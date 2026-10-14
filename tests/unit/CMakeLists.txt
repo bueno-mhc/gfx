@@ -1,6 +1,8 @@
 add_subdirectory(enums)
 add_subdirectory(errors)
 add_subdirectory(handles)
+add_subdirectory(interface)
+add_subdirectory(shader_layout)
 if(WIN32)
     add_subdirectory(platform)
 endif()

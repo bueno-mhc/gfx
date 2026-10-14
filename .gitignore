@@ -5,6 +5,9 @@
 # Machine-specific CMake presets
 CMakeUserPresets.json
 
+# Machine-specific Claude Code settings (.claude/CLAUDE.md is the shared project memory)
+/.claude/settings.local.json
+
 # Tooling caches
 /.cache/
 /.vs/

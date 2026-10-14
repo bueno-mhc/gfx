@@ -274,4 +274,43 @@ private:
     std::string m_compiler_log;
 };
 
+
+
+
+/// @brief Describes a shader whose interface does not match what it is combined with.
+struct ShaderLayoutMismatchDescription
+{
+    std::optional<BackendKind> backend; ///< Backend involved, if any.
+    std::string operation;              ///< Operation that compared the layouts.
+    std::string shader_name;            ///< Name identifying the shader.
+    LayoutMismatch mismatch;            ///< Kind of mismatch.
+    std::string problem;                ///< Precise description (set, binding, types, ...).
+    std::string suggestion;             ///< How to fix it; may be empty.
+};
+
+/// @brief Thrown when a shader's bindings, inputs or outputs do not match a pipeline layout, a vertex
+///        layout, color attachments, or the layout the shader was declared with at compile time.
+class ShaderLayoutMismatchError final : public Error
+{
+public:
+    /// @param description Which shader, which mismatch, and how to fix it.
+    /// @param location    Where the error was raised (defaults to the caller).
+    explicit ShaderLayoutMismatchError(ShaderLayoutMismatchDescription description,
+                                       std::source_location location = std::source_location::current());
+
+    /// @brief Name identifying the shader.
+    [[nodiscard]] auto shader_name() const noexcept -> std::string_view;
+
+    /// @brief Kind of mismatch.
+    [[nodiscard]] auto mismatch() const noexcept -> LayoutMismatch;
+
+    /// @brief Precise description of the mismatch.
+    [[nodiscard]] auto problem() const noexcept -> std::string_view;
+
+private:
+    std::string m_shader_name;
+    LayoutMismatch m_mismatch;
+    std::string m_problem;
+};
+
 } // namespace gfx

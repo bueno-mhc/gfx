@@ -244,10 +244,40 @@ ShaderCompilationError::stage() const noexcept -> ShaderStage
     return m_stage;
 }
 
-auto 
-ShaderCompilationError::compiler_log() const noexcept -> std::string_view 
+auto
+ShaderCompilationError::compiler_log() const noexcept -> std::string_view
 {
     return m_compiler_log;
+}
+
+// ------------------------------------------------------------------------------------------------- ShaderLayoutMismatchError
+ShaderLayoutMismatchError::ShaderLayoutMismatchError(ShaderLayoutMismatchDescription description,
+                                                     std::source_location location)
+    : Error(description.backend, description.operation,
+            std::format("shader '{}' does not match its layout ({}): {}{}", description.shader_name, description.mismatch,
+                        description.problem, suggestion_suffix(description.suggestion)),
+            location)
+    , m_shader_name{std::move(description.shader_name)}
+    , m_mismatch{description.mismatch}
+    , m_problem{std::move(description.problem)}
+{}
+
+auto
+ShaderLayoutMismatchError::shader_name() const noexcept -> std::string_view
+{
+    return m_shader_name;
+}
+
+auto
+ShaderLayoutMismatchError::mismatch() const noexcept -> LayoutMismatch
+{
+    return m_mismatch;
+}
+
+auto
+ShaderLayoutMismatchError::problem() const noexcept -> std::string_view
+{
+    return m_problem;
 }
 
 } // namespace gfx

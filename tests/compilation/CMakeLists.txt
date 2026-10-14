@@ -43,6 +43,60 @@ gfx_add_compilation_failure_test(SequentialEnumerationsRejectBitwiseOperators
     EXPECTED_DIAGNOSTIC "no match for 'operator\\|'"
     LIBRARIES gfx::gfx)
 
+# ------------------------------------------------------------------------------ typed recording
+gfx_add_compilation_failure_test(ComputeRecorderCannotBeginRendering
+    SOURCES interface/compute_recorder_cannot_begin_rendering.cpp
+    EXPECTED_DIAGNOSTIC "no matching function for call to .*QueueType::COMPUTE>::begin_rendering"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(TransferRecorderCannotDispatch
+    SOURCES interface/transfer_recorder_cannot_dispatch.cpp
+    EXPECTED_DIAGNOSTIC "no matching function for call to .*QueueType::TRANSFER>::dispatch"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(DrawsRequireARenderingScope
+    SOURCES interface/draws_require_a_rendering_scope.cpp
+    EXPECTED_DIAGNOSTIC "has no member named 'draw'"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(TypedPushConstantsRequireTheDeclaredSize
+    SOURCES interface/typed_push_constants_require_the_declared_size.cpp
+    EXPECTED_DIAGNOSTIC "no matching function for call to .*push_constants<Shader>"
+    LIBRARIES gfx::gfx)
+
+# ------------------------------------------------------------------------------ typed pipelines and descriptors
+gfx_add_compilation_failure_test(TypedComputePipelineRejectsIncompatibleLayout
+    SOURCES interface/typed_compute_pipeline_rejects_incompatible_layout.cpp
+    EXPECTED_DIAGNOSTIC "LayoutMismatch::DESCRIPTOR_TYPE_MISMATCH, 0, 1, gfx::DescriptorType::STORAGE_IMAGE, gfx::DescriptorType::SAMPLED_IMAGE"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(TypedGraphicsPipelineRejectsMissingVertexAttribute
+    SOURCES interface/typed_graphics_pipeline_rejects_missing_vertex_attribute.cpp
+    EXPECTED_DIAGNOSTIC "LayoutMismatch::VERTEX_INPUT_WITHOUT_ATTRIBUTE, 0, 1"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(DescriptorWritesCheckTheResourceType
+    SOURCES interface/descriptor_writes_check_the_resource_type.cpp
+    EXPECTED_DIAGNOSTIC "the resource type does not match the binding's descriptor type"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(DescriptorWritesRejectUnknownNames
+    SOURCES interface/descriptor_writes_reject_unknown_names.cpp
+    EXPECTED_DIAGNOSTIC "shader_declares_no_binding_with_this_name"
+    LIBRARIES gfx::gfx)
+
+# ------------------------------------------------------------------------------ backend contract
+gfx_add_compilation_failure_test(BackendsMustOverrideEveryOperation
+    SOURCES interface/backends_must_override_every_operation.cpp
+    EXPECTED_DIAGNOSTIC "to be of abstract type 'IncompleteBuffer'"
+    LIBRARIES gfx::gfx)
+
+# ------------------------------------------------------------------------------ compile-time GLSL reflection
+gfx_add_compilation_failure_test(GlslReflectionReportsUnknownMemberTypes
+    SOURCES shader_layout/glsl_reflection_reports_unknown_member_types.cpp
+    EXPECTED_DIAGNOSTIC "glsl_unknown_type_in_structure_or_block"
+    LIBRARIES gfx::gfx)
+
 # ------------------------------------------------------------------------------ naming
-gfx_add_platform_macro_collision_test(EnumeratorsDoNotCollideWithPlatformMacros
-    SOURCE ${PROJECT_SOURCE_DIR}/source/enums.cppm)
+gfx_add_platform_macro_collision_test(NamesDoNotCollideWithPlatformMacros
+    SOURCE ${PROJECT_SOURCE_DIR}/source)

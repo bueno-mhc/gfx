@@ -804,6 +804,24 @@ enum class DebugMessageType : std::uint8_t
     PERFORMANCE = 1U << 2, ///< Suboptimal usage.
 };
 
+/// @brief Why a shader's interface does not match a pipeline layout, vertex layout or attachments.
+enum class LayoutMismatch : std::uint8_t
+{
+    NONE,                              ///< The layouts are compatible.
+    WRONG_SHADER_STAGE,                ///< The shader was compiled for another stage than the pipeline slot.
+    BINDING_MISSING_FROM_LAYOUT,       ///< The shader uses a (set, binding) the pipeline layout lacks.
+    DESCRIPTOR_TYPE_MISMATCH,          ///< The shader and the layout declare different descriptor types.
+    DESCRIPTOR_COUNT_MISMATCH,         ///< The shader and the layout declare different array sizes.
+    STAGE_NOT_VISIBLE,                 ///< The layout does not make the binding visible to the shader's stage.
+    PUSH_CONSTANTS_TOO_LARGE,          ///< The shader's push constants exceed the layout's range.
+    PUSH_CONSTANT_STAGE_NOT_VISIBLE,   ///< The layout's push constants are not visible to the shader's stage.
+    VERTEX_INPUT_WITHOUT_ATTRIBUTE,    ///< A vertex shader input has no vertex attribute at its location.
+    VERTEX_INPUT_TYPE_MISMATCH,        ///< A vertex attribute's format does not match the input's type.
+    FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT,///< A fragment shader output has no color attachment at its location.
+    FRAGMENT_OUTPUT_TYPE_MISMATCH,     ///< A color attachment's format does not match the output's type.
+    CONFLICTING_BINDINGS,              ///< Two shaders declare the same (set, binding) with different types.
+};
+
 // =================================================================================================
 // Constants
 // =================================================================================================
@@ -834,6 +852,24 @@ inline constexpr std::uint32_t MAXIMUM_BOUND_DESCRIPTOR_SETS = 8;
 
 /// @brief Push-constant bytes every backend guarantees.
 inline constexpr std::uint32_t MAXIMUM_PUSH_CONSTANT_SIZE = 128;
+
+/// @brief Maximum number of resource bindings a shader layout records.
+inline constexpr std::uint32_t MAXIMUM_SHADER_BINDINGS = 32;
+
+/// @brief Maximum number of stage inputs (and of stage outputs) a shader layout records.
+inline constexpr std::uint32_t MAXIMUM_SHADER_STAGE_VARIABLES = 16;
+
+/// @brief Maximum length of a binding or stage-variable name recorded in a shader layout.
+inline constexpr std::uint32_t MAXIMUM_BINDING_NAME_LENGTH = 32;
+
+/// @brief Maximum number of structure declarations the compile-time GLSL reflection understands.
+inline constexpr std::uint32_t MAXIMUM_SHADER_STRUCTURES = 16;
+
+/// @brief Maximum number of members of one structure or block in the compile-time GLSL reflection.
+inline constexpr std::uint32_t MAXIMUM_STRUCTURE_MEMBERS = 16;
+
+/// @brief Maximum number of bindings (over all sets) of a compile-time pipeline layout definition.
+inline constexpr std::uint32_t MAXIMUM_PIPELINE_LAYOUT_BINDINGS = 64;
 
 /// @brief Buffer range extending to the end of the buffer.
 inline constexpr std::uint64_t WHOLE_SIZE = std::numeric_limits<std::uint64_t>::max();
@@ -1796,6 +1832,27 @@ struct EnumerationTraits<DebugMessageType>
     };
 };
 
+template<>
+struct EnumerationTraits<LayoutMismatch>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{LayoutMismatch::NONE, "NONE"},
+        EnumeratorName{LayoutMismatch::WRONG_SHADER_STAGE, "WRONG_SHADER_STAGE"},
+        EnumeratorName{LayoutMismatch::BINDING_MISSING_FROM_LAYOUT, "BINDING_MISSING_FROM_LAYOUT"},
+        EnumeratorName{LayoutMismatch::DESCRIPTOR_TYPE_MISMATCH, "DESCRIPTOR_TYPE_MISMATCH"},
+        EnumeratorName{LayoutMismatch::DESCRIPTOR_COUNT_MISMATCH, "DESCRIPTOR_COUNT_MISMATCH"},
+        EnumeratorName{LayoutMismatch::STAGE_NOT_VISIBLE, "STAGE_NOT_VISIBLE"},
+        EnumeratorName{LayoutMismatch::PUSH_CONSTANTS_TOO_LARGE, "PUSH_CONSTANTS_TOO_LARGE"},
+        EnumeratorName{LayoutMismatch::PUSH_CONSTANT_STAGE_NOT_VISIBLE, "PUSH_CONSTANT_STAGE_NOT_VISIBLE"},
+        EnumeratorName{LayoutMismatch::VERTEX_INPUT_WITHOUT_ATTRIBUTE, "VERTEX_INPUT_WITHOUT_ATTRIBUTE"},
+        EnumeratorName{LayoutMismatch::VERTEX_INPUT_TYPE_MISMATCH, "VERTEX_INPUT_TYPE_MISMATCH"},
+        EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT, "FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT"},
+        EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_TYPE_MISMATCH, "FRAGMENT_OUTPUT_TYPE_MISMATCH"},
+        EnumeratorName{LayoutMismatch::CONFLICTING_BINDINGS, "CONFLICTING_BINDINGS"},
+    };
+};
+
 // =================================================================================================
 // Bitmask operators
 // =================================================================================================
@@ -2137,6 +2194,27 @@ resource_state_synchronization(ResourceState state) noexcept -> const ResourceSt
     return RESOURCE_STATE_SYNCHRONIZATION[index < RESOURCE_STATE_SYNCHRONIZATION.size() ? index : 0];
 }
 
+// =================================================================================================
+// Queue capabilities
+// =================================================================================================
+
+/// @brief Kinds of work each QueueType accepts, indexed by the enumerator's value. A graphics queue
+///        also runs compute and transfer work; a compute queue also runs transfer work.
+inline constexpr std::array<QueueCapability, ENUMERATOR_COUNT<QueueType>> QUEUE_TYPE_CAPABILITIES{
+    QueueCapability::GRAPHICS | QueueCapability::COMPUTE | QueueCapability::TRANSFER,
+    QueueCapability::COMPUTE | QueueCapability::TRANSFER,
+    QueueCapability::TRANSFER,
+    QueueCapability::SPARSE_BINDING,
+};
+
+/// @brief Kinds of work a queue of type @p type accepts.
+[[nodiscard]] constexpr auto
+queue_type_capabilities(QueueType type) noexcept -> QueueCapability
+{
+    const auto index = static_cast<std::size_t>(std::to_underlying(type));
+    return index < QUEUE_TYPE_CAPABILITIES.size() ? QUEUE_TYPE_CAPABILITIES[index] : QueueCapability::NONE;
+}
+
 } // namespace gfx
 
 // =================================================================================================
@@ -2367,6 +2445,7 @@ static_assert(verify<ColorSpace>(), "EnumerationTraits<ColorSpace>::NAMES is out
 static_assert(verify<SwapchainStatus>(), "EnumerationTraits<SwapchainStatus>::NAMES is out of sync with the enumeration");
 static_assert(verify<DebugMessageSeverity>(), "EnumerationTraits<DebugMessageSeverity>::NAMES is out of sync with the enumeration");
 static_assert(verify<DebugMessageType>(), "EnumerationTraits<DebugMessageType>::NAMES is out of sync with the enumeration");
+static_assert(verify<LayoutMismatch>(), "EnumerationTraits<LayoutMismatch>::NAMES is out of sync with the enumeration");
 
 consteval auto 
 format_properties_are_ordered() -> bool 
