@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import List, Mapping
 
 # This script lives in <project>/builder/; the project root is one level up.
-PROJECT_DIRECTORY = Path(__file__).resolve().parent.parent
+PROJECT_DIRECTORY = Path(__file__).resolve().parent
 
 
 class CMakeBuilder:
