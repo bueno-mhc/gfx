@@ -196,7 +196,7 @@ BackendApiError::BackendApiError(BackendApiFailureDescription description,
                                  std::source_location location)
     : Error(description.backend, description.operation,
             std::format("{} failed with {} ({})", description.api_function, description.result_name, description.result_code),
-            location),
+            location)
     , m_api_function{std::move(description.api_function)}
     , m_result_code{description.result_code}
     , m_result_name{std::move(description.result_name)} 
@@ -225,8 +225,8 @@ ShaderCompilationError::ShaderCompilationError(ShaderCompilationFailureDescripti
                                                std::source_location location)
     : Error(std::nullopt, description.operation,
             std::format("failed to compile {} shader '{}':\n{}", description.stage, description.shader_name,
-                        indent(description.compiler_log, "    "))
-            location),
+                        indent(description.compiler_log, "    ")),
+            location)
     , m_shader_name{std::move(description.shader_name)}
     , m_stage{description.stage}
     , m_compiler_log{std::move(description.compiler_log)} 

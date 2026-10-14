@@ -36,10 +36,12 @@ TEST(ErrorsTest, BackendCapabilityErrorNamesBackendOperationCapabilityReasonAndS
     // The location defaults to the line of the constructor call (GCC reports a call spanning several
     // lines at its last line, so the call is kept on one line).
     const auto expected_line = std::source_location::current().line() + 2;
-    try {
+    try 
+    {
         throw BackendCapabilityError(std::move(description));
-    } catch (const BackendCapabilityError& error) 
-{
+    } 
+    catch (const BackendCapabilityError& error) 
+    {
         const std::string_view message = error.what();
         EXPECT_TRUE(message.starts_with(
             "[gfx::METAL] Device::create_event: capability 'Event (split barrier)' is not supported.\n"
