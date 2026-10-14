@@ -1,0 +1,8 @@
+{
+    // CMake Tools: configure through CMakePresets.json, and debug tests from the Testing panel with the
+    // "gfx: Debug Test (CMake Tools Testing panel)" configuration of launch.json.
+    "cmake.useCMakePresets": "always",
+    "cmake.ctest.debugLaunchTarget": "gfx: Debug Test (CMake Tools Testing panel)",
+    // Groups "Suite.Test" names under "Suite" in the Testing panel.
+    "cmake.ctest.testSuiteDelimiter": "\\."
+}

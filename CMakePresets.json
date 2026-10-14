@@ -2,8 +2,9 @@
   "version": 11,
   "$comment": [
     "WARNING: this project uses `import std;`, an EXPERIMENTAL CMake feature enabled through a",
-    "release-specific UUID (see the WARNING block at the top of CMakeLists.txt). Only the Ninja",
-    "generators can build it. Override MSYS2_ROOT in a CMakeUserPresets.json if MSYS2 is not in C:/msys64."
+    "release-specific UUID (see the WARNING block in cmake/GfxImportStandardLibrary.cmake). Only the",
+    "Ninja generators can build it. The presets put MSYS2's ucrt64/bin first on PATH, so they work from",
+    "any shell or IDE. Override MSYS2_ROOT in a CMakeUserPresets.json if MSYS2 is not in C:/msys64."
   ],
   "cmakeMinimumRequired": { "major": 4, "minor": 3, "patch": 0 },
   "configurePresets": [
@@ -15,7 +16,7 @@
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "environment": {
         "MSYS2_ROOT": "C:/msys64",
-        "PATH": "$env{MSYS2_ROOT}/ucrt64/bin$pathListSep$penv{PATH}"
+        "PATH": "$env{MSYS2_ROOT}/ucrt64/bin${pathListSep}$penv{PATH}"
       },
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "g++"

@@ -33,13 +33,13 @@ TEST(ErrorsTest, BackendCapabilityErrorNamesBackendOperationCapabilityReasonAndS
         .reason = "Metal has no GPU-side split-barrier object",
         .suggestion = "use TimelineSemaphore across queues",
     };
-    // The location defaults to the line of the constructor call (GCC reports a call spanning several
-    // lines at its last line, so the call is kept on one line).
-    const auto expected_line = std::source_location::current().line() + 2;
-    try 
+    // The location is passed explicitly so the check does not depend on how this file is formatted;
+    // ErrorsTest.LocationDefaultsToTheCaller covers the default argument.
+    const std::source_location throw_location = std::source_location::current();
+    try
     {
-        throw BackendCapabilityError(std::move(description));
-    } 
+        throw BackendCapabilityError(std::move(description), throw_location);
+    }
     catch (const BackendCapabilityError& error) 
     {
         const std::string_view message = error.what();
@@ -55,10 +55,17 @@ TEST(ErrorsTest, BackendCapabilityErrorNamesBackendOperationCapabilityReasonAndS
         EXPECT_EQ(error.capability(), "Event (split barrier)");
         EXPECT_EQ(error.reason(), "Metal has no GPU-side split-barrier object");
         EXPECT_EQ(error.suggestion(), "use TimelineSemaphore across queues");
-        EXPECT_EQ(error.location().line(), expected_line);
+        EXPECT_EQ(error.location().line(), throw_location.line());
         return;
     }
     FAIL() << "BackendCapabilityError was not thrown";
+}
+
+TEST(ErrorsTest, LocationDefaultsToTheCaller)
+{
+    const InvalidUsageError error({.backend = std::nullopt, .operation = "test", .problem = "problem", .suggestion = ""});
+    EXPECT_TRUE(std::string_view{error.location().file_name()}.ends_with("errors_test.cpp")) << error.location().file_name();
+    EXPECT_TRUE(contains(error.location().function_name(), "LocationDefaultsToTheCaller")) << error.location().function_name();
 }
 
 TEST(ErrorsTest, ErrorsCanBeCaughtThroughTheBaseClass) 

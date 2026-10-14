@@ -22,8 +22,12 @@ function(gfx_add_test name)
         target_sources(${name} PRIVATE FILE_SET CXX_MODULES FILES ${argument_MODULES})
     endif()
     target_link_libraries(${name} PRIVATE gfx::project_options GTest::gtest_main ${argument_LIBRARIES})
+    # Runs before the discovery step below (POST_BUILD commands run in the order they are added).
     gfx_deploy_runtime_dependencies(${name})
-    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+    # POST_BUILD discovery registers every test case as a direct call of the test executable.
+    # (PRE_TEST discovery wraps each call in a `cmake -P` launcher script, which debuggers such as
+    # CMake Tools' "Debug Test" would attach to instead of the test.)
+    gtest_discover_tests(${name} DISCOVERY_MODE POST_BUILD)
 endfunction()
 
 # gfx_add_compilation_failure_test(<name> SOURCES <file>... EXPECTED_DIAGNOSTIC <regex>

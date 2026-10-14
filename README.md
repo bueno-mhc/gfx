@@ -79,6 +79,19 @@ Tests run in parallel through CTest (`ctest --preset debug`). Each GoogleTest ca
 its own CTest test. Compilation tests (label `compilation`) build snippets that must be rejected and
 run one at a time; run only them with `ctest --preset debug -L compilation`.
 
+## Debugging a test in VS Code
+
+`.vscode/` provides build/test tasks and two debug configurations (gdb, Debug build). A debugged test
+stops at its first failed assertion; select the test's frame in the call stack.
+
+- **Testing panel** (CMake Tools extension, "debug" preset selected): every test case is listed;
+  "Debug Test" on any of them starts **gfx: Debug Test**.
+- **Run and Debug view**: **gfx: Debug Test** asks which CTest test to debug; **gfx: Debug Test
+  Executable** (C/C++ extension only) asks for a test executable and a GoogleTest filter such as
+  `HandlesTest.DefaultHandleIsNull`.
+- **Tasks**: *gfx: Run One Test (Debug)* runs the tests matching a name pattern without the debugger
+  (including the `CompilationFailure.*` tests, which cannot be debugged).
+
 ## Using gfx together with `<windows.h>`
 
 With GCC 16 on MinGW, a translation unit cannot include `<windows.h>` and import modules unless the

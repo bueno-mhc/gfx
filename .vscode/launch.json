@@ -1,0 +1,81 @@
+{
+    // Debug configurations for the gfx tests: Debug build (build/debug), gdb from MSYS2 UCRT64.
+    // Both build first and stop in the debugger at the first failed assertion (GTEST_BREAK_ON_FAILURE);
+    // when that happens, select the test's own frame in the CALL STACK view.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Run and Debug view: select this configuration and press the green Run button (or F5).
+            // Asks for a test executable, then for the test(s) to run: Suite.Test for one test,
+            // Suite.* for a suite, * for every test of the executable. Needs only the C/C++ extension.
+            "name": "gfx: Debug Test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/tests/${input:testExecutable}",
+            "args": ["--gtest_filter=${input:googleTestFilter}"],
+            "cwd": "${workspaceFolder}/build/debug",
+            "environment": [
+                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Debug"
+        },
+        {
+            // Used by the Testing panel's "Debug Test" button (see settings.json); requires CMake Tools
+            // with the "debug" configure preset selected. CMake Tools replaces the ${cmake.test*}
+            // placeholders with the chosen test's command line: <executable> --gtest_filter=<Suite.Test>.
+            "name": "gfx: Debug Test (CMake Tools Testing panel)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${cmake.testProgram}",
+            "args": ["${cmake.testArgs}"],
+            "cwd": "${cmake.testWorkingDirectory}",
+            "environment": [
+                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Debug"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "testExecutable",
+            "type": "pickString",
+            "description": "Test executable to debug",
+            "options": [
+                { "label": "enums      - EnumsTest.*", "value": "unit/enums/gfx_enums_tests.exe" },
+                { "label": "errors     - ErrorsTest.*", "value": "unit/errors/gfx_errors_tests.exe" },
+                { "label": "handles    - HandlesTest.*", "value": "unit/handles/gfx_handles_tests.exe" },
+                { "label": "platform   - PlatformHeadersTest.*", "value": "unit/platform/gfx_platform_tests.exe" },
+                { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
+            ],
+            "default": "unit/handles/gfx_handles_tests.exe"
+        },
+        {
+            "id": "googleTestFilter",
+            "type": "promptString",
+            "description": "Test(s) to run: Suite.Test (e.g. HandlesTest.DefaultHandleIsNull), Suite.* or * (all)",
+            "default": "*"
+        }
+    ]
+}
