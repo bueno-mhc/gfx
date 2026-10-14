@@ -21,6 +21,8 @@ option(GFX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 include(GfxToolchainRequirements)
 include(GfxProjectOptions)
 
+add_subdirectory(source)
+
 if(GFX_BUILD_TESTS)
     include(GfxTesting)
     add_subdirectory(tests)

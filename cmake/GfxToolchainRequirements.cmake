@@ -7,7 +7,7 @@ if(NOT CMAKE_GENERATOR MATCHES "^Ninja")
     message(FATAL_ERROR
         "gfx: the '${CMAKE_GENERATOR}' generator cannot build C++ modules that use `import std`.\n"
         "  Suggestion: configure with -G Ninja (MSYS2 package mingw-w64-ucrt-x86_64-ninja),\n"
-        "              or use `python builder/build.py` / `cmake --preset debug`.")
+        "              or use `python build.py` / `cmake --preset debug`.")
 endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15)

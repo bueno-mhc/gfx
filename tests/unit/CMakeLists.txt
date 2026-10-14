@@ -1,0 +1,6 @@
+add_subdirectory(enums)
+add_subdirectory(errors)
+add_subdirectory(handles)
+if(WIN32)
+    add_subdirectory(platform)
+endif()

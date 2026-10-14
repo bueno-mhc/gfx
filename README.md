@@ -4,7 +4,18 @@ A C++23 graphics rendering abstraction that models Vulkan's object model (instan
 device, queues, resources, commands, synchronization) above concrete backends. It is written with
 C++ modules, strongly typed numeric handles and compile-time validated shader layouts.
 
-> **Status:** step 0, the toolchain and build infrastructure. The library itself is added in later steps.
+> **Status:** step 1: enumerations and constants, errors, and typed handles. Interfaces and
+> backends are added in later steps.
+
+```cpp
+import std;
+import gfx;
+
+static_assert(gfx::format_properties(gfx::Format::BC7_SRGB_BLOCK).bytes_per_block == 16);
+auto stages = gfx::ShaderStage::VERTEX | gfx::ShaderStage::FRAGMENT;   // bitmask enumerations only
+std::string text = std::format("{}", stages);                          // "VERTEX | FRAGMENT"
+gfx::BufferHandle buffer;                // null; handles come from a Device and support no arithmetic
+```
 
 ## Requirements (Windows)
 
@@ -31,23 +42,31 @@ source on Windows and linked statically.
 gfx/
 ├── CMakeLists.txt        entry point; only orchestrates the modules in cmake/
 ├── CMakePresets.json     configure/build/test/workflow presets (CMake reads them only from the root)
-├── builder/
-│   └── build.py          configure, build and test driver
+├── build.py              configure, build and test driver
 ├── cmake/
 │   ├── GfxImportStandardLibrary.cmake   experimental `import std` gate (included before project())
 │   ├── GfxToolchainRequirements.cmake   Ninja / GCC / `import std` checks and language level
-│   ├── GfxProjectOptions.cmake          warnings and platform libraries for every target
+│   ├── GfxProjectOptions.cmake          warnings, platform libraries and toolchain workarounds
 │   ├── GfxRuntimeDeployment.cmake       copies required DLLs next to Windows executables
 │   ├── GfxDependencies.cmake            system package or FetchContent for each dependency
-│   └── GfxTesting.cmake                 GoogleTest + CTest helpers (gfx_add_test)
+│   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
+│   └── scripts/                         CMake scripts run by tests
+├── source/               the library (module gfx and its parts)
+│   ├── gfx.cppm          `import gfx;` umbrella
+│   ├── enums.cppm        every enumeration and constant (the only file that defines them)
+│   ├── errors.cppm/.cpp  exception hierarchy (gfx::Error, BackendCapabilityError, ...)
+│   ├── handles.cppm      typed numeric handles and their concepts
+│   └── include/gfx/      headers only where a module cannot serve (toolchain workarounds)
 └── tests/
-    └── toolchain/        toolchain conformance tests (one subfolder per test suite)
+    ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
+    ├── unit/<area>/      GoogleTest unit tests, one subfolder per library area
+    └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 
 ## Building and testing
 
 ```bash
-python builder/build.py --test
+python build.py --test
 ```
 
 or, with CMake presets:
@@ -56,8 +75,20 @@ or, with CMake presets:
 cmake --workflow --preset debug
 ```
 
-Tests run in parallel through CTest (`ctest --test-dir build/debug --parallel`). Each GoogleTest
-case is registered as its own CTest test.
+Tests run in parallel through CTest (`ctest --preset debug`). Each GoogleTest case is registered as
+its own CTest test. Compilation tests (label `compilation`) build snippets that must be rejected and
+run one at a time; run only them with `ctest --preset debug -L compilation`.
+
+## Using gfx together with `<windows.h>`
+
+With GCC 16 on MinGW, a translation unit cannot include `<windows.h>` and import modules unless the
+header comes first and through the workaround header:
+
+```cpp
+#include <gfx/windows_headers.hpp>   // instead of <windows.h>, before any import
+import std;
+import gfx;
+```
 
 ## Warnings
 
@@ -65,6 +96,11 @@ case is registered as its own CTest test.
   whose UUID changes with every CMake release. After upgrading CMake, configuration stops with an
   explanation; update the UUID table in `cmake/GfxImportStandardLibrary.cmake` or pass
   `-DGFX_IMPORT_STD_GATE=<uuid>`.
+- **GCC 16 on MinGW emits some standard library symbols as duplicate definitions with `import std`**
+  (static locals of templates, e.g. inside `std::format`). Every executable that uses gfx therefore
+  links with `-Wl,--allow-multiple-definition`, propagated by the `gfx::toolchain_workarounds`
+  target. The test `CompilationFailure.ImportStdDuplicatesStaticLocals` starts failing once a GCC
+  release fixes this; the workaround can then be removed.
 - **Windows Smart App Control**, when enforced, judges every freshly compiled executable and unsigned
   DLL by cloud reputation, and may block any of them unpredictably (test executables included). A
   blocked test fails with `execute_process Abnormal exit` or exit code `0xC0E90002`; the

@@ -12,13 +12,20 @@ import multiprocessing
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Mapping
+from typing import Callable, List, Mapping
 
-# This script lives in <project>/builder/; the project root is one level up.
+# This script lives in the project root.
 PROJECT_DIRECTORY = Path(__file__).resolve().parent
+
+
+def _remove_read_only(function: Callable[[str], object], path: str, _error: object) -> None:
+    """Clears the read-only attribute (Git marks its object files read-only) and retries the removal."""
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
 
 
 class CMakeBuilder:
@@ -103,7 +110,10 @@ class CMakeBuilder:
 
     def remove_build_directory(self) -> bool:
         if self.build_directory.exists():
-            shutil.rmtree(self.build_directory)
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(self.build_directory, onexc=_remove_read_only)
+            else:
+                shutil.rmtree(self.build_directory, onerror=_remove_read_only)
             print(f"Removed {self.build_directory}")
         return True
 
@@ -114,14 +124,14 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python builder/build.py                          # Debug build into build/debug
-  python builder/build.py --test                   # build, then run all tests in parallel
-  python builder/build.py --build-type Release --test
-  python builder/build.py --test --test-regex Toolchain
-  python builder/build.py --clean-all              # delete the build directory
+  python build.py                          # Debug build into build/debug
+  python build.py --test                   # build, then run all tests in parallel
+  python build.py --build-type Release --test
+  python build.py --test --test-regex Toolchain
+  python build.py --clean-all              # delete the build directory
 """)
     parser.add_argument("--source-directory", default=str(PROJECT_DIRECTORY),
-                        help="Project source directory (default: parent of the builder/ folder)")
+                        help="Project source directory (default: directory of this script)")
     parser.add_argument("--build-directory",
                         help="Build directory, relative to the source directory (default: build/<build type>)")
     parser.add_argument("-G", "--generator", default="Ninja",
