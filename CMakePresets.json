@@ -1,0 +1,73 @@
+{
+  "version": 11,
+  "$comment": [
+    "WARNING: this project uses `import std;`, an EXPERIMENTAL CMake feature enabled through a",
+    "release-specific UUID (see the WARNING block at the top of CMakeLists.txt). Only the Ninja",
+    "generators can build it. Override MSYS2_ROOT in a CMakeUserPresets.json if MSYS2 is not in C:/msys64."
+  ],
+  "cmakeMinimumRequired": { "major": 4, "minor": 3, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "msys2-ucrt64",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "environment": {
+        "MSYS2_ROOT": "C:/msys64",
+        "PATH": "$env{MSYS2_ROOT}/ucrt64/bin$pathListSep$penv{PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug - GCC (MSYS2 UCRT64) + Ninja",
+      "inherits": "msys2-ucrt64",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Release - GCC (MSYS2 UCRT64) + Ninja",
+      "inherits": "msys2-ucrt64",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": "" }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": "" }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "debug",
+      "steps": [
+        { "type": "configure", "name": "debug" },
+        { "type": "build", "name": "debug" },
+        { "type": "test", "name": "debug" }
+      ]
+    },
+    {
+      "name": "release",
+      "steps": [
+        { "type": "configure", "name": "release" },
+        { "type": "build", "name": "release" },
+        { "type": "test", "name": "release" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Build trees
+/build/
+/out/
+
+# Machine-specific CMake presets
+CMakeUserPresets.json
+
+# Tooling caches
+/.cache/
+/.vs/
+__pycache__/
