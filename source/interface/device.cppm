@@ -10,7 +10,6 @@ import gfx.handles;
 import :backend_object;
 import :common_types;
 import :shader_layout;
-import :layout_compatibility;
 import :device_memory;
 import :buffer;
 import :image;
@@ -33,15 +32,16 @@ import :query_pool;
 import :queue;
 import :swapchain;
 import :deleter;
-import :typed_objects;
+import :shader_validation;
 
 export namespace gfx
 {
 
 class PhysicalDevice;
 
-/// @brief The logical device. Creation functions are thread-safe; objects must be destroyed before
-///        the device. Destroying an object the GPU still uses is safe: the Deleter releases it later.
+/// @brief The logical device. Creation functions are thread-safe (worker threads may create objects
+///        while others record); objects must be destroyed before the device. Destroying an object the
+///        GPU still uses is safe: the Deleter releases it later.
 class Device : public BackendObject
 {
 public:
@@ -88,9 +88,11 @@ public:
 
     // ----------------------------------------------------------------------------- shaders and pipelines
 
-    /// @brief Compiles a shader (GLSL to SPIR-V) or loads SPIR-V, and reflects its layout.
-    /// @throws ShaderCompilationError when the source does not compile.
-    /// @throws ShaderLayoutMismatchError when the reflected layout differs from expected_layout.
+    /// @brief Creates a shader module from SPIR-V (or, in Debug builds, from GLSL compiled at run time)
+    ///        and reflects its layout from the SPIR-V. Backends first call
+    ///        validate_shader_module_description().
+    /// @throws InvalidUsageError when the description is invalid, e.g. GLSL in a Release build.
+    /// @throws ShaderCompilationError when GLSL source does not compile.
     [[nodiscard]] virtual auto create_shader_module(const ShaderModuleDescription& description) -> std::unique_ptr<ShaderModule> = 0;
 
     /// @brief Creates a descriptor set layout.
@@ -101,14 +103,14 @@ public:
     [[nodiscard]] virtual auto create_pipeline_layout(const PipelineLayoutDescription& description)
         -> std::unique_ptr<PipelineLayout> = 0;
 
-    /// @brief Creates a compute pipeline.
+    /// @brief Creates a compute pipeline. Backends check it with validate_compute_pipeline().
     /// @throws ShaderLayoutMismatchError when the shader does not match the pipeline layout.
     [[nodiscard]] virtual auto create_compute_pipeline(const ComputePipelineDescription& description)
         -> std::unique_ptr<ComputePipeline> = 0;
 
-    /// @brief Creates a graphics pipeline.
+    /// @brief Creates a graphics pipeline. Backends check it with validate_graphics_pipeline().
     /// @throws ShaderLayoutMismatchError when a shader does not match the pipeline layout, the vertex
-    ///         layout or the color attachments.
+    ///         attributes or the color attachments.
     [[nodiscard]] virtual auto create_graphics_pipeline(const GraphicsPipelineDescription& description)
         -> std::unique_ptr<GraphicsPipeline> = 0;
 
@@ -140,120 +142,67 @@ public:
     /// @brief Creates a swapchain for a window (DeviceFeature::PRESENTATION).
     [[nodiscard]] virtual auto create_swapchain(const SwapchainDescription& description) -> std::unique_ptr<Swapchain> = 0;
 
-    // ----------------------------------------------------------------------------- typed creation (checked at compile time)
+    // ----------------------------------------------------------------------------- layouts from shaders
 
-    /// @brief Creates the module of a shader known at compile time; the layout reflected from the
-    ///        compiled code must equal Shader::LAYOUT.
-    template<ShaderDefinition Shader>
-    [[nodiscard]] auto create_shader() -> TypedShaderModule<Shader>
+    /// @brief Creates the pipeline layout that exactly provides what @p shaders use, with one descriptor
+    ///        set layout per set index: bindings named and visible as the reflected layouts say, and one
+    ///        push-constant range covering every shader's push constants.
+    /// @throws ShaderLayoutMismatchError when two shaders declare one binding differently.
+    [[nodiscard]] auto create_pipeline_layout_from(std::span<const ShaderModule* const> shaders,
+                                                   std::string_view debug_name = {}) -> ReflectedPipelineLayout
     {
-        return TypedShaderModule<Shader>{create_shader_module({
-            .stage = Shader::LAYOUT.stage,
-            .source_format = ShaderSourceFormat::GLSL,
-            .glsl_source = Shader::SOURCE,
-            .spirv = {},
-            .entry_point = "main",
-            .name = Shader::NAME,
-            .expected_layout = Shader::LAYOUT,
-        })};
-    }
+        // Merge what the shaders use.
+        const PipelineLayoutDefinition definition = pipeline_layout_definition_from(shaders);
 
-    /// @brief Creates the descriptor set layouts (one per set index) and the pipeline layout of a
-    ///        compile-time definition.
-    template<const PipelineLayoutDefinition& Definition>
-    [[nodiscard]] auto create_pipeline_layout(std::string_view debug_name = {}) -> TypedPipelineLayout<Definition>
-    {
-        // One descriptor set layout per set index, holding the definition's bindings of that set.
+        // One descriptor set layout per set index, holding the bindings of that set.
         std::vector<std::unique_ptr<DescriptorSetLayout>> set_layouts;
         std::vector<DescriptorSetLayoutHandle> set_layout_handles;
-        for (std::uint32_t set = 0; set < Definition.set_count(); ++set)
+        for (std::uint32_t set = 0; set < definition.set_count(); ++set)
         {
-            std::vector<DescriptorSetLayoutBinding> bindings;
-            for (const LayoutBinding& binding : Definition.bindings())
-            {
-                if (binding.set == set)
-                {
-                    bindings.push_back({
-                        .binding = binding.binding,
-                        .type = binding.type,
-                        .count = binding.count,
-                        .stages = binding.stages,
-                        .options = binding.options,
-                    });
-                }
-            }
+            const std::vector<DescriptorSetLayoutBinding> bindings = definition.set_bindings(set);
             set_layouts.push_back(create_descriptor_set_layout({.bindings = bindings, .debug_name = debug_name}));
             set_layout_handles.push_back(set_layouts.back()->handle());
         }
 
-        // The push constants form one range, visible to every stage that reads them.
-        const std::array<PushConstantRange, 1> push_constant_range{
-            PushConstantRange{.stages = Definition.push_constant_stages, .offset = 0, .size = Definition.push_constant_size}};
-        const std::span<const PushConstantRange> push_constant_ranges =
-            Definition.push_constant_size > 0 ? std::span<const PushConstantRange>{push_constant_range}
-                                              : std::span<const PushConstantRange>{};
-
-        // Create the pipeline layout and hand over every object.
-        std::unique_ptr<PipelineLayout> pipeline_layout = create_pipeline_layout(PipelineLayoutDescription{
+        // The pipeline layout over them; the result owns it together with the set layouts.
+        std::unique_ptr<PipelineLayout> pipeline_layout = create_pipeline_layout({
             .set_layouts = set_layout_handles,
-            .push_constant_ranges = push_constant_ranges,
+            .push_constant_ranges = definition.push_constant_ranges,
             .debug_name = debug_name,
         });
-        return TypedPipelineLayout<Definition>{std::move(set_layouts), std::move(pipeline_layout)};
+        return ReflectedPipelineLayout{std::move(set_layouts), std::move(pipeline_layout)};
     }
 
-    /// @brief Creates a compute pipeline; the shader's stage, bindings and push constants are checked
-    ///        against the pipeline layout at compile time.
-    template<const PipelineLayoutDefinition& Definition, ShaderDefinition Shader>
-    [[nodiscard]] auto create_compute_pipeline(const TypedPipelineLayout<Definition>& layout,
-                                               const TypedShaderModule<Shader>& shader,
-                                               std::string_view debug_name = {}) -> std::unique_ptr<ComputePipeline>
+    /// @brief Creates the pipeline layout that exactly provides what @p shaders use (see the overload).
+    [[nodiscard]] auto create_pipeline_layout_from(std::initializer_list<const ShaderModule*> shaders,
+                                                   std::string_view debug_name = {}) -> ReflectedPipelineLayout
     {
-        // Proven at compile time; a mismatch fails here and prints the complete LayoutCheck.
-        static_assert(LayoutDiagnostic<check_shader_stage(Shader::LAYOUT, ShaderStage::COMPUTE)>::OK);
-        static_assert(LayoutDiagnostic<check_pipeline_layout(Shader::LAYOUT, Definition)>::OK);
-
-        return create_compute_pipeline(ComputePipelineDescription{
-            .layout = layout.handle(),
-            .shader = shader.handle(),
-            .debug_name = debug_name,
-        });
+        return create_pipeline_layout_from(std::span<const ShaderModule* const>{shaders.begin(), shaders.size()}, debug_name);
     }
 
-    /// @brief Creates a graphics pipeline; shader stages, bindings, push constants, vertex inputs and
-    ///        fragment outputs are checked at compile time against the pipeline layout, @p Vertices
-    ///        and @p Attachments.
-    template<const VertexLayoutDefinition& Vertices,
-             const AttachmentLayoutDefinition& Attachments,
-             const PipelineLayoutDefinition& Definition,
-             ShaderDefinition VertexShader,
-             ShaderDefinition FragmentShader>
-    [[nodiscard]] auto create_graphics_pipeline(const TypedPipelineLayout<Definition>& layout,
-                                                const TypedShaderModule<VertexShader>& vertex_shader,
-                                                const TypedShaderModule<FragmentShader>& fragment_shader,
-                                                const GraphicsPipelineState& state = {}) -> std::unique_ptr<GraphicsPipeline>
+    // ----------------------------------------------------------------------------- shader hot reload
+
+    /// @brief Debug builds: recompiles every shader module whose source file changed since the last
+    ///        call, and replaces its code (and rebuilds the pipelines using it, behind the same handles)
+    ///        when the new code still fits their pipeline layouts. A file that does not compile or no
+    ///        longer fits keeps its old code, and the report says why. Release builds return no report.
+    ///
+    /// Call it once per frame, when no thread is recording commands.
+    [[nodiscard]] auto poll_shader_changes() -> std::vector<ShaderReload>
     {
-        // Proven at compile time; a mismatch fails here and prints the complete LayoutCheck.
-        static_assert(LayoutDiagnostic<check_shader_stage(VertexShader::LAYOUT, ShaderStage::VERTEX)>::OK);
-        static_assert(LayoutDiagnostic<check_shader_stage(FragmentShader::LAYOUT, ShaderStage::FRAGMENT)>::OK);
-        static_assert(LayoutDiagnostic<check_pipeline_layout(VertexShader::LAYOUT, Definition)>::OK);
-        static_assert(LayoutDiagnostic<check_pipeline_layout(FragmentShader::LAYOUT, Definition)>::OK);
-        static_assert(LayoutDiagnostic<check_vertex_input(VertexShader::LAYOUT, Vertices)>::OK);
-        static_assert(LayoutDiagnostic<check_fragment_output(FragmentShader::LAYOUT, Attachments)>::OK);
-
-        return create_graphics_pipeline(GraphicsPipelineDescription{
-            .layout = layout.handle(),
-            .vertex_shader = vertex_shader.handle(),
-            .fragment_shader = fragment_shader.handle(),
-            .vertex_bindings = Vertices.bindings(),
-            .vertex_attributes = Vertices.attributes(),
-            .color_formats = Attachments.color_formats(),
-            .depth_format = Attachments.depth_format,
-            .stencil_format = Attachments.stencil_format,
-            .samples = Attachments.samples,
-            .state = state,
-        });
+        if constexpr (SHADER_HOT_RELOAD)
+        {
+            return reload_changed_shaders();
+        }
+        else
+        {
+            return {};
+        }
     }
+
+protected:
+    /// @brief Backend part of poll_shader_changes() (called in Debug builds only).
+    [[nodiscard]] virtual auto reload_changed_shaders() -> std::vector<ShaderReload> = 0;
 };
 
 // Default definitions: a backend forwards to these for the operations it does not implement.
@@ -390,6 +339,12 @@ auto
 Device::create_swapchain(const SwapchainDescription& /*description*/) -> std::unique_ptr<Swapchain>
 {
     throw_not_implemented("Device::create_swapchain");
+}
+
+auto
+Device::reload_changed_shaders() -> std::vector<ShaderReload>
+{
+    throw_not_implemented("Device::poll_shader_changes");
 }
 
 } // namespace gfx

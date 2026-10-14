@@ -18,8 +18,10 @@ struct DescriptorSetLayoutBinding
     std::uint32_t count = 1;                                         ///< Number of descriptors.
     ShaderStage stages = ShaderStage::NONE;                          ///< Stages that may access it.
     DescriptorBindingOption options = DescriptorBindingOption::NONE; ///< Descriptor indexing options.
+    std::string name{};                                              ///< Name shaders use for it (may be empty);
+                                                                     ///< PipelineLayout::find_binding() searches it.
 
-    constexpr bool operator==(const DescriptorSetLayoutBinding&) const = default;
+    bool operator==(const DescriptorSetLayoutBinding&) const = default;
 };
 
 /// @brief How to create a DescriptorSetLayout.

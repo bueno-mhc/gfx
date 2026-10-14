@@ -31,16 +31,20 @@ function(gfx_add_test name)
 endfunction()
 
 # gfx_add_compilation_failure_test(<name> SOURCES <file>... EXPECTED_DIAGNOSTIC <regex>
-#                                  [LIBRARIES <target>...] [WITHOUT_PROJECT_OPTIONS])
+#                                  [MODULES <module interface>...] [LIBRARIES <target>...]
+#                                  [WITHOUT_PROJECT_OPTIONS])
 #   Registers CTest test CompilationFailure.<name>, which passes only if building SOURCES fails with
 #   a diagnostic matching EXPECTED_DIAGNOSTIC (so code that should be rejected by the type system
 #   stays rejected, and for the intended reason). The target is excluded from the default build.
 #   WITHOUT_PROJECT_OPTIONS builds without warnings and toolchain workarounds; toolchain-defect
 #   detectors use it to prove a workaround is still needed.
 function(gfx_add_compilation_failure_test name)
-    cmake_parse_arguments(PARSE_ARGV 1 argument "WITHOUT_PROJECT_OPTIONS" "EXPECTED_DIAGNOSTIC" "SOURCES;LIBRARIES")
+    cmake_parse_arguments(PARSE_ARGV 1 argument "WITHOUT_PROJECT_OPTIONS" "EXPECTED_DIAGNOSTIC" "SOURCES;MODULES;LIBRARIES")
     set(target gfx_compilation_failure_${name})
     add_executable(${target} EXCLUDE_FROM_ALL ${argument_SOURCES})
+    if(argument_MODULES)
+        target_sources(${target} PRIVATE FILE_SET CXX_MODULES FILES ${argument_MODULES})
+    endif()
     if(NOT argument_WITHOUT_PROJECT_OPTIONS)
         target_link_libraries(${target} PRIVATE gfx::project_options)
     endif()

@@ -124,3 +124,22 @@ Step 2: interfaces (`gfx.interface` partitions in `source/interface/`), descript
 base with throwing defaults, Recorder<Q> + RenderingScope, barriers and rendering descriptions,
 compile-time shader layout + compatibility checks, ShaderLayoutMismatchError, typed device front doors,
 tests with fake backend objects, compilation-failure tests for the typed API.
+
+## 9. Shader redesign and parallel rendering (step 2b, 2026-10-14)
+
+- The user asked how Handle / HandleKey / HandleIssuer / BackendObject relate: answered with two
+  diagrams (class relationships; buffer creation → handle use → deferred release).
+- The user asked whether the consteval GLSL reflection would support hot reload and whether command
+  buffers should be multi-threaded. Answer: commercial engines compile shaders offline and reflect the
+  bytecode (Unreal declares parameters in C++ and validates at shader compile; sokol-shdc/Godot generate
+  headers); native command buffers are never thread-safe — engines record many buffers in parallel and
+  submit in order, and split big passes with secondaries / per-part command lists / Metal parallel
+  encoders. The user decided: rebuild the shader pipeline the commercial way with SPIR-V reflection;
+  hot reload Debug only; Release only compiled code; add what is missing to split a pass ("across
+  frames" read as across threads) — all recommendations accepted.
+- Implemented (see CLAUDE.md §5, §6.6, §9): run-time ShaderLayout, shader_validation, named pipeline
+  layout bindings + find_binding, checked descriptor writes and push constants, SHADER_HOT_RELOAD,
+  poll_shader_changes (API only), parallel rendering passes, FrameCommandPools.
+- New GCC 16 defect found while building: capturing lambda in an in-class constructor of a class declared
+  in another partition → unreadable BMI; bisected on the real file, minimal 4-file detector added.
+- Verified: 107 tests pass in Debug and Release from scratch; README examples compiled with -Werror.

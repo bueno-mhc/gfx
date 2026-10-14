@@ -12,6 +12,11 @@ export module gfx.enums;
 
 import std;
 
+// Set to 1 by CMake for Debug builds (source/CMakeLists.txt); everything else is a Release build.
+#ifndef GFX_SHADER_HOT_RELOAD
+#define GFX_SHADER_HOT_RELOAD 0
+#endif
+
 export namespace gfx 
 {
 
@@ -664,16 +669,8 @@ enum class ShaderStage : std::uint16_t
 /// @brief Form in which shader code is handed to the library.
 enum class ShaderSourceFormat : std::uint8_t 
 {
-    GLSL,  ///< GLSL source text, compiled to SPIR-V by the library.
-    SPIRV, ///< Precompiled SPIR-V binary.
-};
-
-/// @brief Memory layout rules of a GLSL uniform, storage or push-constant block.
-enum class BlockPacking : std::uint8_t 
-{
-    STD140, ///< GLSL std140 (default for uniform blocks).
-    STD430, ///< GLSL std430 (default for storage and push-constant blocks).
-    SCALAR, ///< Scalar block layout (GL_EXT_scalar_block_layout).
+    GLSL,  ///< GLSL source text, compiled to SPIR-V at run time (Debug builds only; see SHADER_HOT_RELOAD).
+    SPIRV, ///< SPIR-V binary compiled at build time (gfx_add_shaders) or by any other compiler.
 };
 
 /// @brief Kind of resource bound to a descriptor.
@@ -718,7 +715,7 @@ enum class PipelineBindPoint : std::uint8_t
 enum class CommandBufferLevel : std::uint8_t 
 {
     PRIMARY,   ///< Submitted to a queue.
-    SECONDARY, ///< Executed from a primary command buffer.
+    SECONDARY, ///< Records part of a parallel rendering pass; executed by the primary that began the pass.
 };
 
 /// @brief Optional behaviors of a command pool. Bitmask.
@@ -813,13 +810,21 @@ enum class LayoutMismatch : std::uint8_t
     DESCRIPTOR_TYPE_MISMATCH,          ///< The shader and the layout declare different descriptor types.
     DESCRIPTOR_COUNT_MISMATCH,         ///< The shader and the layout declare different array sizes.
     STAGE_NOT_VISIBLE,                 ///< The layout does not make the binding visible to the shader's stage.
-    PUSH_CONSTANTS_TOO_LARGE,          ///< The shader's push constants exceed the layout's range.
+    PUSH_CONSTANTS_OUTSIDE_RANGE,      ///< The shader's push-constant bytes are not inside the layout's range.
     PUSH_CONSTANT_STAGE_NOT_VISIBLE,   ///< The layout's push constants are not visible to the shader's stage.
     VERTEX_INPUT_WITHOUT_ATTRIBUTE,    ///< A vertex shader input has no vertex attribute at its location.
     VERTEX_INPUT_TYPE_MISMATCH,        ///< A vertex attribute's format does not match the input's type.
     FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT,///< A fragment shader output has no color attachment at its location.
     FRAGMENT_OUTPUT_TYPE_MISMATCH,     ///< A color attachment's format does not match the output's type.
     CONFLICTING_BINDINGS,              ///< Two shaders declare the same (set, binding) with different types.
+};
+
+/// @brief Outcome of reloading one changed shader file (Debug builds).
+enum class ShaderReloadResult : std::uint8_t
+{
+    RELOADED,           ///< The new code replaced the old one; pipelines using it were rebuilt.
+    COMPILATION_FAILED, ///< The file does not compile; the old code stays in use.
+    LAYOUT_MISMATCH,    ///< The new code no longer fits a pipeline layout using it; the old code stays in use.
 };
 
 // =================================================================================================
@@ -853,23 +858,13 @@ inline constexpr std::uint32_t MAXIMUM_BOUND_DESCRIPTOR_SETS = 8;
 /// @brief Push-constant bytes every backend guarantees.
 inline constexpr std::uint32_t MAXIMUM_PUSH_CONSTANT_SIZE = 128;
 
-/// @brief Maximum number of resource bindings a shader layout records.
-inline constexpr std::uint32_t MAXIMUM_SHADER_BINDINGS = 32;
+/// @brief First word of every SPIR-V module.
+inline constexpr std::uint32_t SPIRV_MAGIC_NUMBER = 0x07230203U;
 
-/// @brief Maximum number of stage inputs (and of stage outputs) a shader layout records.
-inline constexpr std::uint32_t MAXIMUM_SHADER_STAGE_VARIABLES = 16;
-
-/// @brief Maximum length of a binding or stage-variable name recorded in a shader layout.
-inline constexpr std::uint32_t MAXIMUM_BINDING_NAME_LENGTH = 32;
-
-/// @brief Maximum number of structure declarations the compile-time GLSL reflection understands.
-inline constexpr std::uint32_t MAXIMUM_SHADER_STRUCTURES = 16;
-
-/// @brief Maximum number of members of one structure or block in the compile-time GLSL reflection.
-inline constexpr std::uint32_t MAXIMUM_STRUCTURE_MEMBERS = 16;
-
-/// @brief Maximum number of bindings (over all sets) of a compile-time pipeline layout definition.
-inline constexpr std::uint32_t MAXIMUM_PIPELINE_LAYOUT_BINDINGS = 64;
+/// @brief Whether this build of the library is a Debug build, which compiles GLSL at run time and
+///        reloads changed shader files (Device::poll_shader_changes()). Release builds only load SPIR-V
+///        compiled at build time: GLSL input is rejected and polling for changes does nothing.
+inline constexpr bool SHADER_HOT_RELOAD = GFX_SHADER_HOT_RELOAD != 0;
 
 /// @brief Buffer range extending to the end of the buffer.
 inline constexpr std::uint64_t WHOLE_SIZE = std::numeric_limits<std::uint64_t>::max();
@@ -1675,17 +1670,6 @@ struct EnumerationTraits<ShaderSourceFormat>
 };
 
 template<> 
-struct EnumerationTraits<BlockPacking> 
-{
-    static constexpr bool IS_BITMASK = false;
-    static constexpr std::array NAMES{
-        EnumeratorName{BlockPacking::STD140, "STD140"}, 
-        EnumeratorName{BlockPacking::STD430, "STD430"},
-        EnumeratorName{BlockPacking::SCALAR, "SCALAR"},
-    };
-};
-
-template<> 
 struct EnumerationTraits<DescriptorType> 
 {
     static constexpr bool IS_BITMASK = false;
@@ -1843,13 +1827,24 @@ struct EnumerationTraits<LayoutMismatch>
         EnumeratorName{LayoutMismatch::DESCRIPTOR_TYPE_MISMATCH, "DESCRIPTOR_TYPE_MISMATCH"},
         EnumeratorName{LayoutMismatch::DESCRIPTOR_COUNT_MISMATCH, "DESCRIPTOR_COUNT_MISMATCH"},
         EnumeratorName{LayoutMismatch::STAGE_NOT_VISIBLE, "STAGE_NOT_VISIBLE"},
-        EnumeratorName{LayoutMismatch::PUSH_CONSTANTS_TOO_LARGE, "PUSH_CONSTANTS_TOO_LARGE"},
+        EnumeratorName{LayoutMismatch::PUSH_CONSTANTS_OUTSIDE_RANGE, "PUSH_CONSTANTS_OUTSIDE_RANGE"},
         EnumeratorName{LayoutMismatch::PUSH_CONSTANT_STAGE_NOT_VISIBLE, "PUSH_CONSTANT_STAGE_NOT_VISIBLE"},
         EnumeratorName{LayoutMismatch::VERTEX_INPUT_WITHOUT_ATTRIBUTE, "VERTEX_INPUT_WITHOUT_ATTRIBUTE"},
         EnumeratorName{LayoutMismatch::VERTEX_INPUT_TYPE_MISMATCH, "VERTEX_INPUT_TYPE_MISMATCH"},
         EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT, "FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT"},
         EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_TYPE_MISMATCH, "FRAGMENT_OUTPUT_TYPE_MISMATCH"},
         EnumeratorName{LayoutMismatch::CONFLICTING_BINDINGS, "CONFLICTING_BINDINGS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ShaderReloadResult>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ShaderReloadResult::RELOADED, "RELOADED"},
+        EnumeratorName{ShaderReloadResult::COMPILATION_FAILED, "COMPILATION_FAILED"},
+        EnumeratorName{ShaderReloadResult::LAYOUT_MISMATCH, "LAYOUT_MISMATCH"},
     };
 };
 
@@ -2432,7 +2427,6 @@ static_assert(verify<IndexType>(), "EnumerationTraits<IndexType>::NAMES is out o
 static_assert(verify<VertexInputRate>(), "EnumerationTraits<VertexInputRate>::NAMES is out of sync with the enumeration");
 static_assert(verify<ShaderStage>(), "EnumerationTraits<ShaderStage>::NAMES is out of sync with the enumeration");
 static_assert(verify<ShaderSourceFormat>(), "EnumerationTraits<ShaderSourceFormat>::NAMES is out of sync with the enumeration");
-static_assert(verify<BlockPacking>(), "EnumerationTraits<BlockPacking>::NAMES is out of sync with the enumeration");
 static_assert(verify<DescriptorType>(), "EnumerationTraits<DescriptorType>::NAMES is out of sync with the enumeration");
 static_assert(verify<DescriptorBindingOption>(), "EnumerationTraits<DescriptorBindingOption>::NAMES is out of sync with the enumeration");
 static_assert(verify<PipelineBindPoint>(), "EnumerationTraits<PipelineBindPoint>::NAMES is out of sync with the enumeration");
@@ -2446,6 +2440,7 @@ static_assert(verify<SwapchainStatus>(), "EnumerationTraits<SwapchainStatus>::NA
 static_assert(verify<DebugMessageSeverity>(), "EnumerationTraits<DebugMessageSeverity>::NAMES is out of sync with the enumeration");
 static_assert(verify<DebugMessageType>(), "EnumerationTraits<DebugMessageType>::NAMES is out of sync with the enumeration");
 static_assert(verify<LayoutMismatch>(), "EnumerationTraits<LayoutMismatch>::NAMES is out of sync with the enumeration");
+static_assert(verify<ShaderReloadResult>(), "EnumerationTraits<ShaderReloadResult>::NAMES is out of sync with the enumeration");
 
 consteval auto 
 format_properties_are_ordered() -> bool 

@@ -1,13 +1,16 @@
 /// @file recorder.cppm
-/// @brief Typed command recording: Recorder<QueueType> and RenderingScope<QueueType>.
+/// @brief Typed command recording: Recorder<QueueType>, the rendering scopes, and the recorder of the
+///        parts of a parallel rendering pass.
 ///
-/// Both are zero-cost, non-virtual wrappers around a CommandBuffer. Their member functions are
+/// All are zero-cost, non-virtual wrappers around a CommandBuffer. Their member functions are
 /// constrained by the capabilities of the queue type, so invalid recordings are compile errors:
 /// - Recorder<QueueType::TRANSFER> has copies and barriers, but no dispatch;
 /// - Recorder<QueueType::COMPUTE> adds compute pipelines, descriptor sets, push constants, dispatches;
 /// - Recorder<QueueType::GRAPHICS> adds begin_rendering(), which returns the RenderingScope that holds
-///   every draw command (draws cannot be recorded outside a rendering pass).
-/// Both are RAII: the recorder ends the command buffer and the scope ends the rendering pass.
+///   every draw command (draws cannot be recorded outside a rendering pass), and
+///   begin_parallel_rendering(), which returns a ParallelRenderingScope: other threads record the draws
+///   into secondary command buffers with RenderingPartRecorder, and the scope executes them in order.
+/// All are RAII: recorders end their command buffer and scopes end their rendering pass.
 export module gfx.interface:recorder;
 
 import std;
@@ -18,26 +21,78 @@ import :common_types;
 import :commands;
 import :synchronization;
 import :command_buffer;
-import :layout_compatibility;
+import :pipeline_layout;
 
 export namespace gfx
 {
 
-/// @brief Commands of a dynamic rendering pass; obtained from Recorder::begin_rendering(), ends the
-///        pass when destroyed.
-template<QueueType Type>
-class RenderingScope
+/// @brief Data that can be pushed as push constants: trivially copyable, and neither a pointer nor a
+///        span (whose bytes would be the address, not the data).
+template<class Data>
+concept PushConstantData = std::is_trivially_copyable_v<Data> && !std::is_pointer_v<Data> &&
+                           !requires { typename Data::element_type; Data::extent; };
+
+/// @brief Stages a push-constant write of @p size bytes at @p offset must name: the stages of every
+///        push-constant range of @p layout overlapping those bytes.
+/// @throws InvalidUsageError when some of the bytes are outside every push-constant range.
+[[nodiscard]] auto
+push_constant_stages(const PipelineLayout& layout,
+                     std::uint32_t offset,
+                     std::uint32_t size) -> ShaderStage
 {
-public:
-    ~RenderingScope()
+    const std::vector<PushConstantRange>& ranges = layout.definition().push_constant_ranges;
+    const std::uint32_t end = offset + size;
+
+    // Every byte must be inside some range: walk from range to range.
+    std::uint32_t position = offset;
+    while (position < end)
     {
-        m_command_buffer.record_end_rendering();
+        const auto range = std::ranges::find_if(ranges, [position](const PushConstantRange& candidate)
+        {
+            return candidate.offset <= position && position < candidate.offset + candidate.size;
+        });
+        if (range == ranges.end())
+        {
+            std::string provided;
+            for (const PushConstantRange& candidate : ranges)
+            {
+                provided += std::format("{}[{}, {}) for {}", provided.empty() ? "" : ", ", candidate.offset,
+                                        candidate.offset + candidate.size, candidate.stages);
+            }
+            throw InvalidUsageError({
+                .backend = layout.backend(),
+                .operation = "push_constants",
+                .problem = std::format("push-constant bytes [{}, {}) are not all inside the push-constant ranges of "
+                                       "pipeline layout '{}' (byte {} is outside every range)",
+                                       offset, end, layout.debug_name(), position),
+                .suggestion = provided.empty() ? std::string{"the pipeline layout has no push constants"}
+                                               : std::format("its ranges are {}", provided),
+            });
+        }
+        position = range->offset + range->size;
     }
 
-    RenderingScope(const RenderingScope&) = delete;
-    RenderingScope(RenderingScope&&) = delete;
-    auto operator=(const RenderingScope&) -> RenderingScope& = delete;
-    auto operator=(RenderingScope&&) -> RenderingScope& = delete;
+    // The write names the stages of every range it overlaps.
+    ShaderStage stages = ShaderStage::NONE;
+    for (const PushConstantRange& range : ranges)
+    {
+        if (range.offset < end && offset < range.offset + range.size)
+        {
+            stages |= range.stages;
+        }
+    }
+    return stages;
+}
+
+/// @brief The commands allowed inside a rendering pass: dynamic state, graphics pipeline and resource
+///        bindings, push constants and draws. Base of RenderingScope and RenderingPartRecorder.
+class RenderingCommands
+{
+public:
+    RenderingCommands(const RenderingCommands&) = delete;
+    RenderingCommands(RenderingCommands&&) = delete;
+    auto operator=(const RenderingCommands&) -> RenderingCommands& = delete;
+    auto operator=(RenderingCommands&&) -> RenderingCommands& = delete;
 
     /// @brief Sets the viewport.
     void set_viewport(const Viewport& viewport)
@@ -66,7 +121,7 @@ public:
         m_command_buffer.record_bind_descriptor_sets(PipelineBindPoint::GRAPHICS, layout, first_set, sets, dynamic_offsets);
     }
 
-    /// @brief Sets push-constant bytes.
+    /// @brief Sets push-constant bytes (unchecked: the stages must match the layout's ranges).
     void push_constants(PipelineLayoutHandle layout,
                         ShaderStage stages,
                         std::uint32_t offset,
@@ -75,12 +130,14 @@ public:
         m_command_buffer.record_push_constants(layout, stages, offset, data);
     }
 
-    /// @brief Sets the push constants of @p Shader; @p Data must have exactly the declared size.
-    template<ShaderDefinition Shader, class Data>
-        requires PushConstantsFor<Data, Shader>
-    void push_constants(PipelineLayoutHandle layout, const Data& data)
+    /// @brief Sets the push constants at @p offset to the bytes of @p data, for the stages whose
+    ///        push-constant ranges in @p layout hold them.
+    /// @throws InvalidUsageError when the bytes are not inside the layout's push-constant ranges.
+    template<PushConstantData Data>
+    void push_constants(const PipelineLayout& layout, const Data& data, std::uint32_t offset = 0)
     {
-        m_command_buffer.record_push_constants(layout, Shader::LAYOUT.stage, 0, std::as_bytes(std::span{&data, 1}));
+        const ShaderStage stages = push_constant_stages(layout, offset, sizeof(Data));
+        m_command_buffer.record_push_constants(layout.handle(), stages, offset, std::as_bytes(std::span{&data, 1}));
     }
 
     /// @brief Binds vertex buffers starting at binding @p first_binding.
@@ -119,18 +176,191 @@ public:
         m_command_buffer.record_draw_indexed_indirect(arguments);
     }
 
+    /// @brief Opens a labeled region shown by debugging tools.
+    void begin_debug_label(std::string_view name, const std::array<float, 4>& color = {1.0F, 1.0F, 1.0F, 1.0F})
+    {
+        m_command_buffer.record_begin_debug_label(name, color);
+    }
+
+    /// @brief Closes the innermost labeled region.
+    void end_debug_label()
+    {
+        m_command_buffer.record_end_debug_label();
+    }
+
+protected:
+    explicit RenderingCommands(CommandBuffer& command_buffer)
+        : m_command_buffer{command_buffer}
+    {}
+
+    ~RenderingCommands() = default;
+
+protected:
+    CommandBuffer& m_command_buffer;
+};
+
+template<QueueType Type>
+class Recorder;
+
+/// @brief Commands of a dynamic rendering pass; obtained from Recorder::begin_rendering(), ends the
+///        pass when destroyed.
+template<QueueType Type>
+class RenderingScope final : public RenderingCommands
+{
+public:
+    ~RenderingScope()
+    {
+        m_command_buffer.record_end_rendering();
+    }
+
+    RenderingScope(const RenderingScope&) = delete;
+    RenderingScope(RenderingScope&&) = delete;
+    auto operator=(const RenderingScope&) -> RenderingScope& = delete;
+    auto operator=(RenderingScope&&) -> RenderingScope& = delete;
+
 private:
     friend class Recorder<Type>;
 
     explicit RenderingScope(CommandBuffer& command_buffer)
+        : RenderingCommands{command_buffer}
+    {}
+};
+
+/// @brief A rendering pass whose draws other threads record into secondary command buffers; obtained
+///        from Recorder::begin_parallel_rendering(), ends the pass when destroyed. Inside the pass, the
+///        primary command buffer only executes the recorded parts.
+///
+/// Workflow: hand inheritance() to the recording threads; each records a part with a
+/// RenderingPartRecorder on a secondary command buffer of its own CommandPool; once every part's
+/// recorder is destroyed, execute() runs the parts in the order given, whatever order they finished in.
+class ParallelRenderingScope final
+{
+public:
+    ~ParallelRenderingScope()
+    {
+        m_command_buffer.record_end_rendering();
+    }
+
+    ParallelRenderingScope(const ParallelRenderingScope&) = delete;
+    ParallelRenderingScope(ParallelRenderingScope&&) = delete;
+    auto operator=(const ParallelRenderingScope&) -> ParallelRenderingScope& = delete;
+    auto operator=(ParallelRenderingScope&&) -> ParallelRenderingScope& = delete;
+
+    /// @brief What the parts must be recorded with (safe to read from any thread).
+    [[nodiscard]] auto inheritance() const noexcept -> const RenderingInheritance&
+    {
+        return m_inheritance;
+    }
+
+    /// @brief Executes recorded parts, in this order.
+    void execute(std::span<const CommandBufferHandle> parts)
+    {
+        m_command_buffer.record_execute_commands(parts);
+    }
+
+    /// @brief Executes recorded parts, in this order.
+    /// @throws InvalidUsageError when a part is not a secondary command buffer.
+    void execute(std::span<const std::unique_ptr<CommandBuffer>> parts)
+    {
+        // Every part must be a secondary command buffer; collect their handles.
+        std::vector<CommandBufferHandle> handles;
+        handles.reserve(parts.size());
+        for (const std::unique_ptr<CommandBuffer>& part : parts)
+        {
+            if (part->level() != CommandBufferLevel::SECONDARY)
+            {
+                throw InvalidUsageError({
+                    .backend = part->backend(),
+                    .operation = "ParallelRenderingScope::execute",
+                    .problem = std::format("'{}' is a {} command buffer; the parts of a parallel rendering pass are "
+                                           "secondary command buffers",
+                                           part->debug_name(), part->level()),
+                    .suggestion = "allocate the parts with CommandBufferLevel::SECONDARY and record them with RenderingPartRecorder",
+                });
+            }
+            handles.push_back(part->handle());
+        }
+        execute(handles);
+    }
+
+private:
+    template<QueueType Type>
+    friend class Recorder;
+
+    ParallelRenderingScope(CommandBuffer& command_buffer, const RenderingDescription& rendering)
         : m_command_buffer{command_buffer}
+        , m_inheritance{command_buffer.record_begin_parallel_rendering(rendering)}
     {}
 
 private:
     CommandBuffer& m_command_buffer;
+    RenderingInheritance m_inheritance;
 };
 
-/// @brief Records commands for queue type @p Type into a CommandBuffer: begins recording when
+/// @brief Records one part of a parallel rendering pass into a secondary command buffer: begins it for
+///        the pass described by an inheritance (ParallelRenderingScope::inheritance()) and ends it when
+///        destroyed. Only commands allowed inside a rendering pass exist on it: barriers, copies and
+///        nested passes do not compile.
+class RenderingPartRecorder final : public RenderingCommands
+{
+public:
+    /// @brief Begins recording the part.
+    /// @throws InvalidUsageError when @p command_buffer is not a secondary command buffer of a graphics
+    ///         queue, or @p inheritance does not come from a parallel rendering pass.
+    RenderingPartRecorder(CommandBuffer& command_buffer, const RenderingInheritance& inheritance)
+        : RenderingCommands{command_buffer}
+    {
+        // A secondary command buffer of a queue that renders, for a real pass. (No lambda here: GCC 16
+        // writes an unreadable module file for a capturing lambda in the constructor of a class that
+        // another partition declares, and :command_buffer declares this one; see
+        // CompilationFailure.LambdaInConstructorCorruptsModuleFile.)
+        if (command_buffer.level() != CommandBufferLevel::SECONDARY)
+        {
+            reject(command_buffer,
+                   std::format("'{}' is a {} command buffer; parts are recorded into secondary command buffers",
+                               command_buffer.debug_name(), command_buffer.level()),
+                   "allocate it with CommandBufferLevel::SECONDARY");
+        }
+        if (!has_any(queue_type_capabilities(command_buffer.queue_type()), QueueCapability::GRAPHICS))
+        {
+            reject(command_buffer,
+                   std::format("'{}' belongs to a {} queue, which cannot render", command_buffer.debug_name(),
+                               command_buffer.queue_type()),
+                   "allocate it from a command pool of a graphics queue");
+        }
+        if (!inheritance.primary.is_valid())
+        {
+            reject(command_buffer, "the inheritance does not describe a parallel rendering pass",
+                   "use ParallelRenderingScope::inheritance() of the pass the part belongs to");
+        }
+
+        // Start recording the part.
+        m_command_buffer.record_begin_rendering_part(inheritance);
+    }
+
+    ~RenderingPartRecorder()
+    {
+        m_command_buffer.record_end();
+    }
+
+    RenderingPartRecorder(const RenderingPartRecorder&) = delete;
+    RenderingPartRecorder(RenderingPartRecorder&&) = delete;
+    auto operator=(const RenderingPartRecorder&) -> RenderingPartRecorder& = delete;
+    auto operator=(RenderingPartRecorder&&) -> RenderingPartRecorder& = delete;
+
+private:
+    [[noreturn]] static void reject(const CommandBuffer& command_buffer, std::string problem, std::string suggestion)
+    {
+        throw InvalidUsageError({
+            .backend = command_buffer.backend(),
+            .operation = "RenderingPartRecorder::RenderingPartRecorder",
+            .problem = std::move(problem),
+            .suggestion = std::move(suggestion),
+        });
+    }
+};
+
+/// @brief Records commands for queue type @p Type into a primary CommandBuffer: begins recording when
 ///        constructed, ends it when destroyed.
 template<QueueType Type>
 class Recorder
@@ -140,11 +370,24 @@ public:
     static constexpr QueueCapability CAPABILITIES = queue_type_capabilities(Type);
 
     /// @brief Begins recording.
-    /// @throws InvalidUsageError when @p command_buffer belongs to a queue type that cannot run every
-    ///         kind of work of @p Type (e.g. a compute recorder on a transfer command buffer).
+    /// @throws InvalidUsageError when @p command_buffer is a secondary command buffer, or belongs to a
+    ///         queue type that cannot run every kind of work of @p Type (e.g. a compute recorder on a
+    ///         transfer command buffer).
     explicit Recorder(CommandBuffer& command_buffer)
         : m_command_buffer{command_buffer}
     {
+        // Secondary command buffers only record parts of parallel rendering passes.
+        if (command_buffer.level() != CommandBufferLevel::PRIMARY)
+        {
+            throw InvalidUsageError({
+                .backend = command_buffer.backend(),
+                .operation = "Recorder::Recorder",
+                .problem = std::format("'{}' is a secondary command buffer", command_buffer.debug_name()),
+                .suggestion = "record parts of a parallel rendering pass with RenderingPartRecorder, and everything "
+                              "else into primary command buffers",
+            });
+        }
+
         // A graphics command buffer accepts compute recording, not the other way around.
         if (!has_all(queue_type_capabilities(command_buffer.queue_type()), CAPABILITIES))
         {
@@ -256,12 +499,6 @@ public:
         m_command_buffer.record_end_debug_label();
     }
 
-    /// @brief Executes secondary command buffers.
-    void execute_commands(std::span<const CommandBufferHandle> secondary_command_buffers)
-    {
-        m_command_buffer.record_execute_commands(secondary_command_buffers);
-    }
-
     // ----------------------------------------------------------------------------- compute and graphics queues
 
     /// @brief Clears subresources of a color image outside rendering passes.
@@ -291,19 +528,22 @@ public:
         m_command_buffer.record_bind_descriptor_sets(PipelineBindPoint::COMPUTE, layout, first_set, sets, dynamic_offsets);
     }
 
-    /// @brief Sets push-constant bytes.
+    /// @brief Sets push-constant bytes (unchecked: the stages must match the layout's ranges).
     void push_constants(PipelineLayoutHandle layout, ShaderStage stages, std::uint32_t offset, std::span<const std::byte> data)
         requires (has_any(CAPABILITIES, QueueCapability::COMPUTE))
     {
         m_command_buffer.record_push_constants(layout, stages, offset, data);
     }
 
-    /// @brief Sets the push constants of @p Shader; @p Data must have exactly the declared size.
-    template<ShaderDefinition Shader, class Data>
-        requires PushConstantsFor<Data, Shader> && (has_any(CAPABILITIES, QueueCapability::COMPUTE))
-    void push_constants(PipelineLayoutHandle layout, const Data& data)
+    /// @brief Sets the push constants at @p offset to the bytes of @p data, for the stages whose
+    ///        push-constant ranges in @p layout hold them.
+    /// @throws InvalidUsageError when the bytes are not inside the layout's push-constant ranges.
+    template<PushConstantData Data>
+        requires (has_any(CAPABILITIES, QueueCapability::COMPUTE))
+    void push_constants(const PipelineLayout& layout, const Data& data, std::uint32_t offset = 0)
     {
-        m_command_buffer.record_push_constants(layout, Shader::LAYOUT.stage, 0, std::as_bytes(std::span{&data, 1}));
+        const ShaderStage stages = push_constant_stages(layout, offset, sizeof(Data));
+        m_command_buffer.record_push_constants(layout.handle(), stages, offset, std::as_bytes(std::span{&data, 1}));
     }
 
     /// @brief Dispatches compute workgroups.
@@ -364,6 +604,15 @@ public:
     {
         m_command_buffer.record_begin_rendering(rendering);
         return RenderingScope<Type>{m_command_buffer};
+    }
+
+    /// @brief Begins a dynamic rendering pass recorded by several threads: each records a part into a
+    ///        secondary command buffer (RenderingPartRecorder), and the returned scope executes the parts
+    ///        in order and ends the pass when destroyed.
+    [[nodiscard]] auto begin_parallel_rendering(const RenderingDescription& rendering) -> ParallelRenderingScope
+        requires (has_any(CAPABILITIES, QueueCapability::GRAPHICS))
+    {
+        return ParallelRenderingScope{m_command_buffer, rendering};
     }
 
 private:

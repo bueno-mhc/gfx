@@ -10,7 +10,6 @@ set(GFX_INTERFACE_MODULES
     interface/common_types.cppm
     interface/backend_object.cppm
     interface/shader_layout.cppm
-    interface/layout_compatibility.cppm
     interface/synchronization.cppm
     interface/commands.cppm
     interface/device_memory.cppm
@@ -36,8 +35,9 @@ set(GFX_INTERFACE_MODULES
     interface/queue.cppm
     interface/swapchain.cppm
     interface/deleter.cppm
-    interface/typed_objects.cppm
+    interface/shader_validation.cppm
     interface/device.cppm
+    interface/frame_command_pools.cppm
     interface/physical_device.cppm
     interface/instance.cppm)
 
@@ -56,6 +56,10 @@ target_sources(gfx
 
 # Headers exist only where a module cannot serve (toolchain workarounds), e.g. <gfx/windows_headers.hpp>.
 target_include_directories(gfx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
+# Debug builds compile GLSL at run time and reload changed shader files; Release builds only load
+# SPIR-V compiled at build time (gfx::SHADER_HOT_RELOAD in enums.cppm).
+target_compile_definitions(gfx PUBLIC $<$<CONFIG:Debug>:GFX_SHADER_HOT_RELOAD=1>)
 
 target_compile_features(gfx PUBLIC cxx_std_23)
 target_link_libraries(gfx

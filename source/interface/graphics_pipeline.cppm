@@ -7,10 +7,30 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import :backend_object;
-import :layout_compatibility;
 
 export namespace gfx
 {
+
+/// @brief A vertex buffer binding: stride and step rate.
+struct VertexInputBinding
+{
+    std::uint32_t binding = 0;                         ///< Binding index.
+    std::uint32_t stride = 0;                          ///< Bytes between consecutive elements.
+    VertexInputRate rate = VertexInputRate::VERTEX;    ///< Per vertex or per instance.
+
+    constexpr bool operator==(const VertexInputBinding&) const = default;
+};
+
+/// @brief A vertex attribute: where a shader input location reads from.
+struct VertexInputAttribute
+{
+    std::uint32_t location = 0;        ///< Shader input location.
+    std::uint32_t binding = 0;         ///< Vertex buffer binding it reads.
+    Format format = Format::UNDEFINED; ///< Format of the data in the buffer.
+    std::uint32_t offset = 0;          ///< Byte offset inside one element.
+
+    constexpr bool operator==(const VertexInputAttribute&) const = default;
+};
 
 /// @brief Stencil test and operations for one face orientation.
 struct StencilOperationState
@@ -73,12 +93,13 @@ struct GraphicsPipelineState
     std::string_view debug_name{};                                 ///< Name shown by debugging tools.
 };
 
-/// @brief How to create a GraphicsPipeline (type-erased form; see Device's typed overload).
+/// @brief How to create a GraphicsPipeline. Creation checks the shaders against the pipeline layout,
+///        the vertex attributes and the color formats (validate_graphics_pipeline()).
 struct GraphicsPipelineDescription
 {
     PipelineLayoutHandle layout{};                          ///< Pipeline layout.
     ShaderModuleHandle vertex_shader{};                     ///< Vertex shader module.
-    ShaderModuleHandle fragment_shader{};                   ///< Fragment shader module.
+    ShaderModuleHandle fragment_shader{};                   ///< Fragment shader module (null = depth only).
     std::span<const VertexInputBinding> vertex_bindings{};  ///< Vertex buffer bindings.
     std::span<const VertexInputAttribute> vertex_attributes{}; ///< Vertex attributes.
     std::span<const Format> color_formats{};                ///< Formats of the color attachments.

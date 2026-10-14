@@ -4,10 +4,10 @@ export module gfx.interface:descriptor_set;
 
 import std;
 import gfx.enums;
+import gfx.errors;
 import gfx.handles;
 import :backend_object;
-import :shader_layout;
-import :layout_compatibility;
+import :pipeline_layout;
 
 export namespace gfx
 {
@@ -52,22 +52,6 @@ struct DescriptorWrite
     std::span<const DescriptorResource> resources{};  ///< Resources, one per element.
 };
 
-/// @brief The DescriptorResource alternative that @p Type bindings accept (std::monostate when the
-///        library cannot write that type yet: texel buffers and acceleration structures).
-template<DescriptorType Type>
-using DescriptorResourceOf =
-    std::conditional_t<Type == DescriptorType::SAMPLER, SamplerDescriptor,
-    std::conditional_t<Type == DescriptorType::COMBINED_IMAGE_SAMPLER, CombinedImageSamplerDescriptor,
-    std::conditional_t<Type == DescriptorType::SAMPLED_IMAGE || Type == DescriptorType::STORAGE_IMAGE ||
-                       Type == DescriptorType::INPUT_ATTACHMENT, ImageDescriptor,
-    std::conditional_t<Type == DescriptorType::UNIFORM_BUFFER || Type == DescriptorType::STORAGE_BUFFER ||
-                       Type == DescriptorType::UNIFORM_BUFFER_DYNAMIC || Type == DescriptorType::STORAGE_BUFFER_DYNAMIC,
-                       BufferDescriptor, std::monostate>>>>;
-
-/// @brief Whether @p Resource can be written to a binding of type @p Type.
-template<class Resource, DescriptorType Type>
-concept DescriptorResourceFor = std::same_as<Resource, DescriptorResourceOf<Type>>;
-
 /// @brief Whether a resource matches a binding type (for backends validating DescriptorWrites).
 [[nodiscard]] constexpr auto
 descriptor_resource_matches(DescriptorType type,
@@ -93,6 +77,40 @@ descriptor_resource_matches(DescriptorType type,
     }
 }
 
+/// @brief Name of the DescriptorResource alternative a binding of type @p type accepts, for messages.
+[[nodiscard]] constexpr auto
+descriptor_resource_name(DescriptorType type) noexcept -> std::string_view
+{
+    switch (type)
+    {
+        case DescriptorType::SAMPLER:
+            return "SamplerDescriptor";
+        case DescriptorType::COMBINED_IMAGE_SAMPLER:
+            return "CombinedImageSamplerDescriptor";
+        case DescriptorType::SAMPLED_IMAGE:
+        case DescriptorType::STORAGE_IMAGE:
+        case DescriptorType::INPUT_ATTACHMENT:
+            return "ImageDescriptor";
+        case DescriptorType::UNIFORM_BUFFER:
+        case DescriptorType::STORAGE_BUFFER:
+        case DescriptorType::UNIFORM_BUFFER_DYNAMIC:
+        case DescriptorType::STORAGE_BUFFER_DYNAMIC:
+            return "BufferDescriptor";
+        default:
+            return "no DescriptorResource yet (texel buffers and acceleration structures cannot be written yet)";
+    }
+}
+
+/// @brief Name of the alternative @p resource holds, for messages.
+[[nodiscard]] constexpr auto
+descriptor_resource_name(const DescriptorResource& resource) noexcept -> std::string_view
+{
+    constexpr std::array<std::string_view, 4> NAMES{"BufferDescriptor", "ImageDescriptor", "SamplerDescriptor",
+                                                    "CombinedImageSamplerDescriptor"};
+    static_assert(NAMES.size() == std::variant_size_v<DescriptorResource>);
+    return NAMES[resource.index()];
+}
+
 /// @brief Resources bound to the bindings of a descriptor set layout. Allocated from a DescriptorPool.
 class DescriptorSet : public BackendObject
 {
@@ -107,23 +125,49 @@ public:
     /// @throws InvalidUsageError when a resource does not match its binding's type.
     virtual void update(std::span<const DescriptorWrite> writes) = 0;
 
-    /// @brief Writes @p resource to the binding @p Name of @p Shader. The binding index is found and
-    ///        the resource type checked at compile time (a buffer written to an image binding does not
-    ///        compile). The set must have been allocated with the layout of that binding's set.
-    template<FixedString Name, ShaderDefinition Shader, class Resource>
-    void write(const Resource& resource, std::uint32_t array_element = 0)
+    /// @brief Writes @p resource to the binding at @p location (from PipelineLayout::find_binding()).
+    ///        The set must have been allocated with the layout of set @p location.set.
+    /// @throws InvalidUsageError when the resource does not match the binding's type or
+    ///         @p array_element is beyond the binding's array.
+    void write(const BindingLocation& location,
+               const DescriptorResource& resource,
+               std::uint32_t array_element = 0)
     {
-        // Resolve the binding by name and check the resource type, both at compile time.
-        constexpr ShaderBinding binding = binding_of<Name, Shader>();
-        static_assert(!std::same_as<DescriptorResourceOf<binding.type>, std::monostate>,
-                      "gfx: this descriptor type cannot be written with DescriptorSet::write yet");
-        static_assert(DescriptorResourceFor<Resource, binding.type>,
-                      "gfx: the resource type does not match the binding's descriptor type (see DescriptorResourceOf)");
+        // The resource must be the kind the binding accepts.
+        if (!descriptor_resource_matches(location.type, resource))
+        {
+            throw InvalidUsageError({
+                .backend = backend(),
+                .operation = "DescriptorSet::write",
+                .problem = std::format("set {} binding {} is {}, which takes {}, not {}", location.set, location.binding,
+                                       location.type, descriptor_resource_name(location.type),
+                                       descriptor_resource_name(resource)),
+                .suggestion = "",
+            });
+        }
 
-        // Write the single resource.
+        // A fixed-size array must contain the element (runtime-sized arrays have count 0).
+        if (location.count != 0 && array_element >= location.count)
+        {
+            throw InvalidUsageError({
+                .backend = backend(),
+                .operation = "DescriptorSet::write",
+                .problem = std::format("set {} binding {} has {} element(s); element {} does not exist", location.set,
+                                       location.binding, location.count, array_element),
+                .suggestion = "",
+            });
+        }
+        write(location.binding, resource, array_element);
+    }
+
+    /// @brief Writes @p resource to binding index @p binding (checked by the backend).
+    void write(std::uint32_t binding,
+               const DescriptorResource& resource,
+               std::uint32_t array_element = 0)
+    {
         const std::array<DescriptorResource, 1> resources{resource};
         const std::array<DescriptorWrite, 1> writes{
-            DescriptorWrite{.binding = binding.binding, .array_element = array_element, .resources = resources}};
+            DescriptorWrite{.binding = binding, .array_element = array_element, .resources = resources}};
         update(writes);
     }
 };

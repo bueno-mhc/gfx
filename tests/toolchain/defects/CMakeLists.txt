@@ -18,3 +18,13 @@ gfx_add_compilation_failure_test(WindowsHeadersConflictWithModules
     SOURCES windows_headers_with_modules.cpp
     EXPECTED_DIAGNOSTIC "conflicting language linkage for imported declaration"
     WITHOUT_PROJECT_OPTIONS)
+
+# A class declared in one module partition and defined in another cannot have a capturing lambda in an
+# in-class constructor: the defining partition's module file cannot be read back.
+# Workaround: a private static [[noreturn]] function instead of the lambda
+# (RenderingPartRecorder::reject in source/interface/recorder.cppm; :command_buffer declares the class).
+gfx_add_compilation_failure_test(LambdaInConstructorCorruptsModuleFile
+    SOURCES lambda_in_constructor_importer.cpp
+    MODULES lambda_in_constructor_primary.cppm lambda_in_constructor_declaration.cppm lambda_in_constructor_module.cppm
+    EXPECTED_DIAGNOSTIC "failed to read compiled module"
+    WITHOUT_PROJECT_OPTIONS)

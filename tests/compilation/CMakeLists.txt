@@ -59,42 +59,25 @@ gfx_add_compilation_failure_test(DrawsRequireARenderingScope
     EXPECTED_DIAGNOSTIC "has no member named 'draw'"
     LIBRARIES gfx::gfx)
 
-gfx_add_compilation_failure_test(TypedPushConstantsRequireTheDeclaredSize
-    SOURCES interface/typed_push_constants_require_the_declared_size.cpp
-    EXPECTED_DIAGNOSTIC "no matching function for call to .*push_constants<Shader>"
+gfx_add_compilation_failure_test(ParallelRenderingScopeCannotDraw
+    SOURCES interface/parallel_rendering_scope_cannot_draw.cpp
+    EXPECTED_DIAGNOSTIC "class gfx::ParallelRenderingScope[^']*' has no member named 'draw'"
     LIBRARIES gfx::gfx)
 
-# ------------------------------------------------------------------------------ typed pipelines and descriptors
-gfx_add_compilation_failure_test(TypedComputePipelineRejectsIncompatibleLayout
-    SOURCES interface/typed_compute_pipeline_rejects_incompatible_layout.cpp
-    EXPECTED_DIAGNOSTIC "LayoutMismatch::DESCRIPTOR_TYPE_MISMATCH, 0, 1, gfx::DescriptorType::STORAGE_IMAGE, gfx::DescriptorType::SAMPLED_IMAGE"
+gfx_add_compilation_failure_test(RenderingPartsCannotRecordBarriers
+    SOURCES interface/rendering_parts_cannot_record_barriers.cpp
+    EXPECTED_DIAGNOSTIC "class gfx::RenderingPartRecorder[^']*' has no member named 'barrier'"
     LIBRARIES gfx::gfx)
 
-gfx_add_compilation_failure_test(TypedGraphicsPipelineRejectsMissingVertexAttribute
-    SOURCES interface/typed_graphics_pipeline_rejects_missing_vertex_attribute.cpp
-    EXPECTED_DIAGNOSTIC "LayoutMismatch::VERTEX_INPUT_WITHOUT_ATTRIBUTE, 0, 1"
-    LIBRARIES gfx::gfx)
-
-gfx_add_compilation_failure_test(DescriptorWritesCheckTheResourceType
-    SOURCES interface/descriptor_writes_check_the_resource_type.cpp
-    EXPECTED_DIAGNOSTIC "the resource type does not match the binding's descriptor type"
-    LIBRARIES gfx::gfx)
-
-gfx_add_compilation_failure_test(DescriptorWritesRejectUnknownNames
-    SOURCES interface/descriptor_writes_reject_unknown_names.cpp
-    EXPECTED_DIAGNOSTIC "shader_declares_no_binding_with_this_name"
+gfx_add_compilation_failure_test(PushConstantsRejectPointers
+    SOURCES interface/push_constants_reject_pointers.cpp
+    EXPECTED_DIAGNOSTIC "no matching function for call to .*push_constants"
     LIBRARIES gfx::gfx)
 
 # ------------------------------------------------------------------------------ backend contract
 gfx_add_compilation_failure_test(BackendsMustOverrideEveryOperation
     SOURCES interface/backends_must_override_every_operation.cpp
     EXPECTED_DIAGNOSTIC "to be of abstract type 'IncompleteBuffer'"
-    LIBRARIES gfx::gfx)
-
-# ------------------------------------------------------------------------------ compile-time GLSL reflection
-gfx_add_compilation_failure_test(GlslReflectionReportsUnknownMemberTypes
-    SOURCES shader_layout/glsl_reflection_reports_unknown_member_types.cpp
-    EXPECTED_DIAGNOSTIC "glsl_unknown_type_in_structure_or_block"
     LIBRARIES gfx::gfx)
 
 # ------------------------------------------------------------------------------ naming

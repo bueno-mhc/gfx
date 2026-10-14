@@ -1,6 +1,7 @@
 /// @file interface.cppm
 /// @brief The abstract interfaces of gfx: the objects every backend implements, their descriptions,
-///        typed command recording, and the compile-time shader layout machinery.
+///        typed command recording, parallel rendering passes, and the validation of reflected shader
+///        layouts.
 ///
 /// Object model (Vulkan-like): Instance -> PhysicalDevice -> Device -> Queue, resources (DeviceMemory,
 /// Buffer, Image, ImageView, Sampler), binding model (ShaderModule, DescriptorSetLayout, PipelineLayout,
@@ -12,7 +13,6 @@ export module gfx.interface;
 export import :common_types;
 export import :backend_object;
 export import :shader_layout;
-export import :layout_compatibility;
 export import :synchronization;
 export import :commands;
 export import :device_memory;
@@ -38,7 +38,8 @@ export import :recorder;
 export import :queue;
 export import :swapchain;
 export import :deleter;
-export import :typed_objects;
+export import :shader_validation;
 export import :device;
+export import :frame_command_pools;
 export import :physical_device;
 export import :instance;

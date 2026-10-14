@@ -1,4 +1,6 @@
-// Device, PhysicalDevice and Instance: descriptive defaults, typed creation, device selection.
+// Device, PhysicalDevice and Instance: descriptive defaults, shader modules and their reflected
+// layouts, pipeline layouts derived from shaders, pipeline validation, descriptor writes, hot reload,
+// device selection.
 #include <gtest/gtest.h>
 
 import std;
@@ -15,45 +17,74 @@ using gfx::tests::FakeDevice;
 using gfx::tests::FakeInstance;
 using gfx::tests::FakePhysicalDevice;
 
-inline constexpr char BLUR_SOURCE[] = R"glsl(
-#version 460
-layout(local_size_x = 8, local_size_y = 8) in;
-layout(set = 0, binding = 0) uniform sampler2D u_input;
-layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D u_output;
-layout(push_constant) uniform Push { vec2 texel; float radius; } push;
-void main() {}
-)glsl";
+// SPIR-V the fake device accepts: its "reflection" ignores the code and reads the registered layout.
+inline constexpr std::array<std::uint32_t, 1> FAKE_SPIRV{SPIRV_MAGIC_NUMBER};
 
-inline constexpr char MESH_VERTEX_SOURCE[] = R"glsl(
-#version 460
-layout(set = 0, binding = 0) uniform Camera { mat4 view_projection; } camera;
-layout(location = 0) in vec3 a_position;
-layout(location = 0) out vec3 v_color;
-void main() {}
-)glsl";
+auto blur_layout() -> ShaderLayout
+{
+    return {
+        .stage = ShaderStage::COMPUTE,
+        .bindings = {{.set = 0, .binding = 0, .type = DescriptorType::COMBINED_IMAGE_SAMPLER, .name = "u_input"},
+                     {.set = 0, .binding = 1, .type = DescriptorType::STORAGE_IMAGE, .image_format = Format::R16G16B16A16_SFLOAT,
+                      .name = "u_output"}},
+        .push_constant_offset = 0,
+        .push_constant_size = 12,
+        .workgroup_size = {8, 8, 1},
+    };
+}
 
-inline constexpr char MESH_FRAGMENT_SOURCE[] = R"glsl(
-#version 460
-layout(set = 2, binding = 0) uniform sampler2D u_albedo;
-layout(location = 0) in vec3 v_color;
-layout(location = 0) out vec4 o_color;
-void main() {}
-)glsl";
+auto mesh_vertex_layout() -> ShaderLayout
+{
+    return {
+        .stage = ShaderStage::VERTEX,
+        .bindings = {{.set = 0, .binding = 0, .type = DescriptorType::UNIFORM_BUFFER, .block_size = 64, .name = "camera"}},
+        .push_constant_offset = 0,
+        .push_constant_size = 64,
+        .inputs = {{.location = 0, .format = Format::R32G32B32_SFLOAT, .name = "a_position"}},
+        .outputs = {{.location = 0, .format = Format::R32G32B32_SFLOAT, .name = "v_color"}},
+    };
+}
 
-using BlurShader = GlslShader<BLUR_SOURCE, ShaderStage::COMPUTE, "blur">;
-using MeshVertexShader = GlslShader<MESH_VERTEX_SOURCE, ShaderStage::VERTEX, "mesh vertex">;
-using MeshFragmentShader = GlslShader<MESH_FRAGMENT_SOURCE, ShaderStage::FRAGMENT, "mesh fragment">;
+auto mesh_fragment_layout() -> ShaderLayout
+{
+    return {
+        .stage = ShaderStage::FRAGMENT,
+        .bindings = {{.set = 2, .binding = 0, .type = DescriptorType::COMBINED_IMAGE_SAMPLER, .name = "u_albedo"}},
+        .push_constant_offset = 64,
+        .push_constant_size = 16,
+        .inputs = {{.location = 0, .format = Format::R32G32B32_SFLOAT, .name = "v_color"}},
+        .outputs = {{.location = 0, .format = Format::R32G32B32A32_SFLOAT, .name = "o_color"}},
+    };
+}
 
-inline constexpr PipelineLayoutDefinition BLUR_LAYOUT = pipeline_layout_from<BlurShader>();
-inline constexpr PipelineLayoutDefinition MESH_LAYOUT = pipeline_layout_from<MeshVertexShader, MeshFragmentShader>();
-inline constexpr VertexLayoutDefinition MESH_VERTICES = VertexLayoutDefinition{}
-    .with_binding(0, 12)
-    .with_attribute(0, 0, Format::R32G32B32_SFLOAT, 0);
-inline constexpr AttachmentLayoutDefinition MESH_ATTACHMENTS = AttachmentLayoutDefinition{}
-    .with_color(Format::B8G8R8A8_SRGB)
-    .with_depth(Format::D32_SFLOAT);
+/// A fake device whose "reflection" knows the three shaders above.
+class DeviceTest : public ::testing::Test
+{
+protected:
+    DeviceTest()
+    {
+        m_device.add_reflected_layout("blur", blur_layout());
+        m_device.add_reflected_layout("mesh vertex", mesh_vertex_layout());
+        m_device.add_reflected_layout("mesh fragment", mesh_fragment_layout());
+    }
 
-TEST(DeviceTest, BackendsMustOverrideEveryOperation)
+    /// Creates the module called @p name, as user code does: through the Device interface.
+    auto create_shader(std::string_view name, ShaderStage stage) -> std::unique_ptr<ShaderModule>
+    {
+        return device().create_shader_module({.stage = stage, .spirv = FAKE_SPIRV, .name = name});
+    }
+
+    auto device() -> Device&
+    {
+        return m_device;
+    }
+
+protected:
+    FakePhysicalDevice m_physical_device{PhysicalDeviceType::DISCRETE_GPU};
+    FakeDevice m_device{m_physical_device};
+};
+
+TEST_F(DeviceTest, BackendsMustOverrideEveryOperation)
 {
     static_assert(std::is_abstract_v<Device> && std::is_abstract_v<CommandBuffer> && std::is_abstract_v<Buffer>);
     static_assert(!std::is_copy_constructible_v<FakeDevice> && !std::is_move_constructible_v<FakeDevice>,
@@ -61,13 +92,11 @@ TEST(DeviceTest, BackendsMustOverrideEveryOperation)
     SUCCEED();
 }
 
-TEST(DeviceTest, UnimplementedOperationsThrowADescriptiveError)
+TEST_F(DeviceTest, UnimplementedOperationsThrowADescriptiveError)
 {
-    FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU};
-    FakeDevice device{physical_device};
     try
     {
-        (void)device.create_event({});
+        (void)m_device.create_event({});
         FAIL() << "BackendCapabilityError was not thrown";
     }
     catch (const BackendCapabilityError& error)
@@ -81,112 +110,238 @@ TEST(DeviceTest, UnimplementedOperationsThrowADescriptiveError)
             << error.what();
     }
     // Through the interface, as user code does (default arguments belong to the interface).
-    Device& interface = device;
-    EXPECT_THROW((void)interface.create_buffer({.size = 16}), BackendCapabilityError);
-    EXPECT_THROW((void)interface.queue(QueueType::COMPUTE), BackendCapabilityError);
-    EXPECT_THROW(interface.deleter().enqueue([] {}), BackendCapabilityError);
+    EXPECT_THROW((void)device().create_buffer({.size = 16}), BackendCapabilityError);
+    EXPECT_THROW((void)device().queue(QueueType::COMPUTE), BackendCapabilityError);
+    EXPECT_THROW(device().deleter().enqueue([] {}), BackendCapabilityError);
 }
 
-TEST(DeviceTest, TypedShaderCreationPassesTheCompileTimeLayout)
+TEST_F(DeviceTest, ShaderModulesExposeTheLayoutReflectedFromTheirCode)
 {
-    FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU};
-    FakeDevice device{physical_device};
-    Device& interface = device;
+    const std::unique_ptr<ShaderModule> shader = create_shader("blur", ShaderStage::COMPUTE);
+    EXPECT_EQ(shader->layout(), blur_layout());
+    EXPECT_EQ(shader->debug_name(), "blur");
+    EXPECT_TRUE(shader->handle().is_valid());
+    EXPECT_EQ(m_device.captured().shader_module_names, (std::vector<std::string>{"blur"}));
 
-    const TypedShaderModule<BlurShader> shader = interface.create_shader<BlurShader>();
-
-    const tests::CapturedDescriptions& captured = device.captured();
-    ASSERT_TRUE(captured.shader_module.has_value());
-    EXPECT_EQ(captured.shader_module->stage, ShaderStage::COMPUTE);
-    EXPECT_EQ(captured.shader_module->source_format, ShaderSourceFormat::GLSL);
-    EXPECT_EQ(captured.shader_source, BlurShader::SOURCE);
-    EXPECT_EQ(captured.shader_name, "blur");
-    ASSERT_TRUE(captured.shader_module->expected_layout.has_value());
-    EXPECT_EQ(*captured.shader_module->expected_layout, BlurShader::LAYOUT);
-    EXPECT_TRUE(shader.handle().is_valid());
+    // The backend validates the description before reflecting anything.
+    const std::array<std::uint32_t, 1> not_spirv{0xDEADBEEFU};
+    EXPECT_THROW((void)device().create_shader_module({.stage = ShaderStage::COMPUTE, .spirv = not_spirv, .name = "blur"}),
+                 InvalidUsageError);
 }
 
-TEST(DeviceTest, TypedPipelineLayoutCreatesOneSetLayoutPerSet)
+TEST_F(DeviceTest, GlslModulesAreCreatedOnlyInDebugBuilds)
 {
-    FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU};
-    FakeDevice device{physical_device};
-    Device& interface = device;
+    const ShaderModuleDescription glsl{.stage = ShaderStage::COMPUTE,
+                                       .source_format = ShaderSourceFormat::GLSL,
+                                       .glsl_source = "#version 460\nvoid main() {}\n",
+                                       .source_path = "shaders/blur.comp.glsl",
+                                       .name = "blur"};
+    if constexpr (SHADER_HOT_RELOAD)
+    {
+        EXPECT_NO_THROW((void)device().create_shader_module(glsl));
+    }
+    else
+    {
+        EXPECT_THROW((void)device().create_shader_module(glsl), InvalidUsageError);
+    }
+}
 
-    const TypedPipelineLayout<MESH_LAYOUT> layout = interface.create_pipeline_layout<MESH_LAYOUT>("mesh");
+TEST_F(DeviceTest, PipelineLayoutsFromShadersCreateOneSetLayoutPerSet)
+{
+    const std::unique_ptr<ShaderModule> vertex = create_shader("mesh vertex", ShaderStage::VERTEX);
+    const std::unique_ptr<ShaderModule> fragment = create_shader("mesh fragment", ShaderStage::FRAGMENT);
+    const ReflectedPipelineLayout layout = device().create_pipeline_layout_from({vertex.get(), fragment.get()}, "mesh");
 
-    // Sets 0 and 2 are used, so set 1 gets an empty layout.
-    const tests::CapturedDescriptions& captured = device.captured();
+    // Sets 0 and 2 are used, so set 1 gets an empty layout; bindings keep their names and stages.
+    const tests::CapturedDescriptions& captured = m_device.captured();
     ASSERT_EQ(captured.set_layout_bindings.size(), 3U);
     ASSERT_EQ(captured.set_layout_bindings[0].size(), 1U);
     EXPECT_EQ(captured.set_layout_bindings[0][0].type, DescriptorType::UNIFORM_BUFFER);
     EXPECT_EQ(captured.set_layout_bindings[0][0].stages, ShaderStage::VERTEX);
+    EXPECT_EQ(captured.set_layout_bindings[0][0].name, "camera");
     EXPECT_TRUE(captured.set_layout_bindings[1].empty());
     EXPECT_EQ(captured.set_layout_bindings[2][0].type, DescriptorType::COMBINED_IMAGE_SAMPLER);
     EXPECT_EQ(captured.pipeline_layout_set_layouts.size(), 3U);
-    EXPECT_TRUE(captured.push_constant_ranges.empty());
+    EXPECT_EQ(layout.set_count(), 3U);
     EXPECT_EQ(layout.set_layout(2).handle(), captured.pipeline_layout_set_layouts[2]);
     EXPECT_THROW((void)layout.set_layout(3), InvalidUsageError);
-}
 
-TEST(DeviceTest, TypedComputePipelineCombinesTheTypedObjects)
-{
-    FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU};
-    FakeDevice device{physical_device};
-    Device& interface = device;
-
-    const TypedPipelineLayout<BLUR_LAYOUT> layout = interface.create_pipeline_layout<BLUR_LAYOUT>();
-    const TypedShaderModule<BlurShader> shader = interface.create_shader<BlurShader>();
-    const std::unique_ptr<ComputePipeline> pipeline = interface.create_compute_pipeline(layout, shader, "blur");
-
-    const tests::CapturedDescriptions& captured = device.captured();
-    ASSERT_TRUE(captured.compute_pipeline.has_value());
-    EXPECT_EQ(captured.compute_pipeline->layout, layout.handle());
-    EXPECT_EQ(captured.compute_pipeline->shader, shader.handle());
+    // One push-constant range covers the vertex bytes [0, 64) and the fragment bytes [64, 80).
     ASSERT_EQ(captured.push_constant_ranges.size(), 1U);
-    EXPECT_EQ(captured.push_constant_ranges[0].size, 12U);
-    EXPECT_EQ(captured.push_constant_ranges[0].stages, ShaderStage::COMPUTE);
+    EXPECT_EQ(captured.push_constant_ranges[0], (PushConstantRange{.stages = ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+                                                                   .offset = 0,
+                                                                   .size = 80}));
+    EXPECT_EQ(layout.definition().push_constant_ranges, captured.push_constant_ranges);
+}
+
+TEST_F(DeviceTest, ConflictingShaderBindingsAreReported)
+{
+    ShaderLayout conflicting = mesh_fragment_layout();
+    conflicting.bindings[0].set = 0; // set 0 binding 0 is the vertex shader's uniform block
+    m_device.add_reflected_layout("conflicting fragment", conflicting);
+    const std::unique_ptr<ShaderModule> vertex = create_shader("mesh vertex", ShaderStage::VERTEX);
+    const std::unique_ptr<ShaderModule> fragment = create_shader("conflicting fragment", ShaderStage::FRAGMENT);
+    try
+    {
+        (void)device().create_pipeline_layout_from({vertex.get(), fragment.get()});
+        FAIL() << "ShaderLayoutMismatchError was not thrown";
+    }
+    catch (const ShaderLayoutMismatchError& error)
+    {
+        EXPECT_EQ(error.mismatch(), LayoutMismatch::CONFLICTING_BINDINGS);
+        EXPECT_EQ(error.shader_name(), "conflicting fragment");
+        EXPECT_EQ(error.problem(), "set 0 binding 0 is declared as COMBINED_IMAGE_SAMPLER x1 by this shader and as "
+                                   "UNIFORM_BUFFER x1 by an earlier one");
+    }
+}
+
+TEST_F(DeviceTest, ComputePipelinesAreValidatedAgainstTheirLayout)
+{
+    const std::unique_ptr<ShaderModule> shader = create_shader("blur", ShaderStage::COMPUTE);
+    const ReflectedPipelineLayout layout = device().create_pipeline_layout_from({shader.get()});
+    const std::unique_ptr<ComputePipeline> pipeline =
+        device().create_compute_pipeline({.layout = layout.handle(), .shader = shader->handle(), .debug_name = "blur"});
     EXPECT_EQ(pipeline->layout(), layout.handle());
+
+    // An explicit layout without u_output does not fit the shader.
+    const std::array bindings{DescriptorSetLayoutBinding{.binding = 0,
+                                                         .type = DescriptorType::COMBINED_IMAGE_SAMPLER,
+                                                         .stages = ShaderStage::COMPUTE,
+                                                         .name = "u_input"}};
+    const std::unique_ptr<DescriptorSetLayout> set_layout = device().create_descriptor_set_layout({.bindings = bindings});
+    const std::array set_layouts{set_layout->handle()};
+    const std::array push_constants{PushConstantRange{.stages = ShaderStage::COMPUTE, .offset = 0, .size = 12}};
+    const std::unique_ptr<PipelineLayout> incomplete = device().create_pipeline_layout(
+        {.set_layouts = set_layouts, .push_constant_ranges = push_constants, .debug_name = "incomplete"});
+    try
+    {
+        (void)device().create_compute_pipeline({.layout = incomplete->handle(), .shader = shader->handle()});
+        FAIL() << "ShaderLayoutMismatchError was not thrown";
+    }
+    catch (const ShaderLayoutMismatchError& error)
+    {
+        EXPECT_EQ(error.mismatch(), LayoutMismatch::BINDING_MISSING_FROM_LAYOUT);
+        EXPECT_TRUE(std::string_view{error.what()}.starts_with(
+            "[gfx::NULL_BACKEND] Device::create_compute_pipeline: shader 'blur' does not match its layout "
+            "(BINDING_MISSING_FROM_LAYOUT): the shader uses set 0 binding 1 (STORAGE_IMAGE), which the pipeline "
+            "layout does not declare"))
+            << error.what();
+    }
+
+    // A vertex shader is not a compute shader.
+    const std::unique_ptr<ShaderModule> vertex = create_shader("mesh vertex", ShaderStage::VERTEX);
+    EXPECT_THROW((void)device().create_compute_pipeline({.layout = layout.handle(), .shader = vertex->handle()}),
+                 ShaderLayoutMismatchError);
 }
 
-TEST(DeviceTest, TypedGraphicsPipelinePassesVertexAndAttachmentLayouts)
+TEST_F(DeviceTest, GraphicsPipelinesAreValidatedAgainstAttributesAndAttachments)
 {
-    FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU};
-    FakeDevice device{physical_device};
-    Device& interface = device;
+    const std::unique_ptr<ShaderModule> vertex = create_shader("mesh vertex", ShaderStage::VERTEX);
+    const std::unique_ptr<ShaderModule> fragment = create_shader("mesh fragment", ShaderStage::FRAGMENT);
+    const ReflectedPipelineLayout layout = device().create_pipeline_layout_from({vertex.get(), fragment.get()});
+    const std::array vertex_bindings{VertexInputBinding{.binding = 0, .stride = 12}};
+    const std::array attributes{VertexInputAttribute{.location = 0, .binding = 0, .format = Format::R32G32B32_SFLOAT}};
+    const std::array color_formats{Format::B8G8R8A8_SRGB};
+    const GraphicsPipelineDescription description{
+        .layout = layout.handle(),
+        .vertex_shader = vertex->handle(),
+        .fragment_shader = fragment->handle(),
+        .vertex_bindings = vertex_bindings,
+        .vertex_attributes = attributes,
+        .color_formats = color_formats,
+        .depth_format = Format::D32_SFLOAT,
+        .state = {.debug_name = "mesh"},
+    };
+    EXPECT_NO_THROW((void)device().create_graphics_pipeline(description));
+    EXPECT_EQ(m_device.captured().color_formats, (std::vector{Format::B8G8R8A8_SRGB}));
 
-    const TypedPipelineLayout<MESH_LAYOUT> layout = interface.create_pipeline_layout<MESH_LAYOUT>();
-    const TypedShaderModule<MeshVertexShader> vertex = interface.create_shader<MeshVertexShader>();
-    const TypedShaderModule<MeshFragmentShader> fragment = interface.create_shader<MeshFragmentShader>();
-    const std::unique_ptr<GraphicsPipeline> pipeline =
-        interface.create_graphics_pipeline<MESH_VERTICES, MESH_ATTACHMENTS>(layout, vertex, fragment, {.debug_name = "mesh"});
+    // Without the position attribute.
+    GraphicsPipelineDescription no_attributes = description;
+    no_attributes.vertex_attributes = {};
+    try
+    {
+        (void)device().create_graphics_pipeline(no_attributes);
+        FAIL() << "ShaderLayoutMismatchError was not thrown";
+    }
+    catch (const ShaderLayoutMismatchError& error)
+    {
+        EXPECT_EQ(error.mismatch(), LayoutMismatch::VERTEX_INPUT_WITHOUT_ATTRIBUTE);
+        EXPECT_EQ(error.shader_name(), "mesh vertex");
+    }
 
-    const tests::CapturedDescriptions& captured = device.captured();
-    ASSERT_TRUE(captured.graphics_pipeline.has_value());
-    EXPECT_EQ(captured.graphics_pipeline->vertex_shader, vertex.handle());
-    EXPECT_EQ(captured.graphics_pipeline->fragment_shader, fragment.handle());
-    EXPECT_EQ(captured.vertex_attributes, (std::vector{VertexInputAttribute{0, 0, Format::R32G32B32_SFLOAT, 0}}));
-    EXPECT_EQ(captured.color_formats, (std::vector{Format::B8G8R8A8_SRGB}));
-    EXPECT_EQ(captured.graphics_pipeline->depth_format, Format::D32_SFLOAT);
-    EXPECT_EQ(captured.graphics_pipeline->stencil_format, Format::UNDEFINED);
-    EXPECT_EQ(captured.graphics_pipeline->state.debug_name, "mesh");
+    // An integer attachment for a float output.
+    const std::array integer_color{Format::R32G32B32A32_UINT};
+    GraphicsPipelineDescription integer_attachment = description;
+    integer_attachment.color_formats = integer_color;
+    EXPECT_THROW((void)device().create_graphics_pipeline(integer_attachment), ShaderLayoutMismatchError);
+
+    // Depth only: no fragment shader to check against attachments.
+    GraphicsPipelineDescription depth_only = description;
+    depth_only.fragment_shader = {};
+    depth_only.color_formats = {};
+    EXPECT_NO_THROW((void)device().create_graphics_pipeline(depth_only));
 }
 
-TEST(DeviceTest, DescriptorWritesResolveBindingsByName)
+TEST_F(DeviceTest, BindingsAreLocatedByNameOnce)
 {
+    const std::unique_ptr<ShaderModule> shader = create_shader("blur", ShaderStage::COMPUTE);
+    const ReflectedPipelineLayout layout = device().create_pipeline_layout_from({shader.get()});
+    EXPECT_EQ(layout.find_binding("u_output"),
+              (BindingLocation{.set = 0, .binding = 1, .type = DescriptorType::STORAGE_IMAGE, .count = 1}));
+    try
+    {
+        (void)layout.find_binding("u_ouput");
+        FAIL() << "InvalidUsageError was not thrown";
+    }
+    catch (const InvalidUsageError& error)
+    {
+        EXPECT_EQ(error.problem(), "pipeline layout 'fake' has no binding named 'u_ouput'");
+        EXPECT_EQ(error.suggestion(), "its named bindings are 'u_input' (set 0, binding 0), 'u_output' (set 0, binding 1)");
+    }
+}
+
+TEST_F(DeviceTest, DescriptorWritesAreCheckedAgainstTheBinding)
+{
+    const BindingLocation output{.set = 0, .binding = 1, .type = DescriptorType::STORAGE_IMAGE, .count = 1};
+    const BindingLocation input{.set = 0, .binding = 0, .type = DescriptorType::COMBINED_IMAGE_SAMPLER, .count = 1};
     FakeDescriptorSet set;
-    set.write<"u_output", BlurShader>(ImageDescriptor{.layout = ImageLayout::GENERAL});
-    set.write<"u_input", BlurShader>(CombinedImageSamplerDescriptor{});
-
-    EXPECT_EQ(set.written_bindings(), (std::vector<std::uint32_t>{1, 0}));
-    ASSERT_EQ(set.written_resources().size(), 2U);
+    set.write(output, ImageDescriptor{.layout = ImageLayout::GENERAL});
+    set.write(input, CombinedImageSamplerDescriptor{});
+    set.write(3, BufferDescriptor{}); // by index: checked by the backend
+    EXPECT_EQ(set.written_bindings(), (std::vector<std::uint32_t>{1, 0, 3}));
     EXPECT_EQ(std::get<ImageDescriptor>(set.written_resources()[0]).layout, ImageLayout::GENERAL);
-    EXPECT_TRUE(std::holds_alternative<CombinedImageSamplerDescriptor>(set.written_resources()[1]));
+
+    try
+    {
+        set.write(output, BufferDescriptor{});
+        FAIL() << "InvalidUsageError was not thrown";
+    }
+    catch (const InvalidUsageError& error)
+    {
+        EXPECT_EQ(error.problem(), "set 0 binding 1 is STORAGE_IMAGE, which takes ImageDescriptor, not BufferDescriptor");
+    }
+    EXPECT_THROW(set.write(output, ImageDescriptor{}, 1), InvalidUsageError) << "element 1 of a 1-element binding";
+    EXPECT_EQ(set.written_bindings().size(), 3U) << "rejected writes reach no backend";
 
     static_assert(descriptor_resource_matches(DescriptorType::UNIFORM_BUFFER_DYNAMIC, DescriptorResource{BufferDescriptor{}}));
     static_assert(!descriptor_resource_matches(DescriptorType::STORAGE_IMAGE, DescriptorResource{SamplerDescriptor{}}));
 }
 
-TEST(DeviceTest, MappedBuffersCanBeViewedAsElements)
+TEST_F(DeviceTest, ShaderHotReloadExistsOnlyInDebugBuilds)
+{
+    if constexpr (SHADER_HOT_RELOAD)
+    {
+        // Debug: the request reaches the backend (which does not implement it yet).
+        EXPECT_THROW((void)device().poll_shader_changes(), BackendCapabilityError);
+    }
+    else
+    {
+        // Release: nothing is reloaded, and nothing reaches the backend.
+        EXPECT_TRUE(device().poll_shader_changes().empty());
+    }
+}
+
+TEST(DeviceObjectsTest, MappedBuffersCanBeViewedAsElements)
 {
     FakeBuffer buffer;
     const std::span<std::uint32_t> words = buffer.mapped_elements<std::uint32_t>();
@@ -197,7 +352,7 @@ TEST(DeviceTest, MappedBuffersCanBeViewedAsElements)
     EXPECT_THROW(interface.flush_mapped_range(), BackendCapabilityError);
 }
 
-TEST(DeviceTest, PhysicalDevicesAreSelectedByPreference)
+TEST(DeviceObjectsTest, PhysicalDevicesAreSelectedByPreference)
 {
     FakeInstance instance{PhysicalDeviceType::CPU, PhysicalDeviceType::INTEGRATED_GPU, PhysicalDeviceType::DISCRETE_GPU};
     EXPECT_EQ(instance.select_physical_device().properties().type, PhysicalDeviceType::DISCRETE_GPU);
@@ -209,7 +364,7 @@ TEST(DeviceTest, PhysicalDevicesAreSelectedByPreference)
     EXPECT_THROW((void)empty.select_physical_device(), BackendCapabilityError);
 }
 
-TEST(DeviceTest, MissingFeaturesAreListed)
+TEST(DeviceObjectsTest, MissingFeaturesAreListed)
 {
     const FakePhysicalDevice physical_device{PhysicalDeviceType::DISCRETE_GPU,
                                              {DeviceFeature::TIMELINE_SEMAPHORE, DeviceFeature::DYNAMIC_RENDERING}};

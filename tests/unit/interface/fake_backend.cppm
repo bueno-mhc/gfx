@@ -1,7 +1,10 @@
 // Test-only backend. It shows the backend contract: every operation of an interface must be
 // overridden (the classes would stay abstract otherwise), and operations a backend does not implement
 // explicitly forward to the interface's definition, which throws a descriptive BackendCapabilityError.
-// The fakes record what the typed API passes to the backend, so tests can check it.
+// Like a real backend, the fake device resolves handles to its objects (decoding them with its handle
+// key) and calls the library's validators before creating shader modules and pipelines. Shader
+// "reflection" reads layouts registered by the test, standing in for SPIR-V reflection. The fakes
+// record what the API passes to the backend, so tests can check it.
 export module gfx.tests.fake_backend;
 
 import std;
@@ -42,13 +45,17 @@ protected:
 class FakeCommandBuffer final : public Fake<CommandBuffer>
 {
 public:
-    explicit FakeCommandBuffer(QueueType queue_type)
+    explicit FakeCommandBuffer(QueueType queue_type,
+                               CommandBufferLevel level = CommandBufferLevel::PRIMARY,
+                               std::uint32_t index = 1)
         : m_queue_type{queue_type}
+        , m_level{level}
+        , m_index{index}
     {}
 
     [[nodiscard]] auto handle() const noexcept -> CommandBufferHandle override
     {
-        return make_handle<CommandBufferTag>(1);
+        return make_handle<CommandBufferTag>(m_index);
     }
 
     [[nodiscard]] auto queue_type() const noexcept -> QueueType override
@@ -58,7 +65,7 @@ public:
 
     [[nodiscard]] auto level() const noexcept -> CommandBufferLevel override
     {
-        return CommandBufferLevel::PRIMARY;
+        return m_level;
     }
 
     void reset() override
@@ -80,6 +87,11 @@ protected:
     void record_begin() override
     {
         m_log.emplace_back("begin");
+    }
+
+    void record_begin_rendering_part(const RenderingInheritance& inheritance) override
+    {
+        m_log.push_back(std::format("begin_rendering_part {} pass {}", inheritance.primary, inheritance.pass));
     }
 
     void record_end() noexcept override
@@ -186,6 +198,19 @@ protected:
         m_log.push_back(std::format("begin_rendering {}", rendering.color_attachments.size()));
     }
 
+    [[nodiscard]] auto record_begin_parallel_rendering(const RenderingDescription& rendering) -> RenderingInheritance override
+    {
+        // A real backend reads the formats from the attachments' views; the fake leaves them UNDEFINED.
+        m_log.push_back(std::format("begin_parallel_rendering {}", rendering.color_attachments.size()));
+        return {.primary = handle(),
+                .pass = m_parallel_passes++,
+                .color_formats = {},
+                .color_count = static_cast<std::uint32_t>(rendering.color_attachments.size()),
+                .depth_format = Format::UNDEFINED,
+                .stencil_format = Format::UNDEFINED,
+                .samples = SampleCount::ONE};
+    }
+
     void record_end_rendering() noexcept override
     {
         m_log.emplace_back("end_rendering");
@@ -263,11 +288,19 @@ protected:
 
     void record_execute_commands(std::span<const CommandBufferHandle> secondary_command_buffers) override
     {
-        m_log.push_back(std::format("execute_commands {}", secondary_command_buffers.size()));
+        std::string handles;
+        for (const CommandBufferHandle handle : secondary_command_buffers)
+        {
+            handles += std::format(" {}", handle);
+        }
+        m_log.push_back(std::format("execute_commands{}", handles));
     }
 
 private:
     QueueType m_queue_type;
+    CommandBufferLevel m_level;
+    std::uint32_t m_index;
+    std::uint32_t m_parallel_passes = 0;
     std::vector<std::string> m_log;
     std::vector<std::byte> m_push_constant_bytes;
 };
@@ -277,11 +310,13 @@ private:
 class FakeShaderModule final : public Fake<ShaderModule>
 {
 public:
-    FakeShaderModule(std::uint32_t index, ShaderStage stage, const ShaderLayout& layout)
+    FakeShaderModule(std::uint32_t index, ShaderStage stage, const ShaderLayout& layout, std::string_view name)
         : m_index{index}
         , m_stage{stage}
         , m_layout{layout}
-    {}
+    {
+        m_debug_name = name;
+    }
 
     [[nodiscard]] auto handle() const noexcept -> ShaderModuleHandle override
     {
@@ -330,9 +365,12 @@ private:
 class FakePipelineLayout final : public Fake<PipelineLayout>
 {
 public:
-    explicit FakePipelineLayout(std::uint32_t index)
+    FakePipelineLayout(std::uint32_t index, PipelineLayoutDefinition definition, std::string_view name = "fake")
         : m_index{index}
-    {}
+        , m_definition{std::move(definition)}
+    {
+        m_debug_name = name;
+    }
 
     [[nodiscard]] auto handle() const noexcept -> PipelineLayoutHandle override
     {
@@ -346,7 +384,7 @@ public:
 
 private:
     std::uint32_t m_index;
-    PipelineLayoutDefinition m_definition{};
+    PipelineLayoutDefinition m_definition;
 };
 
 class FakeComputePipeline final : public Fake<ComputePipeline>
@@ -510,14 +548,94 @@ public:
     }
 };
 
+/// Allocates FakeCommandBuffers with increasing handle indices and counts resets.
+class FakeCommandPool final : public Fake<CommandPool>
+{
+public:
+    FakeCommandPool(std::uint32_t index, QueueType queue_type)
+        : m_index{index}
+        , m_queue_type{queue_type}
+    {}
+
+    [[nodiscard]] auto handle() const noexcept -> CommandPoolHandle override
+    {
+        return make_handle<CommandPoolTag>(m_index);
+    }
+
+    [[nodiscard]] auto queue_type() const noexcept -> QueueType override
+    {
+        return m_queue_type;
+    }
+
+    [[nodiscard]] auto allocate(CommandBufferLevel level, std::string_view /*debug_name*/) -> std::unique_ptr<CommandBuffer> override
+    {
+        ++m_allocation_count;
+        return std::make_unique<FakeCommandBuffer>(m_queue_type, level, m_index * 100 + m_allocation_count);
+    }
+
+    void reset() override
+    {
+        ++m_reset_count;
+    }
+
+    [[nodiscard]] auto allocation_count() const noexcept -> std::uint32_t
+    {
+        return m_allocation_count;
+    }
+
+    [[nodiscard]] auto reset_count() const noexcept -> std::uint32_t
+    {
+        return m_reset_count;
+    }
+
+private:
+    std::uint32_t m_index;
+    QueueType m_queue_type;
+    std::uint32_t m_allocation_count = 0;
+    std::uint32_t m_reset_count = 0;
+};
+
+/// A timeline whose value the test sets; it records the values waited for.
+class FakeTimelineSemaphore final : public Fake<TimelineSemaphore>
+{
+public:
+    [[nodiscard]] auto handle() const noexcept -> TimelineSemaphoreHandle override
+    {
+        return make_handle<TimelineSemaphoreTag>(1);
+    }
+
+    [[nodiscard]] auto value() const -> std::uint64_t override
+    {
+        return m_value;
+    }
+
+    [[nodiscard]] auto wait(std::uint64_t value, std::chrono::nanoseconds /*timeout*/) const -> WaitStatus override
+    {
+        m_waited_values.push_back(value);
+        return value <= m_value ? WaitStatus::SIGNALED : WaitStatus::TIMEOUT;
+    }
+
+    void signal(std::uint64_t value) override
+    {
+        m_value = value;
+    }
+
+    [[nodiscard]] auto waited_values() const noexcept -> const std::vector<std::uint64_t>&
+    {
+        return m_waited_values;
+    }
+
+private:
+    std::uint64_t m_value = 0;
+    mutable std::vector<std::uint64_t> m_waited_values;
+};
+
 // ================================================================================================= device
 
-/// What the typed API passed to the fake device (copies: descriptions only borrow their data).
+/// What the API passed to the fake device (copies: descriptions only borrow their data).
 struct CapturedDescriptions
 {
-    std::optional<ShaderModuleDescription> shader_module{};
-    std::string shader_source{};
-    std::string shader_name{};
+    std::vector<std::string> shader_module_names{};
     std::vector<std::vector<DescriptorSetLayoutBinding>> set_layout_bindings{};
     std::vector<DescriptorSetLayoutHandle> pipeline_layout_set_layouts{};
     std::vector<PushConstantRange> push_constant_ranges{};
@@ -527,7 +645,8 @@ struct CapturedDescriptions
     std::vector<Format> color_formats{};
 };
 
-/// Implements what the typed API needs; every other operation forwards to Device's default.
+/// Implements what the shader, pipeline and command pool tests need; every other operation forwards to
+/// Device's default. Objects it created must outlive the creations that name them.
 class FakeDevice final : public Fake<Device>
 {
 public:
@@ -538,6 +657,12 @@ public:
     [[nodiscard]] auto captured() const noexcept -> const CapturedDescriptions&
     {
         return m_captured;
+    }
+
+    /// Stands in for SPIR-V reflection: modules named @p name get @p layout.
+    void add_reflected_layout(std::string name, ShaderLayout layout)
+    {
+        m_reflected_layouts.insert_or_assign(std::move(name), std::move(layout));
     }
 
     [[nodiscard]] auto physical_device() const noexcept -> const PhysicalDevice& override
@@ -602,30 +727,54 @@ public:
 
     [[nodiscard]] auto create_shader_module(const ShaderModuleDescription& description) -> std::unique_ptr<ShaderModule> override
     {
-        m_captured.shader_module = description;
-        m_captured.shader_source = std::string{description.glsl_source};
-        m_captured.shader_name = std::string{description.name};
-        return std::make_unique<FakeShaderModule>(++m_next_index, description.stage,
-                                                  description.expected_layout.value_or(ShaderLayout{}));
+        // Validate first, then "reflect" (look the layout up by name).
+        validate_shader_module_description(description, backend());
+        const auto reflected = m_reflected_layouts.find(std::string{description.name});
+        if (reflected == m_reflected_layouts.end())
+        {
+            throw InvalidUsageError({.backend = backend(),
+                                     .operation = "FakeDevice::create_shader_module",
+                                     .problem = std::format("the test registered no layout for '{}'", description.name),
+                                     .suggestion = "call add_reflected_layout() first"});
+        }
+        m_captured.shader_module_names.emplace_back(description.name);
+        auto shader_module = std::make_unique<FakeShaderModule>(++m_next_index, description.stage, reflected->second, description.name);
+        m_shader_modules[m_next_index] = shader_module.get();
+        return shader_module;
     }
 
     [[nodiscard]] auto create_descriptor_set_layout(const DescriptorSetLayoutDescription& description)
         -> std::unique_ptr<DescriptorSetLayout> override
     {
         m_captured.set_layout_bindings.emplace_back(description.bindings.begin(), description.bindings.end());
-        return std::make_unique<FakeDescriptorSetLayout>(++m_next_index, description.bindings);
+        auto set_layout = std::make_unique<FakeDescriptorSetLayout>(++m_next_index, description.bindings);
+        m_set_layouts[m_next_index] = set_layout.get();
+        return set_layout;
     }
 
     [[nodiscard]] auto create_pipeline_layout(const PipelineLayoutDescription& description) -> std::unique_ptr<PipelineLayout> override
     {
         m_captured.pipeline_layout_set_layouts.assign(description.set_layouts.begin(), description.set_layouts.end());
         m_captured.push_constant_ranges.assign(description.push_constant_ranges.begin(), description.push_constant_ranges.end());
-        return std::make_unique<FakePipelineLayout>(++m_next_index);
+
+        // Resolve the set layouts, then describe the layout the way every backend does.
+        std::vector<const DescriptorSetLayout*> set_layouts;
+        for (const DescriptorSetLayoutHandle handle : description.set_layouts)
+        {
+            set_layouts.push_back(resolve(m_set_layouts, handle));
+        }
+        auto pipeline_layout = std::make_unique<FakePipelineLayout>(
+            ++m_next_index, make_pipeline_layout_definition(set_layouts, description.push_constant_ranges),
+            description.debug_name.empty() ? std::string_view{"fake"} : description.debug_name);
+        m_pipeline_layouts[m_next_index] = pipeline_layout.get();
+        return pipeline_layout;
     }
 
     [[nodiscard]] auto create_compute_pipeline(const ComputePipelineDescription& description)
         -> std::unique_ptr<ComputePipeline> override
     {
+        // Resolve and validate, as every backend does.
+        validate_compute_pipeline(*resolve(m_pipeline_layouts, description.layout), *resolve(m_shader_modules, description.shader));
         m_captured.compute_pipeline = description;
         return std::make_unique<FakeComputePipeline>(++m_next_index, description.layout);
     }
@@ -633,6 +782,11 @@ public:
     [[nodiscard]] auto create_graphics_pipeline(const GraphicsPipelineDescription& description)
         -> std::unique_ptr<GraphicsPipeline> override
     {
+        // Resolve and validate, as every backend does.
+        const ShaderModule* fragment_shader =
+            description.fragment_shader.is_valid() ? resolve(m_shader_modules, description.fragment_shader) : nullptr;
+        validate_graphics_pipeline(*resolve(m_pipeline_layouts, description.layout),
+                                   *resolve(m_shader_modules, description.vertex_shader), fragment_shader, description);
         m_captured.graphics_pipeline = description;
         m_captured.vertex_attributes.assign(description.vertex_attributes.begin(), description.vertex_attributes.end());
         m_captured.color_formats.assign(description.color_formats.begin(), description.color_formats.end());
@@ -646,7 +800,7 @@ public:
 
     [[nodiscard]] auto create_command_pool(const CommandPoolDescription& description) -> std::unique_ptr<CommandPool> override
     {
-        return Device::create_command_pool(description);
+        return std::make_unique<FakeCommandPool>(++m_next_index, description.queue_type);
     }
 
     [[nodiscard]] auto create_fence(const FenceDescription& description) -> std::unique_ptr<Fence> override
@@ -680,11 +834,37 @@ public:
         return Device::create_swapchain(description);
     }
 
+protected:
+    [[nodiscard]] auto reload_changed_shaders() -> std::vector<ShaderReload> override
+    {
+        return Device::reload_changed_shaders();
+    }
+
+private:
+    /// The object a handle names, found through the handle's index (which only a HandleIssuer reads).
+    template<class Object, class Tag>
+    [[nodiscard]] static auto resolve(const std::map<std::uint32_t, const Object*>& objects, Handle<Tag> handle) -> const Object*
+    {
+        const auto found = handle.is_valid() ? objects.find(handle.index(handle_key())) : objects.end();
+        if (found == objects.end())
+        {
+            throw InvalidHandleError({.backend = BackendKind::NULL_BACKEND,
+                                      .operation = "FakeDevice::resolve",
+                                      .handle_type = std::string{Tag::NAME},
+                                      .problem = std::format("{} names no object of this device", handle)});
+        }
+        return found->second;
+    }
+
 private:
     const PhysicalDevice& m_physical_device;
     FakeDeleter m_deleter;
     std::uint32_t m_next_index = 0;
     CapturedDescriptions m_captured;
+    std::map<std::string, ShaderLayout> m_reflected_layouts;
+    std::map<std::uint32_t, const ShaderModule*> m_shader_modules;
+    std::map<std::uint32_t, const DescriptorSetLayout*> m_set_layouts;
+    std::map<std::uint32_t, const PipelineLayout*> m_pipeline_layouts;
 };
 
 class FakePhysicalDevice final : public Fake<PhysicalDevice>
@@ -762,3 +942,4 @@ private:
 static_assert(!std::is_abstract_v<gfx::tests::FakeCommandBuffer> && !std::is_abstract_v<gfx::tests::FakeDevice>);
 static_assert(!std::is_abstract_v<gfx::tests::FakeBuffer> && !std::is_abstract_v<gfx::tests::FakeInstance> &&
               !std::is_abstract_v<gfx::tests::FakePhysicalDevice>);
+static_assert(!std::is_abstract_v<gfx::tests::FakeCommandPool> && !std::is_abstract_v<gfx::tests::FakeTimelineSemaphore>);

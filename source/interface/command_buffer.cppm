@@ -5,6 +5,10 @@
 /// functions only exist for queue types that can run them: a dispatch does not compile on a transfer
 /// recorder and a draw does not compile outside a rendering scope. The recording primitives below are
 /// therefore protected: backends implement them, users never call them directly.
+///
+/// One rendering pass can be recorded by several threads: Recorder::begin_parallel_rendering() begins
+/// it on a primary command buffer, each thread records a part into its own secondary command buffer
+/// with a RenderingPartRecorder, and the primary executes the parts in order.
 export module gfx.interface:command_buffer;
 
 import std;
@@ -24,8 +28,13 @@ class Recorder;
 template<QueueType Type>
 class RenderingScope;
 
-/// @brief Commands recorded by one thread for one queue type. Not thread-safe: record each command
-///        buffer on a single thread (one CommandPool per thread and queue type).
+class RenderingCommands;
+class ParallelRenderingScope;
+class RenderingPartRecorder;
+
+/// @brief Commands recorded by one thread for one queue type. Not thread-safe, like every native
+///        command buffer: threads record in parallel into different command buffers, each allocated from
+///        the thread's own CommandPool (see FrameCommandPools), and the results are submitted in order.
 class CommandBuffer : public BackendObject
 {
 public:
@@ -48,9 +57,14 @@ protected:
     template<QueueType Type>
     friend class RenderingScope;
 
+    friend class RenderingCommands;
+    friend class ParallelRenderingScope;
+    friend class RenderingPartRecorder;
+
     // Recording primitives, called only by Recorder and RenderingScope. The noexcept ones run in
     // destructors: a backend reports their failures when the command buffer is submitted.
     virtual void record_begin() = 0;
+    virtual void record_begin_rendering_part(const RenderingInheritance& inheritance) = 0;
     virtual void record_end() noexcept = 0;
     virtual void record_barrier(const BarrierBatch& barriers) = 0;
     virtual void record_copy_buffer(BufferHandle source, BufferHandle destination, std::span<const BufferCopyRegion> regions) = 0;
@@ -77,6 +91,7 @@ protected:
     virtual void record_wait_events(std::span<const EventHandle> events, const BarrierBatch& barriers) = 0;
     virtual void record_reset_event(EventHandle event, PipelineStage stages) = 0;
     virtual void record_begin_rendering(const RenderingDescription& rendering) = 0;
+    [[nodiscard]] virtual auto record_begin_parallel_rendering(const RenderingDescription& rendering) -> RenderingInheritance = 0;
     virtual void record_end_rendering() noexcept = 0;
     virtual void record_set_viewport(const Viewport& viewport) = 0;
     virtual void record_set_scissor(const Rectangle& scissor) = 0;
@@ -107,6 +122,12 @@ void
 CommandBuffer::record_begin()
 {
     throw_not_implemented("CommandBuffer::record_begin");
+}
+
+void
+CommandBuffer::record_begin_rendering_part(const RenderingInheritance& /*inheritance*/)
+{
+    throw_not_implemented("CommandBuffer::record_begin_rendering_part");
 }
 
 void
@@ -248,6 +269,12 @@ void
 CommandBuffer::record_begin_rendering(const RenderingDescription& /*rendering*/)
 {
     throw_not_implemented("CommandBuffer::record_begin_rendering");
+}
+
+auto
+CommandBuffer::record_begin_parallel_rendering(const RenderingDescription& /*rendering*/) -> RenderingInheritance
+{
+    throw_not_implemented("CommandBuffer::record_begin_parallel_rendering");
 }
 
 void

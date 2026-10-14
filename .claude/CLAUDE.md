@@ -103,26 +103,47 @@ Original hard requirements (from the user's initial specification):
   only for bitmask enumerations; `to_string`; `std::formatter`; `ENUMERATOR_COUNT<E>`;
   `FORMAT_PROPERTIES` (bytes/block, block size, components, aspects, numeric type);
   `RESOURCE_STATE_SYNCHRONIZATION` (render graph: ResourceState → stages, accesses, layout, categories, writes).
-- **Compile-time shader layout** (step 2): `ShaderLayout` literal fixed-capacity value (stage, bindings
-  with set/binding/type/count/block size/image format/name, stage inputs/outputs, push-constant size,
-  workgroup size); produced by consteval `reflect_glsl(source, stage)` (GLSL subset: layout-qualified
-  globals, UBO/SSBO/push-constant blocks with exact std140/std430 sizes incl. structs, arrays and runtime
-  arrays, opaque types, stage I/O, local_size; no preprocessor) or by a consteval builder for declared
-  layouts. Shader definitions `GlslShader<SOURCE, STAGE>` / declared → concept `ShaderDefinition`.
-  Checks: `check_layout()` (one constexpr function; `if consteval` selects compile error vs
-  ShaderLayoutMismatchError), `CompatibleWith<S, Layout>` (GCC prints the full LayoutCheck value on
-  failure), `PushConstantsFor<T, S>`, `binding_of<"name", S>()`, vertex inputs vs VertexLayout,
-  fragment outputs vs attachments, `pipeline_layout_from<...>()` merge. At ShaderModule creation the
-  real SPIR-V is reflected (SPIRV-Cross) and compared with the compile-time layout. Prototype validated
-  with GCC 16 (session-history §2).
-- **Shaders**: GLSL only, compiled to **SPIR-V**; sources inline raw strings **and** CMake-embedded
-  `.glsl` files (`gfx_embed_shaders()`), step 4.
-- **Shader hot reload** (step 4, user approved recommendations): backend-independent GLSL→SPIR-V compiler
-  (glslang + SPIRV-Cross reflection) in the library; reload triggered by the engine calling something
-  like `poll_shader_changes()` (no hidden threads); a reload whose layout differs from the compile-time
-  layout is rejected (old shader kept, error reported); **Debug only — forced off in Release**.
+- **Shader layouts — run-time, reflected from SPIR-V** (step 2b, user decision 2026-10-14, replacing the
+  earlier consteval GLSL reflection, which commercial engines do not do): `ShaderLayout` is a run-time
+  value (stage, bindings with set/binding/type/count/block size/image format/**name**, push-constant
+  offset+size, inputs, outputs, workgroup size) that the backend fills by reflecting the module's SPIR-V
+  (SPIRV-Cross, step 4) — the fake backend reads layouts registered by the test instead. Validation at
+  pipeline creation, **called by backends** after resolving handles: `validate_compute_pipeline(layout,
+  shader)`, `validate_graphics_pipeline(layout, vertex, fragment_or_null, description)` → check_* functions
+  (stage, pipeline layout incl. push-constant byte range per stage, vertex attributes, color formats) →
+  ShaderLayoutMismatchError. `validate_shader_module_description()` (one stage, entry point, SPIR-V magic,
+  GLSL only in Debug). Pipeline layouts explicit (`PipelineLayoutDescription`, bindings may carry names)
+  or derived: `Device::create_pipeline_layout_from({shaders})` → `ReflectedPipelineLayout` (owns set
+  layouts + pipeline layout; one push-constant range covering all shaders; CONFLICTING_BINDINGS error).
+  `PipelineLayout::definition()` (PipelineLayoutDefinition: LayoutBindings with names + ranges;
+  backends build it with `make_pipeline_layout_definition()`), `find_binding(name)` → `BindingLocation`
+  (look up once). `DescriptorSet::write(BindingLocation, resource)` checks type + array element;
+  `write(index, resource)` unchecked. Push constants: `recorder.push_constants(const PipelineLayout&, data,
+  offset)` (concept PushConstantData rejects pointers/spans; `push_constant_stages()` checks coverage and
+  returns the stages of overlapping ranges). Kept from the compile-time design: Recorder<Q>/scopes.
+- **Shaders**: SPIR-V is the input (`ShaderSourceFormat::SPIRV` default). Build-time GLSL→SPIR-V with a
+  CMake function `gfx_add_shaders()` (step 4; full GLSL incl. #include). **Debug builds** also accept GLSL
+  compiled at run time; **Release builds only load compiled SPIR-V** (user: "release mode should only use
+  the compiled code") — `gfx::SHADER_HOT_RELOAD` (enums.cppm) from macro `GFX_SHADER_HOT_RELOAD` set PUBLIC
+  for `$<CONFIG:Debug>` in source/CMakeLists.txt; no override option.
+- **Shader hot reload** (Debug only; implementation step 4): `Device::poll_shader_changes()` (non-virtual;
+  Release returns {} without reaching the backend; Debug calls protected `reload_changed_shaders()`),
+  once per frame when no thread records; `ShaderModuleDescription::source_path` names the watched file;
+  report `std::vector<ShaderReload>` (ShaderReloadResult RELOADED / COMPILATION_FAILED / LAYOUT_MISMATCH +
+  message). Accepted rules: a reload is applied when the new code still fits the pipeline layouts of the
+  pipelines using it (old code kept otherwise); pipelines rebuilt automatically behind the same handles;
+  synchronous compile in poll.
 - **Parallelism**: queues first-class (QueueRequest per type, fallback when no dedicated family);
   CommandPool per thread × queue family (externally synchronized, lock-free recording);
+  **FrameCommandPools** (per thread: one pool per frame in flight, `begin_frame(N)` waits on the frame
+  timeline for the frame that last used the pool, resets it, reuses its command buffers);
+  **parallel rendering passes** (step 2b): `Recorder::begin_parallel_rendering()` → ParallelRenderingScope
+  (`inheritance()`, `execute(parts)`, only execute inside the pass) and `RenderingPartRecorder` on
+  SECONDARY command buffers (only in-pass commands; base class RenderingCommands shared with
+  RenderingScope); RenderingInheritance = primary handle + pass index + formats + samples (Vulkan
+  secondaries with inheritance, D3D12 command list per part, Metal parallel render encoder);
+  Recorder rejects secondary command buffers, Recorder::execute_commands removed; Device creation
+  functions and the backend handle table must be thread-safe (Step 3 slot-table design);
   `Recorder<QueueType Q>` zero-cost typed wrapper with requires-constrained methods (draw does not
   compile on a compute recorder); Queue::submit(batches) non-blocking with timeline semaphore
   waits/signals; binary semaphores only for swapchain; per-queue mutex; Deleter keyed on per-queue
@@ -160,6 +181,13 @@ Original hard requirements (from the user's initial specification):
    `std::strong_ordering`) — only relevant if switching away from `import std`.
 4. MinGW `std::print` needs `-lstdc++exp` (in toolchain workarounds).
 5. GCC reports `std::source_location::current()` of a multi-line call at its **last** line.
+6. **A capturing lambda in an in-class constructor of a class declared in one module partition and
+   defined in another** (RenderingPartRecorder: `:command_buffer` declares it as a friend) makes the
+   defining partition's BMI unreadable ("failed to read compiled module cluster N: Bad file data").
+   Workaround: private static `[[noreturn]]` helper (`RenderingPartRecorder::reject`). Detector:
+   `CompilationFailure.LambdaInConstructorCorruptsModuleFile` (tests/toolchain/defects, 4 small files;
+   `gfx_add_compilation_failure_test` gained a `MODULES` argument for it). Without the cross-partition
+   declaration or without the lambda, the BMI is fine.
 
 ## 7. Repository layout (current)
 
@@ -200,39 +228,35 @@ gfx/
 | 0 | Toolchain, CMake/presets/build.py, GoogleTest, toolchain tests | done, committed (ffae3d2, 0c8af25) |
 | 1 | enums, errors, handles, unit/compilation/macro tests, workarounds | done, committed (8b750f7, 58bbcfc) |
 | — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
-| 2 | Interfaces, descriptions, Recorder<Q>, compile-time shader layouts | **done, awaiting validation** (102 tests) |
+| 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools | **done, awaiting validation** (107 tests, Debug + Release from scratch) |
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs throwing "not implemented yet" | next |
 | 4 | CMake shader embedding, GLSL→SPIR-V compiler, hot reload (Debug only) | |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **102**, all passing in Debug and Release (from scratch).
+Test count at last report: **107**, all passing in Debug and Release (from scratch), 2026-10-14.
 
 ### Step 2 as built (details for the next session)
 
-- `source/interface/`: module `gfx.interface`, 34 partitions: common_types (Version, Extent, Offset,
+- `source/interface/`: module `gfx.interface`, 34 partitions (after 2b): common_types (Version, Extent, Offset,
   Rectangle, Viewport, ImageSubresourceRange/Layers, ComponentMapping, MemoryRequirements,
   MemoryPlacement, NativeWindow), backend_object (BackendObject : HandleIssuer; backend(),
-  debug_name(), throw_unsupported(), throw_not_implemented()), shader_layout, layout_compatibility,
+  debug_name(), throw_unsupported(), throw_not_implemented()), shader_layout, shader_validation,
   synchronization (GlobalMemoryBarrier/BufferBarrier/ImageBarrier/BarrierBatch, buffer_barrier(),
   image_barrier(), needs_barrier(), semaphore waits/signals), commands (copy regions, draw arguments,
   ColorAttachment, DepthStencilAttachment, RenderingDescription), one partition per object (25 classes),
-  recorder, typed_objects (TypedShaderModule<S>, TypedPipelineLayout<DEFINITION>), interface.cppm.
+  recorder, frame_command_pools, interface.cppm (typed_objects and layout_compatibility removed in 2b).
 - Rules applied: **non-noexcept operations** are pure virtual with an out-of-class throwing definition;
   **noexcept accessors** (handle(), size(), ...) are plain pure virtual (a noexcept body cannot throw).
   Every description member has a default initializer (GCC -Wmissing-field-initializers otherwise).
-- CommandBuffer recording primitives (`record_*`) are **protected**; Recorder<Q> and RenderingScope<Q>
-  are friends. Recorder: copies/barriers/queries/labels on every queue; compute pipeline, compute
+- CommandBuffer recording primitives (`record_*`) are **protected**; Recorder<Q>, RenderingScope<Q>,
+  RenderingCommands, ParallelRenderingScope and RenderingPartRecorder are friends. Recorder: copies/barriers/queries/labels on every queue; compute pipeline, compute
   descriptor sets, push constants, dispatch, events, begin/end_query need COMPUTE capability;
   begin_rendering needs GRAPHICS and returns RenderingScope (viewport, scissor, graphics pipeline,
   graphics descriptor sets, push constants, vertex/index buffers, draws). Runtime check at Recorder
   construction: has_all(queue_type_capabilities(buffer.queue_type()), CAPABILITIES).
-- Device typed front doors (member templates): create_shader<S>(), create_pipeline_layout<DEFINITION>()
-  (one set layout per set index), create_compute_pipeline(layout, shader), create_graphics_pipeline<
-  VERTICES, ATTACHMENTS>(layout, vertex, fragment, state) — each static_asserts LayoutDiagnostic<check>.
-- DescriptorSet::write<"name", Shader>(resource): binding resolved and resource type checked at compile
-  time (DescriptorResourceOf<Type>); the set index is not checked. Texel buffers and acceleration
-  structures cannot be written yet (no BufferView object).
+- (Removed in 2b: Device's typed front doors and `DescriptorSet::write<"name", Shader>`; see §5 for the
+  run-time replacements.) Texel buffers and acceleration structures cannot be written yet (no BufferView).
 - Tests: tests/unit/shader_layout, tests/unit/interface (fake backend module `gfx.tests.fake_backend`),
   10 new compilation-failure tests, macro check now scans every .cppm of source/ (837 names).
 - Findings: default arguments are not inherited by overrides — call backends through interface
@@ -245,8 +269,36 @@ Test count at last report: **102**, all passing in Debug and Release (from scrat
 2. Handle tags as `struct` (current) or `class`?
 3. Did "builder folder" mean the build **output** directory (currently `build/`)?
 4. Add a Doxygen HTML target (needs the MSYS2 `doxygen` package)?
-5. (Step 2) Render-graph gaps found: secondary command buffers recorded **inside** a dynamic rendering
-   pass need inheritance information (attachment formats) — needed to record one pass on several
-   threads; no BufferView object for texel buffers. Add them?
+5. (Step 2) Render-graph gaps found: secondary command buffers inside a dynamic rendering pass —
+   **done in 2b** (parallel rendering passes); still open: no BufferView object for texel buffers. Add it?
 6. (Step 2) Value types named `Extent`/`Offset`/`Rectangle` (no `2D`/`3D` suffix, per the no-abbreviation
    rule; Extent has depth = 1 by default). OK?
+**Step 2b done** (2026-10-14): see §5 (shader layouts, shaders, hot reload, parallelism) and §6.6. Files:
+source/interface/{shader_layout, shader_validation (replaces layout_compatibility), pipeline_layout,
+shader_module, descriptor_set, commands, command_buffer, recorder, frame_command_pools, device}.cppm;
+typed_objects.cppm and layout_compatibility.cppm deleted (the user's index still has the old staged
+versions: they need `git add -A`). Tests: tests/unit/shader_layout/shader_validation_test.cpp,
+tests/unit/interface/{device,recorder,frame_command_pools}_test.cpp (parallel parts recorded on real
+std::jthreads), fake backend resolves handles and calls the validators; compile-failure tests: 6 removed
+(typed pipelines x2, typed descriptor writes x2, typed push constants, GLSL reflection), 3 added
+(ParallelRenderingScopeCannotDraw, RenderingPartsCannotRecordBarriers, PushConstantsRejectPointers) + the
+defect detector. README examples (blur with reflected layout; parallel G-buffer) compiled with -Werror.
+`gfx_add_shaders()` is referenced in messages/README but arrives in step 4.
+
+7. ~~**Shader redesign requested by the user (2026-10-14)**~~ ANSWERED: all recommendations accepted, done in step 2b. before Step 2 is committed: the user doubts the
+   consteval GLSL reflection ("not what commercial engines do") and wants the shader pipeline rebuilt the
+   commercial way, with SPIR-V support. Claude proposed: build-time GLSL→SPIR-V (glslang via CMake),
+   SPIR-V as the primary input, **run-time reflection (SPIRV-Cross) as the authority**, validation at
+   pipeline creation (existing check logic reused at run time), pipeline layouts explicit or derived from
+   reflection, descriptor writes by name (looked up once) or by index, push-constant size checked at run
+   time, run-time GLSL compiler Debug-only by default (CMake option for Release), hot reload accepted when
+   the new shader still fits the pipeline layouts using it, pipelines rebuilt behind the same handles.
+   Removes the consteval reflector, GlslShader/DeclaredShader, TypedShaderModule/TypedPipelineLayout, typed
+   Device front doors, write<"name", S>, push_constants<S> and their compile-failure tests; keeps
+   Recorder<Q>/RenderingScope. Optional extra asked: build-time generated C++ headers (sokol-shdc style).
+   Awaiting the user's decisions.
+8. ~~**Parallel rendering requested**~~ ANSWERED (done in step 2b; "frames" read as threads, pool ring added). ("add what is missing for CommandPool (split renderpass across
+   frames)"): Claude read "frames" as threads/command buffers (a pass cannot span frames) and proposed
+   begin_parallel_rendering() → ParallelRenderingScope (inheritance(), execute(parts)) with a
+   RenderingPartRecorder for secondary buffers (draw-state commands only), plus an optional per-thread,
+   per-frame-in-flight pool ring reset through a timeline semaphore. Awaiting confirmation.

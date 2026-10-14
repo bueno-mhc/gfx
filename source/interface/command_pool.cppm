@@ -20,7 +20,8 @@ struct CommandPoolDescription
 };
 
 /// @brief Allocates command buffers. Not thread-safe: give each recording thread its own pool per
-///        queue type, so threads record in parallel without locks.
+///        queue type (and per frame in flight: see FrameCommandPools), so threads record in parallel
+///        without locks.
 class CommandPool : public BackendObject
 {
 public:

@@ -1,5 +1,6 @@
 /// @file commands.cppm
-/// @brief Arguments of recorded commands: copy regions, draws, vertex buffers and dynamic rendering.
+/// @brief Arguments of recorded commands: copy regions, draws, vertex buffers, dynamic rendering and
+///        parallel rendering passes.
 export module gfx.interface:commands;
 
 import std;
@@ -106,6 +107,30 @@ struct RenderingDescription
     std::span<const ColorAttachment> color_attachments{};               ///< Color attachments by location.
     std::optional<DepthStencilAttachment> depth_stencil_attachment{};   ///< Depth/stencil attachment.
     std::string_view debug_name{};                                      ///< Label shown by debugging tools.
+};
+
+/// @brief What a secondary command buffer recording part of a parallel rendering pass needs to know
+///        about the pass. Obtained from ParallelRenderingScope::inheritance() and copied to the threads
+///        that record the parts (RenderingPartRecorder).
+struct RenderingInheritance
+{
+    CommandBufferHandle primary{};                                  ///< Command buffer that began the pass.
+    std::uint32_t pass = 0;                                         ///< Which parallel pass of that command buffer
+                                                                    ///< (counted from 0 since recording began).
+    std::array<Format, MAXIMUM_COLOR_ATTACHMENTS> color_formats{};  ///< Formats of the color attachments
+                                                                    ///< (first color_count used).
+    std::uint32_t color_count = 0;                                  ///< Number of color attachments.
+    Format depth_format = Format::UNDEFINED;                        ///< Depth attachment format (UNDEFINED = none).
+    Format stencil_format = Format::UNDEFINED;                      ///< Stencil attachment format (UNDEFINED = none).
+    SampleCount samples = SampleCount::ONE;                         ///< Samples per pixel.
+
+    /// @brief Formats of the color attachments, by location.
+    [[nodiscard]] constexpr auto color_attachment_formats() const noexcept -> std::span<const Format>
+    {
+        return {color_formats.data(), color_count};
+    }
+
+    constexpr bool operator==(const RenderingInheritance&) const = default;
 };
 
 } // namespace gfx

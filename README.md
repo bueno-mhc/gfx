@@ -5,47 +5,76 @@ device, queues, resources, commands, synchronization) above concrete backends. I
 C++ modules, strongly typed numeric handles and compile-time validated shader layouts.
 
 > **Status:** step 2: enumerations, errors, typed handles, every interface, typed command
-> recording and compile-time shader layouts. Backends (step 3) are not implemented yet.
+> recording, parallel rendering passes and run-time validated shader layouts. Backends (step 3) and
+> the shader compiler and hot reload (step 4) are not implemented yet.
 
-The shader's interface is reflected from its GLSL source **at compile time** and checked against the
-pipeline layout, the vertex layout and the attachments before the program even builds:
+Shaders reach the library as SPIR-V. Their interface (bindings with their names, push constants,
+inputs, outputs) is **reflected from the SPIR-V** when the module is created, and pipeline creation
+checks it against the pipeline layout, the vertex attributes and the color attachments, the way
+commercial engines read the interface from compiled bytecode:
 
 ```cpp
 import std;
 import gfx;
 
-inline constexpr char BLUR_SOURCE[] = R"glsl(
-    #version 460
-    layout(local_size_x = 8, local_size_y = 8) in;
-    layout(set = 0, binding = 0) uniform sampler2D u_input;
-    layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D u_output;
-    layout(push_constant) uniform Push { vec2 texel; float radius; } push;
-    void main() { /* ... */ }
-)glsl";
+struct BlurPush { float texel[2]; float radius; };                      // the shader reads 12 bytes
 
-using BlurShader = gfx::GlslShader<BLUR_SOURCE, gfx::ShaderStage::COMPUTE, "blur">;
-static_assert(BlurShader::LAYOUT.push_constant_size == 12);              // reflected at compile time
-inline constexpr gfx::PipelineLayoutDefinition BLUR_LAYOUT = gfx::pipeline_layout_from<BlurShader>();
-
-struct BlurPush { float texel[2]; float radius; };                       // must be exactly 12 bytes
-
-void blur(gfx::Device& device, gfx::CommandBuffer& command_buffer, gfx::DescriptorSet& set, gfx::ImageViewHandle output)
+void blur(gfx::Device& device, std::span<const std::uint32_t> blur_spirv, gfx::CommandBuffer& command_buffer,
+          gfx::DescriptorSet& set, gfx::ImageViewHandle output)
 {
-    auto layout = device.create_pipeline_layout<BLUR_LAYOUT>();          // set layouts + pipeline layout
-    auto shader = device.create_shader<BlurShader>();                    // compiled; reflection must match
-    auto pipeline = device.create_compute_pipeline(layout, shader);      // compatibility proven at compile time
-    set.write<"u_output", BlurShader>(gfx::ImageDescriptor{.view = output, .layout = gfx::ImageLayout::GENERAL});
+    // Layout reflected from the SPIR-V; the pipeline layout is derived from it (or declared explicitly).
+    auto shader = device.create_shader_module({.stage = gfx::ShaderStage::COMPUTE, .spirv = blur_spirv, .name = "blur"});
+    auto layout = device.create_pipeline_layout_from({shader.get()});
+    auto pipeline = device.create_compute_pipeline({.layout = layout.handle(), .shader = shader->handle()});
+    //   ^ ShaderLayoutMismatchError (set, binding, both types) if the shader does not fit the layout
 
-    gfx::ComputeRecorder recorder{command_buffer};                       // begins; ends when destroyed
+    const gfx::BindingLocation output_binding = layout.find_binding("u_output");   // look a name up once
+    set.write(output_binding, gfx::ImageDescriptor{.view = output, .layout = gfx::ImageLayout::GENERAL});
+    //   ^ InvalidUsageError if the resource does not match the binding's type
+
+    gfx::ComputeRecorder recorder{command_buffer};                                   // begins; ends when destroyed
     recorder.bind_pipeline(pipeline->handle());
-    recorder.push_constants<BlurShader>(layout.handle(), BlurPush{{1.0F / 1920, 1.0F / 1080}, 4.0F});
+    recorder.push_constants(layout.pipeline_layout(), BlurPush{{1.0F / 1920, 1.0F / 1080}, 4.0F});  // checked
     recorder.dispatch(240, 135);
     // recorder.begin_rendering({});   // does not compile: rendering needs a graphics queue
 }
 ```
 
-A mismatch is a compile error that names it, e.g.
-`LayoutCheck{LayoutMismatch::DESCRIPTOR_TYPE_MISMATCH, 0, 1, DescriptorType::STORAGE_IMAGE, DescriptorType::SAMPLED_IMAGE, ...}`.
+**Debug builds** also accept GLSL source, compiled at run time, and reload shaders whose file changed
+(`device.poll_shader_changes()`, once per frame). **Release builds** only load SPIR-V compiled at
+build time: GLSL input is rejected and polling does nothing (`gfx::SHADER_HOT_RELOAD`).
+
+### Recording in parallel
+
+Command buffers are not thread-safe, like every native command buffer: threads record into their own
+command buffers, from their own pools (`FrameCommandPools`: one pool per frame in flight, reused once
+the GPU finished that frame), and the results run in a fixed order. One rendering pass can be split
+across threads:
+
+```cpp
+void record_gbuffer(gfx::CommandBuffer& primary, std::span<gfx::FrameCommandPools> worker_pools,
+                    const gfx::RenderingDescription& gbuffer)
+{
+    gfx::GraphicsRecorder recorder{primary};
+    gfx::ParallelRenderingScope pass = recorder.begin_parallel_rendering(gbuffer);
+    std::vector<gfx::CommandBufferHandle> parts(worker_pools.size());
+    {
+        std::vector<std::jthread> workers;
+        for (std::size_t index = 0; index < worker_pools.size(); ++index)
+        {
+            workers.emplace_back([&, index]
+            {
+                gfx::CommandBuffer& part = worker_pools[index].command_buffer(gfx::CommandBufferLevel::SECONDARY);
+                gfx::RenderingPartRecorder part_recorder{part, pass.inheritance()};
+                part_recorder.draw({.vertex_count = 3});                  // this worker's share of the draws
+                // part_recorder.barrier({});                             // does not compile: not inside a pass
+                parts[index] = part.handle();
+            });
+        }
+    }
+    pass.execute(parts);                                                   // in this order, whatever finished first
+}
+```
 
 ## Requirements (Windows)
 
@@ -88,9 +117,11 @@ gfx/
 │   ├── handles.cppm      typed numeric handles and their concepts
 │   ├── interface/        module gfx.interface: one partition per object or concept
 │   │   ├── interface.cppm             primary interface unit (re-exports every partition)
-│   │   ├── shader_layout.cppm         ShaderLayout and the consteval GLSL reflection
-│   │   ├── layout_compatibility.cppm  compile-time layout definitions, checks, typed shaders
-│   │   ├── recorder.cppm              Recorder<QueueType> and RenderingScope<QueueType>
+│   │   ├── shader_layout.cppm         ShaderLayout, the interface reflected from a shader's SPIR-V
+│   │   ├── shader_validation.cppm     checks of shader layouts against pipeline layouts, vertex
+│   │   │                              attributes and attachments; layouts derived from shaders
+│   │   ├── recorder.cppm              Recorder<QueueType>, rendering scopes, parallel rendering parts
+│   │   ├── frame_command_pools.cppm   per-thread command pools for the frames in flight
 │   │   └── device.cppm, buffer.cppm, ...  the abstract objects backends implement
 │   └── include/gfx/      headers only where a module cannot serve (toolchain workarounds)
 └── tests/
