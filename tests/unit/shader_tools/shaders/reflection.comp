@@ -1,0 +1,50 @@
+#version 460
+// Every kind of binding reflect_spirv() reports, with array sizes, block sizes and names.
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 4, local_size_z = 1) in;
+
+layout(constant_id = 3) const float SCALE = 2.0;
+layout(constant_id = 7) const bool ENABLED = true;
+
+layout(set = 0, binding = 3) buffer Particles
+{
+    vec4 header;
+    vec4 positions[];
+} particles;
+
+layout(set = 1, binding = 0) uniform Camera
+{
+    mat4 view;
+    mat4 projection;
+} camera;
+
+layout(set = 1, binding = 2, rgba16f) uniform image2D output_image;
+layout(set = 1, binding = 4) uniform sampler2D textures[TEXTURE_COUNT];
+layout(set = 2, binding = 0) uniform texture2D bindless_textures[];
+layout(set = 2, binding = 1) uniform sampler samplers[2];
+layout(set = 3, binding = 0) uniform samplerBuffer lookup_table;
+layout(set = 3, binding = 1) uniform texture2D unused_texture;
+
+layout(push_constant) uniform PushConstants
+{
+    uint unused;
+    float time;
+    uint count;
+} push;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    vec4 color = texture(textures[index % TEXTURE_COUNT], vec2(0.5))
+               + texture(nonuniformEXT(sampler2D(bindless_textures[index], samplers[1])), vec2(0.5))
+               + texelFetch(lookup_table, int(index));
+    if (ENABLED && index < push.count)
+    {
+        particles.positions[index] = camera.projection * camera.view * particles.header * SCALE * push.time + color;
+        imageStore(output_image, ivec2(index, 0), color);
+    }
+}

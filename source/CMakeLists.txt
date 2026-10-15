@@ -4,6 +4,18 @@
 add_library(gfx)
 add_library(gfx::gfx ALIAS gfx)
 
+# gfx_slot_table: the storage behind the handles backends issue. It depends on the standard library
+# only, so it is a library of its own that the unit tests import directly.
+add_library(gfx_slot_table STATIC)
+add_library(gfx::slot_table ALIAS gfx_slot_table)
+target_sources(gfx_slot_table
+    PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES backends/common/slot_table.cppm)
+target_compile_features(gfx_slot_table PUBLIC cxx_std_23)
+target_link_libraries(gfx_slot_table PRIVATE gfx::project_options)
+
 # Module gfx.interface: its primary interface unit and one partition per concept or object.
 set(GFX_INTERFACE_MODULES
     interface/interface.cppm
@@ -60,9 +72,70 @@ target_sources(gfx
             enums.cppm
             errors.cppm
             handles.cppm
+            backend_factory.cppm
+            shaders/shader_tools.cppm
             ${GFX_INTERFACE_MODULES}
     PRIVATE
-        errors.cpp)
+        errors.cpp
+        backend_factory.cpp
+        shaders/spirv_reflection.cpp
+        shaders/shader_compiler.cpp)
+
+# Backends: modules of a PRIVATE file set (consumers cannot import them); only the implementation of
+# gfx.backend_factory imports them. GFX_WITH_<NAME>_BACKEND tells it which ones were built.
+set(GFX_BACKEND_MODULES "")
+set(GFX_BACKEND_SOURCES "")
+if(GFX_BACKEND_VULKAN)
+    list(APPEND GFX_BACKEND_MODULES
+        backends/common/handle_table.cppm
+        backends/vulkan/vulkan_backend.cppm
+        backends/vulkan/vulkan_common.cppm
+        backends/vulkan/vulkan_translation.cppm
+        backends/vulkan/vulkan_instance.cppm
+        backends/vulkan/vulkan_device.cppm
+        backends/vulkan/vulkan_pipelines.cppm)
+    list(APPEND GFX_BACKEND_SOURCES
+        backends/vulkan/vulkan_backend.cpp
+        backends/vulkan/vulkan_common.cpp
+        backends/vulkan/vulkan_instance.cpp
+        backends/vulkan/vulkan_device.cpp
+        backends/vulkan/vulkan_queue.cpp
+        backends/vulkan/vulkan_bindless.cpp
+        backends/vulkan/vulkan_layouts.cpp
+        backends/vulkan/vulkan_synchronization.cpp
+        backends/vulkan/vulkan_resources.cpp
+        backends/vulkan/vulkan_pipelines.cpp
+        backends/vulkan/vulkan_commands.cpp
+        backends/vulkan/vulkan_diagnostics.cpp
+        backends/vulkan/renderdoc_capture.cpp
+        backends/vulkan/vma_implementation.cpp)
+    target_compile_definitions(gfx PRIVATE GFX_WITH_VULKAN_BACKEND=1)
+    # Vulkan structures are initialized with designated initializers that leave the members they do not
+    # name zeroed, as the API intends; GCC's -Wextra would flag every one of them.
+    set_source_files_properties(${GFX_BACKEND_MODULES} ${GFX_BACKEND_SOURCES}
+        PROPERTIES COMPILE_OPTIONS $<$<CXX_COMPILER_ID:GNU>:-Wno-missing-field-initializers>)
+endif()
+if(GFX_BACKEND_NULL)
+    list(APPEND GFX_BACKEND_MODULES backends/null/null_backend.cppm)
+    target_compile_definitions(gfx PRIVATE GFX_WITH_NULL_BACKEND=1)
+endif()
+if(GFX_BACKEND_DIRECT3D12)
+    list(APPEND GFX_BACKEND_MODULES backends/d3d12/direct3d12_backend.cppm)
+    target_compile_definitions(gfx PRIVATE GFX_WITH_DIRECT3D12_BACKEND=1)
+endif()
+if(GFX_BACKEND_METAL)
+    list(APPEND GFX_BACKEND_MODULES backends/metal/metal_backend.cppm)
+    target_compile_definitions(gfx PRIVATE GFX_WITH_METAL_BACKEND=1)
+endif()
+if(GFX_BACKEND_MODULES)
+    target_sources(gfx
+        PRIVATE
+            FILE_SET backend_modules TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES ${GFX_BACKEND_MODULES}
+        PRIVATE
+            ${GFX_BACKEND_SOURCES})
+endif()
 
 # Headers exist only where a module cannot serve (toolchain workarounds), e.g. <gfx/windows_headers.hpp>.
 target_include_directories(gfx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -72,6 +145,19 @@ target_include_directories(gfx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_D
 target_compile_definitions(gfx PUBLIC $<$<CONFIG:Debug>:GFX_DEBUG_BUILD=1>)
 
 target_compile_features(gfx PUBLIC cxx_std_23)
+
+# Third-party libraries (cmake/GfxDependencies.cmake): system packages first, FetchContent otherwise.
+include(GfxDependencies)
+gfx_require_spirv_cross()
+gfx_require_glslang()
+# Reflection in every build; the run-time compiler only in Debug builds (Release loads build-time SPIR-V).
+target_link_libraries(gfx PRIVATE gfx::spirv_cross $<$<CONFIG:Debug>:gfx::glslang>)
+if(GFX_BACKEND_VULKAN)
+    gfx_require_volk()
+    gfx_require_vulkan_memory_allocator()
+    gfx_require_renderdoc_api()
+    target_link_libraries(gfx PRIVATE gfx::slot_table gfx::volk gfx::vulkan_memory_allocator gfx::renderdoc_api)
+endif()
 target_link_libraries(gfx
     PUBLIC gfx::toolchain_workarounds   # consumers need them too (see cmake/GfxProjectOptions.cmake)
     PRIVATE gfx::project_options)

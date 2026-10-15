@@ -20,6 +20,8 @@ struct BufferDescription
     MemoryLocation location = MemoryLocation::DEVICE_LOCAL; ///< Where its memory lives (when not placed).
     SharingMode sharing = SharingMode::EXCLUSIVE;           ///< Ownership across queue types.
     std::optional<MemoryPlacement> placement{};             ///< Place it in an existing DeviceMemory instead.
+    bool sparse = false;                                    ///< Create it without memory; Queue::bind_sparse() binds
+                                                            ///< memory to its ranges (DeviceFeature::SPARSE_BINDING).
     bool bindless = true;                                   ///< Register a STORAGE buffer in the bindless table.
     std::string_view debug_name{};                          ///< Name shown by debugging tools.
 };

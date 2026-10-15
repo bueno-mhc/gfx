@@ -1,0 +1,22 @@
+#version 460
+// Writes value + index into a bindless storage buffer: the AZDO path (no descriptor set of its own).
+#extension GL_GOOGLE_include_directive : require
+#include "bindless.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform Push
+{
+    uint target;
+    uint count;
+    uint value;
+} push;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index < push.count)
+    {
+        gfx_storage_buffers[nonuniformEXT(push.target)].words[index] = push.value + index;
+    }
+}

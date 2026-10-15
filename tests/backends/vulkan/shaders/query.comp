@@ -1,0 +1,32 @@
+#version 460
+// Ray queries from a compute shader: the same rays as trace.rgen, over a 4x4 grid.
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 4, local_size_y = 4) in;
+
+layout(set = 0, binding = 3) buffer GfxStorageBuffer
+{
+    uint words[];
+} gfx_storage_buffers[];
+layout(set = 0, binding = 4) uniform accelerationStructureEXT gfx_acceleration_structures[];
+
+layout(push_constant) uniform Push
+{
+    uint structure;
+    uint results;
+} push;
+
+void main()
+{
+    const uvec2 cell = gl_LocalInvocationID.xy;
+    const vec2 position = (vec2(cell) + 0.5) / 4.0 * 2.0 - 1.0;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, gfx_acceleration_structures[nonuniformEXT(push.structure)], gl_RayFlagsOpaqueEXT, 0xFF,
+                          vec3(position, -1.0), 0.0, vec3(0.0, 0.0, 1.0), 10.0);
+    while (rayQueryProceedEXT(query))
+    {
+    }
+    const bool hit = rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+    gfx_storage_buffers[nonuniformEXT(push.results)].words[cell.y * 4 + cell.x] = hit ? 1 : 2;
+}

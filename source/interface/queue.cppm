@@ -34,6 +34,18 @@ struct PresentDescription
 /// @brief A device queue. submit() never waits for the GPU: it returns as soon as the work is queued.
 ///        Submissions to one queue are serialized internally; submissions to different queues proceed
 ///        in parallel from different threads.
+///
+/// **Order of waits and signals.** A queue runs its submissions in order: a submission waiting for a
+/// timeline value holds back every later submission to that queue until the value is reached. A
+/// submission may wait for a value nothing has signaled yet (the CPU or another queue signals it
+/// later), but that value must not be left to a later submission to the same hardware queue: its
+/// signal would wait behind the wait forever (GPU deadlock). Backends refuse the certain case, a later
+/// submission signaling exactly the value waited for; a later signal of a greater value is accepted,
+/// since a smaller value from elsewhere may release the wait first (if nothing does, the GPU stalls).
+/// Several queues may run on one hardware queue when a device has fewer queues than were requested
+/// (e.g. a GPU with a single queue family of one queue runs the graphics, compute and transfer queues
+/// on it); the rule then spans them. Submitting the signaling work before the work that waits for it
+/// is always safe.
 class Queue : public BackendObject
 {
 public:
@@ -52,6 +64,11 @@ public:
     /// @brief Queues command buffers for execution.
     /// @param batches Batches executed in order, each waiting on and signaling its semaphores.
     /// @param fence   Fence signaled when every batch completes (null handle = none).
+    /// @throws InvalidUsageError (at ValidationLevel::CREATION and above) when a batch signals exactly the
+    ///         timeline value an earlier submission to this queue waits for, which nothing else has
+    ///         signaled or promised: the signal could never run (see "Order of waits and signals" above).
+    /// @throws BackendCapabilityError (at ValidationLevel::CREATION and above) when that earlier wait
+    ///         comes from another queue running on the same hardware queue.
     virtual void submit(std::span<const SubmitDescription> batches, FenceHandle fence = {}) = 0;
 
     /// @brief Presents a swapchain image once the semaphores in @p presentation are signaled.
@@ -63,6 +80,8 @@ public:
     virtual void wait_idle() = 0;
 
     /// @brief Binds or unbinds memory of sparse resources (queues with QueueCapability::SPARSE_BINDING).
+    /// @throws InvalidUsageError, BackendCapabilityError as submit() for an order of timeline waits and
+    ///         signals that would deadlock the hardware queue.
     virtual void bind_sparse(const SparseBindDescription& description) = 0;
 };
 

@@ -1,0 +1,25 @@
+#version 460
+// Adds a frame's values, read from the transient buffer at a word offset, to a persistent buffer: both
+// buffers are named by their bindless indices.
+#extension GL_GOOGLE_include_directive : require
+#include "bindless.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform Push
+{
+    uint target;
+    uint source;
+    uint source_word;
+    uint count;
+} push;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index < push.count)
+    {
+        gfx_storage_buffers[nonuniformEXT(push.target)].words[index] +=
+            gfx_storage_buffers[nonuniformEXT(push.source)].words[push.source_word + index];
+    }
+}

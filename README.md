@@ -5,10 +5,28 @@ device, queues, resources, commands, synchronization) above concrete backends. I
 C++ modules and strongly typed numeric handles, is **bindless by default**, and follows **AZDO**
 (Approaching Zero Driver Overhead) principles throughout.
 
-> **Status:** step 2 (the interface) is complete: objects, typed recording, bindless resources,
-> parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
-> resources, profiling and crash diagnostics. Backends (step 3, then the Vulkan backend) and the shader
-> toolchain with hot reload (step 4) are not implemented yet.
+> **Status:** the interface is complete: objects, typed recording, bindless resources, parallel
+> rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame resources,
+> profiling and crash diagnostics. The **Vulkan backend** implements all of it except presentation,
+> which waits for the render-surface abstraction (windows through SDL, GLFW, ...). The SPIR-V
+> toolchain (build-time compilation, reflection, Debug-only run-time compilation and hot reload) is
+> in place. The Direct3D 12 and Metal backends are stubs that throw "not implemented yet".
+
+```cpp
+import std;
+import gfx;
+
+int main()
+{
+    // The backend factory is the only entry to the backends.
+    std::unique_ptr<gfx::Instance> instance = gfx::create_instance(gfx::BackendKind::VULKAN, {.enable_validation = true});
+    gfx::PhysicalDevice& gpu = instance->select_physical_device();   // has every core feature
+
+    // A graphics queue and a dedicated compute queue when the GPU has one.
+    const std::array queues{gfx::QueueRequest{.type = gfx::QueueType::GRAPHICS}, gfx::QueueRequest{.type = gfx::QueueType::COMPUTE}};
+    std::unique_ptr<gfx::Device> device = gpu.create_device({.queues = queues});
+}
+```
 
 Every texture, storage image, sampler, storage buffer and top-level acceleration structure joins the
 device's **bindless table** when it is created; shaders index the table with 32-bit indices passed in
@@ -48,8 +66,23 @@ void blur(gfx::Device& device, std::span<const std::uint32_t> blur_spirv, gfx::C
 
 Shaders are written in **GLSL or HLSL** and reach the backends as **SPIR-V**:
 
-- **Build time**: `gfx_add_shaders()` (CMake) compiles them with glslang or DXC (step 4). Release
-  builds accept only this compiled SPIR-V.
+- **Build time**: `gfx_add_shaders()` (CMake) compiles them with glslang and embeds the SPIR-V in a
+  generated C++ module, as ready-to-use `ShaderModuleDescription` constants. Release builds accept
+  only this compiled SPIR-V.
+
+  ```cmake
+  gfx_add_shaders(my_app
+      MODULE my_app.shaders                # import my_app.shaders;
+      SHADERS shaders/blur.comp shaders/mesh.vert shaders/tonemap.frag.hlsl
+      INCLUDE_DIRECTORIES shaders/include)
+  ```
+
+  ```cpp
+  auto blur = device.create_shader_module(my_app::shaders::blur_comp);   // SPIR-V, stage, entry point, name
+  ```
+
+  Shaders are rebuilt when they or a file they include change. Debug builds embed source-level debug
+  information (for RenderDoc) and the source path, so the shader reloads when its file changes.
 - **Debug builds** also accept GLSL and HLSL source, compile it at run time, and reload shaders whose
   file changed (`device.poll_shader_changes()`, once per frame). A reload is applied only if the new
   code still fits the pipelines using it; otherwise the old code stays and the report says why.
@@ -59,6 +92,35 @@ Shaders are written in **GLSL or HLSL** and reach the backends as **SPIR-V**:
 - Classic descriptor sets remain available for special cases: `device.create_pipeline_layout_from()`
   derives a layout from shaders, `layout.find_binding("u_output")` locates a binding once, and
   `set.write(location, resource)` checks the resource type.
+- The tools are public too: `gfx::reflect_spirv()` returns a module's `ShaderLayout`, and (Debug
+  builds) `gfx::compile_shader()` compiles GLSL or HLSL with defines and include directories.
+- HLSL is compiled by glslang's HLSL front end (DXC is not used yet). Push constants are declared
+  as `[[vk::push_constant]] ConstantBuffer<Parameters> parameters;`.
+
+### Vulkan backend
+
+| Area | Implementation |
+|---|---|
+| Loading | [volk](https://github.com/zeux/volk) (Vulkan 1.3 loader required; a device function table per device) |
+| Memory | Vulkan Memory Allocator: dedicated, placed (aliasing) and sparse resources; CPU-written memory is always host-coherent |
+| Synchronization | synchronization2 barriers, timeline semaphores per queue, deferred destruction keyed on each queue's progress |
+| Rendering | dynamic rendering, secondary command buffers with inheritance for parallel passes |
+| Bindless | one update-after-bind, partially bound descriptor set for the whole device |
+| Pipelines | pipeline cache, background compilation on the application's task scheduler, hot reload in Debug builds |
+| Features | cost-free features enabled automatically; ray tracing, ray queries, mesh shaders, variable-rate shading, sparse resources and crash markers on request (`DeviceDescription::required_features`) |
+| Diagnostics | validation layers and debug messenger, object names, debug labels, RenderDoc captures from code (`Device::begin_capture`), breadcrumbs (NVIDIA diagnostic checkpoints) and `VK_EXT_device_fault` reports when the device is lost |
+
+Every function the backend cannot provide on a given GPU throws `BackendCapabilityError`, naming the
+missing feature and how to get it. Swapchains, presentation and surface queries throw until the
+render-surface abstraction exists.
+
+**Order of waits and signals.** A queue runs its submissions in order, so a submission must not wait
+for a timeline value that only a later submission to the same hardware queue signals: that signal
+would wait behind the wait forever. A GPU with fewer queues than requested runs several gfx queues on
+one hardware queue (an Intel UHD runs graphics, compute and transfer on its single queue), and the
+rule then spans them. `Queue::submit` refuses the certain case (a later submission signaling exactly
+the value waited for) with an error naming both queues. Submitting the signaling work first is always
+safe.
 
 ### AZDO in gfx
 
@@ -135,7 +197,16 @@ pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,ninja,vulkan-headers,vulkan-loader
 
 Dependencies that are not installed (or not usable, such as DLLs refused by Windows application
 control) are downloaded and built with CMake's `FetchContent`. GoogleTest is always built from
-source on Windows and linked statically.
+source on Windows and linked statically. volk and RenderDoc's in-application API header are always
+fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed, the test
+`VulkanCapture.RenderDoc` captures a test's work through `Device::begin_capture()`.
+
+| CMake option | Default | Backend |
+|---|---|---|
+| `GFX_BACKEND_VULKAN` | `ON` | Vulkan (implemented) |
+| `GFX_BACKEND_NULL` | `ON` | Null: an instance without physical devices |
+| `GFX_BACKEND_DIRECT3D12` | `ON` on Windows | Direct3D 12 (stub) |
+| `GFX_BACKEND_METAL` | `ON` on Apple platforms | Metal (stub) |
 
 ## Project layout
 
@@ -150,8 +221,9 @@ gfx/
 │   ├── GfxProjectOptions.cmake          warnings, platform libraries and toolchain workarounds
 │   ├── GfxRuntimeDeployment.cmake       copies required DLLs next to Windows executables
 │   ├── GfxDependencies.cmake            system package or FetchContent for each dependency
+│   ├── GfxShaders.cmake                 gfx_add_shaders(): GLSL/HLSL to SPIR-V at build time
 │   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
-│   └── scripts/                         CMake scripts run by tests
+│   └── scripts/                         CMake scripts run by builds and tests (SPIR-V embedding, ...)
 ├── source/               the library (module gfx and its parts)
 │   ├── gfx.cppm          `import gfx;` umbrella
 │   ├── enums.cppm        every enumeration and constant (the only file that defines them)
@@ -168,10 +240,17 @@ gfx/
 │   │   ├── frame_timeline.cppm, frame_command_pools.cppm, transient_buffer_allocator.cppm,
 │   │   │   uploader.cppm, gpu_profiler.cppm   per-frame resources built on the interfaces
 │   │   └── device.cppm, buffer.cppm, ...  the abstract objects backends implement
+│   ├── backend_factory.cppm/.cpp  create_instance(BackendKind): the only public entry to backends
+│   ├── shaders/          module gfx.shader_tools: SPIR-V reflection (SPIRV-Cross), Debug compiler (glslang)
+│   ├── backends/         private modules, reached only through the factory
+│   │   ├── common/       SlotTable and HandleTable: thread-safe handle-to-object tables
+│   │   ├── vulkan/       module gfx.backends.vulkan (partitions + one implementation unit per area)
+│   │   └── null/, d3d12/, metal/
 │   └── include/gfx/      headers only where a module cannot serve (toolchain workarounds)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── unit/<area>/      GoogleTest unit tests, one subfolder per library area
+    ├── backends/vulkan/  the Vulkan backend on the machine's real GPUs, with validation layers
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 
@@ -190,6 +269,14 @@ cmake --workflow --preset debug
 Tests run in parallel through CTest (`ctest --preset debug`). Each GoogleTest case is registered as
 its own CTest test. Compilation tests (label `compilation`) build snippets that must be rejected and
 run one at a time; run only them with `ctest --preset debug -L compilation`.
+
+The Vulkan tests (`gfx_vulkan_tests`) run on a real GPU with the validation layers; any validation
+error fails the test, and tests whose feature the GPU lacks are skipped. Environment variables:
+
+| Variable | Effect |
+|---|---|
+| `GFX_TEST_PHYSICAL_DEVICE=<index>` | Run on that physical device instead of the best one |
+| `GFX_TEST_VALIDATION=0` | Run without the validation layers |
 
 ## Debugging a test in VS Code
 

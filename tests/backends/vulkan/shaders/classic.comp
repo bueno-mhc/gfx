@@ -1,0 +1,26 @@
+#version 460
+// Doubles the values of a storage buffer bound through a classic descriptor set, scaled by a
+// specialization constant.
+
+layout(local_size_x = 64) in;
+
+layout(constant_id = 0) const uint FACTOR = 2;
+
+layout(set = 0, binding = 0) uniform Parameters
+{
+    uint count;
+} parameters;
+
+layout(set = 0, binding = 1) buffer Values
+{
+    uint values[];
+} data;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index < parameters.count)
+    {
+        data.values[index] *= FACTOR;
+    }
+}

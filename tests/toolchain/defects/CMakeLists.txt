@@ -28,3 +28,16 @@ gfx_add_compilation_failure_test(LambdaInConstructorCorruptsModuleFile
     MODULES lambda_in_constructor_primary.cppm lambda_in_constructor_declaration.cppm lambda_in_constructor_module.cppm
     EXPECTED_DIAGNOSTIC "failed to read compiled module"
     WITHOUT_PROJECT_OPTIONS)
+
+# A constructor defined in a module implementation unit, of a class declared in an internal partition,
+# crashes GCC 16 (segmentation fault at the end of its mem-initializer list) when it default-initializes
+# a member of a class template specialization from another module (a member no initializer names).
+# Workaround: such classes are declared in the implementation unit that defines them
+# (source/backends/vulkan/vulkan_synchronization.cpp); value-initializing the member in the class
+# (`FenceHandle m_handle{};`) avoids it too.
+gfx_add_compilation_failure_test(MemberInitializerOfPartitionClassCrashesCompiler
+    SOURCES member_initializer_definition.cpp member_initializer_importer.cpp
+    MODULES member_initializer_primary.cppm member_initializer_base.cppm
+            member_initializer_declaration.cppm
+    EXPECTED_DIAGNOSTIC "internal compiler error"
+    WITHOUT_PROJECT_OPTIONS)

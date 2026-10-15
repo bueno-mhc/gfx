@@ -6,3 +6,5 @@ export import gfx.enums;
 export import gfx.errors;
 export import gfx.handles;
 export import gfx.interface;
+export import gfx.backend_factory;
+export import gfx.shader_tools;

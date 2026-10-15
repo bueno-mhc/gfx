@@ -28,6 +28,14 @@ def _remove_read_only(function: Callable[[str], object], path: str, _error: obje
     function(path)
 
 
+def _matching_c_compiler(cxx_compiler: str) -> str:
+    """Returns the C compiler of the toolchain of @p cxx_compiler (g++ -> gcc, clang++ -> clang)."""
+    for cxx_name, c_name in (("clang++", "clang"), ("g++", "gcc"), ("c++", "cc")):
+        if cxx_compiler.endswith(cxx_name):
+            return cxx_compiler[: -len(cxx_name)] + c_name
+    return cxx_compiler
+
+
 class CMakeBuilder:
     """Drives the CMake configure, build and test steps for gfx."""
 
@@ -63,7 +71,8 @@ class CMakeBuilder:
             "cmake", "-S", str(self.source_directory), "-B", str(self.build_directory),
             "-G", self.arguments.generator,
             f"-DCMAKE_BUILD_TYPE={self.arguments.build_type}",
-            f"-DCMAKE_CXX_COMPILER={self.arguments.compiler}",
+            f"-DCMAKE_C_COMPILER={self._compiler_path(self.arguments.c_compiler or _matching_c_compiler(self.arguments.compiler))}",
+            f"-DCMAKE_CXX_COMPILER={self._compiler_path(self.arguments.compiler)}",
             f"-DGFX_BUILD_TESTS={'ON' if self.arguments.build_tests else 'OFF'}",
             f"-DGFX_WARNINGS_AS_ERRORS={'ON' if self.arguments.warnings_as_errors else 'OFF'}",
         ]
@@ -73,7 +82,29 @@ class CMakeBuilder:
             command.append(f"-DCMAKE_INSTALL_PREFIX={self.arguments.install_prefix}")
         if self.arguments.verbose_configure:
             command.extend(["--trace", "--trace-expand"])
-        return self._run(command)
+        return self._run(command) and self._check_build_type()
+
+    def _compiler_path(self, compiler: str) -> str:
+        """Returns the absolute path of @p compiler found on the build PATH (or @p compiler itself).
+
+        CMake deletes the cache when a compiler differs from the cached one, and the configure step that
+        follows loses every other -D option (the build type among them); absolute paths compare exactly.
+        """
+        found = shutil.which(compiler, path=self.environment.get("PATH"))
+        return Path(found).as_posix() if found else compiler
+
+    def _check_build_type(self) -> bool:
+        """Fails when the cache does not hold the requested build type (e.g. after CMake reset it)."""
+        cache = self.build_directory / "CMakeCache.txt"
+        for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("CMAKE_BUILD_TYPE:"):
+                configured = line.split("=", 1)[1]
+                if configured != self.arguments.build_type:
+                    print(f"Error: {self.build_directory} is configured as {configured!r}, not {self.arguments.build_type!r}.")
+                    print(f"  Suggestion: python build.py --build-type {self.arguments.build_type} --clean-all, then build again.")
+                    return False
+                return True
+        return True
 
     def build(self) -> bool:
         print(f"\n{'=' * 70}\nBuilding gfx\n{'=' * 70}")
@@ -137,6 +168,8 @@ Examples:
     parser.add_argument("-G", "--generator", default="Ninja",
                         help="CMake generator (default: Ninja; required for C++ modules with `import std`)")
     parser.add_argument("--compiler", default="g++", help="C++ compiler (default: g++)")
+    parser.add_argument("--c-compiler", default="",
+                        help="C compiler, for the C dependencies (default: the one matching --compiler)")
     parser.add_argument("--msys2-root", default=os.environ.get("MSYS2_ROOT", "C:/msys64"),
                         help="MSYS2 installation whose ucrt64/bin is prepended to PATH on Windows "
                              "(default: $MSYS2_ROOT or C:/msys64)")

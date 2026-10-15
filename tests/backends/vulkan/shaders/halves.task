@@ -1,0 +1,10 @@
+#version 460
+// Launches the two mesh workgroups of halves.mesh.
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1) in;
+
+void main()
+{
+    EmitMeshTasksEXT(2, 1, 1);
+}

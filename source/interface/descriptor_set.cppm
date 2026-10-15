@@ -41,8 +41,21 @@ struct CombinedImageSamplerDescriptor
     ImageLayout layout = ImageLayout::SHADER_READ_ONLY; ///< Layout the image is in when accessed.
 };
 
+/// @brief A buffer view bound to a uniform or storage texel buffer binding.
+struct BufferViewDescriptor
+{
+    BufferViewHandle view{}; ///< View.
+};
+
+/// @brief A top-level acceleration structure bound to an acceleration structure binding.
+struct AccelerationStructureDescriptor
+{
+    AccelerationStructureHandle structure{}; ///< Top-level structure.
+};
+
 /// @brief Any resource that can be written to a descriptor.
-using DescriptorResource = std::variant<BufferDescriptor, ImageDescriptor, SamplerDescriptor, CombinedImageSamplerDescriptor>;
+using DescriptorResource = std::variant<BufferDescriptor, ImageDescriptor, SamplerDescriptor, CombinedImageSamplerDescriptor,
+                                        BufferViewDescriptor, AccelerationStructureDescriptor>;
 
 /// @brief Resources written to consecutive array elements of one binding.
 struct DescriptorWrite
@@ -72,9 +85,13 @@ descriptor_resource_matches(DescriptorType type,
         case DescriptorType::UNIFORM_BUFFER_DYNAMIC:
         case DescriptorType::STORAGE_BUFFER_DYNAMIC:
             return std::holds_alternative<BufferDescriptor>(resource);
-        default:
-            return false;
+        case DescriptorType::UNIFORM_TEXEL_BUFFER:
+        case DescriptorType::STORAGE_TEXEL_BUFFER:
+            return std::holds_alternative<BufferViewDescriptor>(resource);
+        case DescriptorType::ACCELERATION_STRUCTURE:
+            return std::holds_alternative<AccelerationStructureDescriptor>(resource);
     }
+    return false;
 }
 
 /// @brief Name of the DescriptorResource alternative a binding of type @p type accepts, for messages.
@@ -96,17 +113,22 @@ descriptor_resource_name(DescriptorType type) noexcept -> std::string_view
         case DescriptorType::UNIFORM_BUFFER_DYNAMIC:
         case DescriptorType::STORAGE_BUFFER_DYNAMIC:
             return "BufferDescriptor";
-        default:
-            return "no DescriptorResource yet (texel buffers and acceleration structures cannot be written yet)";
+        case DescriptorType::UNIFORM_TEXEL_BUFFER:
+        case DescriptorType::STORAGE_TEXEL_BUFFER:
+            return "BufferViewDescriptor";
+        case DescriptorType::ACCELERATION_STRUCTURE:
+            return "AccelerationStructureDescriptor";
     }
+    return {};
 }
 
 /// @brief Name of the alternative @p resource holds, for messages.
 [[nodiscard]] constexpr auto
 descriptor_resource_name(const DescriptorResource& resource) noexcept -> std::string_view
 {
-    constexpr std::array<std::string_view, 4> NAMES{"BufferDescriptor", "ImageDescriptor", "SamplerDescriptor",
-                                                    "CombinedImageSamplerDescriptor"};
+    constexpr std::array<std::string_view, 6> NAMES{"BufferDescriptor",       "ImageDescriptor",
+                                                    "SamplerDescriptor",      "CombinedImageSamplerDescriptor",
+                                                    "BufferViewDescriptor",   "AccelerationStructureDescriptor"};
     static_assert(NAMES.size() == std::variant_size_v<DescriptorResource>);
     return NAMES[resource.index()];
 }

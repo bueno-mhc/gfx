@@ -1,5 +1,12 @@
 # gfx — project memory
 
+> **Autonomous task COMPLETE (2026-10-15): Vulkan backend + SPIR-V infrastructure.** What was built,
+> the decisions taken without the user, deviations and test results are in
+> [vulkan-backend-report.md](vulkan-backend-report.md); the plan with its log is
+> [vulkan-backend-plan.md](vulkan-backend-plan.md). **User validation (2026-10-15):** every decision
+> accepted as recommended; the shared-hardware-queue limitation to be documented and detected
+> (done: `Queue::submit`/`bind_sparse` throw); defect 7 got its detector. Awaiting the user's commit.
+
 This file restores the working context of the gfx project for a new session (Claude Code loads it
 automatically). The chronological record, with the evidence behind each decision, is in
 [session-history.md](session-history.md).
@@ -83,8 +90,53 @@ Original hard requirements (from the user's initial specification):
   descriptive BackendCapabilityError; backends can forward to it or throw their own reason).
 - **Factory boundary**: backends are separate modules in PRIVATE CMake file sets; only the factory's
   implementation unit imports them; native headers only in backend global module fragments.
-- **No backend is implemented for now** (user decision): Vulkan, Null, D3D12 and Metal backends are stubs
-  that throw descriptive "not implemented yet" errors. Only Vulkan infrastructure (packages) is prepared.
+- **Backends** (2026-10-15): **Vulkan implemented** (everything except presentation); Null = an instance
+  without physical devices; D3D12 and Metal are stubs throwing "not implemented yet". **Render surface**
+  (user): to be abstracted later with SDL/GLFW/... implementations — no surface code or interface yet;
+  `create_swapchain`, `Queue::present`, `surface_support` throw naming the missing abstraction.
+- **Backend factory** (`gfx.backend_factory`, re-exported by `gfx`): `backend_availability()`,
+  `available_backends()`, `create_instance(BackendKind, InstanceDescription)`; each backend module
+  exports `unavailable_reason()` + `create_instance()`; CMake options `GFX_BACKEND_{VULKAN,NULL,
+  DIRECT3D12,METAL}` → `GFX_WITH_<NAME>_BACKEND`.
+- **Handle tables**: `gfx_slot_table` library (module `gfx.backends.slot_table`, std only): `SlotTable`
+  lock-free lookups, mutex on insert/remove, chunks of 4096, FIFO reuse past a threshold;
+  `HandleTable<Tag, Record>` (`backends/common/handle_table.cppm`, private HandleIssuer) find/get
+  (InvalidHandleError)/insert/remove/for_each.
+- **Vulkan backend as built** (`source/backends/vulkan/`, module `gfx.backends.vulkan`): partitions
+  `:common` (result names, check/throw), `:translation` (to_vulkan/from_vulkan for every enum),
+  `:instance` (VulkanInstance, VulkanPhysicalDevice, PhysicalDeviceCapabilities), `:device` (records,
+  HandleTables, NativeQueue, VulkanQueue, VulkanDeleter, BindlessTable, VulkanDevice), `:pipelines`
+  (set/pipeline layouts); implementation units per area (device, queue, bindless, layouts,
+  synchronization, resources, pipelines, commands, diagnostics); classes only one unit needs are
+  declared in that unit (defect 7). volk (fetched, `vulkan-sdk-1.4.350.0`; per-device VolkDeviceTable;
+  debug-utils through the global pointers); VMA 3.4 (plain TU `vma_implementation.cpp`); Vulkan 1.3
+  required; cost-free features enabled automatically, RT/ray query/mesh/VRS/conservative/sparse/
+  GPU_CRASH_MARKERS (NV checkpoints only) on request. Several gfx queues may share one native queue
+  (mutex + progress timeline per NativeQueue; deleter keyed on each native queue's submitted value).
+  Barriers: stages masked to the device and the queue type, accesses filtered to their stages.
+  Records hold `PipelineState` (atomic VkPipeline + status: async compile, hot reload) and
+  `CommandBufferStatus` (a stale handle during recording poisons the buffer; submit refuses it).
+  CPU-written memory (HOST_UPLOAD, DEVICE_LOCAL_HOST_VISIBLE) is required HOST_COHERENT.
+  RenderDoc in-application API in a plain TU (`renderdoc_capture.cpp`, `<windows.h>`); device loss →
+  DeviceLostError with the breadcrumb label chain + `VK_EXT_device_fault` report file.
+  **Shared hardware queues** (user: document + detect + throw): on a GPU with one queue (Intel UHD)
+  every queue type shares it, so a submission waiting for a value only a later submission to the same
+  hardware queue signals would deadlock. Detection (≥ ValidationLevel::CREATION): `TimelineSignals`
+  (owned by each timeline semaphore, pointer in its SemaphoreRecord: largest value submitted batches
+  promise) + `NativeQueue::unresolved_waits` (waits nothing had signaled or promised when submitted;
+  pruned when reached). `VulkanQueue::order_timeline_batches()` simulates the batches (waits before
+  signals) and refuses a signal of **exactly** the value of an unresolved wait (the certain case: a
+  greater value is accepted, a smaller one from elsewhere may release the wait) — InvalidUsageError
+  for the same gfx queue, BackendCapabilityError across queues sharing hardware;
+  `record_timeline_batches()` after the submission. Documented on `Queue` (Doxygen) and in README.
+- **SPIR-V tools** (`gfx.shader_tools`, `source/shaders/`): `reflect_spirv()` (SPIRV-Cross C API),
+  `compile_shader()` / `shader_dependencies()` (glslang C API, Debug only; Release does not link
+  glslang). `gfx_add_shaders()` (`cmake/GfxShaders.cmake` + `scripts/GfxEmbedSpirv.cmake`):
+  glslangValidator, depfiles, `-g` in Debug, generated module with `<name>_spirv` arrays and
+  `ShaderModuleDescription` constants (Debug adds source path, defines, include directories). HLSL
+  through glslang (DXC deferred).
+- **Interface additions in the Vulkan task**: `BufferDescription::sparse`; `BufferViewDescriptor` and
+  `AccelerationStructureDescriptor` in the `DescriptorResource` variant.
 - **Handles**: 32-bit (24-bit slot index, 8-bit generation from 1; 0 = null). Value private; users test,
   compare (`<=>`), hash (`std::hash`) and format (`std::formatter`: `Buffer(index 5, generation 3)`).
   `HandleKey` (constructible only by `HandleIssuer`) gates `Handle::create/index/generation` for backends.
@@ -188,6 +240,19 @@ Original hard requirements (from the user's initial specification):
    `CompilationFailure.LambdaInConstructorCorruptsModuleFile` (tests/toolchain/defects, 4 small files;
    `gfx_add_compilation_failure_test` gained a `MODULES` argument for it). Without the cross-partition
    declaration or without the lambda, the BMI is fine.
+7. **GCC 16 ICE (segfault) at the end of the mem-initializer list** of a constructor defined in a module
+   implementation unit, for a class declared in an internal partition, when it default-initializes a
+   member of a class template specialization from another module that no initializer names (e.g.
+   `FenceHandle m_handle;` in VulkanFence). Minimized: the template needs neither a constructor nor a
+   default member initializer; `FenceHandle m_handle{};` in the class avoids it (as does declaring the
+   class in the implementation unit — the workaround used in vulkan_synchronization.cpp). Detector:
+   `CompilationFailure.MemberInitializerOfPartitionClassCrashesCompiler` (tests/toolchain/defects,
+   member_initializer_*: 5 small files).
+8. **glslang 16.2 `-gVS`** (NonSemantic shader debug info) emits invalid SPIR-V for vertex shaders'
+   built-in gl_PerVertex block (spirv-val error): `gfx_add_shaders()` uses `-g`, and the run-time
+   compiler disables NonSemantic debug info.
+9. Backend sources use `-Wno-missing-field-initializers` (per file): Vulkan structs are initialized
+   with designated initializers that leave most members zero.
 
 ## 7. Repository layout (current)
 
@@ -199,11 +264,17 @@ gfx/
 ├── .vscode/                  tasks.json, launch.json, settings.json (see §8)
 ├── .claude/                  this memory
 ├── cmake/  GfxImportStandardLibrary, GfxToolchainRequirements, GfxProjectOptions (+workarounds),
-│           GfxRuntimeDeployment, GfxDependencies, GfxTesting, scripts/GfxCheckPlatformMacroCollisions
+│           GfxRuntimeDeployment, GfxDependencies (volk, VMA, SPIRV-Cross, glslang, RenderDoc header),
+│           GfxShaders (gfx_add_shaders), GfxTesting,
+│           scripts/{GfxCheckPlatformMacroCollisions, GfxEmbedSpirv}
 ├── source/ CMakeLists.txt, gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm,
-│           interface/ (34 partitions of gfx.interface), include/gfx/windows_headers.hpp
-└── tests/  toolchain/ (+defects/), unit/{enums,errors,handles,interface,shader_layout,platform}/,
-            compilation/{handles,enums,interface,shader_layout}/
+│           backend_factory.cppm/.cpp, interface/ (gfx.interface partitions),
+│           shaders/ (shader_tools.cppm, spirv_reflection.cpp, shader_compiler.cpp),
+│           backends/{common (slot_table, handle_table), vulkan, null, d3d12, metal}/,
+│           include/gfx/windows_headers.hpp
+└── tests/  toolchain/ (+defects/), unit/{enums,errors,handles,interface,shader_layout,platform,
+            slot_table,backend_factory,shader_tools}/, backends/vulkan/ (real GPUs, shaders/ via
+            gfx_add_shaders), compilation/{handles,enums,interface,shader_layout}/
 ```
 
 ## 8. Build, test, debug
@@ -220,6 +291,11 @@ gfx/
   GTEST_BREAK_ON_FAILURE=1 stops gdb at the failing assertion (select the test frame in the call stack).
   The executable list in launch.json must be updated when a test executable is added.
 - PowerShell splits `-DNAME=a.b` arguments at the dot: quote `-D` arguments.
+- Vulkan tests: `build/debug/tests/backends/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
+  GPU, the default selection is NVIDIA; `GFX_TEST_PHYSICAL_DEVICE=0` runs on Intel, `GFX_TEST_VALIDATION=0`
+  disables the layers (the harness sets `VK_ADD_LAYER_PATH` itself). CTest `VulkanCapture.RenderDoc`
+  runs one test under `renderdoccmd` (when RenderDoc is installed) and checks the `.rdc` file.
+- Source files may have CRLF endings (core.autocrlf=true); scripts that rewrite files must keep them.
 
 ## 9. Status
 
@@ -229,13 +305,15 @@ gfx/
 | 1 | enums, errors, handles, unit/compilation/macro tests, workarounds | done, committed (8b750f7, 58bbcfc) |
 | — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
 | 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | **done, awaiting validation** (138 tests, Debug + Release) |
-| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table (slot table design with the user) | next |
-| 3b | **Real Vulkan backend** (VMA, sync2, dynamic rendering, bindless descriptor indexing, pipeline cache, breadcrumbs) | user: "the next step is to build the Vulkan layer" |
-| 4 | Shader toolchain: `gfx_add_shaders()` (glslang + DXC → SPIR-V), SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload, shader headers declaring the bindless arrays | |
+| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | **done (autonomous task), awaiting validation** |
+| 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | **done, awaiting validation** (presentation waits for the render-surface abstraction) |
+| 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
+| — | Render-surface abstraction (SDL, GLFW, ...) + swapchain/present | user: later, not yet |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **138**, all passing in Debug and Release (from scratch), 2026-10-14.
+Test count at last report: **264**, all passing in Debug and Release, 2026-10-15 (90 Vulkan tests:
+NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped: no mesh shading/ray tracing, one hardware queue).
 
 ### Step 2c as built (production interface, 2026-10-14)
 

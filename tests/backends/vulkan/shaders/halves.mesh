@@ -1,0 +1,33 @@
+#version 460
+// Two triangles covering one half of the target per workgroup (workgroup 0 the left half, workgroup 1
+// the right half), colored by push constants.
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1) in;
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+
+layout(location = 0) out vec4 colors[];
+
+layout(push_constant) uniform Push
+{
+    vec4 left;
+    vec4 right;
+} push;
+
+void main()
+{
+    const bool left = gl_WorkGroupID.x == 0;
+    const float x0 = left ? -1.0 : 0.0;
+    const float x1 = x0 + 1.0;
+    SetMeshOutputsEXT(4, 2);
+    gl_MeshVerticesEXT[0].gl_Position = vec4(x0, -1.0, 0.0, 1.0);
+    gl_MeshVerticesEXT[1].gl_Position = vec4(x1, -1.0, 0.0, 1.0);
+    gl_MeshVerticesEXT[2].gl_Position = vec4(x0, 1.0, 0.0, 1.0);
+    gl_MeshVerticesEXT[3].gl_Position = vec4(x1, 1.0, 0.0, 1.0);
+    for (uint vertex = 0; vertex < 4; ++vertex)
+    {
+        colors[vertex] = left ? push.left : push.right;
+    }
+    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+    gl_PrimitiveTriangleIndicesEXT[1] = uvec3(2, 1, 3);
+}
