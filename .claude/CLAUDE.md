@@ -57,6 +57,7 @@ Original hard requirements (from the user's initial specification):
 | Member data | `m_` prefix for **class** members only; **plain description structs** (aggregates used with designated initializers) have **no** prefix. |
 | Creation structs | `<Thing>Description` (e.g. `BufferDescription`, `UnsupportedCapabilityDescription`). |
 | Handles | `template<class Tag> class Handle` (a **class**, never `struct Handle`); aliases `using BufferHandle = Handle<BufferTag>`. Tags are empty `struct`s with `NAME`/`USABLE_ON` traits (open question Q2). |
+| `std::variant` | **Allowed and preferred to a C++ `union`** for closed sets of alternatives (user, 2026-10-15: first asked to remove it, then preferred it to the tagged-union alternative). Platform events, `NativeWindowHandle` and the graphics `DescriptorResource` use it. |
 | Code style (user's reformat) | Allman braces everywhere (namespace, class, function, if/for/try/catch, even one-line bodies); out-of-class definitions put `auto` on its own line (`auto\nError::backend() const noexcept -> ...`); one parameter per line when several; leading-comma member-initializer lists; short comments describing each step inside function bodies; friends in their own `private:` section before data members. Tests: `TEST(Suite, Name)` then `{` on the next line. |
 
 ## 4. Environment (verified)
@@ -98,11 +99,31 @@ Original hard requirements (from the user's initial specification):
   `available_backends()`, `create_instance(BackendKind, InstanceDescription)`; each backend module
   exports `unavailable_reason()` + `create_instance()`; CMake options `GFX_BACKEND_{VULKAN,NULL,
   DIRECT3D12,METAL}` → `GFX_WITH_<NAME>_BACKEND`.
-- **Handle tables**: `gfx_slot_table` library (module `gfx.backends.slot_table`, std only): `SlotTable`
-  lock-free lookups, mutex on insert/remove, chunks of 4096, FIFO reuse past a threshold;
-  `HandleTable<Tag, Record>` (`backends/common/handle_table.cppm`, private HandleIssuer) find/get
-  (InvalidHandleError)/insert/remove/for_each.
-- **Vulkan backend as built** (`source/backends/vulkan/`, module `gfx.backends.vulkan`): partitions
+- **Handle tables** (in core since P0): module `gfx.core.slot_table` (std only): `SlotTable` lock-free
+  lookups, mutex on insert/remove, chunks of 4096, FIFO reuse past a threshold; `gfx.core.handle_table`:
+  `HandleTable<Tag, Record>` (private HandleIssuer, constructed with a `BackendIdentity`) find/get
+  (InvalidHandleError)/insert/remove/for_each. Not in the `gfx.core` umbrella (backend utilities).
+- **Core library (P0 of the platform work, 2026-10-15)**: `source/core/`, target `gfx::core` (`gfx_core`),
+  namespace `gfx`, modules `gfx.core` (umbrella) = `gfx.core.enums` (machinery: EnumeratorName,
+  EnumerationTraits, Described/Bitmask/Sequential/**Backend**Enumeration concepts, ENUMERATOR_COUNT,
+  bitmask operators, to_string, **from_string** (sequential + bitmask "A | B"/NONE/0x..), formatter,
+  exported `gfx::enumeration_verification::verify` used by every library's enums file; shared
+  enumerations ValidationLevel, MemoryDomain, NativeWindowKind; constants HANDLE_*, NAME_HASH_*,
+  DEBUG_BUILD, DEFAULT_VALIDATION_LEVEL, WAIT_INDEFINITELY; `GFX_DEBUG_BUILD` is a PUBLIC definition of
+  gfx_core), `gfx.core.errors` (Error with **BackendIdentity** {library, name} — implicit from any
+  BackendEnumeration (traits give `BACKEND_LIBRARY`: graphics "gfx"), `== BackendKind::X` works, message
+  origin "[gfx::VULKAN]"/"[gfx]"; BackendCapabilityError, InvalidUsageError, InvalidHandleError,
+  OutOfMemoryError, BackendApiError; protected helpers `suggestion_line`, `indented`), `gfx.core.handles`
+  (HandleKey, HandleIssuer, Handle<Tag> (Tag needs NAME), concept TaggedHandle, **Identifier<Tag>**:
+  consteval FNV-1a `name_hash`, `from_name` at run time, formatter "Action(0x1A2B3C4D)", concept
+  TaggedIdentifier), `gfx.core.types` (Version, Extent, Offset, Rectangle, Vector2),
+  `gfx.core.native_window` (**NativeWindowHandle**: std::variant<monostate, Win32/Xlib/Xcb/Wayland/
+  Cocoa(+metal_layer)/WebCanvas handles>, integers only, kind() from the index). Graphics keeps its
+  module names: `gfx.enums` / `gfx.handles` / `gfx.errors` re-export the core modules (graphics errors
+  left: DeviceLostError, ShaderCompilationError, ShaderLayoutMismatchError); `gfx` re-exports
+  `gfx.core`; `SwapchainDescription::window` and `surface_support()` take NativeWindowHandle (graphics
+  `NativeWindow` removed); target alias `gfx::graphics`.
+- **Vulkan backend as built** (`source/graphics/backends/vulkan/`, module `gfx.backends.vulkan`): partitions
   `:common` (result names, check/throw), `:translation` (to_vulkan/from_vulkan for every enum),
   `:instance` (VulkanInstance, VulkanPhysicalDevice, PhysicalDeviceCapabilities), `:device` (records,
   HandleTables, NativeQueue, VulkanQueue, VulkanDeleter, BindlessTable, VulkanDevice), `:pipelines`
@@ -203,9 +224,9 @@ Original hard requirements (from the user's initial specification):
 - **Render graph enablement**: sync2-style barriers (memory/buffer/image, queue ownership transfer),
   ResourceState table, dynamic rendering via RAII scope, attachment descriptions, memory requirements +
   placed resources (aliasing), transient attachments, concurrent sharing, timestamp/statistics queries.
-- **Modules**: `gfx` umbrella re-exports `gfx.enums`, `gfx.errors`, `gfx.handles` (and later
-  `gfx.interface`, `gfx.backend_factory`). Interfaces: module `gfx.interface` with partitions in
-  `source/interface/`. Backends: `gfx.backends.<name>` in PRIVATE file sets.
+- **Modules**: `gfx` umbrella re-exports `gfx.core`, `gfx.enums`, `gfx.errors`, `gfx.handles`,
+  `gfx.interface`, `gfx.backend_factory`, `gfx.shader_tools`. Interfaces: module `gfx.interface` with
+  partitions in `source/graphics/interface/`. Backends: `gfx.backends.<name>` in PRIVATE file sets.
 - **`import std;`** is used everywhere (user choice "b"), with the requested **warning comment** in
   `cmake/GfxImportStandardLibrary.cmake` (experimental CMake gate UUID `451f2fe2-a8a2-47c3-bc32-94786d8fc91b`
   for CMake 4.4; `-DGFX_IMPORT_STD_GATE=<uuid>` override). `.hpp` only where a module cannot serve.
@@ -267,14 +288,16 @@ gfx/
 │           GfxRuntimeDeployment, GfxDependencies (volk, VMA, SPIRV-Cross, glslang, RenderDoc header),
 │           GfxShaders (gfx_add_shaders), GfxTesting,
 │           scripts/{GfxCheckPlatformMacroCollisions, GfxEmbedSpirv}
-├── source/ CMakeLists.txt, gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm,
-│           backend_factory.cppm/.cpp, interface/ (gfx.interface partitions),
-│           shaders/ (shader_tools.cppm, spirv_reflection.cpp, shader_compiler.cpp),
-│           backends/{common (slot_table, handle_table), vulkan, null, d3d12, metal}/,
-│           include/gfx/windows_headers.hpp
-└── tests/  toolchain/ (+defects/), unit/{enums,errors,handles,interface,shader_layout,platform,
-            slot_table,backend_factory,shader_tools}/, backends/vulkan/ (real GPUs, shaders/ via
-            gfx_add_shaders), compilation/{handles,enums,interface,shader_layout}/
+├── docs/   platform-design.md (windowing + input design, decisions, phases)
+├── source/ CMakeLists.txt (add_subdirectory core, graphics)
+│   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
+│   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp
+│   └── graphics/  gfx: gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, backend_factory.cppm/.cpp,
+│                  interface/ (gfx.interface partitions), shaders/ (shader_tools.cppm,
+│                  spirv_reflection.cpp, shader_compiler.cpp), backends/{vulkan, null, d3d12, metal}/
+└── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), graphics/{backend_factory,
+            enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
+            (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface}/
 ```
 
 ## 8. Build, test, debug
@@ -291,7 +314,7 @@ gfx/
   GTEST_BREAK_ON_FAILURE=1 stops gdb at the failing assertion (select the test frame in the call stack).
   The executable list in launch.json must be updated when a test executable is added.
 - PowerShell splits `-DNAME=a.b` arguments at the dot: quote `-D` arguments.
-- Vulkan tests: `build/debug/tests/backends/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
+- Vulkan tests: `build/debug/tests/graphics/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
   GPU, the default selection is NVIDIA; `GFX_TEST_PHYSICAL_DEVICE=0` runs on Intel, `GFX_TEST_VALIDATION=0`
   disables the layers (the harness sets `VK_ADD_LAYER_PATH` itself). CTest `VulkanCapture.RenderDoc`
   runs one test under `renderdoccmd` (when RenderDoc is installed) and checks the `.rdc` file.
@@ -308,7 +331,7 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| — | Render-surface abstraction (SDL, GLFW, ...) + swapchain/present | user: later, not yet |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | **P0 (restructure into core + graphics) done, awaiting validation** (277 tests Debug + Release); next P1 (platform foundations). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
@@ -428,6 +451,24 @@ After a gap analysis against Unreal RHI / NVRHI / Diligent / The Forge / Dawn, t
    6 CI (MSVC/Clang/GCC, Linux), packaging, Doxygen, architecture document.
 
 ## 10. Open questions (asked, not answered yet)
+
+0. **Platform library (2026-10-15)** — answers recorded in docs/platform-design.md §D: restructure into
+   source/{core,graphics,platform} (graphics namespace/modules unchanged) YES; one error hierarchy in
+   core (`BackendIdentity`) YES; `NativeWindowHandle` in core with OS handles only YES; naming deviations
+   (`WindowHandle`/`Window`, `KeyModifier::CONTROL`, `*Identifier`, `PlatformBackendKind`,
+   `DELETE_FORWARD`) YES; dependencies: find_package + FetchContent fallback (GLFW 3.4, SDL3 3.4.10
+   static), nlohmann-json, stb_image; Vulkan presentation YES ("the windowed example should really
+   run"); hold/tap triggers + rumble/LEDs now, sensors/AXIS_3D later; window tests allowed; **no gamepad**
+   (inject events, SDL virtual gamepads); **no std::variant** at first (reverted, see follow-up); **threading model of commercial engines** (researched:
+   Unreal, Unity, Godot, SDL3, GLFW — design A9: main thread owns the platform and pumps; input once per
+   game frame, immutable frame shared with jobs, double-buffered; EventChannel SPSC for a separate game
+   thread; render thread never touches platform/input, reads window sizes via atomics).
+   **Follow-up (2026-10-15):** events and NativeWindowHandle use **std::variant** (preferred to a union;
+   DescriptorResource unchanged); **backends SDL3 and GLFW only** (no headless; others reported as not
+   built); A9 threading model confirmed. **Implementation started: P0 (restructure).**
+   Facts: MSYS2 has glfw 3.4, sdl3 3.4.10, nlohmann-json 3.12, stb, benchmark (none installed; pacman is
+   `C:\msys64\usr\bin\pacman.exe`, not on the Git Bash PATH). Graphics `NativeWindow{connection, window}`
+   carries no windowing-system tag; the Vulkan instance enables no surface extensions yet.
 
 1. Keep `import std` + `--allow-multiple-definition`, or switch modules to global-module-fragment
    `#include`s (recommended by Claude: avoids the linker flag and the experimental CMake gate)?

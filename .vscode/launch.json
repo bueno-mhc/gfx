@@ -63,19 +63,20 @@
             "type": "pickString",
             "description": "Test executable to debug",
             "options": [
-                { "label": "enums      - EnumsTest.*", "value": "unit/enums/gfx_enums_tests.exe" },
-                { "label": "errors     - ErrorsTest.*", "value": "unit/errors/gfx_errors_tests.exe" },
-                { "label": "handles    - HandlesTest.*", "value": "unit/handles/gfx_handles_tests.exe" },
-                { "label": "interface  - RecorderTest.*, DeviceTest.*, BindlessTest.*, PipelineValidationTest.*, FrameResourcesTest.*, FrameCommandPoolsTest.*, ...", "value": "unit/interface/gfx_interface_tests.exe" },
-                { "label": "shader layout - ShaderValidationTest.*, PipelineLayoutDefinitionTest.*, ShaderModuleDescriptionTest.*", "value": "unit/shader_layout/gfx_shader_layout_tests.exe" },
-                { "label": "platform   - PlatformHeadersTest.*", "value": "unit/platform/gfx_platform_tests.exe" },
-                { "label": "slot table - SlotTableTest.*", "value": "unit/slot_table/gfx_slot_table_tests.exe" },
-                { "label": "backend factory - BackendFactoryTest.*", "value": "unit/backend_factory/gfx_backend_factory_tests.exe" },
-                { "label": "shader tools - SpirvReflectionTest.*, ShaderCompilerTest.*, ShaderCompilerDebugTest.*, GfxAddShadersTest.*", "value": "unit/shader_tools/gfx_shader_tools_tests.exe" },
-                { "label": "vulkan     - Vulkan*Test.* (real GPU; GFX_TEST_PHYSICAL_DEVICE=<index> picks the GPU)", "value": "backends/vulkan/gfx_vulkan_tests.exe" },
+                { "label": "core       - EnumerationTest.*, IdentifierTest.*, BackendIdentityTest.*, NativeWindowHandleTest.*", "value": "core/gfx_core_tests.exe" },
+                { "label": "slot table - SlotTableTest.*", "value": "core/slot_table/gfx_slot_table_tests.exe" },
+                { "label": "enums      - EnumsTest.*", "value": "graphics/enums/gfx_enums_tests.exe" },
+                { "label": "errors     - ErrorsTest.*", "value": "graphics/errors/gfx_errors_tests.exe" },
+                { "label": "handles    - HandlesTest.*", "value": "graphics/handles/gfx_handles_tests.exe" },
+                { "label": "interface  - RecorderTest.*, DeviceTest.*, BindlessTest.*, PipelineValidationTest.*, FrameResourcesTest.*, FrameCommandPoolsTest.*, ...", "value": "graphics/interface/gfx_interface_tests.exe" },
+                { "label": "shader layout - ShaderValidationTest.*, PipelineLayoutDefinitionTest.*, ShaderModuleDescriptionTest.*", "value": "graphics/shader_layout/gfx_shader_layout_tests.exe" },
+                { "label": "windows headers - PlatformHeadersTest.*", "value": "graphics/windows_headers/gfx_windows_headers_tests.exe" },
+                { "label": "backend factory - BackendFactoryTest.*", "value": "graphics/backend_factory/gfx_backend_factory_tests.exe" },
+                { "label": "shader tools - SpirvReflectionTest.*, ShaderCompilerTest.*, ShaderCompilerDebugTest.*, GfxAddShadersTest.*", "value": "graphics/shader_tools/gfx_shader_tools_tests.exe" },
+                { "label": "vulkan     - Vulkan*Test.* (real GPU; GFX_TEST_PHYSICAL_DEVICE=<index> picks the GPU)", "value": "graphics/vulkan/gfx_vulkan_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
-            "default": "unit/handles/gfx_handles_tests.exe"
+            "default": "graphics/handles/gfx_handles_tests.exe"
         },
         {
             "id": "googleTestFilter",

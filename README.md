@@ -224,33 +224,45 @@ gfx/
 │   ├── GfxShaders.cmake                 gfx_add_shaders(): GLSL/HLSL to SPIR-V at build time
 │   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
 │   └── scripts/                         CMake scripts run by builds and tests (SPIR-V embedding, ...)
-├── source/               the library (module gfx and its parts)
-│   ├── gfx.cppm          `import gfx;` umbrella
-│   ├── enums.cppm        every enumeration and constant (the only file that defines them)
-│   ├── errors.cppm/.cpp  exception hierarchy (gfx::Error, BackendCapabilityError, ...)
-│   ├── handles.cppm      typed numeric handles and their concepts
-│   ├── interface/        module gfx.interface: one partition per object or concept
-│   │   ├── interface.cppm             primary interface unit (re-exports every partition)
-│   │   ├── bindless.cppm              bindless indices, table capacities, the universal pipeline layout
-│   │   ├── shader_layout.cppm         ShaderLayout, the interface reflected from a shader's SPIR-V
-│   │   ├── shader_validation.cppm     pipeline checks (stages, layouts, attributes, attachments,
-│   │   │                              specialization constants, ray tracing groups)
-│   │   ├── recorder.cppm              Recorder<QueueType>, rendering scopes, parallel rendering parts
-│   │   ├── acceleration_structure.cppm, ray_tracing_pipeline.cppm   ray tracing
-│   │   ├── frame_timeline.cppm, frame_command_pools.cppm, transient_buffer_allocator.cppm,
-│   │   │   uploader.cppm, gpu_profiler.cppm   per-frame resources built on the interfaces
-│   │   └── device.cppm, buffer.cppm, ...  the abstract objects backends implement
-│   ├── backend_factory.cppm/.cpp  create_instance(BackendKind): the only public entry to backends
-│   ├── shaders/          module gfx.shader_tools: SPIR-V reflection (SPIRV-Cross), Debug compiler (glslang)
-│   ├── backends/         private modules, reached only through the factory
-│   │   ├── common/       SlotTable and HandleTable: thread-safe handle-to-object tables
-│   │   ├── vulkan/       module gfx.backends.vulkan (partitions + one implementation unit per area)
-│   │   └── null/, d3d12/, metal/
-│   └── include/gfx/      headers only where a module cannot serve (toolchain workarounds)
+├── docs/                 design documents (docs/platform-design.md: windowing and input)
+├── source/
+│   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
+│   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,
+│   │   │                            to_string/from_string, std::format) and the shared enumerations
+│   │   ├── errors.cppm/.cpp         exception hierarchy (gfx::Error, BackendCapabilityError, ...) and
+│   │   │                            BackendIdentity (which library's backend raised an error)
+│   │   ├── handles.cppm             Handle<Tag> (issued by backends) and Identifier<Tag> (hashed names)
+│   │   ├── types.cppm               Version, Extent, Offset, Rectangle, Vector2
+│   │   ├── native_window.cppm       NativeWindowHandle: OS window handles, from the platform library
+│   │   │                            to the graphics library
+│   │   ├── slot_table.cppm, handle_table.cppm   thread-safe handle-to-object tables for backends
+│   │   └── include/gfx/             headers only where a module cannot serve (toolchain workarounds)
+│   └── graphics/         the graphics library (`import gfx;`)
+│       ├── gfx.cppm      `import gfx;` umbrella (gfx.core included)
+│       ├── enums.cppm    every graphics enumeration and constant (the only graphics file that defines them)
+│       ├── errors.cppm   graphics errors (DeviceLostError, ShaderCompilationError, ShaderLayoutMismatchError)
+│       ├── handles.cppm  graphics handle tags (BufferHandle, ...) and their concepts
+│       ├── interface/    module gfx.interface: one partition per object or concept
+│       │   ├── interface.cppm             primary interface unit (re-exports every partition)
+│       │   ├── bindless.cppm              bindless indices, table capacities, the universal pipeline layout
+│       │   ├── shader_layout.cppm         ShaderLayout, the interface reflected from a shader's SPIR-V
+│       │   ├── shader_validation.cppm     pipeline checks (stages, layouts, attributes, attachments,
+│       │   │                              specialization constants, ray tracing groups)
+│       │   ├── recorder.cppm              Recorder<QueueType>, rendering scopes, parallel rendering parts
+│       │   ├── acceleration_structure.cppm, ray_tracing_pipeline.cppm   ray tracing
+│       │   ├── frame_timeline.cppm, frame_command_pools.cppm, transient_buffer_allocator.cppm,
+│       │   │   uploader.cppm, gpu_profiler.cppm   per-frame resources built on the interfaces
+│       │   └── device.cppm, buffer.cppm, ...  the abstract objects backends implement
+│       ├── backend_factory.cppm/.cpp  create_instance(BackendKind): the only public entry to backends
+│       ├── shaders/      module gfx.shader_tools: SPIR-V reflection (SPIRV-Cross), Debug compiler (glslang)
+│       └── backends/     private modules, reached only through the factory
+│           ├── vulkan/   module gfx.backends.vulkan (partitions + one implementation unit per area)
+│           └── null/, d3d12/, metal/
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
-    ├── unit/<area>/      GoogleTest unit tests, one subfolder per library area
-    ├── backends/vulkan/  the Vulkan backend on the machine's real GPUs, with validation layers
+    ├── core/             gfx.core (imports gfx.core only) and the slot table
+    ├── graphics/<area>/  GoogleTest unit tests of the graphics library, one subfolder per area;
+    │                     graphics/vulkan: the Vulkan backend on the machine's real GPUs
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 
