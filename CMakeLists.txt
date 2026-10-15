@@ -24,6 +24,10 @@ option(GFX_BACKEND_NULL "Build the null backend (a stub that is not implemented 
 option(GFX_BACKEND_DIRECT3D12 "Build the Direct3D 12 backend (a stub that is not implemented yet)" ${WIN32})
 option(GFX_BACKEND_METAL "Build the Metal backend (a stub that is not implemented yet)" ${APPLE})
 
+# The platform library (windowing and input). gfx::platform::create_platform() throws a descriptive
+# error for a backend that was not built.
+option(GFX_BUILD_PLATFORM "Build the platform library (windowing and input)" ON)
+
 include(GfxToolchainRequirements)
 include(GfxProjectOptions)
 include(GfxShaders)       # gfx_add_shaders(): GLSL / HLSL -> SPIR-V at build time

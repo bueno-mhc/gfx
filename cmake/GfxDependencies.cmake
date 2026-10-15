@@ -207,6 +207,31 @@ function(gfx_require_renderdoc_api)
     target_include_directories(gfx_renderdoc_api SYSTEM INTERFACE ${renderdoc_api_SOURCE_DIR})
 endfunction()
 
+# gfx_require_stb_image()
+#   Provides gfx::stb_image: stb_image.h (public domain / MIT), with which the platform library decodes
+#   PNG window icons and cursors. The system header (MSYS2: mingw-w64-ucrt-x86_64-stb) is used when
+#   present; otherwise version 2.30 is downloaded from a pinned commit and checked against its hash.
+function(gfx_require_stb_image)
+    if(TARGET gfx::stb_image)
+        return()
+    endif()
+    add_library(gfx_stb_image INTERFACE)
+    add_library(gfx::stb_image ALIAS gfx_stb_image)
+    find_path(GFX_STB_IMAGE_INCLUDE_DIRECTORY stb_image.h PATH_SUFFIXES stb)
+    if(GFX_STB_IMAGE_INCLUDE_DIRECTORY AND NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        message(STATUS "gfx: stb_image found in ${GFX_STB_IMAGE_INCLUDE_DIRECTORY}")
+        target_include_directories(gfx_stb_image SYSTEM INTERFACE ${GFX_STB_IMAGE_INCLUDE_DIRECTORY})
+        return()
+    endif()
+    FetchContent_Declare(stb_image
+        URL https://raw.githubusercontent.com/nothings/stb/f1c79c02822848a9bed4315b12c8c8f3761e1296/stb_image.h
+        URL_HASH SHA256=594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3
+        DOWNLOAD_NO_EXTRACT TRUE)
+    FetchContent_MakeAvailable(stb_image)
+    message(STATUS "gfx: stb_image 2.30 fetched")
+    target_include_directories(gfx_stb_image SYSTEM INTERFACE ${stb_image_SOURCE_DIR})
+endfunction()
+
 # gfx_require_spirv_cross()
 #   Provides gfx::spirv_cross: the SPIRV-Cross C API, which reflects shader layouts from SPIR-V.
 function(gfx_require_spirv_cross)

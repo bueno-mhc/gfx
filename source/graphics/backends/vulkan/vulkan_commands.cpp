@@ -123,24 +123,24 @@ clear_color(Format format,
     VkClearColorValue value{};
     switch (format_properties(format).numeric_type)
     {
-    case FormatNumericType::UNSIGNED_INTEGER:
-        for (std::size_t index = 0; index < 4; ++index)
-        {
-            value.uint32[index] = static_cast<std::uint32_t>(color[index]);
-        }
-        break;
-    case FormatNumericType::SIGNED_INTEGER:
-        for (std::size_t index = 0; index < 4; ++index)
-        {
-            value.int32[index] = static_cast<std::int32_t>(color[index]);
-        }
-        break;
-    default:
-        for (std::size_t index = 0; index < 4; ++index)
-        {
-            value.float32[index] = color[index];
-        }
-        break;
+        case FormatNumericType::UNSIGNED_INTEGER:
+            for (std::size_t index = 0; index < 4; ++index)
+            {
+                value.uint32[index] = static_cast<std::uint32_t>(color[index]);
+            }
+            break;
+        case FormatNumericType::SIGNED_INTEGER:
+            for (std::size_t index = 0; index < 4; ++index)
+            {
+                value.int32[index] = static_cast<std::int32_t>(color[index]);
+            }
+            break;
+        default:
+            for (std::size_t index = 0; index < 4; ++index)
+            {
+                value.float32[index] = color[index];
+            }
+            break;
     }
     return value;
 }
@@ -1158,12 +1158,12 @@ VulkanCommandBuffer::ready_pipeline(const PipelineState& state,
 {
     switch (state.status.load(std::memory_order_acquire))
     {
-    case PipelineStatus::READY: return state.pipeline.load(std::memory_order_acquire);
-    case PipelineStatus::COMPILING:
-        fail(operation, "the pipeline is still compiling in the background",
-             "bind it once status() is READY (or call wait()); draw with a fallback pipeline meanwhile");
-    case PipelineStatus::COMPILATION_FAILED:
-        fail(operation, "the pipeline failed to compile", "call wait() to get the compilation's error");
+        case PipelineStatus::READY: return state.pipeline.load(std::memory_order_acquire);
+        case PipelineStatus::COMPILING:
+            fail(operation, "the pipeline is still compiling in the background",
+                "bind it once status() is READY (or call wait()); draw with a fallback pipeline meanwhile");
+        case PipelineStatus::COMPILATION_FAILED:
+            fail(operation, "the pipeline failed to compile", "call wait() to get the compilation's error");
     }
     fail(operation, "the pipeline has an unknown status");
 }

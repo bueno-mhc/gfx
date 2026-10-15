@@ -93,3 +93,26 @@ gfx_add_compilation_failure_test(BackendsMustOverrideEveryOperation
 # ------------------------------------------------------------------------------ naming
 gfx_add_platform_macro_collision_test(NamesDoNotCollideWithPlatformMacros
     SOURCE ${PROJECT_SOURCE_DIR}/source)
+
+# ------------------------------------------------------------------------------ platform
+if(GFX_BUILD_PLATFORM)
+    gfx_add_compilation_failure_test(EventPayloadMustMatchItsType
+        SOURCES platform/event_payload_must_match_its_type.cpp
+        EXPECTED_DIAGNOSTIC "could not convert|no matching function for call to .*make"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(PlatformHandlesOfDifferentKindsDoNotCompare
+        SOURCES platform/platform_handles_of_different_kinds_do_not_compare.cpp
+        EXPECTED_DIAGNOSTIC "no match for 'operator=='"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(IdentifiersOfDifferentKindsDoNotMix
+        SOURCES platform/identifiers_of_different_kinds_do_not_mix.cpp
+        EXPECTED_DIAGNOSTIC "conversion from 'gfx::Identifier<gfx::platform::BindingContextTag>' to non-scalar type 'const gfx::platform::ActionIdentifier'|conversion from .*BindingContextTag.* to non-scalar type"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(IdentifiersNeedAName
+        SOURCES platform/identifiers_need_a_name.cpp
+        EXPECTED_DIAGNOSTIC "an identifier needs a non-empty name|not a constant expression"
+        LIBRARIES gfx::platform)
+endif()

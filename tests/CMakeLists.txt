@@ -2,4 +2,7 @@
 add_subdirectory(toolchain)    # toolchain conformance (C++23, import std, GoogleTest with modules)
 add_subdirectory(core)         # gfx.core: shared machinery, errors, handles, identifiers, native window handle
 add_subdirectory(graphics)     # the graphics library: unit tests, and its backends on the machine's GPUs
+if(GFX_BUILD_PLATFORM)
+    add_subdirectory(platform) # the platform library (windowing and input)
+endif()
 add_subdirectory(compilation)  # code that must not compile, and naming checks

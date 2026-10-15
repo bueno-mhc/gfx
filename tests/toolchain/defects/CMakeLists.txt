@@ -41,3 +41,15 @@ gfx_add_compilation_failure_test(MemberInitializerOfPartitionClassCrashesCompile
             member_initializer_declaration.cppm
     EXPECTED_DIAGNOSTIC "internal compiler error"
     WITHOUT_PROJECT_OPTIONS)
+
+# HandleTable::find() or remove() instantiated in a module interface, for a tag of another module and a
+# record pointing to a class of the instantiating module, makes the module file unreadable for importers
+# ("failed to read compiled module cluster N: Bad file data").
+# Workaround: such uses live in module implementation units (the Vulkan backend's .cpp files,
+# tests/platform/fake_platform.cpp).
+gfx_add_compilation_failure_test(TableLookupInModuleInterfaceCorruptsModuleFile
+    SOURCES table_lookup_importer.cpp
+    MODULES table_lookup_holder.cppm
+    EXPECTED_DIAGNOSTIC "failed to read compiled module"
+    LIBRARIES gfx::platform
+    WITHOUT_PROJECT_OPTIONS)

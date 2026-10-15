@@ -58,7 +58,7 @@ Original hard requirements (from the user's initial specification):
 | Creation structs | `<Thing>Description` (e.g. `BufferDescription`, `UnsupportedCapabilityDescription`). |
 | Handles | `template<class Tag> class Handle` (a **class**, never `struct Handle`); aliases `using BufferHandle = Handle<BufferTag>`. Tags are empty `struct`s with `NAME`/`USABLE_ON` traits (open question Q2). |
 | `std::variant` | **Allowed and preferred to a C++ `union`** for closed sets of alternatives (user, 2026-10-15: first asked to remove it, then preferred it to the tagged-union alternative). Platform events, `NativeWindowHandle` and the graphics `DescriptorResource` use it. |
-| Code style (user's reformat) | Allman braces everywhere (namespace, class, function, if/for/try/catch, even one-line bodies); out-of-class definitions put `auto` on its own line (`auto\nError::backend() const noexcept -> ...`); one parameter per line when several; leading-comma member-initializer lists; short comments describing each step inside function bodies; friends in their own `private:` section before data members. Tests: `TEST(Suite, Name)` then `{` on the next line. |
+| Code style (user's reformat) | Allman braces everywhere (namespace, class, function, if/for/try/catch, even one-line bodies); out-of-class definitions put `auto` on its own line (`auto\nError::backend() const noexcept -> ...`); one parameter per line when several; leading-comma member-initializer lists; short comments describing each step inside function bodies; friends in their own `private:` section before data members; **`case` labels indented one level inside the `switch` braces** (user's reformat of vulkan_commands/resources.cpp and the platform backend_factory.cpp, 2026-10-15). Tests: `TEST(Suite, Name)` then `{` on the next line. |
 
 ## 4. Environment (verified)
 
@@ -156,6 +156,30 @@ Original hard requirements (from the user's initial specification):
   glslangValidator, depfiles, `-g` in Debug, generated module with `<name>_spirv` arrays and
   `ShaderModuleDescription` constants (Debug adds source path, defines, include directories). HLSL
   through glslang (DXC deferred).
+- **Platform library (P1 as built, 2026-10-15)**: `source/platform/`, target `gfx::platform`
+  (`gfx_platform`, option `GFX_BUILD_PLATFORM` ON), namespace `gfx::platform`, `import gfx.platform;`
+  (re-exports gfx.core). Modules: `gfx.platform.enums` (generated tables: `Key` = USB HID usages, sparse
+  enumeration; `KeyCode` = code points / `KEY_CODE_NON_PRINTABLE_FLAG | HID`; PlatformBackendKind {SDL3,
+  GLFW, WINDOWS, XCB, COCOA, WEB} with BACKEND_LIBRARY "gfx::platform"; PlatformFeature, WindowMode,
+  WindowFlag, SurfaceApi, CursorShape (`I_BEAM`: TEXT is a windows.h macro), CursorMode, MouseButton(+Mask),
+  KeyModifier (SHIFT/CONTROL/ALT/SUPER combined), GamepadButton/Axis/Type, HatPosition, TouchDeviceType,
+  EventType, EventWaitMode; constants; `using gfx::operator|` etc. so ADL finds the bitmask operators),
+  `gfx.platform.handles` (Window/Monitor/Cursor/Gamepad/Joystick/TouchDevice handles,
+  ActionIdentifier/BindingContextIdentifier, PlayerIdentifier slot, literals `_action`/`_context`),
+  `gfx.platform.interface` partitions `:platform_object` (PlatformObject : HandleIssuer, mirrors
+  BackendObject), `:event` (payload structs with static `TYPES`, `EventPayloadVariant` = std::variant,
+  consteval `event_payload_index`, `EventPayload<TYPE>`, `Event::make<TYPE>` / get_if / as / visit /
+  text / with_text, ≤ 64 bytes trivially copyable; `CodePoints`/`code_points()`/`is_valid_utf8()`;
+  `EventSpan`, `EventQueue` reused per pump with a text buffer), `:image` (ImageData RGBA/PNG,
+  `decode_image()` with stb_image 2.30 fetched by URL + SHA-256, PNG only, `STBI_NO_STDIO` in the GMF),
+  `:monitor`, `:cursor`, `:window` (thread-safe size/framebuffer/scale/minimized/native handle via atomics;
+  backends call update_*; `validate_window_description()`), `:input_devices`, `:platform` (Platform:
+  pump = thread check → deferred releases → pushed events → backend `pump(mode, timeout)` → events pushed
+  while waiting → drop events of dead windows; watchers called during the pump (RAII `EventWatcher`, weak
+  lifetime token, removal during dispatch deferred, re-entrant pump refused); `push_event`/`wake` from any
+  thread; `defer_release(HandleKey, fn)` for backends; protected `emit`, `require_platform_thread`,
+  `release_deferred`), `gfx.platform.backend_factory` (no backend built yet: every kind reports why).
+  Tests: tests/platform (fake platform module + implementation unit; 31 tests) and 4 compile-failure tests.
 - **Interface additions in the Vulkan task**: `BufferDescription::sparse`; `BufferViewDescriptor` and
   `AccelerationStructureDescriptor` in the `DescriptorResource` variant.
 - **Handles**: 32-bit (24-bit slot index, 8-bit generation from 1; 0 = null). Value private; users test,
@@ -274,6 +298,16 @@ Original hard requirements (from the user's initial specification):
    compiler disables NonSemantic debug info.
 9. Backend sources use `-Wno-missing-field-initializers` (per file): Vulkan structs are initialized
    with designated initializers that leave most members zero.
+10. **`HandleTable::find()`/`remove()` instantiated in a module interface** (inline or not), for a tag of
+   another module (e.g. `gfx::platform::WindowTag`) with a record pointing to a class of the instantiating
+   module, makes that module file unreadable for importers ("failed to read compiled module cluster N: Bad
+   file data", "failed to load binding"). `insert()` alone is fine; a local tag or a record without the
+   pointer is fine. Workaround: table lookups live in module implementation units (Vulkan backend .cpp,
+   tests/platform/fake_platform.cpp; the SDL3/GLFW backends must do the same). Detector:
+   `CompilationFailure.TableLookupInModuleInterfaceCorruptsModuleFile` (tests/toolchain/defects/
+   table_lookup_*). Found by bisecting the fake platform with a script that stubs functions.
+11. stb_image's `<stdio.h>` in a global module fragment conflicts with `import std` (vsnprintf linkage):
+   define `STBI_NO_STDIO` before including it there.
 
 ## 7. Repository layout (current)
 
@@ -292,12 +326,16 @@ gfx/
 ├── source/ CMakeLists.txt (add_subdirectory core, graphics)
 │   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
 │   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp
-│   └── graphics/  gfx: gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, backend_factory.cppm/.cpp,
-│                  interface/ (gfx.interface partitions), shaders/ (shader_tools.cppm,
-│                  spirv_reflection.cpp, shader_compiler.cpp), backends/{vulkan, null, d3d12, metal}/
-└── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), graphics/{backend_factory,
+│   ├── graphics/  gfx: gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, backend_factory.cppm/.cpp,
+│   │              interface/ (gfx.interface partitions), shaders/ (shader_tools.cppm,
+│   │              spirv_reflection.cpp, shader_compiler.cpp), backends/{vulkan, null, d3d12, metal}/
+│   └── platform/  gfx.platform: platform.cppm, enums.cppm (generated Key/KeyCode tables), handles.cppm,
+│                  backend_factory.cppm/.cpp, interface/ (gfx.platform.interface partitions + image.cpp,
+│                  stb_image_implementation.cpp); backends/{sdl3,glfw}/ arrive in P3/P4
+└── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
+            .cppm/.cpp + 6 test files), graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
-            (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface}/
+            (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
 ```
 
 ## 8. Build, test, debug
@@ -331,11 +369,11 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | **P0 (restructure into core + graphics) done, awaiting validation** (277 tests Debug + Release); next P1 (platform foundations). Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | **P0 (restructure) and P1 (platform foundations) done, awaiting validation** (313 tests Debug + Release); next P2 (input system). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **264**, all passing in Debug and Release, 2026-10-15 (90 Vulkan tests:
+Test count at last report: **313**, all passing in Debug and Release, 2026-10-15 (after P1; 90 Vulkan tests:
 NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped: no mesh shading/ray tracing, one hardware queue).
 
 ### Step 2c as built (production interface, 2026-10-14)

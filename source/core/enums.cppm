@@ -35,7 +35,7 @@ enum class ValidationLevel : std::uint8_t
 };
 
 /// @brief Memory heap an allocation failure refers to.
-enum class MemoryDomain : std::uint8_t 
+enum class MemoryDomain : std::uint8_t
 {
     HOST,   ///< System memory.
     DEVICE, ///< GPU memory.
@@ -69,6 +69,10 @@ inline constexpr std::uint32_t MAXIMUM_HANDLE_INDEX = (1U << HANDLE_INDEX_BITS) 
 /// @brief Largest slot generation; generations count from 1 to this value and then wrap to 1.
 inline constexpr std::uint32_t MAXIMUM_HANDLE_GENERATION = (1U << HANDLE_GENERATION_BITS) - 1U;
 
+/// @brief Values of a sparse enumeration below this limit are all checked at compile time for an
+///        enumerator missing from its NAMES table (larger values only through their entries).
+inline constexpr std::size_t SPARSE_VERIFICATION_LIMIT = 1024;
+
 /// @brief FNV-1a offset basis: the hash of the empty string (32 bits).
 inline constexpr std::uint32_t NAME_HASH_OFFSET_BASIS = 2166136261U;
 
@@ -91,7 +95,7 @@ inline constexpr std::chrono::nanoseconds WAIT_INDEFINITELY = std::chrono::nanos
 
 /// @brief Associates an enumerator with its spelling, for diagnostics and formatting.
 template<class Enumeration>
-struct EnumeratorName 
+struct EnumeratorName
 {
     Enumeration value;     ///< Enumerator.
     std::string_view name; ///< Its spelling, without the enumeration name.
@@ -99,7 +103,9 @@ struct EnumeratorName
 
 /// @brief Compile-time description of an enumeration. Specialized for every enumeration of the
 ///        library with `IS_BITMASK` and `NAMES` (the single-bit enumerators of a bitmask, or every
-///        enumerator of a sequential enumeration in declaration order).
+///        enumerator of a sequential enumeration in declaration order). Enumerations whose values have
+///        gaps (e.g. keys numbered by USB HID usage) also set `IS_SPARSE = true` and list their
+///        enumerators in ascending value order.
 template<class Enumeration>
 struct EnumerationTraits;
 
@@ -113,13 +119,23 @@ concept DescribedEnumeration = std::is_enum_v<Enumeration> // Must be an enumera
 
 /// @brief An enumeration whose enumerators are single bits combined with |, & and ^.
 template<class Enumeration>
-concept BitmaskEnumeration = DescribedEnumeration<Enumeration> 
+concept BitmaskEnumeration = DescribedEnumeration<Enumeration>
                                 && EnumerationTraits<Enumeration>::IS_BITMASK;
+
+/// @brief An enumeration whose values have gaps (traits with `IS_SPARSE = true`), e.g. keys numbered
+///        by USB HID usage. NAMES lists its enumerators in ascending value order.
+template<class Enumeration>
+concept SparseEnumeration = DescribedEnumeration<Enumeration>
+                                && !EnumerationTraits<Enumeration>::IS_BITMASK
+                                && requires {
+                                       requires EnumerationTraits<Enumeration>::IS_SPARSE;
+                                   };
 
 /// @brief An enumeration whose enumerators are numbered 0, 1, 2, ... without gaps.
 template<class Enumeration>
-concept SequentialEnumeration = DescribedEnumeration<Enumeration> 
-                                    && !EnumerationTraits<Enumeration>::IS_BITMASK;
+concept SequentialEnumeration = DescribedEnumeration<Enumeration>
+                                    && !EnumerationTraits<Enumeration>::IS_BITMASK
+                                    && !SparseEnumeration<Enumeration>;
 
 /// @brief Number of enumerators of a sequential enumeration (e.g. to size translation tables).
 template<SequentialEnumeration Enumeration>
@@ -144,12 +160,12 @@ struct EnumerationTraits<ValidationLevel>
     };
 };
 
-template<> 
-struct EnumerationTraits<MemoryDomain> 
+template<>
+struct EnumerationTraits<MemoryDomain>
 {
     static constexpr bool IS_BITMASK = false;
     static constexpr std::array NAMES{
-        EnumeratorName{MemoryDomain::HOST, "HOST"}, 
+        EnumeratorName{MemoryDomain::HOST, "HOST"},
         EnumeratorName{MemoryDomain::DEVICE, "DEVICE"},
     };
 };
@@ -175,8 +191,8 @@ struct EnumerationTraits<NativeWindowKind>
 
 /// @brief Union of two sets of bits.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-operator|(Enumeration left, Enumeration right) noexcept -> Enumeration 
+[[nodiscard]] constexpr auto
+operator|(Enumeration left, Enumeration right) noexcept -> Enumeration
 {
     using Underlying = std::underlying_type_t<Enumeration>;
     return static_cast<Enumeration>(static_cast<Underlying>(std::to_underlying(left) | std::to_underlying(right)));
@@ -184,8 +200,8 @@ operator|(Enumeration left, Enumeration right) noexcept -> Enumeration
 
 /// @brief Intersection of two sets of bits.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-operator&(Enumeration left, Enumeration right) noexcept -> Enumeration 
+[[nodiscard]] constexpr auto
+operator&(Enumeration left, Enumeration right) noexcept -> Enumeration
 {
     using Underlying = std::underlying_type_t<Enumeration>;
     return static_cast<Enumeration>(static_cast<Underlying>(std::to_underlying(left) & std::to_underlying(right)));
@@ -193,8 +209,8 @@ operator&(Enumeration left, Enumeration right) noexcept -> Enumeration
 
 /// @brief Bits set in exactly one of the operands.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-operator^(Enumeration left, Enumeration right) noexcept -> Enumeration 
+[[nodiscard]] constexpr auto
+operator^(Enumeration left, Enumeration right) noexcept -> Enumeration
 {
     using Underlying = std::underlying_type_t<Enumeration>;
     return static_cast<Enumeration>(static_cast<Underlying>(std::to_underlying(left) ^ std::to_underlying(right)));
@@ -202,12 +218,12 @@ operator^(Enumeration left, Enumeration right) noexcept -> Enumeration
 
 /// @brief Complement of a set of bits, restricted to the bits named by the enumeration.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-operator~(Enumeration value) noexcept -> Enumeration 
+[[nodiscard]] constexpr auto
+operator~(Enumeration value) noexcept -> Enumeration
 {
     using Underlying = std::underlying_type_t<Enumeration>;
     Underlying named_bits = 0;
-    for (const auto& entry : EnumerationTraits<Enumeration>::NAMES) 
+    for (const auto& entry : EnumerationTraits<Enumeration>::NAMES)
     {
         named_bits = static_cast<Underlying>(named_bits | std::to_underlying(entry.value));
     }
@@ -216,48 +232,48 @@ operator~(Enumeration value) noexcept -> Enumeration
 
 /// @brief Adds the bits of @p right to @p left.
 template<BitmaskEnumeration Enumeration>
-constexpr auto 
-operator|=(Enumeration& left, Enumeration right) noexcept -> Enumeration& 
+constexpr auto
+operator|=(Enumeration& left, Enumeration right) noexcept -> Enumeration&
 {
     return left = left | right;
 }
 
 /// @brief Keeps in @p left only the bits also set in @p right.
 template<BitmaskEnumeration Enumeration>
-constexpr auto 
-operator&=(Enumeration& left, Enumeration right) noexcept -> Enumeration& 
+constexpr auto
+operator&=(Enumeration& left, Enumeration right) noexcept -> Enumeration&
 {
     return left = left & right;
 }
 
 /// @brief Toggles in @p left the bits set in @p right.
 template<BitmaskEnumeration Enumeration>
-constexpr auto 
-operator^=(Enumeration& left, Enumeration right) noexcept -> Enumeration& 
+constexpr auto
+operator^=(Enumeration& left, Enumeration right) noexcept -> Enumeration&
 {
     return left = left ^ right;
 }
 
 /// @brief Whether every bit of @p bits is set in @p value (true when @p bits is empty).
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-has_all(Enumeration value, Enumeration bits) noexcept -> bool 
+[[nodiscard]] constexpr auto
+has_all(Enumeration value, Enumeration bits) noexcept -> bool
 {
     return (value & bits) == bits;
 }
 
 /// @brief Whether at least one bit of @p bits is set in @p value.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-has_any(Enumeration value, Enumeration bits) noexcept -> bool 
+[[nodiscard]] constexpr auto
+has_any(Enumeration value, Enumeration bits) noexcept -> bool
 {
     return std::to_underlying(value & bits) != 0;
 }
 
 /// @brief Whether no bit is set.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-is_empty(Enumeration value) noexcept -> bool 
+[[nodiscard]] constexpr auto
+is_empty(Enumeration value) noexcept -> bool
 {
     return std::to_underlying(value) == 0;
 }
@@ -269,39 +285,52 @@ is_empty(Enumeration value) noexcept -> bool
 /// @brief Spelling of an enumerator of a sequential enumeration, e.g. "R8G8B8A8_UNORM".
 /// @return The spelling, or "<invalid>" for a value that names no enumerator.
 template<SequentialEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-to_string(Enumeration value) noexcept -> std::string_view 
+[[nodiscard]] constexpr auto
+to_string(Enumeration value) noexcept -> std::string_view
 {
     const auto index = static_cast<std::size_t>(std::to_underlying(value));
     const auto& names = EnumerationTraits<Enumeration>::NAMES;
     return index < names.size() ? names[index].name : std::string_view{"<invalid>"};
 }
 
+/// @brief Spelling of an enumerator of a sparse enumeration, e.g. "SPACE".
+/// @return The spelling, or "<invalid>" for a value that names no enumerator.
+template<SparseEnumeration Enumeration>
+[[nodiscard]] constexpr auto
+to_string(Enumeration value) noexcept -> std::string_view
+{
+    // NAMES is sorted by value: binary search.
+    const auto& names = EnumerationTraits<Enumeration>::NAMES;
+    const auto found = std::ranges::lower_bound(names, std::to_underlying(value), {},
+                                                [](const auto& entry) { return std::to_underlying(entry.value); });
+    return found != names.end() && found->value == value ? found->name : std::string_view{"<invalid>"};
+}
+
 /// @brief Spelling of a set of bits, e.g. "VERTEX | FRAGMENT"; "NONE" when empty. Bits that no
 ///        enumerator names are appended in hexadecimal.
 template<BitmaskEnumeration Enumeration>
-[[nodiscard]] constexpr auto 
-to_string(Enumeration value) -> std::string 
+[[nodiscard]] constexpr auto
+to_string(Enumeration value) -> std::string
 {
     using Underlying = std::underlying_type_t<Enumeration>;
     auto remaining = std::to_underlying(value);
 
     // Check for the empty set first, so that we don't print "NONE | 0x..." for a value with no named bits.
-    if (remaining == 0) 
+    if (remaining == 0)
     {
         return "NONE";
     }
 
     // Iterate over the enumerators in order, appending their names to the text if their bit is set.
     std::string text;
-    for (const auto& entry : EnumerationTraits<Enumeration>::NAMES) 
+    for (const auto& entry : EnumerationTraits<Enumeration>::NAMES)
     {
         // Skip enumerators that are not single bits, so that we don't print "ALL_GRAPHICS" when the value is "VERTEX | FRAGMENT | COMPUTE".
         const auto bit = std::to_underlying(entry.value);
-        if ((remaining & bit) != 0) 
+        if ((remaining & bit) != 0)
         {
             // Append a separator if this is not the first enumerator name.
-            if (!text.empty()) 
+            if (!text.empty())
             {
                 text += " | ";
             }
@@ -315,7 +344,7 @@ to_string(Enumeration value) -> std::string
     }
 
     // If any bits remain that no enumerator names, append them in hexadecimal.
-    if (remaining != 0) 
+    if (remaining != 0)
     {
         // Append the remaining bits in hexadecimal, with the most significant digit first. The digits are appended to the front of the string, so that the final string is in big-endian order.
         constexpr std::string_view digits = "0123456789ABCDEF";
@@ -328,7 +357,7 @@ to_string(Enumeration value) -> std::string
         }
 
         // Append a separator if this is not the first enumerator name, then append the hexadecimal representation of the remaining bits.
-        if (!text.empty()) 
+        if (!text.empty())
         {
             text += " | ";
         }
@@ -345,7 +374,8 @@ to_string(Enumeration value) -> std::string
 
 /// @brief The enumerator spelled @p name, as to_string() spells it (e.g. "R8G8B8A8_UNORM").
 /// @return The enumerator, or std::nullopt when no enumerator has that spelling.
-template<SequentialEnumeration Enumeration>
+template<class Enumeration>
+    requires SequentialEnumeration<Enumeration> || SparseEnumeration<Enumeration>
 [[nodiscard]] constexpr auto
 from_string(std::string_view name) noexcept -> std::optional<Enumeration>
 {
@@ -437,51 +467,61 @@ from_string(std::string_view text) noexcept -> std::optional<Enumeration>
 export namespace gfx::enumeration_verification
 {
 
-/// Checks order (sequential: value == index; bitmask: single ascending bits) and unique spellings.
+/// Checks order (sequential: value == index; bitmask: single ascending bits; sparse: ascending values)
+/// and unique spellings.
 template<class Enumeration, std::size_t Count>
-consteval auto 
-names_are_consistent(const std::array<EnumeratorName<Enumeration>, Count>& names, bool is_bitmask) -> bool 
+consteval auto
+names_are_consistent(const std::array<EnumeratorName<Enumeration>, Count>& names,
+                     bool is_bitmask,
+                     bool is_sparse) -> bool
 {
     // The underlying type of the enumeration, converted to unsigned so that we can compare values without worrying about signedness.
     using Unsigned = std::make_unsigned_t<std::underlying_type_t<Enumeration>>;
 
     // Check that every enumerator has a non-empty name, that the enumerators are in the right order, and that no two enumerators have the same name.
-    for (std::size_t index = 0; index < Count; ++index) 
+    for (std::size_t index = 0; index < Count; ++index)
     {
         // The enumerator's value, converted to unsigned so that we can compare values without worrying about signedness.
         const auto value = static_cast<Unsigned>(std::to_underlying(names[index].value));
 
         // Check that the enumerator has a non-empty name.
-        if (names[index].name.empty()) 
+        if (names[index].name.empty())
         {
             return false;
         }
 
         // Check that the enumerators are in the right order, and that no two enumerators have the same name.
-        if (is_bitmask) 
+        if (is_bitmask)
         {
             // Check that the enumerators are in ascending order, and that each enumerator is a single bit (1, 2, 4, 8, ...).
-            if (!std::has_single_bit(value)) 
+            if (!std::has_single_bit(value))
             {
                 return false;
             }
 
             // Check that the enumerators are in ascending order, and that each enumerator is a single bit (1, 2, 4, 8, ...).
-            if (index > 0 && value <= static_cast<Unsigned>(std::to_underlying(names[index - 1].value))) 
+            if (index > 0 && value <= static_cast<Unsigned>(std::to_underlying(names[index - 1].value)))
             {
                 return false;
             }
-        } 
+        }
+        else if (is_sparse) // Sparse enumerations list strictly ascending values.
+        {
+            if (index > 0 && value <= static_cast<Unsigned>(std::to_underlying(names[index - 1].value)))
+            {
+                return false;
+            }
+        }
         else if (value != index) // Sequential enumerations must have values equal to their index.
         {
             return false;
         }
 
         // Iterate over all previous enumerators to check that no two enumerators have the same name.
-        for (std::size_t other = 0; other < index; ++other) 
+        for (std::size_t other = 0; other < index; ++other)
         {
             // Check that no two enumerators have the same name.
-            if (names[other].name == names[index].name) 
+            if (names[other].name == names[index].name)
             {
                 return false;
             }
@@ -494,8 +534,8 @@ names_are_consistent(const std::array<EnumeratorName<Enumeration>, Count>& names
 /// The compiler's own spelling of the enumerator Value: its last `::` component, or an empty view
 /// when Value names no enumerator (GCC and Clang then print a cast such as "(gfx::Format)72").
 template<auto Value>
-consteval auto 
-compiler_spelling() -> std::string_view 
+consteval auto
+compiler_spelling() -> std::string_view
 {
     // The compiler's own spelling of the enumerator Value, as printed by __PRETTY_FUNCTION__.
     const std::string_view signature = __PRETTY_FUNCTION__;
@@ -504,7 +544,7 @@ compiler_spelling() -> std::string_view
     const auto start = signature.find("Value = ");
 
     // If not found, the signature is not in the expected format, so we return an empty view.
-    if (start == std::string_view::npos) 
+    if (start == std::string_view::npos)
     {
         return {};
     }
@@ -514,7 +554,7 @@ compiler_spelling() -> std::string_view
     const auto value = signature.substr(start + 8, end - start - 8);
 
     // If not found, the signature is not in the expected format, so we return an empty view.
-    if (value.find(')') != std::string_view::npos) 
+    if (value.find(')') != std::string_view::npos)
     {
         return {};
     }
@@ -523,15 +563,15 @@ compiler_spelling() -> std::string_view
     const auto separator = value.rfind("::");
 
     // If not found, the signature is not in the expected format, so we return the whole value.
-    return separator == std::string_view::npos ? value 
+    return separator == std::string_view::npos ? value
                                                : value.substr(separator + 2);
 }
 
 /// Every NAMES entry is spelled exactly like its enumerator, and the enumeration declares no
 /// enumerator missing from NAMES (sequential: right after the last entry; bitmask: any other bit).
 template<DescribedEnumeration Enumeration>
-consteval auto 
-names_match_compiler() -> bool 
+consteval auto
+names_match_compiler() -> bool
 {
     using Traits = EnumerationTraits<Enumeration>;
     using Underlying = std::underlying_type_t<Enumeration>;
@@ -545,20 +585,20 @@ names_match_compiler() -> bool
     }(std::make_index_sequence<count>{});
 
     // Check that every bit that is not named by an enumerator is not named by the compiler either. This ensures that the enumeration declares no enumerator missing from NAMES.
-    if constexpr (Traits::IS_BITMASK) 
+    if constexpr (Traits::IS_BITMASK)
     {
         // The number of bits in the underlying type of the enumeration, so that we can check every bit for a missing enumerator.
         constexpr auto bit_count = std::numeric_limits<std::make_unsigned_t<Underlying>>::digits;
 
         // Check that every bit that is not named by an enumerator is not named by the compiler either. This ensures that the enumeration declares no enumerator missing from NAMES.
-        const bool no_unnamed_bit = []<std::size_t... Bit>(std::index_sequence<Bit...>) 
+        const bool no_unnamed_bit = []<std::size_t... Bit>(std::index_sequence<Bit...>)
         {
             constexpr auto named = [] {
                 // The union of all bits named by the enumerators in NAMES, so that we can check every bit for a missing enumerator.
                 std::make_unsigned_t<Underlying> bits = 0;
 
                 // Compute the union of all bits named by the enumerators in NAMES.
-                for (const auto& entry : Traits::NAMES) 
+                for (const auto& entry : Traits::NAMES)
                 {
                     bits = static_cast<std::make_unsigned_t<Underlying>>(bits | static_cast<std::make_unsigned_t<Underlying>>(std::to_underlying(entry.value)));
                 }
@@ -574,8 +614,31 @@ names_match_compiler() -> bool
 
         // The entries in NAMES match the compiler's spelling, and the enumeration declares no enumerator missing from NAMES.
         return entries_match && no_unnamed_bit;
-    } 
-    else 
+    }
+    else if constexpr (SparseEnumeration<Enumeration>)
+    {
+        // Every value below SPARSE_VERIFICATION_LIMIT (and up to just past the largest named one) that NAMES
+        // does not list must name no enumerator; larger values are only checked through their NAMES entries.
+        constexpr auto largest = static_cast<std::size_t>(std::to_underlying(Traits::NAMES[count - 1].value));
+        constexpr auto checked = std::min<std::size_t>(largest + 2, SPARSE_VERIFICATION_LIMIT);
+        const bool no_unnamed_value = []<std::size_t... Value>(std::index_sequence<Value...>)
+        {
+            constexpr auto is_named = [](std::size_t value)
+            {
+                for (const auto& entry : Traits::NAMES)
+                {
+                    if (static_cast<std::size_t>(std::to_underlying(entry.value)) == value)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            return ((is_named(Value) || compiler_spelling<static_cast<Enumeration>(static_cast<Underlying>(Value))>().empty()) && ...);
+        }(std::make_index_sequence<checked>{});
+        return entries_match && no_unnamed_value;
+    }
+    else
     {
         // The entries in NAMES match the compiler's spelling, and the enumeration declares no enumerator missing from NAMES (the last enumerator is right after the last entry in NAMES).
         return entries_match && compiler_spelling<static_cast<Enumeration>(static_cast<Underlying>(count))>().empty();
@@ -589,11 +652,12 @@ consteval auto names_match_compiler() -> bool {
 #endif
 
 template<DescribedEnumeration Enumeration>
-consteval auto 
-verify() -> bool 
+consteval auto
+verify() -> bool
 {
     // Check that the entries in NAMES are consistent with the enumeration, and that they match the compiler's spelling of the enumerators.
-    return names_are_consistent(EnumerationTraits<Enumeration>::NAMES, EnumerationTraits<Enumeration>::IS_BITMASK)
+    return names_are_consistent(EnumerationTraits<Enumeration>::NAMES, EnumerationTraits<Enumeration>::IS_BITMASK,
+                                SparseEnumeration<Enumeration>)
         && names_match_compiler<Enumeration>();
 }
 
@@ -609,21 +673,21 @@ static_assert(verify<NativeWindowKind>(), "EnumerationTraits<NativeWindowKind>::
 
 /// @brief Formats any described gfx enumeration by its spelling (bitmasks as "A | B").
 template<gfx::DescribedEnumeration Enumeration>
-struct std::formatter<Enumeration, char> : std::formatter<std::string_view, char> 
+struct std::formatter<Enumeration, char> : std::formatter<std::string_view, char>
 {
     template<class FormatContext>
-    auto format(Enumeration value, FormatContext& context) const -> FormatContext::iterator 
+    auto format(Enumeration value, FormatContext& context) const -> FormatContext::iterator
     {
         // Check if the enumeration is a bitmask enumeration, and format it accordingly.
-        if constexpr (gfx::BitmaskEnumeration<Enumeration>) 
+        if constexpr (gfx::BitmaskEnumeration<Enumeration>)
         {
-            // For bitmask enumerations, we can format the value as a string by using the to_string function, which will return a string with the names of 
-            // the enumerators that are set in the bitmask, separated by " | ". If no enumerators are set, it will return "0x0". We can then use the 
+            // For bitmask enumerations, we can format the value as a string by using the to_string function, which will return a string with the names of
+            // the enumerators that are set in the bitmask, separated by " | ". If no enumerators are set, it will return "0x0". We can then use the
             // std::formatter for std::string_view to format this string.
             const std::string text = gfx::to_string(value);
             return std::formatter<std::string_view, char>::format(text, context);
-        } 
-        else 
+        }
+        else
         {
             // For non-bitmask enumerations, we can use the underlying type to format the value as a string.
             return std::formatter<std::string_view, char>::format(gfx::to_string(value), context);

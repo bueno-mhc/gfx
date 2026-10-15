@@ -33,18 +33,18 @@ resource_allocation(MemoryLocation location) noexcept -> VmaAllocationCreateInfo
 {
     switch (location)
     {
-    case MemoryLocation::DEVICE_LOCAL: return {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    case MemoryLocation::HOST_UPLOAD:
-        return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
-    case MemoryLocation::HOST_READBACK:
-        return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
-    case MemoryLocation::DEVICE_LOCAL_HOST_VISIBLE:
-        return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-                .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+        case MemoryLocation::DEVICE_LOCAL: return {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        case MemoryLocation::HOST_UPLOAD:
+            return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                    .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+        case MemoryLocation::HOST_READBACK:
+            return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+        case MemoryLocation::DEVICE_LOCAL_HOST_VISIBLE:
+            return {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                    .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
     }
     return {.usage = VMA_MEMORY_USAGE_AUTO};
 }
@@ -55,19 +55,19 @@ memory_allocation(MemoryLocation location) noexcept -> VmaAllocationCreateInfo
 {
     switch (location)
     {
-    case MemoryLocation::DEVICE_LOCAL:
-        return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
-    case MemoryLocation::HOST_UPLOAD:
-        return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
-    case MemoryLocation::HOST_READBACK:
-        return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                .preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT};
-    case MemoryLocation::DEVICE_LOCAL_HOST_VISIBLE:
-        return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-                .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+        case MemoryLocation::DEVICE_LOCAL:
+            return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT, .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+        case MemoryLocation::HOST_UPLOAD:
+            return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                    .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+        case MemoryLocation::HOST_READBACK:
+            return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                    .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                    .preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT};
+        case MemoryLocation::DEVICE_LOCAL_HOST_VISIBLE:
+            return {.flags = VMA_ALLOCATION_CREATE_CAN_ALIAS_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                    .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
     }
     return {};
 }

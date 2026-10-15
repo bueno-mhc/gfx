@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0 (restructure) done, awaiting validation; next P1**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0 (restructure) and P1 (platform foundations) done, awaiting validation; next P2 (input)**. Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -352,7 +352,7 @@ which none of the surveyed engines uses.
   size, work area, content scale, current video mode with refresh rate), `video_modes(handle)`. Monitors
   stay owned by the platform; a disconnected monitor's handle becomes stale (generation) and a
   `MONITOR_DISCONNECTED` event says so.
-- **Cursors**: `Platform::create_cursor(CursorShape)` (`ARROW`, `TEXT`, `WAIT`, `PROGRESS`, `CROSSHAIR`,
+- **Cursors**: `Platform::create_cursor(CursorShape)` (`ARROW`, `I_BEAM`, `WAIT`, `PROGRESS`, `CROSSHAIR`,
   `POINTER`, `RESIZE_EAST_WEST`, `RESIZE_NORTH_SOUTH`, `RESIZE_NORTHWEST_SOUTHEAST`,
   `RESIZE_NORTHEAST_SOUTHWEST`, `MOVE`, `NOT_ALLOWED`) or from RGBA with a hot spot;
   `Window::set_cursor(handle)`, `set_cursor_mode(CursorMode::NORMAL | HIDDEN | CONFINED | CAPTURED)`
