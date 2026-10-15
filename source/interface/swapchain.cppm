@@ -22,7 +22,22 @@ struct SwapchainDescription
     std::uint32_t minimum_image_count = 3;                ///< Images in flight.
     ImageUsage usage = ImageUsage::COLOR_ATTACHMENT;      ///< Usage of the images.
     QueueType present_queue = QueueType::GRAPHICS;        ///< Queue type that presents.
+    std::uint32_t maximum_frame_latency = 2;              ///< Frames queued for presentation before
+                                                          ///< wait_for_frame_latency() blocks (input latency).
     std::string_view debug_name{};                        ///< Name shown by debugging tools.
+};
+
+/// @brief Mastering display and content light levels of HDR output (HDR10 metadata).
+struct HdrMetadata
+{
+    std::array<float, 2> display_primary_red{0.708F, 0.292F};   ///< CIE 1931 xy chromaticity.
+    std::array<float, 2> display_primary_green{0.170F, 0.797F}; ///< CIE 1931 xy chromaticity.
+    std::array<float, 2> display_primary_blue{0.131F, 0.046F};  ///< CIE 1931 xy chromaticity.
+    std::array<float, 2> white_point{0.3127F, 0.3290F};          ///< CIE 1931 xy chromaticity.
+    float maximum_luminance = 1000.0F;                           ///< Nits.
+    float minimum_luminance = 0.001F;                            ///< Nits.
+    float maximum_content_light_level = 1000.0F;                 ///< Nits.
+    float maximum_frame_average_light_level = 400.0F;            ///< Nits.
 };
 
 /// @brief An image acquired from a swapchain, to render into and then present.
@@ -63,6 +78,14 @@ public:
 
     /// @brief Recreates the images with a new size (after the window was resized).
     virtual void resize(Extent extent) = 0;
+
+    /// @brief Blocks until fewer than SwapchainDescription::maximum_frame_latency frames wait for
+    ///        presentation: call it before sampling input, to keep latency low (DXGI frame latency
+    ///        waitable object, VK_KHR_present_wait).
+    [[nodiscard]] virtual auto wait_for_frame_latency(std::chrono::nanoseconds timeout = WAIT_INDEFINITELY) -> WaitStatus = 0;
+
+    /// @brief Describes the HDR content presented (HDR color spaces).
+    virtual void set_hdr_metadata(const HdrMetadata& metadata) = 0;
 };
 
 auto
@@ -77,6 +100,18 @@ void
 Swapchain::resize(Extent /*extent*/)
 {
     throw_not_implemented("Swapchain::resize");
+}
+
+auto
+Swapchain::wait_for_frame_latency(std::chrono::nanoseconds /*timeout*/) -> WaitStatus
+{
+    throw_not_implemented("Swapchain::wait_for_frame_latency");
+}
+
+void
+Swapchain::set_hdr_metadata(const HdrMetadata& /*metadata*/)
+{
+    throw_not_implemented("Swapchain::set_hdr_metadata");
 }
 
 } // namespace gfx

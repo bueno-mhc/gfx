@@ -66,7 +66,7 @@
                 { "label": "enums      - EnumsTest.*", "value": "unit/enums/gfx_enums_tests.exe" },
                 { "label": "errors     - ErrorsTest.*", "value": "unit/errors/gfx_errors_tests.exe" },
                 { "label": "handles    - HandlesTest.*", "value": "unit/handles/gfx_handles_tests.exe" },
-                { "label": "interface  - RecorderTest.*, DeviceTest.*, FrameCommandPoolsTest.*, SynchronizationTest.*", "value": "unit/interface/gfx_interface_tests.exe" },
+                { "label": "interface  - RecorderTest.*, DeviceTest.*, BindlessTest.*, PipelineValidationTest.*, FrameResourcesTest.*, FrameCommandPoolsTest.*, ...", "value": "unit/interface/gfx_interface_tests.exe" },
                 { "label": "shader layout - ShaderValidationTest.*, PipelineLayoutDefinitionTest.*, ShaderModuleDescriptionTest.*", "value": "unit/shader_layout/gfx_shader_layout_tests.exe" },
                 { "label": "platform   - PlatformHeadersTest.*", "value": "unit/platform/gfx_platform_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }

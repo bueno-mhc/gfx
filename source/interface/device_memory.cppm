@@ -19,6 +19,25 @@ struct DeviceMemoryDescription
     std::string_view debug_name{};                         ///< Name shown by debugging tools.
 };
 
+/// @brief Budget and usage of one memory heap (Device::memory_budget(), DeviceFeature::MEMORY_BUDGET):
+///        how much this process may use before the driver starts evicting or failing allocations.
+struct MemoryHeapBudget
+{
+    MemoryProperty properties = MemoryProperty::NONE; ///< DEVICE_LOCAL for video memory, NONE for system memory.
+    std::uint64_t size = 0;                           ///< Bytes of the heap.
+    std::uint64_t budget = 0;                         ///< Bytes this process may use (shared with other processes).
+    std::uint64_t usage = 0;                          ///< Bytes this process uses.
+};
+
+/// @brief The library's own allocations (Device::memory_statistics()).
+struct MemoryStatistics
+{
+    std::uint64_t block_count = 0;      ///< Memory blocks allocated from the driver.
+    std::uint64_t allocation_count = 0; ///< Sub-allocations placed in them (buffers, images, ...).
+    std::uint64_t block_bytes = 0;      ///< Bytes of the blocks.
+    std::uint64_t allocation_bytes = 0; ///< Bytes of the sub-allocations (the rest is free or fragmentation).
+};
+
 /// @brief A block of device memory. Buffers and images placed in it (BufferDescription::placement,
 ///        ImageDescription::placement) may alias each other, as render graphs do with transient resources.
 class DeviceMemory : public BackendObject

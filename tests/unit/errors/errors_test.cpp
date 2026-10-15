@@ -75,6 +75,20 @@ TEST(ErrorsTest, ErrorsCanBeCaughtThroughTheBaseClass)
                  std::runtime_error);
 }
 
+TEST(ErrorsTest, DeviceLossReportsTheGpuBreadcrumbs)
+{
+    const DeviceLostError error({.backend = BackendKind::VULKAN,
+                                 .operation = "Queue::submit",
+                                 .details = "VK_ERROR_DEVICE_LOST",
+                                 .active_markers = {"frame 12", "shadows", "cascade 2"},
+                                 .crash_report_path = "crashes/0001.nv-gpudmp"});
+    EXPECT_EQ(error.active_markers().size(), 3U);
+    EXPECT_EQ(error.crash_report_path(), "crashes/0001.nv-gpudmp");
+    const std::string_view message = error.what();
+    EXPECT_NE(message.find("\n  GPU was inside: frame 12 > shadows > cascade 2"), std::string_view::npos) << message;
+    EXPECT_NE(message.find("\n  Crash report: crashes/0001.nv-gpudmp"), std::string_view::npos) << message;
+}
+
 TEST(ErrorsTest, BackendIndependentErrorsUseTheLibraryPrefix) 
 {
     const InvalidUsageError error({

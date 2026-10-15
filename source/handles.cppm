@@ -291,6 +291,34 @@ struct SwapchainTag {
     static constexpr QueueCapability USABLE_ON = QueueCapability::NONE;
 };
 
+/// @brief Tag of BufferViewHandle.
+struct BufferViewTag
+{
+    static constexpr std::string_view NAME = "BufferView";
+    static constexpr QueueCapability USABLE_ON = QueueCapability::GRAPHICS | QueueCapability::COMPUTE;
+};
+
+/// @brief Tag of AccelerationStructureHandle.
+struct AccelerationStructureTag
+{
+    static constexpr std::string_view NAME = "AccelerationStructure";
+    static constexpr QueueCapability USABLE_ON = QueueCapability::GRAPHICS | QueueCapability::COMPUTE;
+};
+
+/// @brief Tag of RayTracingPipelineHandle.
+struct RayTracingPipelineTag
+{
+    static constexpr std::string_view NAME = "RayTracingPipeline";
+    static constexpr QueueCapability USABLE_ON = QueueCapability::COMPUTE;
+};
+
+/// @brief Tag of PipelineCacheHandle.
+struct PipelineCacheTag
+{
+    static constexpr std::string_view NAME = "PipelineCache";
+    static constexpr QueueCapability USABLE_ON = QueueCapability::NONE;
+};
+
 // ================================================================================================= Handle types
 
 using BufferHandle              = Handle<BufferTag>;              ///< Names a Buffer.
@@ -314,6 +342,10 @@ using TimelineSemaphoreHandle   = Handle<TimelineSemaphoreTag>;   ///< Names a T
 using EventHandle               = Handle<EventTag>;               ///< Names an Event.
 using QueryPoolHandle           = Handle<QueryPoolTag>;           ///< Names a QueryPool.
 using SwapchainHandle           = Handle<SwapchainTag>;           ///< Names a Swapchain.
+using BufferViewHandle          = Handle<BufferViewTag>;          ///< Names a BufferView.
+using AccelerationStructureHandle = Handle<AccelerationStructureTag>; ///< Names an AccelerationStructure.
+using RayTracingPipelineHandle  = Handle<RayTracingPipelineTag>;  ///< Names a RayTracingPipeline.
+using PipelineCacheHandle       = Handle<PipelineCacheTag>;       ///< Names a PipelineCache.
 
 // ================================================================================================= Concepts
 

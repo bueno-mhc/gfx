@@ -6,6 +6,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import :backend_object;
+import :bindless;
 import :common_types;
 
 export namespace gfx
@@ -19,6 +20,8 @@ struct ImageViewDescription
     Format format = Format::UNDEFINED;                  ///< View format (UNDEFINED = the image's format).
     ComponentMapping components{};                      ///< Component swizzle.
     ImageSubresourceRange range{};                      ///< Mip levels, layers and aspects viewed.
+    bool bindless = true;                               ///< Register it in the bindless table (as a sampled image
+                                                        ///< if the image is SAMPLED, as a storage image if STORAGE).
     std::string_view debug_name{};                      ///< Name shown by debugging tools.
 };
 
@@ -40,6 +43,12 @@ public:
 
     /// @brief Viewed range.
     [[nodiscard]] virtual auto range() const noexcept -> ImageSubresourceRange = 0;
+
+    /// @brief Index in the bindless table's sampled images (SAMPLED image, bindless = true; invalid otherwise).
+    [[nodiscard]] virtual auto sampled_index() const noexcept -> SampledImageIndex = 0;
+
+    /// @brief Index in the bindless table's storage images (STORAGE image, bindless = true; invalid otherwise).
+    [[nodiscard]] virtual auto storage_index() const noexcept -> StorageImageIndex = 0;
 };
 
 } // namespace gfx

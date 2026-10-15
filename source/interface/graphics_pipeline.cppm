@@ -7,6 +7,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import :backend_object;
+import :shader_module;
 
 export namespace gfx
 {
@@ -55,6 +56,7 @@ struct RasterizationState
     float depth_bias_constant = 0.0F;                     ///< Constant depth bias.
     float depth_bias_slope = 0.0F;                        ///< Slope-scaled depth bias.
     float line_width = 1.0F;                              ///< Line width (DeviceFeature::WIDE_LINES for != 1).
+    bool conservative = false;                            ///< Conservative rasterization (DeviceFeature::CONSERVATIVE_RASTERIZATION).
 };
 
 /// @brief Depth and stencil tests.
@@ -66,6 +68,9 @@ struct DepthStencilState
     bool stencil_test = false;                                 ///< Test stencil.
     StencilOperationState front{};                             ///< Front faces.
     StencilOperationState back{};                              ///< Back faces.
+    bool depth_bounds_test = false;                            ///< Depth bounds test (DeviceFeature::DEPTH_BOUNDS).
+    float minimum_depth_bound = 0.0F;                          ///< Lower depth bound.
+    float maximum_depth_bound = 1.0F;                          ///< Upper depth bound.
 };
 
 /// @brief Blending of one color attachment.
@@ -89,7 +94,12 @@ struct GraphicsPipelineState
     DepthStencilState depth_stencil{};                             ///< Depth and stencil tests.
     bool alpha_to_coverage = false;                                ///< Alpha to coverage (multisampling).
     std::span<const ColorBlendAttachment> color_blend{};           ///< Per attachment (empty = no blending).
-    std::array<float, 4> blend_constants{};                        ///< BlendFactor::CONSTANT_* values.
+    std::array<float, 4> blend_constants{};                        ///< Initial BlendFactor::CONSTANT_* values.
+    DynamicState dynamic_states = DynamicState::NONE;              ///< State set while recording (fewer pipelines).
+    bool primitive_restart = false;                                ///< A maximal index restarts strips and fans.
+    std::uint32_t sample_mask = 0xFFFFFFFFU;                       ///< Samples written.
+    ShadingRate shading_rate = ShadingRate::ONE_BY_ONE;            ///< Pipeline shading rate (DeviceFeature::VARIABLE_RATE_SHADING).
+    std::uint32_t patch_control_points = 0;                        ///< Vertices per patch (tessellation pipelines).
     std::string_view debug_name{};                                 ///< Name shown by debugging tools.
 };
 
@@ -97,16 +107,25 @@ struct GraphicsPipelineState
 ///        the vertex attributes and the color formats (validate_graphics_pipeline()).
 struct GraphicsPipelineDescription
 {
-    PipelineLayoutHandle layout{};                          ///< Pipeline layout.
-    ShaderModuleHandle vertex_shader{};                     ///< Vertex shader module.
+    PipelineLayoutHandle layout{};                          ///< Pipeline layout (null = the bindless layout).
+    ShaderModuleHandle vertex_shader{};                     ///< Vertex shader (null for mesh pipelines).
     ShaderModuleHandle fragment_shader{};                   ///< Fragment shader module (null = depth only).
-    std::span<const VertexInputBinding> vertex_bindings{};  ///< Vertex buffer bindings.
+    ShaderModuleHandle task_shader{};                       ///< Task shader of a mesh pipeline (optional).
+    ShaderModuleHandle mesh_shader{};                       ///< Mesh shader (DeviceFeature::MESH_SHADER; replaces vertex input).
+    ShaderModuleHandle geometry_shader{};                   ///< Geometry shader (DeviceFeature::GEOMETRY_SHADER).
+    ShaderModuleHandle tessellation_control_shader{};       ///< Tessellation control shader (TESSELLATION_SHADER).
+    ShaderModuleHandle tessellation_evaluation_shader{};    ///< Tessellation evaluation shader (TESSELLATION_SHADER).
+    std::span<const VertexInputBinding> vertex_bindings{};  ///< Vertex buffer bindings (none for bindless vertex pulling).
     std::span<const VertexInputAttribute> vertex_attributes{}; ///< Vertex attributes.
     std::span<const Format> color_formats{};                ///< Formats of the color attachments.
     Format depth_format = Format::UNDEFINED;                ///< Depth attachment format (UNDEFINED = none).
     Format stencil_format = Format::UNDEFINED;              ///< Stencil attachment format (UNDEFINED = none).
     SampleCount samples = SampleCount::ONE;                 ///< Samples per pixel.
+    std::uint32_t view_mask = 0;                            ///< Views rendered at once (DeviceFeature::MULTIVIEW; 0 = one).
     GraphicsPipelineState state{};                          ///< Fixed-function state.
+    std::span<const SpecializationConstant> specialization_constants{}; ///< Constant values of every stage.
+    PipelineCacheHandle cache{};                            ///< Cache to use (null = the device's own).
+    PipelineCreationMode creation_mode = PipelineCreationMode::IMMEDIATE; ///< Compile now or in the background.
 };
 
 /// @brief Vertex and fragment shaders with fixed-function state; a peer of ComputePipeline.
@@ -118,6 +137,19 @@ public:
 
     /// @brief Pipeline layout.
     [[nodiscard]] virtual auto layout() const noexcept -> PipelineLayoutHandle = 0;
+
+    /// @brief Whether it can be bound (see PipelineCreationMode::ASYNCHRONOUS).
+    [[nodiscard]] virtual auto status() const noexcept -> PipelineStatus = 0;
+
+    /// @brief Blocks until compiled.
+    /// @throws The compilation error when it failed.
+    virtual void wait() const = 0;
 };
+
+void
+GraphicsPipeline::wait() const
+{
+    throw_not_implemented("GraphicsPipeline::wait");
+}
 
 } // namespace gfx

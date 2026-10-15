@@ -13,8 +13,8 @@ export module gfx.enums;
 import std;
 
 // Set to 1 by CMake for Debug builds (source/CMakeLists.txt); everything else is a Release build.
-#ifndef GFX_SHADER_HOT_RELOAD
-#define GFX_SHADER_HOT_RELOAD 0
+#ifndef GFX_DEBUG_BUILD
+#define GFX_DEBUG_BUILD 0
 #endif
 
 export namespace gfx 
@@ -102,6 +102,15 @@ enum class DeviceFeature : std::uint8_t
     TEXTURE_COMPRESSION_ETC2,  ///< ETC2 compressed formats.
     TEXTURE_COMPRESSION_ASTC,  ///< ASTC LDR compressed formats.
     PRESENTATION,              ///< Presenting images to a window surface.
+    EXTENDED_DYNAMIC_STATE,    ///< Cull mode, front face, topology and depth/stencil tests set while recording.
+    DEPTH_BOUNDS,              ///< Depth bounds test.
+    MULTIVIEW,                 ///< Rendering several views (view mask) in one pass.
+    VARIABLE_RATE_SHADING,     ///< Fragment shading rates coarser than one per pixel.
+    CONSERVATIVE_RASTERIZATION,///< Rasterizing every pixel a primitive touches.
+    RAY_QUERY,                 ///< Inline ray tracing from any shader stage.
+    SAMPLER_FILTER_MINMAX,     ///< Minimum/maximum sampler reduction.
+    MEMORY_BUDGET,             ///< Memory budget and usage queries per heap.
+    GPU_CRASH_MARKERS,         ///< GPU-written markers that locate a crash (breadcrumbs).
 };
 
 // =================================================================================================
@@ -259,6 +268,9 @@ enum class BufferUsage : std::uint16_t
     VERTEX                = 1U << 7, ///< Bound as a vertex buffer.
     INDIRECT              = 1U << 8, ///< Source of indirect draw and dispatch arguments.
     SHADER_DEVICE_ADDRESS = 1U << 9, ///< Its GPU address may be queried and used in shaders.
+    ACCELERATION_STRUCTURE_STORAGE     = 1U << 10, ///< Holds acceleration structures.
+    ACCELERATION_STRUCTURE_BUILD_INPUT = 1U << 11, ///< Vertices, indices, transforms or instances of builds.
+    SHADER_BINDING_TABLE               = 1U << 12, ///< Holds a ray tracing shader binding table.
 };
 
 /// @brief Dimensionality of an image.
@@ -270,7 +282,7 @@ enum class ImageDimension : std::uint8_t
 };
 
 /// @brief Ways an image may be used. Bitmask.
-enum class ImageUsage : std::uint8_t 
+enum class ImageUsage : std::uint16_t 
 {
     NONE                     = 0,      ///< No usage.
     TRANSFER_SOURCE          = 1U << 0, ///< Source of copy and blit commands.
@@ -281,6 +293,7 @@ enum class ImageUsage : std::uint8_t
     DEPTH_STENCIL_ATTACHMENT = 1U << 5, ///< Rendered to as a depth/stencil attachment.
     TRANSIENT_ATTACHMENT     = 1U << 6, ///< Attachment whose contents never leave the GPU tile memory.
     INPUT_ATTACHMENT         = 1U << 7, ///< Read as an input attachment in fragment shaders.
+    SHADING_RATE_ATTACHMENT  = 1U << 8, ///< Holds per-region fragment shading rates.
 };
 
 /// @brief Optional behaviors requested when creating an image. Bitmask.
@@ -290,6 +303,7 @@ enum class ImageCreationOption : std::uint8_t
     CUBE_COMPATIBLE = 1U << 0, ///< Cube and cube-array views may be created (six layers per cube).
     MUTABLE_FORMAT  = 1U << 1, ///< Views may use a different but compatible format.
     ALIASED         = 1U << 2, ///< Shares memory with other resources (render graph aliasing).
+    SPARSE_RESIDENCY = 1U << 3, ///< Partially resident: memory is bound per tile (Queue::bind_sparse()).
 };
 
 /// @brief Type of an image view.
@@ -336,6 +350,7 @@ enum class ImageLayout : std::uint8_t
     TRANSFER_SOURCE,          ///< Source of copy and blit commands.
     TRANSFER_DESTINATION,     ///< Destination of copy, blit and clear commands.
     PRESENT_SOURCE,           ///< Presentation to a swapchain.
+    SHADING_RATE_ATTACHMENT,  ///< Read as a fragment shading rate attachment.
 };
 
 /// @brief Source of each component of an image view.
@@ -384,6 +399,7 @@ enum class PipelineStage : std::uint32_t
     ACCELERATION_STRUCTURE_BUILD   = 1U << 16, ///< Acceleration structure builds.
     ALL_GRAPHICS                   = 1U << 17, ///< Every graphics stage.
     ALL_COMMANDS                   = 1U << 18, ///< Every stage of every command.
+    SHADING_RATE_ATTACHMENT        = 1U << 19, ///< Reading the fragment shading rate attachment.
 };
 
 /// @brief Memory accesses, used by barriers (synchronization2 model). Bitmask.
@@ -410,6 +426,7 @@ enum class MemoryAccess : std::uint32_t
     MEMORY_WRITE                   = 1U << 17, ///< Any write.
     ACCELERATION_STRUCTURE_READ    = 1U << 18, ///< Acceleration structure reads.
     ACCELERATION_STRUCTURE_WRITE   = 1U << 19, ///< Acceleration structure writes.
+    SHADING_RATE_ATTACHMENT_READ   = 1U << 20, ///< Fragment shading rate attachment reads.
 };
 
 /// @brief High-level state of a resource between passes. Each state maps to the pipeline stages,
@@ -445,6 +462,13 @@ enum class ResourceState : std::uint8_t
     HOST_READ,                         ///< Read by the CPU through mapped memory.
     HOST_WRITE,                        ///< Written by the CPU through mapped memory.
     PRESENT,                           ///< Presented by a swapchain.
+    SHADER_SAMPLED_READ,               ///< Sampled by any shader stage (bindless textures).
+    SHADER_STORAGE_READ,               ///< Storage resource read by any shader stage (bindless).
+    SHADER_STORAGE_READ_WRITE,         ///< Storage resource read and written by any shader stage (bindless).
+    ACCELERATION_STRUCTURE_BUILD_INPUT,///< Geometry, transforms or instances read by acceleration structure builds.
+    ACCELERATION_STRUCTURE_WRITE,      ///< Acceleration structure being built, updated or copied.
+    ACCELERATION_STRUCTURE_READ,       ///< Acceleration structure traced by shaders or read by builds and copies.
+    SHADING_RATE_ATTACHMENT,           ///< Fragment shading rate attachment.
 };
 
 /// @brief Result of waiting on a fence or semaphore with a timeout.
@@ -671,6 +695,7 @@ enum class ShaderSourceFormat : std::uint8_t
 {
     GLSL,  ///< GLSL source text, compiled to SPIR-V at run time (Debug builds only; see SHADER_HOT_RELOAD).
     SPIRV, ///< SPIR-V binary compiled at build time (gfx_add_shaders) or by any other compiler.
+    HLSL,  ///< HLSL source text, compiled to SPIR-V at run time with DXC (Debug builds only).
 };
 
 /// @brief Kind of resource bound to a descriptor.
@@ -703,8 +728,9 @@ enum class DescriptorBindingOption : std::uint8_t
 /// @brief Pipeline category a descriptor set or push constants are bound to.
 enum class PipelineBindPoint : std::uint8_t 
 {
-    GRAPHICS, ///< Graphics pipelines.
-    COMPUTE,  ///< Compute pipelines.
+    GRAPHICS,    ///< Graphics pipelines.
+    COMPUTE,     ///< Compute pipelines.
+    RAY_TRACING, ///< Ray tracing pipelines.
 };
 
 // =================================================================================================
@@ -732,6 +758,7 @@ enum class QueryType : std::uint8_t
     OCCLUSION,           ///< Number of samples passing the depth/stencil tests.
     PIPELINE_STATISTICS, ///< Counters selected with PipelineStatistic.
     TIMESTAMP,           ///< GPU timestamps.
+    ACCELERATION_STRUCTURE_COMPACTED_SIZE, ///< Size an acceleration structure takes once compacted.
 };
 
 /// @brief Counters collected by pipeline statistics queries. Bitmask.
@@ -817,6 +844,8 @@ enum class LayoutMismatch : std::uint8_t
     FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT,///< A fragment shader output has no color attachment at its location.
     FRAGMENT_OUTPUT_TYPE_MISMATCH,     ///< A color attachment's format does not match the output's type.
     CONFLICTING_BINDINGS,              ///< Two shaders declare the same (set, binding) with different types.
+    STAGE_INTERFACE_MISMATCH,          ///< A stage reads a location the previous stage does not write, or with another type.
+    UNKNOWN_SPECIALIZATION_CONSTANT,   ///< A pipeline sets a specialization constant no shader declares.
 };
 
 /// @brief Outcome of reloading one changed shader file (Debug builds).
@@ -825,6 +854,177 @@ enum class ShaderReloadResult : std::uint8_t
     RELOADED,           ///< The new code replaced the old one; pipelines using it were rebuilt.
     COMPILATION_FAILED, ///< The file does not compile; the old code stays in use.
     LAYOUT_MISMATCH,    ///< The new code no longer fits a pipeline layout using it; the old code stays in use.
+};
+
+// =================================================================================================
+// Validation, bindless resources, pipelines, ray tracing and diagnostics
+// =================================================================================================
+
+/// @brief How much the library checks. Levels are ordered: each includes the checks of the previous one.
+enum class ValidationLevel : std::uint8_t
+{
+    NONE,     ///< No checks: invalid usage is undefined behavior (the native API's own rules apply).
+    CREATION, ///< Checks when objects are created and recordings begin; nothing per command (Release default).
+    COMMANDS, ///< Also checks every command, descriptor write and push-constant write (Debug default).
+};
+
+/// @brief Kind of resource in the bindless table. The enumerator's value is its binding index in
+///        descriptor set BINDLESS_SET.
+enum class BindlessResourceKind : std::uint8_t
+{
+    SAMPLED_IMAGE,          ///< Images read through samplers (GLSL texture2D[], HLSL Texture2D[]).
+    STORAGE_IMAGE,          ///< Images read and written by shaders (GLSL image2D[], HLSL RWTexture2D[]).
+    SAMPLER,                ///< Samplers (GLSL sampler[], HLSL SamplerState[]).
+    STORAGE_BUFFER,         ///< Buffers read and written by shaders (GLSL buffer blocks, HLSL ByteAddressBuffer[]).
+    ACCELERATION_STRUCTURE, ///< Top-level acceleration structures for ray queries and ray tracing.
+};
+
+/// @brief Whether a pipeline can be bound.
+enum class PipelineStatus : std::uint8_t
+{
+    READY,              ///< Compiled; can be bound.
+    COMPILING,          ///< Still compiling in the background (PipelineCreationMode::ASYNCHRONOUS).
+    COMPILATION_FAILED, ///< Compilation failed; wait() rethrows the error.
+};
+
+/// @brief When a pipeline is compiled.
+enum class PipelineCreationMode : std::uint8_t
+{
+    IMMEDIATE,    ///< During the creation call.
+    ASYNCHRONOUS, ///< In the background, on DeviceDescription::task_scheduler; poll status() before binding.
+};
+
+/// @brief Pipeline state set while recording instead of baked into the pipeline. Viewport, scissor,
+///        stencil reference and blend constants are always dynamic. Bitmask.
+enum class DynamicState : std::uint16_t
+{
+    NONE               = 0,        ///< Nothing beyond the always-dynamic state.
+    DEPTH_BIAS         = 1U << 0,  ///< RenderingCommands::set_depth_bias().
+    DEPTH_BOUNDS       = 1U << 1,  ///< RenderingCommands::set_depth_bounds() (DeviceFeature::DEPTH_BOUNDS).
+    LINE_WIDTH         = 1U << 2,  ///< RenderingCommands::set_line_width() (DeviceFeature::WIDE_LINES).
+    CULL_MODE          = 1U << 3,  ///< set_cull_mode() (DeviceFeature::EXTENDED_DYNAMIC_STATE).
+    FRONT_FACE         = 1U << 4,  ///< set_front_face() (EXTENDED_DYNAMIC_STATE).
+    PRIMITIVE_TOPOLOGY = 1U << 5,  ///< set_primitive_topology() within the pipeline's topology class (EXTENDED_DYNAMIC_STATE).
+    DEPTH_TEST         = 1U << 6,  ///< set_depth_test() (EXTENDED_DYNAMIC_STATE).
+    DEPTH_WRITE        = 1U << 7,  ///< set_depth_write() (EXTENDED_DYNAMIC_STATE).
+    DEPTH_COMPARE      = 1U << 8,  ///< set_depth_compare() (EXTENDED_DYNAMIC_STATE).
+    STENCIL_TEST       = 1U << 9,  ///< set_stencil_test() (EXTENDED_DYNAMIC_STATE).
+    STENCIL_OPERATION  = 1U << 10, ///< set_stencil_operation() (EXTENDED_DYNAMIC_STATE).
+};
+
+/// @brief Faces a stencil setting applies to. Bitmask.
+enum class StencilFace : std::uint8_t
+{
+    NONE           = 0,             ///< No face.
+    FRONT          = 1U << 0,       ///< Front-facing primitives.
+    BACK           = 1U << 1,       ///< Back-facing primitives.
+    FRONT_AND_BACK = FRONT | BACK,  ///< Both.
+};
+
+/// @brief Level of an acceleration structure.
+enum class AccelerationStructureType : std::uint8_t
+{
+    TOP_LEVEL,    ///< Instances of bottom-level structures; what shaders trace.
+    BOTTOM_LEVEL, ///< Triangles or bounding boxes.
+};
+
+/// @brief Trade-offs of an acceleration structure build. Bitmask.
+enum class AccelerationStructureBuildOption : std::uint8_t
+{
+    NONE              = 0,      ///< Driver defaults.
+    ALLOW_UPDATE      = 1U << 0, ///< Later builds may update it in place (animated geometry).
+    ALLOW_COMPACTION  = 1U << 1, ///< It may be copied into a smaller, compacted structure.
+    PREFER_FAST_TRACE = 1U << 2, ///< Optimize for tracing speed.
+    PREFER_FAST_BUILD = 1U << 3, ///< Optimize for build speed.
+    MINIMIZE_MEMORY   = 1U << 4, ///< Optimize for size.
+};
+
+/// @brief Whether a build creates a structure or refits an existing one.
+enum class AccelerationStructureBuildMode : std::uint8_t
+{
+    BUILD,  ///< Build from scratch.
+    UPDATE, ///< Refit the source structure (built with ALLOW_UPDATE) to moved geometry.
+};
+
+/// @brief How rays treat a geometry. Bitmask.
+enum class GeometryOption : std::uint8_t
+{
+    NONE                  = 0,      ///< Any-hit shaders run.
+    OPAQUE_GEOMETRY       = 1U << 0, ///< No any-hit shader runs for it.
+    NO_DUPLICATE_ANY_HIT  = 1U << 1, ///< Its any-hit shader runs at most once per primitive and ray.
+};
+
+/// @brief Per-instance options of a top-level acceleration structure (same bits in Vulkan and
+///        Direct3D 12). Bitmask.
+enum class AccelerationStructureInstanceOption : std::uint8_t
+{
+    NONE                      = 0,      ///< No option.
+    DISABLE_TRIANGLE_CULLING  = 1U << 0, ///< Back-facing triangles are not culled.
+    FLIP_TRIANGLE_FACING      = 1U << 1, ///< Clockwise triangles face forward.
+    FORCE_OPAQUE_GEOMETRY     = 1U << 2, ///< Treat every geometry as opaque.
+    FORCE_NON_OPAQUE_GEOMETRY = 1U << 3, ///< Treat every geometry as non-opaque.
+};
+
+/// @brief How an acceleration structure is copied.
+enum class AccelerationStructureCopyMode : std::uint8_t
+{
+    CLONE,   ///< Identical copy.
+    COMPACT, ///< Copy into the size reported by an ACCELERATION_STRUCTURE_COMPACTED_SIZE query.
+};
+
+/// @brief Kind of shader group of a ray tracing pipeline.
+enum class RayTracingShaderGroupType : std::uint8_t
+{
+    GENERAL,        ///< One ray generation, miss or callable shader.
+    TRIANGLES_HIT,  ///< Closest-hit and/or any-hit shaders for triangles.
+    PROCEDURAL_HIT, ///< Intersection shader plus optional closest-hit and any-hit shaders.
+};
+
+/// @brief GPU crash diagnostics a device collects. Bitmask.
+enum class CrashDiagnostic : std::uint8_t
+{
+    NONE          = 0,      ///< None.
+    BREADCRUMBS   = 1U << 0, ///< Debug labels are also written by the GPU as it progresses, so a device loss
+                             ///< reports the labels that were active (DeviceFeature::GPU_CRASH_MARKERS).
+    VENDOR_REPORT = 1U << 1, ///< Vendor crash dumps (NVIDIA Aftermath, Direct3D 12 DRED) when available.
+};
+
+/// @brief Frame capture tool attached to the process.
+enum class CaptureTool : std::uint8_t
+{
+    NONE,            ///< No capture tool.
+    RENDERDOC,       ///< RenderDoc.
+    PIX,             ///< Microsoft PIX.
+    NSIGHT_GRAPHICS, ///< NVIDIA Nsight Graphics.
+};
+
+/// @brief How a sampler combines the texels of its footprint.
+enum class SamplerReductionMode : std::uint8_t
+{
+    WEIGHTED_AVERAGE, ///< Filtering (the usual behavior).
+    MINIMUM,          ///< Component-wise minimum (DeviceFeature::SAMPLER_FILTER_MINMAX).
+    MAXIMUM,          ///< Component-wise maximum (DeviceFeature::SAMPLER_FILTER_MINMAX).
+};
+
+/// @brief Pixels covered by one fragment shader invocation (DeviceFeature::VARIABLE_RATE_SHADING).
+enum class ShadingRate : std::uint8_t
+{
+    ONE_BY_ONE,   ///< One invocation per pixel.
+    ONE_BY_TWO,   ///< One invocation per 1x2 pixels.
+    TWO_BY_ONE,   ///< One invocation per 2x1 pixels.
+    TWO_BY_TWO,   ///< One invocation per 2x2 pixels.
+    TWO_BY_FOUR,  ///< One invocation per 2x4 pixels.
+    FOUR_BY_TWO,  ///< One invocation per 4x2 pixels.
+    FOUR_BY_FOUR, ///< One invocation per 4x4 pixels.
+};
+
+/// @brief How two shading rates combine (pipeline, primitive and attachment rates).
+enum class ShadingRateCombiner : std::uint8_t
+{
+    KEEP,    ///< Keep the first rate.
+    REPLACE, ///< Use the second rate.
+    MINIMUM, ///< The finer of the two.
+    MAXIMUM, ///< The coarser of the two.
 };
 
 // =================================================================================================
@@ -861,10 +1061,50 @@ inline constexpr std::uint32_t MAXIMUM_PUSH_CONSTANT_SIZE = 128;
 /// @brief First word of every SPIR-V module.
 inline constexpr std::uint32_t SPIRV_MAGIC_NUMBER = 0x07230203U;
 
-/// @brief Whether this build of the library is a Debug build, which compiles GLSL at run time and
-///        reloads changed shader files (Device::poll_shader_changes()). Release builds only load SPIR-V
-///        compiled at build time: GLSL input is rejected and polling for changes does nothing.
-inline constexpr bool SHADER_HOT_RELOAD = GFX_SHADER_HOT_RELOAD != 0;
+/// @brief Whether this build of the library is a Debug build.
+inline constexpr bool DEBUG_BUILD = GFX_DEBUG_BUILD != 0;
+
+/// @brief Whether shader source is compiled at run time and changed shader files are reloaded
+///        (Device::poll_shader_changes()): Debug builds only. Release builds only load SPIR-V compiled
+///        at build time: GLSL and HLSL input is rejected and polling for changes does nothing.
+inline constexpr bool SHADER_HOT_RELOAD = DEBUG_BUILD;
+
+/// @brief Validation level of instances that do not choose one: every check in Debug builds, only the
+///        checks that cost nothing per command in Release builds.
+inline constexpr ValidationLevel DEFAULT_VALIDATION_LEVEL = DEBUG_BUILD ? ValidationLevel::COMMANDS : ValidationLevel::CREATION;
+
+/// @brief Features every gfx device has: timelines, dynamic rendering and bindless descriptors.
+///        Physical devices lacking one are not offered by Instance::select_physical_device().
+inline constexpr std::array<DeviceFeature, 3> CORE_FEATURES{DeviceFeature::TIMELINE_SEMAPHORE, DeviceFeature::DYNAMIC_RENDERING,
+                                                             DeviceFeature::DESCRIPTOR_INDEXING};
+
+/// @brief Descriptor set holding the bindless table in every pipeline layout (binding = BindlessResourceKind).
+inline constexpr std::uint32_t BINDLESS_SET = 0;
+
+/// @brief Bindless index that names no resource.
+inline constexpr std::uint32_t INVALID_BINDLESS_INDEX = std::numeric_limits<std::uint32_t>::max();
+
+/// @brief Default capacity of the bindless sampled images.
+inline constexpr std::uint32_t DEFAULT_BINDLESS_SAMPLED_IMAGE_CAPACITY = 65536;
+
+/// @brief Default capacity of the bindless storage images.
+inline constexpr std::uint32_t DEFAULT_BINDLESS_STORAGE_IMAGE_CAPACITY = 16384;
+
+/// @brief Default capacity of the bindless samplers (Direct3D 12 allows at most 2048).
+inline constexpr std::uint32_t DEFAULT_BINDLESS_SAMPLER_CAPACITY = 2048;
+
+/// @brief Default capacity of the bindless storage buffers.
+inline constexpr std::uint32_t DEFAULT_BINDLESS_STORAGE_BUFFER_CAPACITY = 65536;
+
+/// @brief Default capacity of the bindless acceleration structures.
+inline constexpr std::uint32_t DEFAULT_BINDLESS_ACCELERATION_STRUCTURE_CAPACITY = 1024;
+
+/// @brief Push-constant bytes of the bindless pipeline layout, visible to every stage (the minimum every
+///        backend guarantees, so one layout serves every pipeline).
+inline constexpr std::uint32_t BINDLESS_PUSH_CONSTANT_SIZE = 128;
+
+/// @brief Size in bytes of one top-level acceleration structure instance record (Vulkan and Direct3D 12).
+inline constexpr std::uint32_t ACCELERATION_STRUCTURE_INSTANCE_SIZE = 64;
 
 /// @brief Buffer range extending to the end of the buffer.
 inline constexpr std::uint64_t WHOLE_SIZE = std::numeric_limits<std::uint64_t>::max();
@@ -1011,6 +1251,15 @@ struct EnumerationTraits<DeviceFeature>
         EnumeratorName{DeviceFeature::TEXTURE_COMPRESSION_ETC2, "TEXTURE_COMPRESSION_ETC2"},
         EnumeratorName{DeviceFeature::TEXTURE_COMPRESSION_ASTC, "TEXTURE_COMPRESSION_ASTC"},
         EnumeratorName{DeviceFeature::PRESENTATION, "PRESENTATION"},
+        EnumeratorName{DeviceFeature::EXTENDED_DYNAMIC_STATE, "EXTENDED_DYNAMIC_STATE"},
+        EnumeratorName{DeviceFeature::DEPTH_BOUNDS, "DEPTH_BOUNDS"},
+        EnumeratorName{DeviceFeature::MULTIVIEW, "MULTIVIEW"},
+        EnumeratorName{DeviceFeature::VARIABLE_RATE_SHADING, "VARIABLE_RATE_SHADING"},
+        EnumeratorName{DeviceFeature::CONSERVATIVE_RASTERIZATION, "CONSERVATIVE_RASTERIZATION"},
+        EnumeratorName{DeviceFeature::RAY_QUERY, "RAY_QUERY"},
+        EnumeratorName{DeviceFeature::SAMPLER_FILTER_MINMAX, "SAMPLER_FILTER_MINMAX"},
+        EnumeratorName{DeviceFeature::MEMORY_BUDGET, "MEMORY_BUDGET"},
+        EnumeratorName{DeviceFeature::GPU_CRASH_MARKERS, "GPU_CRASH_MARKERS"},
     };
 };
 
@@ -1180,6 +1429,9 @@ struct EnumerationTraits<BufferUsage>
         EnumeratorName{BufferUsage::VERTEX, "VERTEX"},
         EnumeratorName{BufferUsage::INDIRECT, "INDIRECT"},
         EnumeratorName{BufferUsage::SHADER_DEVICE_ADDRESS, "SHADER_DEVICE_ADDRESS"},
+        EnumeratorName{BufferUsage::ACCELERATION_STRUCTURE_STORAGE, "ACCELERATION_STRUCTURE_STORAGE"},
+        EnumeratorName{BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT, "ACCELERATION_STRUCTURE_BUILD_INPUT"},
+        EnumeratorName{BufferUsage::SHADER_BINDING_TABLE, "SHADER_BINDING_TABLE"},
     };
 };
 
@@ -1207,6 +1459,7 @@ struct EnumerationTraits<ImageUsage>
         EnumeratorName{ImageUsage::DEPTH_STENCIL_ATTACHMENT, "DEPTH_STENCIL_ATTACHMENT"},
         EnumeratorName{ImageUsage::TRANSIENT_ATTACHMENT, "TRANSIENT_ATTACHMENT"},
         EnumeratorName{ImageUsage::INPUT_ATTACHMENT, "INPUT_ATTACHMENT"},
+        EnumeratorName{ImageUsage::SHADING_RATE_ATTACHMENT, "SHADING_RATE_ATTACHMENT"},
     };
 };
 
@@ -1218,6 +1471,7 @@ struct EnumerationTraits<ImageCreationOption>
         EnumeratorName{ImageCreationOption::CUBE_COMPATIBLE, "CUBE_COMPATIBLE"},
         EnumeratorName{ImageCreationOption::MUTABLE_FORMAT, "MUTABLE_FORMAT"},
         EnumeratorName{ImageCreationOption::ALIASED, "ALIASED"},
+        EnumeratorName{ImageCreationOption::SPARSE_RESIDENCY, "SPARSE_RESIDENCY"},
     };
 };
 
@@ -1275,6 +1529,7 @@ struct EnumerationTraits<ImageLayout>
         EnumeratorName{ImageLayout::TRANSFER_SOURCE, "TRANSFER_SOURCE"},
         EnumeratorName{ImageLayout::TRANSFER_DESTINATION, "TRANSFER_DESTINATION"},
         EnumeratorName{ImageLayout::PRESENT_SOURCE, "PRESENT_SOURCE"},
+        EnumeratorName{ImageLayout::SHADING_RATE_ATTACHMENT, "SHADING_RATE_ATTACHMENT"},
     };
 };
 
@@ -1327,6 +1582,7 @@ struct EnumerationTraits<PipelineStage>
         EnumeratorName{PipelineStage::ACCELERATION_STRUCTURE_BUILD, "ACCELERATION_STRUCTURE_BUILD"},
         EnumeratorName{PipelineStage::ALL_GRAPHICS, "ALL_GRAPHICS"},
         EnumeratorName{PipelineStage::ALL_COMMANDS, "ALL_COMMANDS"},
+        EnumeratorName{PipelineStage::SHADING_RATE_ATTACHMENT, "SHADING_RATE_ATTACHMENT"},
     };
 };
 
@@ -1355,6 +1611,7 @@ struct EnumerationTraits<MemoryAccess>
         EnumeratorName{MemoryAccess::MEMORY_WRITE, "MEMORY_WRITE"},
         EnumeratorName{MemoryAccess::ACCELERATION_STRUCTURE_READ, "ACCELERATION_STRUCTURE_READ"},
         EnumeratorName{MemoryAccess::ACCELERATION_STRUCTURE_WRITE, "ACCELERATION_STRUCTURE_WRITE"},
+        EnumeratorName{MemoryAccess::SHADING_RATE_ATTACHMENT_READ, "SHADING_RATE_ATTACHMENT_READ"},
     };
 };
 
@@ -1391,6 +1648,13 @@ struct EnumerationTraits<ResourceState>
         EnumeratorName{ResourceState::HOST_READ, "HOST_READ"},
         EnumeratorName{ResourceState::HOST_WRITE, "HOST_WRITE"},
         EnumeratorName{ResourceState::PRESENT, "PRESENT"},
+        EnumeratorName{ResourceState::SHADER_SAMPLED_READ, "SHADER_SAMPLED_READ"},
+        EnumeratorName{ResourceState::SHADER_STORAGE_READ, "SHADER_STORAGE_READ"},
+        EnumeratorName{ResourceState::SHADER_STORAGE_READ_WRITE, "SHADER_STORAGE_READ_WRITE"},
+        EnumeratorName{ResourceState::ACCELERATION_STRUCTURE_BUILD_INPUT, "ACCELERATION_STRUCTURE_BUILD_INPUT"},
+        EnumeratorName{ResourceState::ACCELERATION_STRUCTURE_WRITE, "ACCELERATION_STRUCTURE_WRITE"},
+        EnumeratorName{ResourceState::ACCELERATION_STRUCTURE_READ, "ACCELERATION_STRUCTURE_READ"},
+        EnumeratorName{ResourceState::SHADING_RATE_ATTACHMENT, "SHADING_RATE_ATTACHMENT"},
     };
 };
 
@@ -1666,6 +1930,7 @@ struct EnumerationTraits<ShaderSourceFormat>
     static constexpr std::array NAMES{
         EnumeratorName{ShaderSourceFormat::GLSL, "GLSL"}, 
         EnumeratorName{ShaderSourceFormat::SPIRV, "SPIRV"},
+        EnumeratorName{ShaderSourceFormat::HLSL, "HLSL"},
     };
 };
 
@@ -1708,6 +1973,7 @@ struct EnumerationTraits<PipelineBindPoint>
     static constexpr std::array NAMES{
         EnumeratorName{PipelineBindPoint::GRAPHICS, "GRAPHICS"}, 
         EnumeratorName{PipelineBindPoint::COMPUTE, "COMPUTE"},
+        EnumeratorName{PipelineBindPoint::RAY_TRACING, "RAY_TRACING"},
     };
 };
 
@@ -1739,6 +2005,7 @@ struct EnumerationTraits<QueryType>
         EnumeratorName{QueryType::OCCLUSION, "OCCLUSION"},
         EnumeratorName{QueryType::PIPELINE_STATISTICS, "PIPELINE_STATISTICS"},
         EnumeratorName{QueryType::TIMESTAMP, "TIMESTAMP"},
+        EnumeratorName{QueryType::ACCELERATION_STRUCTURE_COMPACTED_SIZE, "ACCELERATION_STRUCTURE_COMPACTED_SIZE"},
     };
 };
 
@@ -1834,6 +2101,218 @@ struct EnumerationTraits<LayoutMismatch>
         EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT, "FRAGMENT_OUTPUT_WITHOUT_ATTACHMENT"},
         EnumeratorName{LayoutMismatch::FRAGMENT_OUTPUT_TYPE_MISMATCH, "FRAGMENT_OUTPUT_TYPE_MISMATCH"},
         EnumeratorName{LayoutMismatch::CONFLICTING_BINDINGS, "CONFLICTING_BINDINGS"},
+        EnumeratorName{LayoutMismatch::STAGE_INTERFACE_MISMATCH, "STAGE_INTERFACE_MISMATCH"},
+        EnumeratorName{LayoutMismatch::UNKNOWN_SPECIALIZATION_CONSTANT, "UNKNOWN_SPECIALIZATION_CONSTANT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ValidationLevel>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ValidationLevel::NONE, "NONE"},
+        EnumeratorName{ValidationLevel::CREATION, "CREATION"},
+        EnumeratorName{ValidationLevel::COMMANDS, "COMMANDS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<BindlessResourceKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{BindlessResourceKind::SAMPLED_IMAGE, "SAMPLED_IMAGE"},
+        EnumeratorName{BindlessResourceKind::STORAGE_IMAGE, "STORAGE_IMAGE"},
+        EnumeratorName{BindlessResourceKind::SAMPLER, "SAMPLER"},
+        EnumeratorName{BindlessResourceKind::STORAGE_BUFFER, "STORAGE_BUFFER"},
+        EnumeratorName{BindlessResourceKind::ACCELERATION_STRUCTURE, "ACCELERATION_STRUCTURE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<PipelineStatus>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{PipelineStatus::READY, "READY"},
+        EnumeratorName{PipelineStatus::COMPILING, "COMPILING"},
+        EnumeratorName{PipelineStatus::COMPILATION_FAILED, "COMPILATION_FAILED"},
+    };
+};
+
+template<>
+struct EnumerationTraits<PipelineCreationMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{PipelineCreationMode::IMMEDIATE, "IMMEDIATE"},
+        EnumeratorName{PipelineCreationMode::ASYNCHRONOUS, "ASYNCHRONOUS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<DynamicState>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{DynamicState::DEPTH_BIAS, "DEPTH_BIAS"},
+        EnumeratorName{DynamicState::DEPTH_BOUNDS, "DEPTH_BOUNDS"},
+        EnumeratorName{DynamicState::LINE_WIDTH, "LINE_WIDTH"},
+        EnumeratorName{DynamicState::CULL_MODE, "CULL_MODE"},
+        EnumeratorName{DynamicState::FRONT_FACE, "FRONT_FACE"},
+        EnumeratorName{DynamicState::PRIMITIVE_TOPOLOGY, "PRIMITIVE_TOPOLOGY"},
+        EnumeratorName{DynamicState::DEPTH_TEST, "DEPTH_TEST"},
+        EnumeratorName{DynamicState::DEPTH_WRITE, "DEPTH_WRITE"},
+        EnumeratorName{DynamicState::DEPTH_COMPARE, "DEPTH_COMPARE"},
+        EnumeratorName{DynamicState::STENCIL_TEST, "STENCIL_TEST"},
+        EnumeratorName{DynamicState::STENCIL_OPERATION, "STENCIL_OPERATION"},
+    };
+};
+
+template<>
+struct EnumerationTraits<StencilFace>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{StencilFace::FRONT, "FRONT"},
+        EnumeratorName{StencilFace::BACK, "BACK"},
+    };
+};
+
+template<>
+struct EnumerationTraits<AccelerationStructureType>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{AccelerationStructureType::TOP_LEVEL, "TOP_LEVEL"},
+        EnumeratorName{AccelerationStructureType::BOTTOM_LEVEL, "BOTTOM_LEVEL"},
+    };
+};
+
+template<>
+struct EnumerationTraits<AccelerationStructureBuildOption>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{AccelerationStructureBuildOption::ALLOW_UPDATE, "ALLOW_UPDATE"},
+        EnumeratorName{AccelerationStructureBuildOption::ALLOW_COMPACTION, "ALLOW_COMPACTION"},
+        EnumeratorName{AccelerationStructureBuildOption::PREFER_FAST_TRACE, "PREFER_FAST_TRACE"},
+        EnumeratorName{AccelerationStructureBuildOption::PREFER_FAST_BUILD, "PREFER_FAST_BUILD"},
+        EnumeratorName{AccelerationStructureBuildOption::MINIMIZE_MEMORY, "MINIMIZE_MEMORY"},
+    };
+};
+
+template<>
+struct EnumerationTraits<AccelerationStructureBuildMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{AccelerationStructureBuildMode::BUILD, "BUILD"},
+        EnumeratorName{AccelerationStructureBuildMode::UPDATE, "UPDATE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<GeometryOption>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{GeometryOption::OPAQUE_GEOMETRY, "OPAQUE_GEOMETRY"},
+        EnumeratorName{GeometryOption::NO_DUPLICATE_ANY_HIT, "NO_DUPLICATE_ANY_HIT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<AccelerationStructureInstanceOption>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{AccelerationStructureInstanceOption::DISABLE_TRIANGLE_CULLING, "DISABLE_TRIANGLE_CULLING"},
+        EnumeratorName{AccelerationStructureInstanceOption::FLIP_TRIANGLE_FACING, "FLIP_TRIANGLE_FACING"},
+        EnumeratorName{AccelerationStructureInstanceOption::FORCE_OPAQUE_GEOMETRY, "FORCE_OPAQUE_GEOMETRY"},
+        EnumeratorName{AccelerationStructureInstanceOption::FORCE_NON_OPAQUE_GEOMETRY, "FORCE_NON_OPAQUE_GEOMETRY"},
+    };
+};
+
+template<>
+struct EnumerationTraits<AccelerationStructureCopyMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{AccelerationStructureCopyMode::CLONE, "CLONE"},
+        EnumeratorName{AccelerationStructureCopyMode::COMPACT, "COMPACT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<RayTracingShaderGroupType>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{RayTracingShaderGroupType::GENERAL, "GENERAL"},
+        EnumeratorName{RayTracingShaderGroupType::TRIANGLES_HIT, "TRIANGLES_HIT"},
+        EnumeratorName{RayTracingShaderGroupType::PROCEDURAL_HIT, "PROCEDURAL_HIT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<CrashDiagnostic>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{CrashDiagnostic::BREADCRUMBS, "BREADCRUMBS"},
+        EnumeratorName{CrashDiagnostic::VENDOR_REPORT, "VENDOR_REPORT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<CaptureTool>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{CaptureTool::NONE, "NONE"},
+        EnumeratorName{CaptureTool::RENDERDOC, "RENDERDOC"},
+        EnumeratorName{CaptureTool::PIX, "PIX"},
+        EnumeratorName{CaptureTool::NSIGHT_GRAPHICS, "NSIGHT_GRAPHICS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<SamplerReductionMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{SamplerReductionMode::WEIGHTED_AVERAGE, "WEIGHTED_AVERAGE"},
+        EnumeratorName{SamplerReductionMode::MINIMUM, "MINIMUM"},
+        EnumeratorName{SamplerReductionMode::MAXIMUM, "MAXIMUM"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ShadingRate>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ShadingRate::ONE_BY_ONE, "ONE_BY_ONE"},
+        EnumeratorName{ShadingRate::ONE_BY_TWO, "ONE_BY_TWO"},
+        EnumeratorName{ShadingRate::TWO_BY_ONE, "TWO_BY_ONE"},
+        EnumeratorName{ShadingRate::TWO_BY_TWO, "TWO_BY_TWO"},
+        EnumeratorName{ShadingRate::TWO_BY_FOUR, "TWO_BY_FOUR"},
+        EnumeratorName{ShadingRate::FOUR_BY_TWO, "FOUR_BY_TWO"},
+        EnumeratorName{ShadingRate::FOUR_BY_FOUR, "FOUR_BY_FOUR"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ShadingRateCombiner>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ShadingRateCombiner::KEEP, "KEEP"},
+        EnumeratorName{ShadingRateCombiner::REPLACE, "REPLACE"},
+        EnumeratorName{ShadingRateCombiner::MINIMUM, "MINIMUM"},
+        EnumeratorName{ShadingRateCombiner::MAXIMUM, "MAXIMUM"},
     };
 };
 
@@ -2149,6 +2628,10 @@ inline constexpr std::array<ResourceStateSynchronization, ENUMERATOR_COUNT<Resou
     constexpr auto image = ResourceCategory::IMAGE;
     constexpr auto any = ResourceCategory::BUFFER | ResourceCategory::IMAGE;
     constexpr auto fragment_tests = Stage::EARLY_FRAGMENT_TESTS | Stage::LATE_FRAGMENT_TESTS;
+    constexpr auto all_shaders = Stage::VERTEX_SHADER | Stage::TESSELLATION_CONTROL_SHADER | Stage::TESSELLATION_EVALUATION_SHADER |
+                                 Stage::GEOMETRY_SHADER | Stage::FRAGMENT_SHADER | Stage::COMPUTE_SHADER | Stage::TASK_SHADER |
+                                 Stage::MESH_SHADER | Stage::RAY_TRACING_SHADER;
+    constexpr auto structure_users = all_shaders | Stage::ACCELERATION_STRUCTURE_BUILD;
     return std::array<ResourceStateSynchronization, ENUMERATOR_COUNT<ResourceState>>{{
         {UNDEFINED, Stage::NONE, Access::NONE, Layout::UNDEFINED, any, false},
         {GENERAL, Stage::ALL_COMMANDS, Access::MEMORY_READ | Access::MEMORY_WRITE, Layout::GENERAL, any, true},
@@ -2178,6 +2661,13 @@ inline constexpr std::array<ResourceStateSynchronization, ENUMERATOR_COUNT<Resou
         {HOST_READ, Stage::HOST, Access::HOST_READ, Layout::GENERAL, any, false},
         {HOST_WRITE, Stage::HOST, Access::HOST_WRITE, Layout::GENERAL, any, true},
         {PRESENT, Stage::NONE, Access::NONE, Layout::PRESENT_SOURCE, image, false},
+        {SHADER_SAMPLED_READ, all_shaders, Access::SHADER_SAMPLED_READ, Layout::SHADER_READ_ONLY, any, false},
+        {SHADER_STORAGE_READ, all_shaders, Access::SHADER_STORAGE_READ, Layout::GENERAL, any, false},
+        {SHADER_STORAGE_READ_WRITE, all_shaders, Access::SHADER_STORAGE_READ | Access::SHADER_STORAGE_WRITE, Layout::GENERAL, any, true},
+        {ACCELERATION_STRUCTURE_BUILD_INPUT, Stage::ACCELERATION_STRUCTURE_BUILD, Access::SHADER_STORAGE_READ, Layout::UNDEFINED, buffer, false},
+        {ACCELERATION_STRUCTURE_WRITE, Stage::ACCELERATION_STRUCTURE_BUILD, Access::ACCELERATION_STRUCTURE_READ | Access::ACCELERATION_STRUCTURE_WRITE, Layout::UNDEFINED, buffer, true},
+        {ACCELERATION_STRUCTURE_READ, structure_users, Access::ACCELERATION_STRUCTURE_READ, Layout::UNDEFINED, buffer, false},
+        {SHADING_RATE_ATTACHMENT, Stage::SHADING_RATE_ATTACHMENT, Access::SHADING_RATE_ATTACHMENT_READ, Layout::SHADING_RATE_ATTACHMENT, image, false},
     }};
 }();
 
@@ -2441,6 +2931,24 @@ static_assert(verify<DebugMessageSeverity>(), "EnumerationTraits<DebugMessageSev
 static_assert(verify<DebugMessageType>(), "EnumerationTraits<DebugMessageType>::NAMES is out of sync with the enumeration");
 static_assert(verify<LayoutMismatch>(), "EnumerationTraits<LayoutMismatch>::NAMES is out of sync with the enumeration");
 static_assert(verify<ShaderReloadResult>(), "EnumerationTraits<ShaderReloadResult>::NAMES is out of sync with the enumeration");
+static_assert(verify<ValidationLevel>(), "EnumerationTraits<ValidationLevel>::NAMES is out of sync with the enumeration");
+static_assert(verify<BindlessResourceKind>(), "EnumerationTraits<BindlessResourceKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<PipelineStatus>(), "EnumerationTraits<PipelineStatus>::NAMES is out of sync with the enumeration");
+static_assert(verify<PipelineCreationMode>(), "EnumerationTraits<PipelineCreationMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<DynamicState>(), "EnumerationTraits<DynamicState>::NAMES is out of sync with the enumeration");
+static_assert(verify<StencilFace>(), "EnumerationTraits<StencilFace>::NAMES is out of sync with the enumeration");
+static_assert(verify<AccelerationStructureType>(), "EnumerationTraits<AccelerationStructureType>::NAMES is out of sync with the enumeration");
+static_assert(verify<AccelerationStructureBuildOption>(), "EnumerationTraits<AccelerationStructureBuildOption>::NAMES is out of sync with the enumeration");
+static_assert(verify<AccelerationStructureBuildMode>(), "EnumerationTraits<AccelerationStructureBuildMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<GeometryOption>(), "EnumerationTraits<GeometryOption>::NAMES is out of sync with the enumeration");
+static_assert(verify<AccelerationStructureInstanceOption>(), "EnumerationTraits<AccelerationStructureInstanceOption>::NAMES is out of sync with the enumeration");
+static_assert(verify<AccelerationStructureCopyMode>(), "EnumerationTraits<AccelerationStructureCopyMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<RayTracingShaderGroupType>(), "EnumerationTraits<RayTracingShaderGroupType>::NAMES is out of sync with the enumeration");
+static_assert(verify<CrashDiagnostic>(), "EnumerationTraits<CrashDiagnostic>::NAMES is out of sync with the enumeration");
+static_assert(verify<CaptureTool>(), "EnumerationTraits<CaptureTool>::NAMES is out of sync with the enumeration");
+static_assert(verify<SamplerReductionMode>(), "EnumerationTraits<SamplerReductionMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<ShadingRate>(), "EnumerationTraits<ShadingRate>::NAMES is out of sync with the enumeration");
+static_assert(verify<ShadingRateCombiner>(), "EnumerationTraits<ShadingRateCombiner>::NAMES is out of sync with the enumeration");
 
 consteval auto 
 format_properties_are_ordered() -> bool 

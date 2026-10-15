@@ -41,7 +41,19 @@ struct StageVariable
     bool operator==(const StageVariable&) const = default;
 };
 
-/// @brief Interface of one shader: bindings, push constants, stage inputs and outputs, workgroup size.
+/// @brief A specialization constant a shader declares (GLSL `layout(constant_id = N) const`, HLSL
+///        `[[vk::constant_id(N)]] const`).
+struct SpecializationConstantInfo
+{
+    std::uint32_t id = 0;   ///< Constant identifier.
+    std::uint32_t size = 4; ///< Bytes of its value.
+    std::string name{};     ///< Variable name.
+
+    bool operator==(const SpecializationConstantInfo&) const = default;
+};
+
+/// @brief Interface of one shader: bindings, push constants, stage inputs and outputs, workgroup size,
+///        specialization constants.
 struct ShaderLayout
 {
     ShaderStage stage = ShaderStage::NONE;                ///< Stage the shader runs in.
@@ -50,7 +62,8 @@ struct ShaderLayout
     std::uint32_t push_constant_size = 0;                 ///< Push-constant bytes it reads from there (0 = none).
     std::vector<StageVariable> inputs{};                  ///< Stage inputs (vertex attributes for a vertex shader).
     std::vector<StageVariable> outputs{};                 ///< Stage outputs (color attachments for a fragment shader).
-    std::array<std::uint32_t, 3> workgroup_size{1, 1, 1}; ///< Compute workgroup size.
+    std::array<std::uint32_t, 3> workgroup_size{1, 1, 1}; ///< Compute, task and mesh workgroup size.
+    std::vector<SpecializationConstantInfo> specialization_constants{}; ///< Constants set at pipeline creation.
 
     /// @brief The binding called @p name, or nullptr.
     [[nodiscard]] auto find(std::string_view name) const noexcept -> const ShaderBinding*

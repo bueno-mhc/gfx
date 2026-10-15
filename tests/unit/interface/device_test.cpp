@@ -110,7 +110,7 @@ TEST_F(DeviceTest, UnimplementedOperationsThrowADescriptiveError)
             << error.what();
     }
     // Through the interface, as user code does (default arguments belong to the interface).
-    EXPECT_THROW((void)device().create_buffer({.size = 16}), BackendCapabilityError);
+    EXPECT_THROW((void)device().create_image({.format = Format::R8G8B8A8_UNORM}), BackendCapabilityError);
     EXPECT_THROW((void)device().queue(QueueType::COMPUTE), BackendCapabilityError);
     EXPECT_THROW(device().deleter().enqueue([] {}), BackendCapabilityError);
 }
@@ -133,7 +133,7 @@ TEST_F(DeviceTest, GlslModulesAreCreatedOnlyInDebugBuilds)
 {
     const ShaderModuleDescription glsl{.stage = ShaderStage::COMPUTE,
                                        .source_format = ShaderSourceFormat::GLSL,
-                                       .glsl_source = "#version 460\nvoid main() {}\n",
+                                       .source = "#version 460\nvoid main() {}\n",
                                        .source_path = "shaders/blur.comp.glsl",
                                        .name = "blur"};
     if constexpr (SHADER_HOT_RELOAD)
@@ -362,6 +362,46 @@ TEST(DeviceObjectsTest, PhysicalDevicesAreSelectedByPreference)
 
     FakeInstance empty{};
     EXPECT_THROW((void)empty.select_physical_device(), BackendCapabilityError);
+}
+
+TEST(DeviceObjectsTest, DevicesWithoutTheCoreFeaturesAreNotSelected)
+{
+    // A discrete GPU without bindless descriptors loses to an integrated GPU that has them.
+    FakeInstance instance{PhysicalDeviceType::INTEGRATED_GPU};
+    instance.add_physical_device(PhysicalDeviceType::DISCRETE_GPU, {DeviceFeature::TIMELINE_SEMAPHORE, DeviceFeature::DYNAMIC_RENDERING});
+    EXPECT_EQ(instance.select_physical_device().properties().type, PhysicalDeviceType::INTEGRATED_GPU);
+    EXPECT_EQ(instance.physical_device(1).missing_core_features(), (std::vector{DeviceFeature::DESCRIPTOR_INDEXING}));
+
+    // With no capable device, the error says what each one lacks.
+    FakeInstance outdated{};
+    outdated.add_physical_device(PhysicalDeviceType::DISCRETE_GPU, {});
+    try
+    {
+        (void)outdated.select_physical_device();
+        FAIL() << "BackendCapabilityError was not thrown";
+    }
+    catch (const BackendCapabilityError& error)
+    {
+        EXPECT_EQ(error.reason(), "no physical device has every core feature: 'fake DISCRETE_GPU' lacks TIMELINE_SEMAPHORE, "
+                                  "DYNAMIC_RENDERING, DESCRIPTOR_INDEXING");
+    }
+}
+
+TEST(DeviceObjectsTest, HlslIsAcceptedOnlyInDebugBuilds)
+{
+    const ShaderModuleDescription hlsl{.stage = ShaderStage::COMPUTE,
+                                       .source_format = ShaderSourceFormat::HLSL,
+                                       .source = "[numthreads(8, 8, 1)] void main() {}",
+                                       .entry_point = "main",
+                                       .name = "blur"};
+    if constexpr (SHADER_HOT_RELOAD)
+    {
+        EXPECT_NO_THROW(validate_shader_module_description(hlsl));
+    }
+    else
+    {
+        EXPECT_THROW(validate_shader_module_description(hlsl), InvalidUsageError);
+    }
 }
 
 TEST(DeviceObjectsTest, MissingFeaturesAreListed)

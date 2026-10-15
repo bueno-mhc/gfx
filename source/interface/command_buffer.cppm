@@ -6,6 +6,10 @@
 /// recorder and a draw does not compile outside a rendering scope. The recording primitives below are
 /// therefore protected: backends implement them, users never call them directly.
 ///
+/// AZDO: every command buffer begins with the device's bindless table bound for every bind point
+/// (backends do it in record_begin() and record_begin_rendering_part()), so pipelines using the bindless
+/// pipeline layout need no descriptor binding at all.
+///
 /// One rendering pass can be recorded by several threads: Recorder::begin_parallel_rendering() begins
 /// it on a primary command buffer, each thread records a part into its own secondary command buffer
 /// with a RenderingPartRecorder, and the primary executes the parts in order.
@@ -18,6 +22,9 @@ import :backend_object;
 import :common_types;
 import :commands;
 import :synchronization;
+import :pipeline_layout;
+import :acceleration_structure;
+import :ray_tracing_pipeline;
 
 export namespace gfx
 {
@@ -49,6 +56,15 @@ public:
 
     /// @brief Discards the recorded commands (pool created with RESETTABLE_COMMAND_BUFFERS).
     virtual void reset() = 0;
+
+    /// @brief The device's bindless pipeline layout (what push constants use by default).
+    [[nodiscard]] virtual auto bindless_pipeline_layout() const noexcept -> const PipelineLayout& = 0;
+
+    /// @brief What the last recording recorded (draws, binds, barriers, ...).
+    [[nodiscard]] auto statistics() const noexcept -> const CommandStatistics&
+    {
+        return m_statistics;
+    }
 
 protected:
     template<QueueType Type>
@@ -108,6 +124,38 @@ protected:
     virtual void record_begin_debug_label(std::string_view name, const std::array<float, 4>& color) = 0;
     virtual void record_end_debug_label() = 0;
     virtual void record_execute_commands(std::span<const CommandBufferHandle> secondary_command_buffers) = 0;
+    virtual void record_blit_image(ImageHandle source, ImageLayout source_layout, ImageHandle destination, ImageLayout destination_layout, std::span<const ImageBlitRegion> regions, Filter filter) = 0;
+    virtual void record_resolve_image(ImageHandle source, ImageLayout source_layout, ImageHandle destination, ImageLayout destination_layout, std::span<const ImageResolveRegion> regions) = 0;
+    virtual void record_clear_depth_stencil_image(ImageHandle image, ImageLayout layout, float depth, std::uint32_t stencil, const ImageSubresourceRange& range) = 0;
+    virtual void record_clear_attachments(std::span<const ClearAttachment> attachments, std::span<const ClearRectangle> rectangles) = 0;
+    virtual void record_set_stencil_reference(StencilFace faces, std::uint32_t reference) = 0;
+    virtual void record_set_blend_constants(const std::array<float, 4>& constants) = 0;
+    virtual void record_set_depth_bias(float constant_factor, float clamp, float slope_factor) = 0;
+    virtual void record_set_depth_bounds(float minimum, float maximum) = 0;
+    virtual void record_set_line_width(float width) = 0;
+    virtual void record_set_cull_mode(CullMode mode) = 0;
+    virtual void record_set_front_face(FrontFace front_face) = 0;
+    virtual void record_set_primitive_topology(PrimitiveTopology topology) = 0;
+    virtual void record_set_depth_test(bool enable) = 0;
+    virtual void record_set_depth_write(bool enable) = 0;
+    virtual void record_set_depth_compare(CompareOperation operation) = 0;
+    virtual void record_set_stencil_test(bool enable) = 0;
+    virtual void record_set_stencil_operation(StencilFace faces, StencilOperation fail, StencilOperation pass, StencilOperation depth_fail, CompareOperation compare) = 0;
+    virtual void record_set_fragment_shading_rate(ShadingRate rate, const std::array<ShadingRateCombiner, 2>& combiners) = 0;
+    virtual void record_draw_indirect_count(const IndirectDrawArguments& arguments, const IndirectCount& count) = 0;
+    virtual void record_draw_indexed_indirect_count(const IndirectDrawArguments& arguments, const IndirectCount& count) = 0;
+    virtual void record_draw_mesh_tasks(const DrawMeshTasksArguments& arguments) = 0;
+    virtual void record_draw_mesh_tasks_indirect(const IndirectDrawArguments& arguments) = 0;
+    virtual void record_draw_mesh_tasks_indirect_count(const IndirectDrawArguments& arguments, const IndirectCount& count) = 0;
+    virtual void record_bind_ray_tracing_pipeline(RayTracingPipelineHandle pipeline) = 0;
+    virtual void record_trace_rays(const ShaderBindingTable& table, std::uint32_t width, std::uint32_t height, std::uint32_t depth) = 0;
+    virtual void record_trace_rays_indirect(const ShaderBindingTable& table, BufferHandle buffer, std::uint64_t offset) = 0;
+    virtual void record_build_acceleration_structures(std::span<const AccelerationStructureBuildDescription> builds) = 0;
+    virtual void record_copy_acceleration_structure(AccelerationStructureHandle source, AccelerationStructureHandle destination, AccelerationStructureCopyMode mode) = 0;
+    virtual void record_write_acceleration_structure_properties(std::span<const AccelerationStructureHandle> structures, QueryPoolHandle pool, std::uint32_t first_query) = 0;
+
+private:
+    CommandStatistics m_statistics{};
 };
 
 // Default definitions: a backend forwards to these for the operations it does not implement.
@@ -375,6 +423,215 @@ void
 CommandBuffer::record_execute_commands(std::span<const CommandBufferHandle> /*secondary_command_buffers*/)
 {
     throw_not_implemented("CommandBuffer::record_execute_commands");
+}
+
+void
+CommandBuffer::record_blit_image(ImageHandle /*source*/,
+                                 ImageLayout /*source_layout*/,
+                                 ImageHandle /*destination*/,
+                                 ImageLayout /*destination_layout*/,
+                                 std::span<const ImageBlitRegion> /*regions*/,
+                                 Filter /*filter*/)
+{
+    throw_not_implemented("CommandBuffer::record_blit_image");
+}
+
+void
+CommandBuffer::record_resolve_image(ImageHandle /*source*/,
+                                    ImageLayout /*source_layout*/,
+                                    ImageHandle /*destination*/,
+                                    ImageLayout /*destination_layout*/,
+                                    std::span<const ImageResolveRegion> /*regions*/)
+{
+    throw_not_implemented("CommandBuffer::record_resolve_image");
+}
+
+void
+CommandBuffer::record_clear_depth_stencil_image(ImageHandle /*image*/,
+                                                ImageLayout /*layout*/,
+                                                float /*depth*/,
+                                                std::uint32_t /*stencil*/,
+                                                const ImageSubresourceRange& /*range*/)
+{
+    throw_not_implemented("CommandBuffer::record_clear_depth_stencil_image");
+}
+
+void
+CommandBuffer::record_clear_attachments(std::span<const ClearAttachment> /*attachments*/,
+                                        std::span<const ClearRectangle> /*rectangles*/)
+{
+    throw_not_implemented("CommandBuffer::record_clear_attachments");
+}
+
+void
+CommandBuffer::record_set_stencil_reference(StencilFace /*faces*/,
+                                            std::uint32_t /*reference*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_stencil_reference");
+}
+
+void
+CommandBuffer::record_set_blend_constants(const std::array<float, 4>& /*constants*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_blend_constants");
+}
+
+void
+CommandBuffer::record_set_depth_bias(float /*constant_factor*/,
+                                     float /*clamp*/,
+                                     float /*slope_factor*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_depth_bias");
+}
+
+void
+CommandBuffer::record_set_depth_bounds(float /*minimum*/,
+                                       float /*maximum*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_depth_bounds");
+}
+
+void
+CommandBuffer::record_set_line_width(float /*width*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_line_width");
+}
+
+void
+CommandBuffer::record_set_cull_mode(CullMode /*mode*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_cull_mode");
+}
+
+void
+CommandBuffer::record_set_front_face(FrontFace /*front_face*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_front_face");
+}
+
+void
+CommandBuffer::record_set_primitive_topology(PrimitiveTopology /*topology*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_primitive_topology");
+}
+
+void
+CommandBuffer::record_set_depth_test(bool /*enable*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_depth_test");
+}
+
+void
+CommandBuffer::record_set_depth_write(bool /*enable*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_depth_write");
+}
+
+void
+CommandBuffer::record_set_depth_compare(CompareOperation /*operation*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_depth_compare");
+}
+
+void
+CommandBuffer::record_set_stencil_test(bool /*enable*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_stencil_test");
+}
+
+void
+CommandBuffer::record_set_stencil_operation(StencilFace /*faces*/,
+                                            StencilOperation /*fail*/,
+                                            StencilOperation /*pass*/,
+                                            StencilOperation /*depth_fail*/,
+                                            CompareOperation /*compare*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_stencil_operation");
+}
+
+void
+CommandBuffer::record_set_fragment_shading_rate(ShadingRate /*rate*/,
+                                                const std::array<ShadingRateCombiner, 2>& /*combiners*/)
+{
+    throw_not_implemented("CommandBuffer::record_set_fragment_shading_rate");
+}
+
+void
+CommandBuffer::record_draw_indirect_count(const IndirectDrawArguments& /*arguments*/,
+                                          const IndirectCount& /*count*/)
+{
+    throw_not_implemented("CommandBuffer::record_draw_indirect_count");
+}
+
+void
+CommandBuffer::record_draw_indexed_indirect_count(const IndirectDrawArguments& /*arguments*/,
+                                                  const IndirectCount& /*count*/)
+{
+    throw_not_implemented("CommandBuffer::record_draw_indexed_indirect_count");
+}
+
+void
+CommandBuffer::record_draw_mesh_tasks(const DrawMeshTasksArguments& /*arguments*/)
+{
+    throw_not_implemented("CommandBuffer::record_draw_mesh_tasks");
+}
+
+void
+CommandBuffer::record_draw_mesh_tasks_indirect(const IndirectDrawArguments& /*arguments*/)
+{
+    throw_not_implemented("CommandBuffer::record_draw_mesh_tasks_indirect");
+}
+
+void
+CommandBuffer::record_draw_mesh_tasks_indirect_count(const IndirectDrawArguments& /*arguments*/,
+                                                     const IndirectCount& /*count*/)
+{
+    throw_not_implemented("CommandBuffer::record_draw_mesh_tasks_indirect_count");
+}
+
+void
+CommandBuffer::record_bind_ray_tracing_pipeline(RayTracingPipelineHandle /*pipeline*/)
+{
+    throw_not_implemented("CommandBuffer::record_bind_ray_tracing_pipeline");
+}
+
+void
+CommandBuffer::record_trace_rays(const ShaderBindingTable& /*table*/,
+                                 std::uint32_t /*width*/,
+                                 std::uint32_t /*height*/,
+                                 std::uint32_t /*depth*/)
+{
+    throw_not_implemented("CommandBuffer::record_trace_rays");
+}
+
+void
+CommandBuffer::record_trace_rays_indirect(const ShaderBindingTable& /*table*/,
+                                          BufferHandle /*buffer*/,
+                                          std::uint64_t /*offset*/)
+{
+    throw_not_implemented("CommandBuffer::record_trace_rays_indirect");
+}
+
+void
+CommandBuffer::record_build_acceleration_structures(std::span<const AccelerationStructureBuildDescription> /*builds*/)
+{
+    throw_not_implemented("CommandBuffer::record_build_acceleration_structures");
+}
+
+void
+CommandBuffer::record_copy_acceleration_structure(AccelerationStructureHandle /*source*/,
+                                                  AccelerationStructureHandle /*destination*/,
+                                                  AccelerationStructureCopyMode /*mode*/)
+{
+    throw_not_implemented("CommandBuffer::record_copy_acceleration_structure");
+}
+
+void
+CommandBuffer::record_write_acceleration_structure_properties(std::span<const AccelerationStructureHandle> /*structures*/,
+                                                              QueryPoolHandle /*pool*/,
+                                                              std::uint32_t /*first_query*/)
+{
+    throw_not_implemented("CommandBuffer::record_write_acceleration_structure_properties");
 }
 
 } // namespace gfx

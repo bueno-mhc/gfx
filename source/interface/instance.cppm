@@ -25,7 +25,10 @@ struct InstanceDescription
 {
     std::string_view application_name = "gfx application";        ///< Reported to drivers and tools.
     Version application_version{};                                ///< Reported to drivers and tools.
-    bool enable_validation = false;                               ///< Enable the backend's validation.
+    ValidationLevel validation_level = DEFAULT_VALIDATION_LEVEL;  ///< Checks the library performs (every object
+                                                                  ///< of the instance inherits it).
+    bool enable_validation = false;                               ///< Also enable the native API's validation
+                                                                  ///< (Vulkan validation layers, D3D12 debug layer).
     DebugMessageSeverity debug_message_severities =
         DebugMessageSeverity::WARNING | DebugMessageSeverity::CRITICAL; ///< Severities forwarded to the callback.
     std::function<void(const DebugMessage&)> debug_callback{};    ///< Receives debug messages (may run on any thread).
@@ -42,8 +45,9 @@ public:
     /// @throws InvalidUsageError when @p index >= physical_device_count().
     [[nodiscard]] virtual auto physical_device(std::size_t index) -> PhysicalDevice& = 0;
 
-    /// @brief The physical device that best matches @p preference.
-    /// @throws BackendCapabilityError when there is no physical device.
+    /// @brief The physical device that best matches @p preference among those with every CORE_FEATURES.
+    /// @throws BackendCapabilityError when there is no such physical device (the message lists what each
+    ///         device lacks).
     [[nodiscard]] auto select_physical_device(PhysicalDevicePreference preference = PhysicalDevicePreference::HIGH_PERFORMANCE)
         -> PhysicalDevice&
     {
@@ -52,6 +56,31 @@ public:
             throw_unsupported("Instance::select_physical_device", "physical device",
                               std::format("no physical device supports the {} backend", backend()),
                               "install a driver that supports it, or use another backend");
+        }
+
+        // Only devices with every core feature can run gfx.
+        std::vector<std::size_t> capable;
+        std::string lacking;
+        for (std::size_t index = 0; index < physical_device_count(); ++index)
+        {
+            const std::vector<DeviceFeature> missing = physical_device(index).missing_core_features();
+            if (missing.empty())
+            {
+                capable.push_back(index);
+                continue;
+            }
+            std::string features;
+            for (const DeviceFeature feature : missing)
+            {
+                features += std::format("{}{}", features.empty() ? "" : ", ", feature);
+            }
+            lacking += std::format("{}'{}' lacks {}", lacking.empty() ? "" : "; ", physical_device(index).properties().name, features);
+        }
+        if (capable.empty())
+        {
+            throw_unsupported("Instance::select_physical_device", "core features",
+                              std::format("no physical device has every core feature: {}", lacking),
+                              "update the graphics driver, or use a newer GPU");
         }
 
         // Rank device types: lower is better.
@@ -63,9 +92,9 @@ public:
             return preference == PhysicalDevicePreference::HIGH_PERFORMANCE ? high_performance[index] : low_power[index];
         };
 
-        // Keep the first device of the best rank.
-        std::size_t best = 0;
-        for (std::size_t index = 1; index < physical_device_count(); ++index)
+        // Keep the first capable device of the best rank.
+        std::size_t best = capable.front();
+        for (const std::size_t index : capable)
         {
             if (rank(physical_device(index).properties().type) < rank(physical_device(best).properties().type))
             {

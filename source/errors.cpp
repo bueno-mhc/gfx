@@ -183,13 +183,34 @@ OutOfMemoryError::requested_bytes() const noexcept -> std::uint64_t
 }
 
 // ------------------------------------------------------------------------------------------------- DeviceLostError
-DeviceLostError::DeviceLostError(DeviceLostDescription description, 
+DeviceLostError::DeviceLostError(DeviceLostDescription description,
                                  std::source_location location)
     : Error(description.backend, description.operation,
-            std::format("the device was lost; every object created from it is unusable{}",
-                        description.details.empty() ? std::string{} : std::format(".\n  Details: {}", description.details)),
-            location) 
+            std::format("the device was lost; every object created from it is unusable{}{}{}",
+                        description.details.empty() ? std::string{} : std::format(".\n  Details: {}", description.details),
+                        description.active_markers.empty()
+                            ? std::string{}
+                            : std::format("\n  GPU was inside: {}",
+                                          description.active_markers | std::views::join_with(std::string_view{" > "}) |
+                                              std::ranges::to<std::string>()),
+                        description.crash_report_path.empty() ? std::string{}
+                                                              : std::format("\n  Crash report: {}", description.crash_report_path)),
+            location)
+    , m_active_markers{std::move(description.active_markers)}
+    , m_crash_report_path{std::move(description.crash_report_path)}
 {}
+
+auto
+DeviceLostError::active_markers() const noexcept -> std::span<const std::string>
+{
+    return m_active_markers;
+}
+
+auto
+DeviceLostError::crash_report_path() const noexcept -> std::string_view
+{
+    return m_crash_report_path;
+}
 
 // ------------------------------------------------------------------------------------------------- BackendApiError
 BackendApiError::BackendApiError(BackendApiFailureDescription description, 

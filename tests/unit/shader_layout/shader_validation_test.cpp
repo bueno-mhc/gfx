@@ -222,7 +222,7 @@ TEST(ShaderModuleDescriptionTest, GlslIsAcceptedOnlyInDebugBuilds)
 {
     const ShaderModuleDescription glsl{.stage = ShaderStage::COMPUTE,
                                        .source_format = ShaderSourceFormat::GLSL,
-                                       .glsl_source = "#version 460\nvoid main() {}\n",
+                                       .source = "#version 460\nvoid main() {}\n",
                                        .name = "blur"};
     if constexpr (SHADER_HOT_RELOAD)
     {

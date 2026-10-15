@@ -186,9 +186,12 @@ private:
 /// @brief Describes the loss of a device (driver reset, GPU hang, removal).
 struct DeviceLostDescription 
 {
-    BackendKind backend;   ///< Backend whose device was lost.
-    std::string operation; ///< Operation that detected the loss.
-    std::string details;   ///< Additional information; may be empty.
+    BackendKind backend;                          ///< Backend whose device was lost.
+    std::string operation;                        ///< Operation that detected the loss.
+    std::string details;                          ///< Additional information; may be empty.
+    std::vector<std::string> active_markers{};    ///< GPU breadcrumbs: the debug labels the GPU was inside, outermost
+                                                  ///< first (CrashDiagnostic::BREADCRUMBS; empty when not collected).
+    std::string crash_report_path{};              ///< Vendor crash dump written (CrashDiagnostic::VENDOR_REPORT).
 };
 
 /// @brief Thrown when the device is lost; every object of that device becomes unusable.
@@ -199,6 +202,16 @@ public:
     /// @param location    Where the error was raised (defaults to the caller).
     explicit DeviceLostError(DeviceLostDescription description,
                              std::source_location location = std::source_location::current());
+
+    /// @brief Debug labels the GPU was inside when it failed, outermost first.
+    [[nodiscard]] auto active_markers() const noexcept -> std::span<const std::string>;
+
+    /// @brief Vendor crash dump written for the failure (empty when none).
+    [[nodiscard]] auto crash_report_path() const noexcept -> std::string_view;
+
+private:
+    std::vector<std::string> m_active_markers;
+    std::string m_crash_report_path;
 };
 
 

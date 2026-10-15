@@ -69,6 +69,16 @@ gfx_add_compilation_failure_test(RenderingPartsCannotRecordBarriers
     EXPECTED_DIAGNOSTIC "class gfx::RenderingPartRecorder[^']*' has no member named 'barrier'"
     LIBRARIES gfx::gfx)
 
+gfx_add_compilation_failure_test(TransferRecorderCannotTraceRays
+    SOURCES interface/transfer_recorder_cannot_trace_rays.cpp
+    EXPECTED_DIAGNOSTIC "no matching function for call to .*QueueType::TRANSFER>::trace_rays"
+    LIBRARIES gfx::gfx)
+
+gfx_add_compilation_failure_test(BindlessIndicesOfDifferentKindsDoNotMix
+    SOURCES interface/bindless_indices_of_different_kinds_do_not_mix.cpp
+    EXPECTED_DIAGNOSTIC "conversion from 'BindlessIndex<gfx::BindlessResourceKind::SAMPLED_IMAGE>' to non-scalar type 'BindlessIndex<gfx::BindlessResourceKind::STORAGE_IMAGE>'"
+    LIBRARIES gfx::gfx)
+
 gfx_add_compilation_failure_test(PushConstantsRejectPointers
     SOURCES interface/push_constants_reject_pointers.cpp
     EXPECTED_DIAGNOSTIC "no matching function for call to .*push_constants"

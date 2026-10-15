@@ -10,6 +10,7 @@ set(GFX_INTERFACE_MODULES
     interface/common_types.cppm
     interface/backend_object.cppm
     interface/shader_layout.cppm
+    interface/bindless.cppm
     interface/synchronization.cppm
     interface/commands.cppm
     interface/device_memory.cppm
@@ -17,6 +18,8 @@ set(GFX_INTERFACE_MODULES
     interface/image.cppm
     interface/image_view.cppm
     interface/sampler.cppm
+    interface/buffer_view.cppm
+    interface/sparse_binding.cppm
     interface/shader_module.cppm
     interface/descriptor_set_layout.cppm
     interface/pipeline_layout.cppm
@@ -24,6 +27,9 @@ set(GFX_INTERFACE_MODULES
     interface/descriptor_pool.cppm
     interface/compute_pipeline.cppm
     interface/graphics_pipeline.cppm
+    interface/ray_tracing_pipeline.cppm
+    interface/pipeline_cache.cppm
+    interface/acceleration_structure.cppm
     interface/fence.cppm
     interface/semaphore.cppm
     interface/timeline_semaphore.cppm
@@ -38,6 +44,10 @@ set(GFX_INTERFACE_MODULES
     interface/shader_validation.cppm
     interface/device.cppm
     interface/frame_command_pools.cppm
+    interface/frame_timeline.cppm
+    interface/transient_buffer_allocator.cppm
+    interface/uploader.cppm
+    interface/gpu_profiler.cppm
     interface/physical_device.cppm
     interface/instance.cppm)
 
@@ -58,8 +68,8 @@ target_sources(gfx
 target_include_directories(gfx PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
 # Debug builds compile GLSL at run time and reload changed shader files; Release builds only load
-# SPIR-V compiled at build time (gfx::SHADER_HOT_RELOAD in enums.cppm).
-target_compile_definitions(gfx PUBLIC $<$<CONFIG:Debug>:GFX_SHADER_HOT_RELOAD=1>)
+# SPIR-V compiled at build time; Debug builds also validate every command (gfx::DEBUG_BUILD in enums.cppm).
+target_compile_definitions(gfx PUBLIC $<$<CONFIG:Debug>:GFX_DEBUG_BUILD=1>)
 
 target_compile_features(gfx PUBLIC cxx_std_23)
 target_link_libraries(gfx

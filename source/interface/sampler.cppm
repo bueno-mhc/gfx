@@ -6,6 +6,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import :backend_object;
+import :bindless;
 
 export namespace gfx
 {
@@ -26,6 +27,8 @@ struct SamplerDescription
     float maximum_level_of_detail = 1000.0F;                        ///< Clamp of the level of detail.
     BorderColor border_color = BorderColor::OPAQUE_BLACK_FLOAT;     ///< Color for CLAMP_TO_BORDER.
     bool unnormalized_coordinates = false;                          ///< Texel instead of [0, 1] coordinates.
+    SamplerReductionMode reduction_mode = SamplerReductionMode::WEIGHTED_AVERAGE; ///< Filtering or min/max reduction.
+    bool bindless = true;                                           ///< Register it in the bindless table.
     std::string_view debug_name{};                                  ///< Name shown by debugging tools.
 };
 
@@ -35,6 +38,9 @@ class Sampler : public BackendObject
 public:
     /// @brief Handle naming this sampler in descriptors.
     [[nodiscard]] virtual auto handle() const noexcept -> SamplerHandle = 0;
+
+    /// @brief Index in the bindless table (invalid when created with bindless = false).
+    [[nodiscard]] virtual auto bindless_index() const noexcept -> SamplerIndex = 0;
 };
 
 } // namespace gfx

@@ -228,13 +228,84 @@ gfx/
 | 0 | Toolchain, CMake/presets/build.py, GoogleTest, toolchain tests | done, committed (ffae3d2, 0c8af25) |
 | 1 | enums, errors, handles, unit/compilation/macro tests, workarounds | done, committed (8b750f7, 58bbcfc) |
 | — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
-| 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools | **done, awaiting validation** (107 tests, Debug + Release from scratch) |
-| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs throwing "not implemented yet" | next |
-| 4 | CMake shader embedding, GLSL→SPIR-V compiler, hot reload (Debug only) | |
+| 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | **done, awaiting validation** (138 tests, Debug + Release) |
+| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table (slot table design with the user) | next |
+| 3b | **Real Vulkan backend** (VMA, sync2, dynamic rendering, bindless descriptor indexing, pipeline cache, breadcrumbs) | user: "the next step is to build the Vulkan layer" |
+| 4 | Shader toolchain: `gfx_add_shaders()` (glslang + DXC → SPIR-V), SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload, shader headers declaring the bindless arrays | |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **107**, all passing in Debug and Release (from scratch), 2026-10-14.
+Test count at last report: **138**, all passing in Debug and Release (from scratch), 2026-10-14.
+
+### Step 2c as built (production interface, 2026-10-14)
+
+- **Build macro**: `GFX_DEBUG_BUILD` (PUBLIC, `$<CONFIG:Debug>`) → `DEBUG_BUILD`, `SHADER_HOT_RELOAD`,
+  `DEFAULT_VALIDATION_LEVEL` (COMMANDS in Debug, CREATION in Release) in enums.cppm.
+- **Validation levels**: `BackendObject` stores the level (non-virtual `validation_level()`,
+  `validates(level)`, protected ctor/`set_validation_level`); `InstanceDescription::validation_level`.
+  CREATION = descriptions, shader/pipeline checks (backends call validators only at ≥ CREATION),
+  recorder/part/execute construction checks; COMMANDS = push-constant coverage, indirect count buffer,
+  trace_rays ray-generation region, Uploader texel size. Also `set_debug_name()` (pure virtual).
+- **Bindless** (bindless.cppm): `BindlessIndex<Kind>` (public value, GPU data, invalid = INVALID_BINDLESS_INDEX,
+  formatter), aliases SampledImageIndex/StorageImageIndex/SamplerIndex/StorageBufferIndex/
+  AccelerationStructureIndex; `BindlessResourceKind` value = binding in BINDLESS_SET (0); names
+  gfx_sampled_images, gfx_storage_images, gfx_samplers, gfx_storage_buffers, gfx_acceleration_structures;
+  `bindless_pipeline_layout_definition()` (arrays PARTIALLY_BOUND|UPDATE_AFTER_BIND, stages ALL, push
+  constants [0,128) ALL). `DeviceDescription::bindless` capacities. Resources register by default
+  (`bindless = true`): Buffer::bindless_index (STORAGE), ImageView::sampled_index/storage_index,
+  Sampler::bindless_index, AccelerationStructure::bindless_index (top level). Pipelines with a null layout
+  use `Device::bindless_pipeline_layout()`; backends bind the table in record_begin /
+  record_begin_rendering_part; `push_constants(data)` without a layout uses the bindless layout
+  (`CommandBuffer::bindless_pipeline_layout()`). `Device::bindless_usage()`.
+- **Shaders**: `ShaderSourceFormat::HLSL`; description `source` (renamed from glsl_source), `defines`,
+  `include_directories`, `source_path`; `SpecializationConstant` + `specialization_constant(id, value)`;
+  ShaderLayout gains `specialization_constants`.
+- **Pipelines**: compute/graphics/RT descriptions have specialization_constants, `cache`
+  (PipelineCacheHandle), `creation_mode` (IMMEDIATE/ASYNCHRONOUS on `DeviceDescription::task_scheduler`);
+  pipelines have `status()` (READY/COMPILING/COMPILATION_FAILED) and `wait()`. Graphics: task, mesh,
+  geometry, tessellation shaders, view_mask, `state.dynamic_states` (DynamicState bitmask; viewport,
+  scissor, stencil reference, blend constants always dynamic), conservative rasterization, depth bounds,
+  primitive restart, sample mask, shading rate, patch control points. `PipelineCache` (serialize,
+  loaded_initial_data). Validation: `validate_compute_pipeline(layout, shader, constants)`,
+  `validate_graphics_pipeline(layout, GraphicsPipelineShaders, description)` (vertex XOR mesh, task needs
+  mesh, tessellation pairs, no geometry/tess with mesh, stage interface last-pre-raster→fragment,
+  specialization ids), `validate_ray_tracing_pipeline(layout, description, resolve)`. LayoutMismatch +=
+  STAGE_INTERFACE_MISMATCH, UNKNOWN_SPECIALIZATION_CONSTANT.
+- **Ray tracing**: AccelerationStructure (+ descriptions, TriangleGeometry, BoundingBoxGeometry,
+  InstanceGeometry, build description/sizes, 64-byte `AccelerationStructureInstance` with bitfields +
+  `make_instance`), RayTracingPipeline (groups, shader_group_handles), ShaderBindingTable(+Region),
+  `shader_binding_table_layout()`; recorder: build/copy/write properties, bind_pipeline(RT), trace_rays(_indirect).
+- **Commands**: blit_image, resolve_image, clear_depth_stencil_image, `generate_mipmaps()` (library
+  algorithm), clear_attachments, extended dynamic state setters, set_fragment_shading_rate,
+  draw_(indexed_)indirect_count (`IndirectCount`), draw_mesh_tasks(_indirect)(_count); argument structs
+  double as indirect records (static_asserted sizes); RenderingDescription view_mask +
+  shading_rate_attachment; `CommandStatistics` per command buffer (counted by recorders, reset at begin);
+  `ParallelRenderingScope::execute(unique_ptrs)` no longer allocates.
+- **Memory / sparse / misc**: BufferView, MemoryHeapBudget + `Device::memory_budget()`,
+  MemoryStatistics, persistent mapping documented; sparse_binding.cppm + `Queue::bind_sparse()`,
+  `Device::sparse_image_requirements()`; Sampler reduction mode; SurfaceSupport +
+  `PhysicalDevice::surface_support()`; Swapchain maximum_frame_latency, `wait_for_frame_latency()`,
+  `set_hdr_metadata()`; DeviceLimits (+RT, mesh, subgroup, bindless maxima, ...); DeviceFeature += 9;
+  ResourceState += SHADER_* (any stage, bindless), ACCELERATION_STRUCTURE_*, SHADING_RATE_ATTACHMENT.
+- **Core features**: `CORE_FEATURES` (TIMELINE_SEMAPHORE, DYNAMIC_RENDERING, DESCRIPTOR_INDEXING);
+  `select_physical_device()` skips devices lacking them (error lists what each lacks).
+- **Diagnostics**: CrashDiagnostic (BREADCRUMBS = debug labels written by the GPU; VENDOR_REPORT),
+  `DeviceLostError::active_markers()`/`crash_report_path()` (message "GPU was inside: a > b"),
+  CaptureTool + `Device::capture_tool/begin_capture/end_capture`.
+- **Library helpers on the interfaces** (backend-independent): `FrameTimeline` (pacing, frame_signal,
+  deleter collect), `TransientBufferAllocator` (lock-free CAS bump allocator, persistently mapped,
+  per-frame regions; frame N uses region N % frames; `write(range)` / `write(value)` rejecting ranges and
+  pointers), `Uploader` (staging + barriers, upload_buffer/upload_image), `GpuProfiler` (timestamp
+  scopes, read back N frames later).
+- **Tests**: bindless_test, pipeline_validation_test (incl. RT data layouts), frame_resources_test (real
+  threads), recorder/device/errors additions; compile-failure: TransferRecorderCannotTraceRays,
+  BindlessIndicesOfDifferentKindsDoNotMix. Fake backend: FakeQueryPool, sized FakeBuffer, bindless layout
+  (`default_bindless_layout()`), `use_validation_level()`, `last_timeline()`, `last_query_pool()`.
+- Gotchas met: lambdas that use a local `constexpr` need it `static constexpr`; span parameters do not
+  deduce from fixed-extent spans (accept contiguous ranges instead); `\n` in shell heredocs passed to
+  python becomes a newline — write such scripts with the Write tool.
+- **Not addressed** (documented as future): external memory/semaphore interop, multi-GPU, video,
+  device-generated commands, MSVC/Clang/Linux builds (step 6 CI).
 
 ### Step 2 as built (details for the next session)
 
@@ -261,6 +332,22 @@ Test count at last report: **107**, all passing in Debug and Release (from scrat
   10 new compilation-failure tests, macro check now scans every .cppm of source/ (837 names).
 - Findings: default arguments are not inherited by overrides — call backends through interface
   references; MinGW `<windows.h>` defines min/max only for C, not C++ (MSVC defines them in C++).
+
+### Production-readiness decisions (user, 2026-10-14) — step 2c
+
+After a gap analysis against Unreal RHI / NVRHI / Diligent / The Forge / Dawn, the user decided:
+1. **Define the whole interface now (step 2c, "as much as possible"); the next step is the Vulkan
+   backend** (step 3 = factory + stubs + thread-safe handle table, 3b = real Vulkan backend). This reverses
+   the earlier "no backend implementation for now".
+2. **GLSL and HLSL** accepted, converted to SPIR-V at the appropriate moment (build time with
+   `gfx_add_shaders()` — glslang / DXC; run time in Debug builds only).
+3. **Bindless by default everywhere, AZDO (Approaching Zero Driver Overhead) at all levels.**
+4. **Validation levels as recommended**: full checks in Debug; Release keeps only checks that cost
+   nothing per command (creation-time checks); selectable at instance creation.
+5. **Keep exceptions.**
+6. **Targets: MSVC and Clang on Windows, plus Linux** (GCC/Clang). Metal ignored for now.
+7. Order as recommended: 2c interface → 3 → 3b Vulkan → 4 shader toolchain → 5 samples/benchmarks →
+   6 CI (MSVC/Clang/GCC, Linux), packaging, Doxygen, architecture document.
 
 ## 10. Open questions (asked, not answered yet)
 

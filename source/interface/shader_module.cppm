@@ -1,9 +1,10 @@
 /// @file shader_module.cppm
 /// @brief ShaderModule: compiled shader code together with the layout reflected from it.
 ///
-/// Shader code reaches the library as SPIR-V. Release builds only accept SPIR-V compiled at build time
-/// (gfx_add_shaders() in CMake, or any other compiler). Debug builds also accept GLSL source, compile
-/// it at run time, and reload modules whose source file changed (Device::poll_shader_changes()).
+/// Shader code reaches the backends as SPIR-V. GLSL and HLSL are converted to SPIR-V at build time
+/// (gfx_add_shaders() in CMake, with glslang and DXC), which is all Release builds accept. Debug builds
+/// also accept GLSL and HLSL source, compile it at run time, and reload modules whose source file
+/// changed (Device::poll_shader_changes()).
 export module gfx.interface:shader_module;
 
 import std;
@@ -16,23 +17,56 @@ import :shader_layout;
 export namespace gfx
 {
 
+/// @brief A preprocessor definition for run-time compilation (shader variants): `#define name value`.
+struct ShaderDefine
+{
+    std::string_view name{};  ///< Macro name.
+    std::string_view value{}; ///< Macro value (may be empty).
+};
+
+/// @brief The value of one specialization constant, set when a pipeline is created.
+struct SpecializationConstant
+{
+    std::uint32_t id = 0;    ///< Constant identifier (constant_id).
+    std::uint32_t value = 0; ///< Bits of the value (bool as 0 or 1, int, uint or float).
+};
+
+/// @brief The value of constant @p id: a bool, a 32-bit integer or a float.
+template<class Value>
+    requires std::same_as<Value, bool> || std::same_as<Value, std::int32_t> || std::same_as<Value, std::uint32_t> ||
+             std::same_as<Value, float>
+[[nodiscard]] constexpr auto
+specialization_constant(std::uint32_t id, Value value) noexcept -> SpecializationConstant
+{
+    if constexpr (std::same_as<Value, bool>)
+    {
+        return {.id = id, .value = value ? 1U : 0U};
+    }
+    else
+    {
+        return {.id = id, .value = std::bit_cast<std::uint32_t>(value)};
+    }
+}
+
 /// @brief How to create a ShaderModule.
 struct ShaderModuleDescription
 {
     ShaderStage stage = ShaderStage::NONE;                        ///< Stage the shader runs in.
-    ShaderSourceFormat source_format = ShaderSourceFormat::SPIRV; ///< SPIR-V binary or GLSL source (Debug only).
+    ShaderSourceFormat source_format = ShaderSourceFormat::SPIRV; ///< SPIR-V binary, or GLSL / HLSL source (Debug only).
     std::span<const std::uint32_t> spirv{};                       ///< SPIR-V words (ShaderSourceFormat::SPIRV).
-    std::string_view glsl_source{};                               ///< GLSL source (ShaderSourceFormat::GLSL).
-    std::string_view source_path{};                               ///< GLSL file the code comes from; Debug builds
-                                                                  ///< reload the module when it changes (empty =
-                                                                  ///< not reloadable).
+    std::string_view source{};                                    ///< GLSL or HLSL source text.
+    std::string_view source_path{};                               ///< File the code comes from; Debug builds reload
+                                                                  ///< the module when it changes (empty = not
+                                                                  ///< reloadable) and resolve #include from it.
     std::string_view entry_point = "main";                        ///< Entry point function.
+    std::span<const ShaderDefine> defines{};                      ///< Definitions of a run-time compilation.
+    std::span<const std::string_view> include_directories{};      ///< Where #include looks, after source_path's directory.
     std::string_view name{};                                      ///< Name for messages (file name or debug name).
 };
 
 /// @brief Checks what a backend can check before compiling or reflecting anything: one stage, an entry
-///        point, SPIR-V that starts with its magic number, and GLSL only in Debug builds. Backends call
-///        it first in Device::create_shader_module().
+///        point, SPIR-V that starts with its magic number, and GLSL or HLSL only in Debug builds.
+///        Backends call it first in Device::create_shader_module().
 /// @throws InvalidUsageError naming the problem.
 void
 validate_shader_module_description(const ShaderModuleDescription& description,
@@ -75,15 +109,17 @@ validate_shader_module_description(const ShaderModuleDescription& description,
         return;
     }
 
-    // GLSL: compiled at run time in Debug builds only.
+    // GLSL and HLSL: compiled at run time in Debug builds only.
     if constexpr (!SHADER_HOT_RELOAD)
     {
-        reject("GLSL source is compiled at run time only in Debug builds; this Release build only loads compiled SPIR-V",
+        reject(std::format("{} source is compiled at run time only in Debug builds; this Release build only loads "
+                           "compiled SPIR-V",
+                           description.source_format),
                "compile the shader at build time with gfx_add_shaders() and pass its SPIR-V");
     }
-    if (description.glsl_source.empty())
+    if (description.source.empty())
     {
-        reject("the GLSL source is empty", "set ShaderModuleDescription::glsl_source");
+        reject(std::format("the {} source is empty", description.source_format), "set ShaderModuleDescription::source");
     }
 }
 

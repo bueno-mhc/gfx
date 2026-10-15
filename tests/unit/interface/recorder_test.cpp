@@ -135,7 +135,8 @@ TEST(RecorderTest, PushConstantsUseTheStagesOfTheLayoutsRanges)
 
 TEST(RecorderTest, PushConstantsOutsideTheLayoutAreRejected)
 {
-    const FakePipelineLayout layout = compute_push_layout();
+    FakePipelineLayout layout = compute_push_layout();
+    layout.use_validation_level(ValidationLevel::COMMANDS);
     FakeCommandBuffer command_buffer{QueueType::COMPUTE};
     ComputeRecorder recorder{command_buffer};
     try
@@ -248,4 +249,124 @@ TEST(RecorderTest, RenderingPartsNeedSecondaryGraphicsCommandBuffersAndARealPass
     EXPECT_THROW(pass.execute(parts), InvalidUsageError);
 }
 
+TEST(RecorderTest, PerCommandChecksRunOnlyAtTheCommandsLevel)
+{
+    FakePipelineLayout layout = compute_push_layout();
+    layout.use_validation_level(ValidationLevel::CREATION);
+    FakeCommandBuffer command_buffer{QueueType::COMPUTE};
+    {
+        ComputeRecorder recorder{command_buffer};
+        recorder.push_constants(layout, BlurPush{}, 4); // outside the range, but not checked at CREATION
+    }
+    EXPECT_EQ(command_buffer.log()[1], std::format("push_constants {} 4 12", ShaderStage::COMPUTE));
+
+    // At NONE, even the recorder's construction checks are skipped.
+    FakeCommandBuffer transfer{QueueType::TRANSFER};
+    transfer.use_validation_level(ValidationLevel::NONE);
+    EXPECT_NO_THROW(ComputeRecorder{transfer});
+}
+
+TEST(RecorderTest, StatisticsCountWhatWasRecorded)
+{
+    FakeCommandBuffer command_buffer{QueueType::GRAPHICS};
+    const std::array<ColorAttachment, 1> attachments{ColorAttachment{}};
+    {
+        GraphicsRecorder recorder{command_buffer};
+        recorder.barrier({});
+        recorder.dispatch(1);
+        RenderingScope<QueueType::GRAPHICS> rendering = recorder.begin_rendering({.color_attachments = attachments});
+        rendering.bind_pipeline(GraphicsPipelineHandle{});
+        rendering.push_constants(std::uint32_t{7});
+        rendering.draw({.vertex_count = 3});
+        rendering.draw_indexed({.index_count = 6});
+        rendering.draw_indirect({.draw_count = 100});
+    }
+    const CommandStatistics& statistics = command_buffer.statistics();
+    EXPECT_EQ(statistics, (CommandStatistics{.draws = 2,
+                                             .indirect_draws = 1,
+                                             .dispatches = 1,
+                                             .pipeline_binds = 1,
+                                             .push_constant_writes = 1,
+                                             .barriers = 1,
+                                             .rendering_passes = 1}));
+
+    // A new recording starts from zero.
+    {
+        GraphicsRecorder recorder{command_buffer};
+    }
+    EXPECT_EQ(command_buffer.statistics(), CommandStatistics{});
+}
+
+TEST(RecorderTest, DynamicStateAndGpuDrivenCommandsReachTheBackend)
+{
+    FakeCommandBuffer command_buffer{QueueType::GRAPHICS};
+    command_buffer.use_validation_level(ValidationLevel::COMMANDS);
+    const tests::FakeBuffer count_buffer{64, BufferUsage::INDIRECT, 9};
+    {
+        GraphicsRecorder recorder{command_buffer};
+        RenderingScope<QueueType::GRAPHICS> rendering = recorder.begin_rendering({});
+        rendering.set_stencil_reference(StencilFace::FRONT_AND_BACK, 1);
+        rendering.set_cull_mode(CullMode::NONE);
+        rendering.set_depth_bias(1.0F, 0.0F, 2.0F);
+        rendering.draw_indexed_indirect_count({.draw_count = 1}, {.buffer = count_buffer.handle(), .offset = 0, .maximum_draw_count = 4096});
+        rendering.draw_mesh_tasks({.group_count_x = 32});
+        rendering.set_fragment_shading_rate(ShadingRate::TWO_BY_TWO);
+    }
+    const std::vector<std::string>& log = command_buffer.log();
+    EXPECT_EQ(log[2], std::format("set_stencil_reference {} 1", StencilFace::FRONT_AND_BACK));
+    EXPECT_EQ(log[3], "set_cull_mode NONE");
+    EXPECT_EQ(log[4], "set_depth_bias 1 0 2");
+    EXPECT_EQ(log[5], "draw_indexed_indirect_count 4096");
+    EXPECT_EQ(log[6], "draw_mesh_tasks 32 1 1");
+    EXPECT_EQ(log[7], "set_fragment_shading_rate TWO_BY_TWO KEEP KEEP");
+}
+
+TEST(RecorderTest, IndirectCountsNeedACountBuffer)
+{
+    FakeCommandBuffer command_buffer{QueueType::GRAPHICS};
+    command_buffer.use_validation_level(ValidationLevel::COMMANDS);
+    GraphicsRecorder recorder{command_buffer};
+    RenderingScope<QueueType::GRAPHICS> rendering = recorder.begin_rendering({});
+    EXPECT_THROW(rendering.draw_indirect_count({}, {.buffer = BufferHandle{}, .offset = 0, .maximum_draw_count = 0}), InvalidUsageError);
+}
+
+TEST(RecorderTest, MipmapsAreGeneratedWithBlitsAndBarriers)
+{
+    FakeCommandBuffer command_buffer{QueueType::GRAPHICS};
+    {
+        GraphicsRecorder recorder{command_buffer};
+        recorder.generate_mipmaps(ImageHandle{}, {.width = 8, .height = 4, .depth = 1}, 3, ResourceState::TRANSFER_DESTINATION,
+                                  ResourceState::SHADER_SAMPLED_READ);
+    }
+    const std::vector<std::string> expected{
+        "begin",
+        "barrier 0 0 2", // level 0 -> source, levels 1-2 -> destination
+        std::format("blit_image {} 0 8 -> {} 1 4x2 LINEAR", ImageLayout::TRANSFER_SOURCE, ImageLayout::TRANSFER_DESTINATION),
+        "barrier 0 0 1", // level 1 -> source
+        std::format("blit_image {} 1 4 -> {} 2 2x1 LINEAR", ImageLayout::TRANSFER_SOURCE, ImageLayout::TRANSFER_DESTINATION),
+        "barrier 0 0 1", // level 2 -> source
+        "barrier 0 0 1", // every level -> final state
+        "end",
+    };
+    EXPECT_EQ(command_buffer.log(), expected);
+    EXPECT_EQ(command_buffer.statistics().transfers, 2U);
+}
+
+TEST(RecorderTest, TraceRaysNeedsExactlyOneRayGenerationRecord)
+{
+    FakeCommandBuffer command_buffer{QueueType::COMPUTE};
+    command_buffer.use_validation_level(ValidationLevel::COMMANDS);
+    ComputeRecorder recorder{command_buffer};
+    const ShaderBindingTableLayout layout = shader_binding_table_layout(32, 32, 64, {});
+    // A null buffer handle is invalid: build the table on a "real" one.
+    tests::FakeBuffer table_buffer{layout.size, BufferUsage::SHADER_BINDING_TABLE, 5};
+    EXPECT_NO_THROW(recorder.trace_rays(layout.table(table_buffer.handle()), 1920, 1080));
+
+    ShaderBindingTable two_records = layout.table(table_buffer.handle());
+    two_records.ray_generation.size *= 2;
+    EXPECT_THROW(recorder.trace_rays(two_records, 1920, 1080), InvalidUsageError);
+    EXPECT_EQ(command_buffer.statistics().ray_traces, 1U);
+}
+
 } // namespace
+

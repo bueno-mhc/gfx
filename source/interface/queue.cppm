@@ -8,6 +8,7 @@ import gfx.enums;
 import gfx.handles;
 import :backend_object;
 import :synchronization;
+import :sparse_binding;
 
 export namespace gfx
 {
@@ -60,6 +61,9 @@ public:
 
     /// @brief Blocks until every submission to this queue completes.
     virtual void wait_idle() = 0;
+
+    /// @brief Binds or unbinds memory of sparse resources (queues with QueueCapability::SPARSE_BINDING).
+    virtual void bind_sparse(const SparseBindDescription& description) = 0;
 };
 
 void
@@ -79,6 +83,12 @@ void
 Queue::wait_idle()
 {
     throw_not_implemented("Queue::wait_idle");
+}
+
+void
+Queue::bind_sparse(const SparseBindDescription& /*description*/)
+{
+    throw_not_implemented("Queue::bind_sparse");
 }
 
 } // namespace gfx

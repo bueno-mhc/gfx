@@ -20,6 +20,9 @@ export namespace gfx
 /// Objects are owned through std::unique_ptr and are neither copyable nor movable: their address is
 /// stable for their whole lifetime, and their destructor releases the native objects (possibly later,
 /// through the device's Deleter, once the GPU no longer uses them).
+///
+/// Every object knows the validation level of its instance (stored, not virtual, so a check costs one
+/// comparison): the library's own checks of creations, recordings and commands consult it.
 class BackendObject : public HandleIssuer
 {
 public:
@@ -36,8 +39,34 @@ public:
     /// @brief Name given at creation (the `debug_name` of its description), shown by debugging tools.
     [[nodiscard]] virtual auto debug_name() const noexcept -> std::string_view = 0;
 
+    /// @brief Renames the object, in messages and in debugging tools (RenderDoc, PIX, validation layers).
+    virtual void set_debug_name(std::string_view name) = 0;
+
+    /// @brief Checks the library performs for this object (the level of its instance).
+    [[nodiscard]] auto validation_level() const noexcept -> ValidationLevel
+    {
+        return m_validation_level;
+    }
+
+    /// @brief Whether checks of level @p level run for this object.
+    [[nodiscard]] auto validates(ValidationLevel level) const noexcept -> bool
+    {
+        return m_validation_level >= level;
+    }
+
 protected:
     BackendObject() = default;
+
+    /// @brief Backends pass their instance's validation level to every object they create.
+    explicit BackendObject(ValidationLevel validation_level) noexcept
+        : m_validation_level{validation_level}
+    {}
+
+    /// @brief Sets the validation level (for backends that learn it after construction).
+    void set_validation_level(ValidationLevel validation_level) noexcept
+    {
+        m_validation_level = validation_level;
+    }
 
     /// @brief Throws a BackendCapabilityError describing why this backend cannot perform @p operation.
     /// @param operation  Operation of the interface, e.g. "Device::create_event".
@@ -56,6 +85,9 @@ protected:
     /// @param location  Where the error is raised (defaults to the caller).
     [[noreturn]] void throw_not_implemented(std::string_view operation,
                                             std::source_location location = std::source_location::current()) const;
+
+private:
+    ValidationLevel m_validation_level = DEFAULT_VALIDATION_LEVEL;
 };
 
 void

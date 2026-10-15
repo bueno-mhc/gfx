@@ -7,6 +7,7 @@ import gfx.enums;
 import gfx.handles;
 import :backend_object;
 import :common_types;
+import :bindless;
 import :device;
 
 export namespace gfx
@@ -29,6 +30,23 @@ struct DeviceLimits
     double timestamp_period_nanoseconds = 1.0;                        ///< Nanoseconds per timestamp tick.
     SampleCount color_sample_counts = SampleCount::ONE;               ///< Supported color sample counts.
     SampleCount depth_sample_counts = SampleCount::ONE;               ///< Supported depth sample counts.
+    std::uint64_t minimum_texel_buffer_offset_alignment = 1;          ///< Alignment of BufferView offsets.
+    std::uint64_t non_coherent_atom_size = 1;                         ///< Granularity of flushes of non-coherent memory.
+    std::uint64_t maximum_memory_allocation_size = 0;                 ///< Largest single allocation.
+    std::uint32_t maximum_draw_indirect_count = 1;                    ///< Largest draw count of one indirect draw.
+    std::uint32_t minimum_subgroup_size = 1;                          ///< Smallest subgroup (wave) size.
+    std::uint32_t maximum_subgroup_size = 1;                          ///< Largest subgroup (wave) size.
+    std::array<std::uint32_t, ENUMERATOR_COUNT<BindlessResourceKind>> maximum_bindless_resources{}; ///< Bindless capacity
+                                                                                                    ///< the device allows, by kind.
+    std::uint32_t maximum_multiview_view_count = 1;                   ///< Views of a multiview pass.
+    std::uint32_t shader_group_handle_size = 0;                       ///< Bytes of a ray tracing shader group handle.
+    std::uint32_t shader_group_handle_alignment = 0;                  ///< Alignment of shader binding table records.
+    std::uint32_t shader_group_base_alignment = 0;                    ///< Alignment of shader binding table regions.
+    std::uint32_t maximum_ray_recursion_depth = 0;                    ///< Deepest trace recursion.
+    std::array<std::uint32_t, 3> maximum_task_workgroup_size{};       ///< Task shader invocations per workgroup, per axis.
+    std::array<std::uint32_t, 3> maximum_mesh_workgroup_size{};       ///< Mesh shader invocations per workgroup, per axis.
+    std::uint32_t maximum_mesh_output_vertices = 0;                   ///< Vertices one mesh workgroup emits.
+    std::uint32_t maximum_mesh_output_primitives = 0;                 ///< Primitives one mesh workgroup emits.
 };
 
 /// @brief Identity, versions and limits of a physical device.
@@ -67,12 +85,40 @@ struct QueueRequest
     float priority = 1.0F;                ///< Scheduling priority in [0, 1].
 };
 
+/// @brief A format and color space a surface can present.
+struct SurfaceFormat
+{
+    Format format = Format::UNDEFINED;                   ///< Image format.
+    ColorSpace color_space = ColorSpace::SRGB_NONLINEAR; ///< Color space.
+
+    constexpr bool operator==(const SurfaceFormat&) const = default;
+};
+
+/// @brief What a window surface supports (PhysicalDevice::surface_support()), to fill a SwapchainDescription.
+struct SurfaceSupport
+{
+    std::vector<SurfaceFormat> formats{};           ///< Presentable formats and color spaces (HDR ones included).
+    std::vector<PresentMode> present_modes{};       ///< Presentation modes.
+    std::uint32_t minimum_image_count = 0;          ///< Fewest swapchain images.
+    std::uint32_t maximum_image_count = 0;          ///< Most swapchain images (0 = no limit).
+    Extent current_extent{};                        ///< The window's size.
+    ImageUsage supported_usage = ImageUsage::NONE;  ///< Usages swapchain images allow.
+};
+
+/// @brief Runs a background task (e.g. an asynchronous pipeline compilation) on the application's job
+///        system. May be called from any thread; the library never creates threads of its own.
+using TaskScheduler = std::function<void(std::move_only_function<void()>)>;
+
 /// @brief How to create a Device.
 struct DeviceDescription
 {
-    std::span<const QueueRequest> queues{};             ///< Queues to create.
-    std::span<const DeviceFeature> required_features{}; ///< Features that must be enabled.
-    std::string_view debug_name{};                      ///< Name shown by debugging tools.
+    std::span<const QueueRequest> queues{};                            ///< Queues to create.
+    std::span<const DeviceFeature> required_features{};                ///< Features that must be enabled (CORE_FEATURES always are).
+    BindlessTableDescription bindless{};                               ///< Capacities of the bindless table.
+    CrashDiagnostic crash_diagnostics = CrashDiagnostic::NONE;         ///< GPU crash diagnostics to collect.
+    TaskScheduler task_scheduler{};                                    ///< Runs asynchronous pipeline compilations
+                                                                       ///< (empty = they compile during creation).
+    std::string_view debug_name{};                                     ///< Name shown by debugging tools.
 };
 
 /// @brief A physical device. Owned by its Instance.
@@ -91,6 +137,9 @@ public:
     /// @brief What @p format can be used for.
     [[nodiscard]] virtual auto format_support(Format format) const -> FormatSupport = 0;
 
+    /// @brief What a swapchain for @p window can use (formats, color spaces, present modes, image counts).
+    [[nodiscard]] virtual auto surface_support(const NativeWindow& window) const -> SurfaceSupport = 0;
+
     /// @brief Creates a logical device.
     /// @throws BackendCapabilityError listing every required feature that is not supported.
     [[nodiscard]] virtual auto create_device(const DeviceDescription& description) -> std::unique_ptr<Device> = 0;
@@ -108,12 +157,24 @@ public:
         }
         return missing;
     }
+
+    /// @brief The CORE_FEATURES this device lacks (it cannot run gfx when any is missing).
+    [[nodiscard]] auto missing_core_features() const -> std::vector<DeviceFeature>
+    {
+        return missing_features(CORE_FEATURES);
+    }
 };
 
 auto
 PhysicalDevice::format_support(Format /*format*/) const -> FormatSupport
 {
     throw_not_implemented("PhysicalDevice::format_support");
+}
+
+auto
+PhysicalDevice::surface_support(const NativeWindow& /*window*/) const -> SurfaceSupport
+{
+    throw_not_implemented("PhysicalDevice::surface_support");
 }
 
 auto

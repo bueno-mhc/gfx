@@ -33,6 +33,12 @@ import :queue;
 import :swapchain;
 import :deleter;
 import :shader_validation;
+import :bindless;
+import :buffer_view;
+import :pipeline_cache;
+import :acceleration_structure;
+import :ray_tracing_pipeline;
+import :sparse_binding;
 
 export namespace gfx
 {
@@ -63,6 +69,25 @@ public:
     /// @brief Blocks until every queue is idle.
     virtual void wait_idle() = 0;
 
+    // ----------------------------------------------------------------------------- bindless resources
+
+    /// @brief The pipeline layout every pipeline uses unless its description names another: the bindless
+    ///        table in set BINDLESS_SET and BINDLESS_PUSH_CONSTANT_SIZE bytes of push constants for every
+    ///        stage (bindless_pipeline_layout_definition()).
+    [[nodiscard]] virtual auto bindless_pipeline_layout() const noexcept -> const PipelineLayout& = 0;
+
+    /// @brief How full the bindless table is.
+    [[nodiscard]] virtual auto bindless_usage() const noexcept -> BindlessTableUsage = 0;
+
+    // ----------------------------------------------------------------------------- memory
+
+    /// @brief Budget and usage of every memory heap (DeviceFeature::MEMORY_BUDGET): stream less, or free
+    ///        memory, when usage approaches the budget.
+    [[nodiscard]] virtual auto memory_budget() const -> std::vector<MemoryHeapBudget> = 0;
+
+    /// @brief The library's own memory blocks and sub-allocations.
+    [[nodiscard]] virtual auto memory_statistics() const -> MemoryStatistics = 0;
+
     // ----------------------------------------------------------------------------- memory and resources
 
     /// @brief Memory a buffer with this description needs (to place it in a DeviceMemory).
@@ -85,6 +110,12 @@ public:
 
     /// @brief Creates a sampler.
     [[nodiscard]] virtual auto create_sampler(const SamplerDescription& description) -> std::unique_ptr<Sampler> = 0;
+
+    /// @brief Creates a formatted view of a buffer range (texel buffer).
+    [[nodiscard]] virtual auto create_buffer_view(const BufferViewDescription& description) -> std::unique_ptr<BufferView> = 0;
+
+    /// @brief How a sparse image is divided into tiles.
+    [[nodiscard]] virtual auto sparse_image_requirements(ImageHandle image) const -> SparseImageRequirements = 0;
 
     // ----------------------------------------------------------------------------- shaders and pipelines
 
@@ -118,6 +149,26 @@ public:
     [[nodiscard]] virtual auto create_descriptor_pool(const DescriptorPoolDescription& description)
         -> std::unique_ptr<DescriptorPool> = 0;
 
+    /// @brief Creates a pipeline cache, loading the data of an earlier run.
+    [[nodiscard]] virtual auto create_pipeline_cache(const PipelineCacheDescription& description)
+        -> std::unique_ptr<PipelineCache> = 0;
+
+    /// @brief Creates a ray tracing pipeline (DeviceFeature::RAY_TRACING). Backends check it with
+    ///        validate_ray_tracing_pipeline().
+    /// @throws ShaderLayoutMismatchError when a shader does not match the pipeline layout.
+    [[nodiscard]] virtual auto create_ray_tracing_pipeline(const RayTracingPipelineDescription& description)
+        -> std::unique_ptr<RayTracingPipeline> = 0;
+
+    // ----------------------------------------------------------------------------- acceleration structures
+
+    /// @brief Storage and scratch memory a build of @p description needs.
+    [[nodiscard]] virtual auto acceleration_structure_build_sizes(const AccelerationStructureBuildDescription& description) const
+        -> AccelerationStructureBuildSizes = 0;
+
+    /// @brief Creates an acceleration structure in buffer storage (DeviceFeature::RAY_TRACING or RAY_QUERY).
+    [[nodiscard]] virtual auto create_acceleration_structure(const AccelerationStructureDescription& description)
+        -> std::unique_ptr<AccelerationStructure> = 0;
+
     // ----------------------------------------------------------------------------- commands and synchronization
 
     /// @brief Creates a command pool (one per recording thread and queue type).
@@ -141,6 +192,18 @@ public:
 
     /// @brief Creates a swapchain for a window (DeviceFeature::PRESENTATION).
     [[nodiscard]] virtual auto create_swapchain(const SwapchainDescription& description) -> std::unique_ptr<Swapchain> = 0;
+
+    // ----------------------------------------------------------------------------- frame capture
+
+    /// @brief Capture tool attached to the process (RenderDoc, PIX, Nsight Graphics), if any.
+    [[nodiscard]] virtual auto capture_tool() const noexcept -> CaptureTool = 0;
+
+    /// @brief Starts capturing every queue's work in the attached tool, e.g. around one frame.
+    /// @throws BackendCapabilityError when no capture tool is attached.
+    virtual void begin_capture(std::string_view title) = 0;
+
+    /// @brief Ends the capture begun by begin_capture().
+    virtual void end_capture() = 0;
 
     // ----------------------------------------------------------------------------- layouts from shaders
 
@@ -339,6 +402,68 @@ auto
 Device::create_swapchain(const SwapchainDescription& /*description*/) -> std::unique_ptr<Swapchain>
 {
     throw_not_implemented("Device::create_swapchain");
+}
+
+auto
+Device::memory_budget() const -> std::vector<MemoryHeapBudget>
+{
+    throw_not_implemented("Device::memory_budget");
+}
+
+auto
+Device::memory_statistics() const -> MemoryStatistics
+{
+    throw_not_implemented("Device::memory_statistics");
+}
+
+auto
+Device::create_buffer_view(const BufferViewDescription& /*description*/) -> std::unique_ptr<BufferView>
+{
+    throw_not_implemented("Device::create_buffer_view");
+}
+
+auto
+Device::sparse_image_requirements(ImageHandle /*image*/) const -> SparseImageRequirements
+{
+    throw_not_implemented("Device::sparse_image_requirements");
+}
+
+auto
+Device::create_pipeline_cache(const PipelineCacheDescription& /*description*/) -> std::unique_ptr<PipelineCache>
+{
+    throw_not_implemented("Device::create_pipeline_cache");
+}
+
+auto
+Device::create_ray_tracing_pipeline(const RayTracingPipelineDescription& /*description*/) -> std::unique_ptr<RayTracingPipeline>
+{
+    throw_not_implemented("Device::create_ray_tracing_pipeline");
+}
+
+auto
+Device::acceleration_structure_build_sizes(const AccelerationStructureBuildDescription& /*description*/) const
+    -> AccelerationStructureBuildSizes
+{
+    throw_not_implemented("Device::acceleration_structure_build_sizes");
+}
+
+auto
+Device::create_acceleration_structure(const AccelerationStructureDescription& /*description*/)
+    -> std::unique_ptr<AccelerationStructure>
+{
+    throw_not_implemented("Device::create_acceleration_structure");
+}
+
+void
+Device::begin_capture(std::string_view /*title*/)
+{
+    throw_not_implemented("Device::begin_capture");
+}
+
+void
+Device::end_capture()
+{
+    throw_not_implemented("Device::end_capture");
 }
 
 auto

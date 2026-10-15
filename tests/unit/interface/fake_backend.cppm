@@ -28,6 +28,17 @@ public:
         return m_debug_name;
     }
 
+    void set_debug_name(std::string_view name) override
+    {
+        m_debug_name = name;
+    }
+
+    /// The validation level a backend passes from its instance (tests choose it explicitly).
+    void use_validation_level(ValidationLevel level) noexcept
+    {
+        Interface::set_validation_level(level);
+    }
+
 protected:
     template<class Tag>
     [[nodiscard]] static auto make_handle(std::uint32_t index) -> Handle<Tag>
@@ -38,6 +49,43 @@ protected:
 protected:
     std::string m_debug_name = "fake";
 };
+
+// ================================================================================================= pipeline layout
+
+class FakePipelineLayout final : public Fake<PipelineLayout>
+{
+public:
+    FakePipelineLayout(std::uint32_t index, PipelineLayoutDefinition definition, std::string_view name = "fake")
+        : m_index{index}
+        , m_definition{std::move(definition)}
+    {
+        m_debug_name = name;
+    }
+
+    [[nodiscard]] auto handle() const noexcept -> PipelineLayoutHandle override
+    {
+        return make_handle<PipelineLayoutTag>(m_index);
+    }
+
+    [[nodiscard]] auto definition() const noexcept -> const PipelineLayoutDefinition& override
+    {
+        return m_definition;
+    }
+
+private:
+    std::uint32_t m_index;
+    PipelineLayoutDefinition m_definition;
+};
+
+/// The bindless pipeline layout of a device with default capacities and every kind of resource.
+[[nodiscard]] inline auto default_bindless_layout() -> const FakePipelineLayout&
+{
+    static constexpr std::array KINDS{BindlessResourceKind::SAMPLED_IMAGE, BindlessResourceKind::STORAGE_IMAGE,
+                                      BindlessResourceKind::SAMPLER, BindlessResourceKind::STORAGE_BUFFER,
+                                      BindlessResourceKind::ACCELERATION_STRUCTURE};
+    static const FakePipelineLayout layout{1000, bindless_pipeline_layout_definition(BindlessTableDescription{}, KINDS), "bindless"};
+    return layout;
+}
 
 // ================================================================================================= command buffer
 
@@ -66,6 +114,16 @@ public:
     [[nodiscard]] auto level() const noexcept -> CommandBufferLevel override
     {
         return m_level;
+    }
+
+    [[nodiscard]] auto bindless_pipeline_layout() const noexcept -> const PipelineLayout& override
+    {
+        return *m_bindless_layout;
+    }
+
+    void use_bindless_layout(const PipelineLayout& layout) noexcept
+    {
+        m_bindless_layout = &layout;
     }
 
     void reset() override
@@ -296,10 +354,167 @@ protected:
         m_log.push_back(std::format("execute_commands{}", handles));
     }
 
+    void record_blit_image(ImageHandle /*source*/, ImageLayout source_layout, ImageHandle /*destination*/, ImageLayout destination_layout,
+                           std::span<const ImageBlitRegion> regions, Filter filter) override
+    {
+        for (const ImageBlitRegion& region : regions)
+        {
+            m_log.push_back(std::format("blit_image {} {} {} -> {} {} {}x{} {}", source_layout, region.source_subresource.mip_level,
+                                        region.source_bounds[1].x, destination_layout, region.destination_subresource.mip_level,
+                                        region.destination_bounds[1].x, region.destination_bounds[1].y, filter));
+        }
+    }
+
+    void record_resolve_image(ImageHandle /*source*/, ImageLayout /*source_layout*/, ImageHandle /*destination*/,
+                              ImageLayout /*destination_layout*/, std::span<const ImageResolveRegion> regions) override
+    {
+        m_log.push_back(std::format("resolve_image {}", regions.size()));
+    }
+
+    void record_clear_depth_stencil_image(ImageHandle /*image*/, ImageLayout layout, float depth, std::uint32_t stencil,
+                                          const ImageSubresourceRange& /*range*/) override
+    {
+        m_log.push_back(std::format("clear_depth_stencil_image {} {} {}", layout, depth, stencil));
+    }
+
+    void record_clear_attachments(std::span<const ClearAttachment> attachments, std::span<const ClearRectangle> rectangles) override
+    {
+        m_log.push_back(std::format("clear_attachments {} {}", attachments.size(), rectangles.size()));
+    }
+
+    void record_set_stencil_reference(StencilFace faces, std::uint32_t reference) override
+    {
+        m_log.push_back(std::format("set_stencil_reference {} {}", faces, reference));
+    }
+
+    void record_set_blend_constants(const std::array<float, 4>& constants) override
+    {
+        m_log.push_back(std::format("set_blend_constants {}", constants[0]));
+    }
+
+    void record_set_depth_bias(float constant_factor, float clamp, float slope_factor) override
+    {
+        m_log.push_back(std::format("set_depth_bias {} {} {}", constant_factor, clamp, slope_factor));
+    }
+
+    void record_set_depth_bounds(float minimum, float maximum) override
+    {
+        m_log.push_back(std::format("set_depth_bounds {} {}", minimum, maximum));
+    }
+
+    void record_set_line_width(float width) override
+    {
+        m_log.push_back(std::format("set_line_width {}", width));
+    }
+
+    void record_set_cull_mode(CullMode mode) override
+    {
+        m_log.push_back(std::format("set_cull_mode {}", mode));
+    }
+
+    void record_set_front_face(FrontFace front_face) override
+    {
+        m_log.push_back(std::format("set_front_face {}", front_face));
+    }
+
+    void record_set_primitive_topology(PrimitiveTopology topology) override
+    {
+        m_log.push_back(std::format("set_primitive_topology {}", topology));
+    }
+
+    void record_set_depth_test(bool enable) override
+    {
+        m_log.push_back(std::format("set_depth_test {}", enable));
+    }
+
+    void record_set_depth_write(bool enable) override
+    {
+        m_log.push_back(std::format("set_depth_write {}", enable));
+    }
+
+    void record_set_depth_compare(CompareOperation operation) override
+    {
+        m_log.push_back(std::format("set_depth_compare {}", operation));
+    }
+
+    void record_set_stencil_test(bool enable) override
+    {
+        m_log.push_back(std::format("set_stencil_test {}", enable));
+    }
+
+    void record_set_stencil_operation(StencilFace faces, StencilOperation fail, StencilOperation pass, StencilOperation depth_fail,
+                                      CompareOperation compare) override
+    {
+        m_log.push_back(std::format("set_stencil_operation {} {} {} {} {}", faces, fail, pass, depth_fail, compare));
+    }
+
+    void record_set_fragment_shading_rate(ShadingRate rate, const std::array<ShadingRateCombiner, 2>& combiners) override
+    {
+        m_log.push_back(std::format("set_fragment_shading_rate {} {} {}", rate, combiners[0], combiners[1]));
+    }
+
+    void record_draw_indirect_count(const IndirectDrawArguments& /*arguments*/, const IndirectCount& count) override
+    {
+        m_log.push_back(std::format("draw_indirect_count {}", count.maximum_draw_count));
+    }
+
+    void record_draw_indexed_indirect_count(const IndirectDrawArguments& /*arguments*/, const IndirectCount& count) override
+    {
+        m_log.push_back(std::format("draw_indexed_indirect_count {}", count.maximum_draw_count));
+    }
+
+    void record_draw_mesh_tasks(const DrawMeshTasksArguments& arguments) override
+    {
+        m_log.push_back(std::format("draw_mesh_tasks {} {} {}", arguments.group_count_x, arguments.group_count_y, arguments.group_count_z));
+    }
+
+    void record_draw_mesh_tasks_indirect(const IndirectDrawArguments& arguments) override
+    {
+        m_log.push_back(std::format("draw_mesh_tasks_indirect {}", arguments.draw_count));
+    }
+
+    void record_draw_mesh_tasks_indirect_count(const IndirectDrawArguments& /*arguments*/, const IndirectCount& count) override
+    {
+        m_log.push_back(std::format("draw_mesh_tasks_indirect_count {}", count.maximum_draw_count));
+    }
+
+    void record_bind_ray_tracing_pipeline(RayTracingPipelineHandle pipeline) override
+    {
+        m_log.push_back(std::format("bind_ray_tracing_pipeline {}", pipeline));
+    }
+
+    void record_trace_rays(const ShaderBindingTable& /*table*/, std::uint32_t width, std::uint32_t height, std::uint32_t depth) override
+    {
+        m_log.push_back(std::format("trace_rays {} {} {}", width, height, depth));
+    }
+
+    void record_trace_rays_indirect(const ShaderBindingTable& /*table*/, BufferHandle /*buffer*/, std::uint64_t offset) override
+    {
+        m_log.push_back(std::format("trace_rays_indirect {}", offset));
+    }
+
+    void record_build_acceleration_structures(std::span<const AccelerationStructureBuildDescription> builds) override
+    {
+        m_log.push_back(std::format("build_acceleration_structures {}", builds.size()));
+    }
+
+    void record_copy_acceleration_structure(AccelerationStructureHandle /*source*/, AccelerationStructureHandle /*destination*/,
+                                            AccelerationStructureCopyMode mode) override
+    {
+        m_log.push_back(std::format("copy_acceleration_structure {}", mode));
+    }
+
+    void record_write_acceleration_structure_properties(std::span<const AccelerationStructureHandle> structures,
+                                                        QueryPoolHandle /*pool*/, std::uint32_t first_query) override
+    {
+        m_log.push_back(std::format("write_acceleration_structure_properties {} {}", structures.size(), first_query));
+    }
+
 private:
     QueueType m_queue_type;
     CommandBufferLevel m_level;
     std::uint32_t m_index;
+    const PipelineLayout* m_bindless_layout = &default_bindless_layout();
     std::uint32_t m_parallel_passes = 0;
     std::vector<std::string> m_log;
     std::vector<std::byte> m_push_constant_bytes;
@@ -362,31 +577,6 @@ private:
     std::vector<DescriptorSetLayoutBinding> m_bindings;
 };
 
-class FakePipelineLayout final : public Fake<PipelineLayout>
-{
-public:
-    FakePipelineLayout(std::uint32_t index, PipelineLayoutDefinition definition, std::string_view name = "fake")
-        : m_index{index}
-        , m_definition{std::move(definition)}
-    {
-        m_debug_name = name;
-    }
-
-    [[nodiscard]] auto handle() const noexcept -> PipelineLayoutHandle override
-    {
-        return make_handle<PipelineLayoutTag>(m_index);
-    }
-
-    [[nodiscard]] auto definition() const noexcept -> const PipelineLayoutDefinition& override
-    {
-        return m_definition;
-    }
-
-private:
-    std::uint32_t m_index;
-    PipelineLayoutDefinition m_definition;
-};
-
 class FakeComputePipeline final : public Fake<ComputePipeline>
 {
 public:
@@ -410,6 +600,15 @@ public:
         return {1, 1, 1};
     }
 
+    [[nodiscard]] auto status() const noexcept -> PipelineStatus override
+    {
+        return PipelineStatus::READY;
+    }
+
+    void wait() const override
+    {
+    }
+
 private:
     std::uint32_t m_index;
     PipelineLayoutHandle m_layout;
@@ -426,6 +625,15 @@ public:
     [[nodiscard]] auto handle() const noexcept -> GraphicsPipelineHandle override
     {
         return make_handle<GraphicsPipelineTag>(m_index);
+    }
+
+    [[nodiscard]] auto status() const noexcept -> PipelineStatus override
+    {
+        return PipelineStatus::READY;
+    }
+
+    void wait() const override
+    {
     }
 
     [[nodiscard]] auto layout() const noexcept -> PipelineLayoutHandle override
@@ -476,13 +684,25 @@ private:
     std::vector<DescriptorResource> m_resources;
 };
 
-/// Host-visible buffer of 64 bytes; everything else is left to the interface's defaults.
+/// Host-visible buffer (64 bytes unless created by FakeDevice); everything else is left to the
+/// interface's defaults. STORAGE buffers get bindless index = handle index.
 class FakeBuffer final : public Fake<Buffer>
 {
 public:
+    explicit FakeBuffer(std::uint64_t size = 64,
+                        BufferUsage usage = BufferUsage::STORAGE,
+                        std::uint32_t index = 1,
+                        std::string_view name = "fake")
+        : m_memory(static_cast<std::size_t>(size))
+        , m_usage{usage}
+        , m_index{index}
+    {
+        m_debug_name = name;
+    }
+
     [[nodiscard]] auto handle() const noexcept -> BufferHandle override
     {
-        return make_handle<BufferTag>(1);
+        return make_handle<BufferTag>(m_index);
     }
 
     [[nodiscard]] auto size() const noexcept -> std::uint64_t override
@@ -492,12 +712,17 @@ public:
 
     [[nodiscard]] auto usage() const noexcept -> BufferUsage override
     {
-        return BufferUsage::STORAGE;
+        return m_usage;
     }
 
     [[nodiscard]] auto location() const noexcept -> MemoryLocation override
     {
         return MemoryLocation::HOST_UPLOAD;
+    }
+
+    [[nodiscard]] auto bindless_index() const noexcept -> StorageBufferIndex override
+    {
+        return has_any(m_usage, BufferUsage::STORAGE) ? StorageBufferIndex{m_index} : StorageBufferIndex{};
     }
 
     [[nodiscard]] auto mapped_memory() -> std::span<std::byte> override
@@ -521,7 +746,9 @@ public:
     }
 
 private:
-    std::array<std::byte, 64> m_memory{};
+    std::vector<std::byte> m_memory;
+    BufferUsage m_usage;
+    std::uint32_t m_index;
 };
 
 class FakeDeleter final : public Fake<Deleter>
@@ -534,7 +761,13 @@ public:
 
     auto collect() -> std::size_t override
     {
-        return Deleter::collect();
+        ++m_collections;
+        return 0;
+    }
+
+    [[nodiscard]] auto collections() const noexcept -> std::uint32_t
+    {
+        return m_collections;
     }
 
     void flush() override
@@ -546,6 +779,52 @@ public:
     {
         return 0;
     }
+
+private:
+    std::uint32_t m_collections = 0;
+};
+
+/// Timestamp results the test provides.
+class FakeQueryPool final : public Fake<QueryPool>
+{
+public:
+    FakeQueryPool(std::uint32_t index, QueryType type, std::uint32_t count)
+        : m_index{index}
+        , m_type{type}
+        , m_results(count)
+    {}
+
+    [[nodiscard]] auto handle() const noexcept -> QueryPoolHandle override
+    {
+        return make_handle<QueryPoolTag>(m_index);
+    }
+
+    [[nodiscard]] auto type() const noexcept -> QueryType override
+    {
+        return m_type;
+    }
+
+    [[nodiscard]] auto count() const noexcept -> std::uint32_t override
+    {
+        return static_cast<std::uint32_t>(m_results.size());
+    }
+
+    [[nodiscard]] auto results(std::uint32_t first, std::span<std::uint64_t> destination, bool /*wait*/) -> bool override
+    {
+        std::ranges::copy(std::span{m_results}.subspan(first, destination.size()), destination.begin());
+        return true;
+    }
+
+    /// Sets the value query @p query will report.
+    void set_result(std::uint32_t query, std::uint64_t value)
+    {
+        m_results[query] = value;
+    }
+
+private:
+    std::uint32_t m_index;
+    QueryType m_type;
+    std::vector<std::uint64_t> m_results;
 };
 
 /// Allocates FakeCommandBuffers with increasing handle indices and counts resets.
@@ -707,7 +986,9 @@ public:
 
     [[nodiscard]] auto create_buffer(const BufferDescription& description) -> std::unique_ptr<Buffer> override
     {
-        return Device::create_buffer(description);
+        auto buffer = std::make_unique<FakeBuffer>(description.size, description.usage, ++m_next_index, description.debug_name);
+        buffer->use_validation_level(validation_level());
+        return buffer;
     }
 
     [[nodiscard]] auto create_image(const ImageDescription& description) -> std::unique_ptr<Image> override
@@ -773,24 +1054,110 @@ public:
     [[nodiscard]] auto create_compute_pipeline(const ComputePipelineDescription& description)
         -> std::unique_ptr<ComputePipeline> override
     {
-        // Resolve and validate, as every backend does.
-        validate_compute_pipeline(*resolve(m_pipeline_layouts, description.layout), *resolve(m_shader_modules, description.shader));
+        // Resolve (no layout = the bindless one) and validate, as every backend does.
+        if (validates(ValidationLevel::CREATION))
+        {
+            validate_compute_pipeline(layout_of(description.layout), *resolve(m_shader_modules, description.shader),
+                                      description.specialization_constants);
+        }
         m_captured.compute_pipeline = description;
-        return std::make_unique<FakeComputePipeline>(++m_next_index, description.layout);
+        return std::make_unique<FakeComputePipeline>(++m_next_index, layout_of(description.layout).handle());
     }
 
     [[nodiscard]] auto create_graphics_pipeline(const GraphicsPipelineDescription& description)
         -> std::unique_ptr<GraphicsPipeline> override
     {
-        // Resolve and validate, as every backend does.
-        const ShaderModule* fragment_shader =
-            description.fragment_shader.is_valid() ? resolve(m_shader_modules, description.fragment_shader) : nullptr;
-        validate_graphics_pipeline(*resolve(m_pipeline_layouts, description.layout),
-                                   *resolve(m_shader_modules, description.vertex_shader), fragment_shader, description);
+        // Resolve (no layout = the bindless one) and validate, as every backend does.
+        if (validates(ValidationLevel::CREATION))
+        {
+            validate_graphics_pipeline(layout_of(description.layout),
+                                       {.vertex = resolve_optional(description.vertex_shader),
+                                        .fragment = resolve_optional(description.fragment_shader),
+                                        .task = resolve_optional(description.task_shader),
+                                        .mesh = resolve_optional(description.mesh_shader),
+                                        .geometry = resolve_optional(description.geometry_shader),
+                                        .tessellation_control = resolve_optional(description.tessellation_control_shader),
+                                        .tessellation_evaluation = resolve_optional(description.tessellation_evaluation_shader)},
+                                       description);
+        }
         m_captured.graphics_pipeline = description;
         m_captured.vertex_attributes.assign(description.vertex_attributes.begin(), description.vertex_attributes.end());
         m_captured.color_formats.assign(description.color_formats.begin(), description.color_formats.end());
-        return std::make_unique<FakeGraphicsPipeline>(++m_next_index, description.layout);
+        return std::make_unique<FakeGraphicsPipeline>(++m_next_index, layout_of(description.layout).handle());
+    }
+
+    [[nodiscard]] auto create_ray_tracing_pipeline(const RayTracingPipelineDescription& description)
+        -> std::unique_ptr<RayTracingPipeline> override
+    {
+        // Validate, then report that the fake cannot build one.
+        if (validates(ValidationLevel::CREATION))
+        {
+            validate_ray_tracing_pipeline(layout_of(description.layout), description,
+                                          [this](ShaderModuleHandle handle) { return resolve_optional(handle); });
+        }
+        return Device::create_ray_tracing_pipeline(description);
+    }
+
+    [[nodiscard]] auto bindless_pipeline_layout() const noexcept -> const PipelineLayout& override
+    {
+        return default_bindless_layout();
+    }
+
+    [[nodiscard]] auto bindless_usage() const noexcept -> BindlessTableUsage override
+    {
+        return {};
+    }
+
+    [[nodiscard]] auto memory_budget() const -> std::vector<MemoryHeapBudget> override
+    {
+        return Device::memory_budget();
+    }
+
+    [[nodiscard]] auto memory_statistics() const -> MemoryStatistics override
+    {
+        return Device::memory_statistics();
+    }
+
+    [[nodiscard]] auto create_buffer_view(const BufferViewDescription& description) -> std::unique_ptr<BufferView> override
+    {
+        return Device::create_buffer_view(description);
+    }
+
+    [[nodiscard]] auto sparse_image_requirements(ImageHandle image) const -> SparseImageRequirements override
+    {
+        return Device::sparse_image_requirements(image);
+    }
+
+    [[nodiscard]] auto create_pipeline_cache(const PipelineCacheDescription& description) -> std::unique_ptr<PipelineCache> override
+    {
+        return Device::create_pipeline_cache(description);
+    }
+
+    [[nodiscard]] auto acceleration_structure_build_sizes(const AccelerationStructureBuildDescription& description) const
+        -> AccelerationStructureBuildSizes override
+    {
+        return Device::acceleration_structure_build_sizes(description);
+    }
+
+    [[nodiscard]] auto create_acceleration_structure(const AccelerationStructureDescription& description)
+        -> std::unique_ptr<AccelerationStructure> override
+    {
+        return Device::create_acceleration_structure(description);
+    }
+
+    [[nodiscard]] auto capture_tool() const noexcept -> CaptureTool override
+    {
+        return CaptureTool::NONE;
+    }
+
+    void begin_capture(std::string_view title) override
+    {
+        Device::begin_capture(title);
+    }
+
+    void end_capture() override
+    {
+        Device::end_capture();
     }
 
     [[nodiscard]] auto create_descriptor_pool(const DescriptorPoolDescription& description) -> std::unique_ptr<DescriptorPool> override
@@ -816,7 +1183,27 @@ public:
     [[nodiscard]] auto create_timeline_semaphore(const TimelineSemaphoreDescription& description)
         -> std::unique_ptr<TimelineSemaphore> override
     {
-        return Device::create_timeline_semaphore(description);
+        auto timeline = std::make_unique<FakeTimelineSemaphore>();
+        timeline->signal(description.initial_value);
+        m_last_timeline = timeline.get();
+        return timeline;
+    }
+
+    /// The timeline semaphore created last.
+    [[nodiscard]] auto last_timeline() const noexcept -> FakeTimelineSemaphore&
+    {
+        return *m_last_timeline;
+    }
+
+    /// The query pool created last.
+    [[nodiscard]] auto last_query_pool() const noexcept -> FakeQueryPool&
+    {
+        return *m_last_query_pool;
+    }
+
+    [[nodiscard]] auto fake_deleter() noexcept -> FakeDeleter&
+    {
+        return m_deleter;
     }
 
     [[nodiscard]] auto create_event(const EventDescription& description) -> std::unique_ptr<Event> override
@@ -826,7 +1213,9 @@ public:
 
     [[nodiscard]] auto create_query_pool(const QueryPoolDescription& description) -> std::unique_ptr<QueryPool> override
     {
-        return Device::create_query_pool(description);
+        auto pool = std::make_unique<FakeQueryPool>(++m_next_index, description.type, description.count);
+        m_last_query_pool = pool.get();
+        return pool;
     }
 
     [[nodiscard]] auto create_swapchain(const SwapchainDescription& description) -> std::unique_ptr<Swapchain> override
@@ -841,6 +1230,18 @@ protected:
     }
 
 private:
+    /// The pipeline layout a description names; the bindless one when it names none.
+    [[nodiscard]] auto layout_of(PipelineLayoutHandle handle) const -> const PipelineLayout&
+    {
+        return handle.is_valid() ? *resolve(m_pipeline_layouts, handle) : default_bindless_layout();
+    }
+
+    /// The shader module a description names, or nullptr for a null handle.
+    [[nodiscard]] auto resolve_optional(ShaderModuleHandle handle) const -> const ShaderModule*
+    {
+        return handle.is_valid() ? resolve(m_shader_modules, handle) : nullptr;
+    }
+
     /// The object a handle names, found through the handle's index (which only a HandleIssuer reads).
     template<class Object, class Tag>
     [[nodiscard]] static auto resolve(const std::map<std::uint32_t, const Object*>& objects, Handle<Tag> handle) -> const Object*
@@ -865,12 +1266,15 @@ private:
     std::map<std::uint32_t, const ShaderModule*> m_shader_modules;
     std::map<std::uint32_t, const DescriptorSetLayout*> m_set_layouts;
     std::map<std::uint32_t, const PipelineLayout*> m_pipeline_layouts;
+    FakeTimelineSemaphore* m_last_timeline = nullptr;
+    FakeQueryPool* m_last_query_pool = nullptr;
 };
 
 class FakePhysicalDevice final : public Fake<PhysicalDevice>
 {
 public:
-    explicit FakePhysicalDevice(PhysicalDeviceType type, std::vector<DeviceFeature> features = {})
+    explicit FakePhysicalDevice(PhysicalDeviceType type,
+                                std::vector<DeviceFeature> features = {CORE_FEATURES.begin(), CORE_FEATURES.end()})
         : m_features{std::move(features)}
     {
         m_properties.name = std::format("fake {}", type);
@@ -897,6 +1301,11 @@ public:
         return PhysicalDevice::format_support(format);
     }
 
+    [[nodiscard]] auto surface_support(const NativeWindow& window) const -> SurfaceSupport override
+    {
+        return PhysicalDevice::surface_support(window);
+    }
+
     [[nodiscard]] auto create_device(const DeviceDescription& /*description*/) -> std::unique_ptr<Device> override
     {
         return std::make_unique<FakeDevice>(*this);
@@ -916,6 +1325,12 @@ public:
         {
             m_physical_devices.push_back(std::make_unique<FakePhysicalDevice>(type));
         }
+    }
+
+    /// Adds a device with only @p features.
+    void add_physical_device(PhysicalDeviceType type, std::vector<DeviceFeature> features)
+    {
+        m_physical_devices.push_back(std::make_unique<FakePhysicalDevice>(type, std::move(features)));
     }
 
     [[nodiscard]] auto physical_device_count() const noexcept -> std::size_t override
@@ -942,4 +1357,5 @@ private:
 static_assert(!std::is_abstract_v<gfx::tests::FakeCommandBuffer> && !std::is_abstract_v<gfx::tests::FakeDevice>);
 static_assert(!std::is_abstract_v<gfx::tests::FakeBuffer> && !std::is_abstract_v<gfx::tests::FakeInstance> &&
               !std::is_abstract_v<gfx::tests::FakePhysicalDevice>);
-static_assert(!std::is_abstract_v<gfx::tests::FakeCommandPool> && !std::is_abstract_v<gfx::tests::FakeTimelineSemaphore>);
+static_assert(!std::is_abstract_v<gfx::tests::FakeCommandPool> && !std::is_abstract_v<gfx::tests::FakeTimelineSemaphore> &&
+              !std::is_abstract_v<gfx::tests::FakeQueryPool>);

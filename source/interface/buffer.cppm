@@ -6,6 +6,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import :backend_object;
+import :bindless;
 import :common_types;
 
 export namespace gfx
@@ -19,6 +20,7 @@ struct BufferDescription
     MemoryLocation location = MemoryLocation::DEVICE_LOCAL; ///< Where its memory lives (when not placed).
     SharingMode sharing = SharingMode::EXCLUSIVE;           ///< Ownership across queue types.
     std::optional<MemoryPlacement> placement{};             ///< Place it in an existing DeviceMemory instead.
+    bool bindless = true;                                   ///< Register a STORAGE buffer in the bindless table.
     std::string_view debug_name{};                          ///< Name shown by debugging tools.
 };
 
@@ -38,7 +40,8 @@ public:
     /// @brief Where its memory lives.
     [[nodiscard]] virtual auto location() const noexcept -> MemoryLocation = 0;
 
-    /// @brief The buffer's memory, mapped into the CPU address space (host-visible locations only).
+    /// @brief The buffer's memory, mapped into the CPU address space for the buffer's whole lifetime
+    ///        (persistent mapping: never mapped or unmapped per frame). Host-visible locations only.
     /// @throws InvalidUsageError for memory the CPU cannot access.
     [[nodiscard]] virtual auto mapped_memory() -> std::span<std::byte> = 0;
 
@@ -50,6 +53,9 @@ public:
 
     /// @brief GPU virtual address of the buffer (requires BufferUsage::SHADER_DEVICE_ADDRESS).
     [[nodiscard]] virtual auto device_address() const -> std::uint64_t = 0;
+
+    /// @brief Index in the bindless table (STORAGE usage and bindless = true; invalid otherwise).
+    [[nodiscard]] virtual auto bindless_index() const noexcept -> StorageBufferIndex = 0;
 
     /// @brief The mapped memory viewed as an array of @p Element.
     template<class Element>

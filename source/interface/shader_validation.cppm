@@ -12,6 +12,8 @@ import :shader_layout;
 import :shader_module;
 import :pipeline_layout;
 import :graphics_pipeline;
+import :compute_pipeline;
+import :ray_tracing_pipeline;
 
 export namespace gfx
 {
@@ -213,6 +215,49 @@ check_fragment_output(const ShaderLayout& fragment_shader,
     return {};
 }
 
+/// @brief Checks that every input location of a stage is written by the previous stage with the same
+///        numeric type (float, signed or unsigned integer).
+[[nodiscard]] auto
+check_stage_interface(const ShaderLayout& previous_stage,
+                      const ShaderLayout& next_stage) noexcept -> LayoutCheck
+{
+    for (const StageVariable& input : next_stage.inputs)
+    {
+        const auto output = std::ranges::find(previous_stage.outputs, input.location, &StageVariable::location);
+        if (output == previous_stage.outputs.end() ||
+            shader_numeric_type(output->format) != shader_numeric_type(input.format))
+        {
+            return {.mismatch = LayoutMismatch::STAGE_INTERFACE_MISMATCH,
+                    .index = input.location,
+                    .shader_format = input.format,
+                    .layout_format = output == previous_stage.outputs.end() ? Format::UNDEFINED : output->format,
+                    .shader_stage = next_stage.stage,
+                    .layout_stages = previous_stage.stage};
+        }
+    }
+    return {};
+}
+
+/// @brief Checks that every specialization constant a pipeline sets is declared by one of its shaders.
+[[nodiscard]] auto
+check_specialization_constants(std::span<const ShaderLayout* const> shaders,
+                               std::span<const SpecializationConstant> constants) noexcept -> LayoutCheck
+{
+    for (const SpecializationConstant& constant : constants)
+    {
+        const bool declared = std::ranges::any_of(shaders, [&constant](const ShaderLayout* shader)
+        {
+            return shader != nullptr &&
+                   std::ranges::contains(shader->specialization_constants, constant.id, &SpecializationConstantInfo::id);
+        });
+        if (!declared)
+        {
+            return {.mismatch = LayoutMismatch::UNKNOWN_SPECIALIZATION_CONSTANT, .index = constant.id};
+        }
+    }
+    return {};
+}
+
 /// @brief Human-readable explanation of a failed check (empty for a passed one).
 [[nodiscard]] auto
 describe(const LayoutCheck& check) -> std::string
@@ -261,6 +306,13 @@ describe(const LayoutCheck& check) -> std::string
             return std::format("set {} binding {} is declared as {} x{} by this shader and as {} x{} by an earlier one",
                                check.set, check.index, check.shader_type, check.shader_value, check.layout_type,
                                check.layout_value);
+        case LayoutMismatch::STAGE_INTERFACE_MISMATCH:
+            return std::format("the {} stage reads location {} as {}, but the {} stage writes {} there", check.shader_stage,
+                               check.index, check.shader_format, check.layout_stages,
+                               check.layout_format == Format::UNDEFINED ? std::string{"nothing"}
+                                                                        : std::format("{}", check.layout_format));
+        case LayoutMismatch::UNKNOWN_SPECIALIZATION_CONSTANT:
+            return std::format("the pipeline sets specialization constant {}, which none of its shaders declares", check.index);
     }
     return std::format("unknown mismatch {}", check.mismatch);
 }
@@ -289,44 +341,213 @@ validate_layout_check(const LayoutCheck& check,
     });
 }
 
-/// @brief Checks a compute pipeline before a backend creates it.
-/// @throws ShaderLayoutMismatchError when the shader is not a compute shader or does not match @p layout.
+/// @brief Checks a compute pipeline before a backend creates it (with the bindless pipeline layout when
+///        the description names none). Backends call it at ValidationLevel::CREATION.
+/// @throws ShaderLayoutMismatchError when the shader is not a compute shader, does not match @p layout,
+///         or does not declare a specialization constant the description sets.
 void
 validate_compute_pipeline(const PipelineLayout& layout,
-                          const ShaderModule& shader)
+                          const ShaderModule& shader,
+                          std::span<const SpecializationConstant> specialization_constants = {})
 {
-    constexpr std::string_view OPERATION = "Device::create_compute_pipeline";
+    static constexpr std::string_view OPERATION = "Device::create_compute_pipeline";
     validate_layout_check(check_shader_stage(shader.layout(), ShaderStage::COMPUTE), shader, OPERATION);
     validate_layout_check(check_pipeline_layout(shader.layout(), layout.definition()), shader, OPERATION);
+    const std::array<const ShaderLayout*, 1> layouts{&shader.layout()};
+    validate_layout_check(check_specialization_constants(layouts, specialization_constants), shader, OPERATION);
 }
 
-/// @brief Checks a graphics pipeline before a backend creates it: stages, pipeline layout, vertex
-///        attributes and color attachments.
-/// @param layout          Pipeline layout named by @p description.
-/// @param vertex_shader   Vertex shader named by @p description.
-/// @param fragment_shader Fragment shader named by @p description, or nullptr for a depth-only pipeline.
-/// @param description     The rest of the pipeline description.
+/// @brief The shader modules a GraphicsPipelineDescription names, resolved by the backend (nullptr for
+///        the stages it leaves empty).
+struct GraphicsPipelineShaders
+{
+    const ShaderModule* vertex = nullptr;                  ///< Vertex shader.
+    const ShaderModule* fragment = nullptr;                ///< Fragment shader.
+    const ShaderModule* task = nullptr;                    ///< Task shader.
+    const ShaderModule* mesh = nullptr;                    ///< Mesh shader.
+    const ShaderModule* geometry = nullptr;                ///< Geometry shader.
+    const ShaderModule* tessellation_control = nullptr;    ///< Tessellation control shader.
+    const ShaderModule* tessellation_evaluation = nullptr; ///< Tessellation evaluation shader.
+};
+
+/// @brief Checks a graphics pipeline before a backend creates it: the combination of stages, each
+///        stage against the pipeline layout, vertex attributes, the interface between the last
+///        pre-rasterization stage and the fragment shader, color attachments and specialization
+///        constants. Backends call it at ValidationLevel::CREATION.
+/// @param layout      Pipeline layout named by @p description (the bindless layout when it names none).
+/// @param shaders     Shader modules named by @p description.
+/// @param description The rest of the pipeline description.
+/// @throws InvalidUsageError when the stages do not form a pipeline (no vertex or mesh shader, both,
+///         a task shader without a mesh shader, half a tessellation pair).
 /// @throws ShaderLayoutMismatchError naming the first mismatch.
 void
 validate_graphics_pipeline(const PipelineLayout& layout,
-                           const ShaderModule& vertex_shader,
-                           const ShaderModule* fragment_shader,
+                           const GraphicsPipelineShaders& shaders,
                            const GraphicsPipelineDescription& description)
 {
-    constexpr std::string_view OPERATION = "Device::create_graphics_pipeline";
-
-    // The vertex shader: stage, bindings and push constants, attributes.
-    validate_layout_check(check_shader_stage(vertex_shader.layout(), ShaderStage::VERTEX), vertex_shader, OPERATION);
-    validate_layout_check(check_pipeline_layout(vertex_shader.layout(), layout.definition()), vertex_shader, OPERATION);
-    validate_layout_check(check_vertex_input(vertex_shader.layout(), description.vertex_attributes), vertex_shader, OPERATION);
-
-    // The fragment shader, if any: stage, bindings and push constants, attachments.
-    if (fragment_shader != nullptr)
+    static constexpr std::string_view OPERATION = "Device::create_graphics_pipeline";
+    const auto reject = [&layout](std::string problem, std::string suggestion)
     {
-        validate_layout_check(check_shader_stage(fragment_shader->layout(), ShaderStage::FRAGMENT), *fragment_shader, OPERATION);
-        validate_layout_check(check_pipeline_layout(fragment_shader->layout(), layout.definition()), *fragment_shader, OPERATION);
-        validate_layout_check(check_fragment_output(fragment_shader->layout(), description.color_formats), *fragment_shader,
+        throw InvalidUsageError({.backend = layout.backend(),
+                                 .operation = std::string{OPERATION},
+                                 .problem = std::move(problem),
+                                 .suggestion = std::move(suggestion)});
+    };
+
+    // The stages must form a pipeline: vertex or mesh processing, never both.
+    if ((shaders.vertex == nullptr) == (shaders.mesh == nullptr))
+    {
+        reject(shaders.vertex == nullptr ? "the pipeline has neither a vertex nor a mesh shader"
+                                         : "the pipeline has both a vertex and a mesh shader",
+               "use a vertex shader (with optional tessellation and geometry shaders) or a mesh shader (with an optional "
+               "task shader)");
+    }
+    if (shaders.task != nullptr && shaders.mesh == nullptr)
+    {
+        reject("the pipeline has a task shader without a mesh shader", "add the mesh shader the task shader launches");
+    }
+    if ((shaders.tessellation_control == nullptr) != (shaders.tessellation_evaluation == nullptr))
+    {
+        reject("the pipeline has only one of the two tessellation shaders", "use both tessellation shaders, or neither");
+    }
+    if (shaders.mesh != nullptr && (shaders.geometry != nullptr || shaders.tessellation_evaluation != nullptr))
+    {
+        reject("a mesh pipeline cannot have geometry or tessellation shaders", "remove them, or use a vertex shader");
+    }
+
+    // Every stage: its kind and its bindings and push constants.
+    const std::array<std::pair<const ShaderModule*, ShaderStage>, 7> stages{{
+        {shaders.vertex, ShaderStage::VERTEX},
+        {shaders.tessellation_control, ShaderStage::TESSELLATION_CONTROL},
+        {shaders.tessellation_evaluation, ShaderStage::TESSELLATION_EVALUATION},
+        {shaders.geometry, ShaderStage::GEOMETRY},
+        {shaders.task, ShaderStage::TASK},
+        {shaders.mesh, ShaderStage::MESH},
+        {shaders.fragment, ShaderStage::FRAGMENT},
+    }};
+    std::vector<const ShaderLayout*> layouts;
+    for (const auto& [shader, stage] : stages)
+    {
+        if (shader != nullptr)
+        {
+            validate_layout_check(check_shader_stage(shader->layout(), stage), *shader, OPERATION);
+            validate_layout_check(check_pipeline_layout(shader->layout(), layout.definition()), *shader, OPERATION);
+            layouts.push_back(&shader->layout());
+        }
+    }
+
+    // Vertex input, then what the last pre-rasterization stage hands to the fragment shader.
+    if (shaders.vertex != nullptr)
+    {
+        validate_layout_check(check_vertex_input(shaders.vertex->layout(), description.vertex_attributes), *shaders.vertex,
                               OPERATION);
+    }
+    const ShaderModule* last = shaders.geometry != nullptr                  ? shaders.geometry
+                               : shaders.tessellation_evaluation != nullptr ? shaders.tessellation_evaluation
+                                                                            : shaders.vertex;
+    if (shaders.fragment != nullptr)
+    {
+        if (last != nullptr)
+        {
+            validate_layout_check(check_stage_interface(last->layout(), shaders.fragment->layout()), *shaders.fragment, OPERATION);
+        }
+        validate_layout_check(check_fragment_output(shaders.fragment->layout(), description.color_formats), *shaders.fragment,
+                              OPERATION);
+    }
+
+    // Specialization constants must exist in some stage.
+    const ShaderModule& any_shader = shaders.vertex != nullptr ? *shaders.vertex : *shaders.mesh;
+    validate_layout_check(check_specialization_constants(layouts, description.specialization_constants), any_shader, OPERATION);
+}
+
+/// @brief Checks a ray tracing pipeline before a backend creates it: group composition, shader stages,
+///        the pipeline layout and specialization constants. Backends call it at ValidationLevel::CREATION.
+/// @param layout      Pipeline layout named by @p description (the bindless layout when it names none).
+/// @param description The pipeline description.
+/// @param resolve     The backend's module for a handle (nullptr for a null handle).
+/// @throws InvalidUsageError when a group is malformed or no group generates rays.
+/// @throws ShaderLayoutMismatchError naming the first mismatch.
+void
+validate_ray_tracing_pipeline(const PipelineLayout& layout,
+                              const RayTracingPipelineDescription& description,
+                              const std::function<const ShaderModule*(ShaderModuleHandle)>& resolve)
+{
+    static constexpr std::string_view OPERATION = "Device::create_ray_tracing_pipeline";
+    const auto reject = [&layout](std::size_t group, std::string problem)
+    {
+        throw InvalidUsageError({.backend = layout.backend(),
+                                 .operation = std::string{OPERATION},
+                                 .problem = std::format("group {}: {}", group, problem),
+                                 .suggestion = "GENERAL groups hold one ray generation, miss or callable shader; hit groups "
+                                               "hold closest-hit, any-hit and (procedural) intersection shaders"});
+    };
+
+    // Each present shader: its stage must be one of @p allowed, and it must match the layout.
+    std::vector<const ShaderLayout*> layouts;
+    bool generates_rays = false;
+    const auto check = [&](std::size_t group, ShaderModuleHandle handle, ShaderStage allowed, std::string_view role)
+    {
+        const ShaderModule* shader = resolve(handle);
+        if (shader == nullptr)
+        {
+            return;
+        }
+        if (!has_any(allowed, shader->layout().stage))
+        {
+            reject(group, std::format("its {} shader '{}' is a {} shader", role, shader->debug_name(), shader->layout().stage));
+        }
+        validate_layout_check(check_pipeline_layout(shader->layout(), layout.definition()), *shader, OPERATION);
+        layouts.push_back(&shader->layout());
+        generates_rays = generates_rays || shader->layout().stage == ShaderStage::RAY_GENERATION;
+    };
+
+    for (std::size_t index = 0; index < description.groups.size(); ++index)
+    {
+        const RayTracingShaderGroup& group = description.groups[index];
+        switch (group.type)
+        {
+            case RayTracingShaderGroupType::GENERAL:
+                if (!group.general.is_valid() || group.closest_hit.is_valid() || group.any_hit.is_valid() ||
+                    group.intersection.is_valid())
+                {
+                    reject(index, "a GENERAL group holds exactly one shader, in `general`");
+                }
+                check(index, group.general, ShaderStage::RAY_GENERATION | ShaderStage::MISS | ShaderStage::CALLABLE, "general");
+                break;
+            case RayTracingShaderGroupType::TRIANGLES_HIT:
+            case RayTracingShaderGroupType::PROCEDURAL_HIT:
+            {
+                const bool procedural = group.type == RayTracingShaderGroupType::PROCEDURAL_HIT;
+                if (group.general.is_valid() || procedural != group.intersection.is_valid())
+                {
+                    reject(index, procedural ? "a PROCEDURAL_HIT group needs an intersection shader and no general shader"
+                                             : "a TRIANGLES_HIT group has no general or intersection shader");
+                }
+                check(index, group.closest_hit, ShaderStage::CLOSEST_HIT, "closest-hit");
+                check(index, group.any_hit, ShaderStage::ANY_HIT, "any-hit");
+                check(index, group.intersection, ShaderStage::INTERSECTION, "intersection");
+                break;
+            }
+        }
+    }
+    if (!generates_rays)
+    {
+        reject(description.groups.size(), "no group holds a ray generation shader");
+    }
+
+    // Specialization constants must exist in some shader.
+    if (!description.specialization_constants.empty())
+    {
+        const LayoutCheck constants = check_specialization_constants(layouts, description.specialization_constants);
+        if (!constants.ok())
+        {
+            throw ShaderLayoutMismatchError({.backend = layout.backend(),
+                                             .operation = std::string{OPERATION},
+                                             .shader_name = std::string{description.debug_name},
+                                             .mismatch = constants.mismatch,
+                                             .problem = describe(constants),
+                                             .suggestion = "declare the constant in a shader, or stop setting it"});
+        }
     }
 }
 
