@@ -5,7 +5,7 @@
 > [vulkan-backend-report.md](vulkan-backend-report.md); the plan with its log is
 > [vulkan-backend-plan.md](vulkan-backend-plan.md). **User validation (2026-10-15):** every decision
 > accepted as recommended; the shared-hardware-queue limitation to be documented and detected
-> (done: `Queue::submit`/`bind_sparse` throw); defect 7 got its detector. Awaiting the user's commit.
+> (done: `Queue::submit`/`bind_sparse` throw); defect 7 got its detector. Committed by the user (e839407).
 
 This file restores the working context of the gfx project for a new session (Claude Code loads it
 automatically). The chronological record, with the evidence behind each decision, is in
@@ -304,9 +304,9 @@ gfx/
 | 0 | Toolchain, CMake/presets/build.py, GoogleTest, toolchain tests | done, committed (ffae3d2, 0c8af25) |
 | 1 | enums, errors, handles, unit/compilation/macro tests, workarounds | done, committed (8b750f7, 58bbcfc) |
 | — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
-| 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | **done, awaiting validation** (138 tests, Debug + Release) |
-| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | **done (autonomous task), awaiting validation** |
-| 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | **done, awaiting validation** (presentation waits for the render-surface abstraction) |
+| 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | done, committed (6bacc72, 1bbb792) |
+| 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
+| 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | — | Render-surface abstraction (SDL, GLFW, ...) + swapchain/present | user: later, not yet |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
