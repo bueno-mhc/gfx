@@ -23,21 +23,21 @@ stage_of(SpvExecutionModel model) noexcept -> ShaderStage
 {
     switch (model)
     {
-    case SpvExecutionModelVertex: return ShaderStage::VERTEX;
-    case SpvExecutionModelTessellationControl: return ShaderStage::TESSELLATION_CONTROL;
-    case SpvExecutionModelTessellationEvaluation: return ShaderStage::TESSELLATION_EVALUATION;
-    case SpvExecutionModelGeometry: return ShaderStage::GEOMETRY;
-    case SpvExecutionModelFragment: return ShaderStage::FRAGMENT;
-    case SpvExecutionModelGLCompute: return ShaderStage::COMPUTE;
-    case SpvExecutionModelTaskEXT: return ShaderStage::TASK;
-    case SpvExecutionModelMeshEXT: return ShaderStage::MESH;
-    case SpvExecutionModelRayGenerationKHR: return ShaderStage::RAY_GENERATION;
-    case SpvExecutionModelIntersectionKHR: return ShaderStage::INTERSECTION;
-    case SpvExecutionModelAnyHitKHR: return ShaderStage::ANY_HIT;
-    case SpvExecutionModelClosestHitKHR: return ShaderStage::CLOSEST_HIT;
-    case SpvExecutionModelMissKHR: return ShaderStage::MISS;
-    case SpvExecutionModelCallableKHR: return ShaderStage::CALLABLE;
-    default: return ShaderStage::NONE;
+        case SpvExecutionModelVertex:                   return ShaderStage::VERTEX;
+        case SpvExecutionModelTessellationControl:      return ShaderStage::TESSELLATION_CONTROL;
+        case SpvExecutionModelTessellationEvaluation:   return ShaderStage::TESSELLATION_EVALUATION;
+        case SpvExecutionModelGeometry:                 return ShaderStage::GEOMETRY;
+        case SpvExecutionModelFragment:                 return ShaderStage::FRAGMENT;
+        case SpvExecutionModelGLCompute:                return ShaderStage::COMPUTE;
+        case SpvExecutionModelTaskEXT:                  return ShaderStage::TASK;
+        case SpvExecutionModelMeshEXT:                  return ShaderStage::MESH;
+        case SpvExecutionModelRayGenerationKHR:         return ShaderStage::RAY_GENERATION;
+        case SpvExecutionModelIntersectionKHR:          return ShaderStage::INTERSECTION;
+        case SpvExecutionModelAnyHitKHR:                return ShaderStage::ANY_HIT;
+        case SpvExecutionModelClosestHitKHR:            return ShaderStage::CLOSEST_HIT;
+        case SpvExecutionModelMissKHR:                  return ShaderStage::MISS;
+        case SpvExecutionModelCallableKHR:              return ShaderStage::CALLABLE;
+        default:                                        return ShaderStage::NONE;
     }
 }
 
@@ -47,46 +47,46 @@ format_of(SpvImageFormat format) noexcept -> Format
 {
     switch (format)
     {
-    case SpvImageFormatRgba32f: return Format::R32G32B32A32_SFLOAT;
-    case SpvImageFormatRgba16f: return Format::R16G16B16A16_SFLOAT;
-    case SpvImageFormatR32f: return Format::R32_SFLOAT;
-    case SpvImageFormatRgba8: return Format::R8G8B8A8_UNORM;
-    case SpvImageFormatRgba8Snorm: return Format::R8G8B8A8_SNORM;
-    case SpvImageFormatRg32f: return Format::R32G32_SFLOAT;
-    case SpvImageFormatRg16f: return Format::R16G16_SFLOAT;
-    case SpvImageFormatR11fG11fB10f: return Format::B10G11R11_UFLOAT_PACK32;
-    case SpvImageFormatR16f: return Format::R16_SFLOAT;
-    case SpvImageFormatRgba16: return Format::R16G16B16A16_UNORM;
-    case SpvImageFormatRgb10A2: return Format::A2B10G10R10_UNORM_PACK32;
-    case SpvImageFormatRg16: return Format::R16G16_UNORM;
-    case SpvImageFormatRg8: return Format::R8G8_UNORM;
-    case SpvImageFormatR16: return Format::R16_UNORM;
-    case SpvImageFormatR8: return Format::R8_UNORM;
-    case SpvImageFormatRgba16Snorm: return Format::R16G16B16A16_SNORM;
-    case SpvImageFormatRg16Snorm: return Format::R16G16_SNORM;
-    case SpvImageFormatRg8Snorm: return Format::R8G8_SNORM;
-    case SpvImageFormatR16Snorm: return Format::R16_SNORM;
-    case SpvImageFormatR8Snorm: return Format::R8_SNORM;
-    case SpvImageFormatRgba32i: return Format::R32G32B32A32_SINT;
-    case SpvImageFormatRgba16i: return Format::R16G16B16A16_SINT;
-    case SpvImageFormatRgba8i: return Format::R8G8B8A8_SINT;
-    case SpvImageFormatR32i: return Format::R32_SINT;
-    case SpvImageFormatRg32i: return Format::R32G32_SINT;
-    case SpvImageFormatRg16i: return Format::R16G16_SINT;
-    case SpvImageFormatRg8i: return Format::R8G8_SINT;
-    case SpvImageFormatR16i: return Format::R16_SINT;
-    case SpvImageFormatR8i: return Format::R8_SINT;
-    case SpvImageFormatRgba32ui: return Format::R32G32B32A32_UINT;
-    case SpvImageFormatRgba16ui: return Format::R16G16B16A16_UINT;
-    case SpvImageFormatRgba8ui: return Format::R8G8B8A8_UINT;
-    case SpvImageFormatR32ui: return Format::R32_UINT;
-    case SpvImageFormatRgb10a2ui: return Format::A2B10G10R10_UINT_PACK32;
-    case SpvImageFormatRg32ui: return Format::R32G32_UINT;
-    case SpvImageFormatRg16ui: return Format::R16G16_UINT;
-    case SpvImageFormatRg8ui: return Format::R8G8_UINT;
-    case SpvImageFormatR16ui: return Format::R16_UINT;
-    case SpvImageFormatR8ui: return Format::R8_UINT;
-    default: return Format::UNDEFINED;
+        case SpvImageFormatRgba32f:         return Format::R32G32B32A32_SFLOAT;
+        case SpvImageFormatRgba16f:         return Format::R16G16B16A16_SFLOAT;
+        case SpvImageFormatR32f:            return Format::R32_SFLOAT;
+        case SpvImageFormatRgba8:           return Format::R8G8B8A8_UNORM;
+        case SpvImageFormatRgba8Snorm:      return Format::R8G8B8A8_SNORM;
+        case SpvImageFormatRg32f:           return Format::R32G32_SFLOAT;
+        case SpvImageFormatRg16f:           return Format::R16G16_SFLOAT;
+        case SpvImageFormatR11fG11fB10f:    return Format::B10G11R11_UFLOAT_PACK32;
+        case SpvImageFormatR16f:            return Format::R16_SFLOAT;
+        case SpvImageFormatRgba16:          return Format::R16G16B16A16_UNORM;
+        case SpvImageFormatRgb10A2:         return Format::A2B10G10R10_UNORM_PACK32;
+        case SpvImageFormatRg16:            return Format::R16G16_UNORM;
+        case SpvImageFormatRg8:             return Format::R8G8_UNORM;
+        case SpvImageFormatR16:             return Format::R16_UNORM;
+        case SpvImageFormatR8:              return Format::R8_UNORM;
+        case SpvImageFormatRgba16Snorm:     return Format::R16G16B16A16_SNORM;
+        case SpvImageFormatRg16Snorm:       return Format::R16G16_SNORM;
+        case SpvImageFormatRg8Snorm:        return Format::R8G8_SNORM;
+        case SpvImageFormatR16Snorm:        return Format::R16_SNORM;
+        case SpvImageFormatR8Snorm:         return Format::R8_SNORM;
+        case SpvImageFormatRgba32i:         return Format::R32G32B32A32_SINT;
+        case SpvImageFormatRgba16i:         return Format::R16G16B16A16_SINT;
+        case SpvImageFormatRgba8i:          return Format::R8G8B8A8_SINT;
+        case SpvImageFormatR32i:            return Format::R32_SINT;
+        case SpvImageFormatRg32i:           return Format::R32G32_SINT;
+        case SpvImageFormatRg16i:           return Format::R16G16_SINT;
+        case SpvImageFormatRg8i:            return Format::R8G8_SINT;
+        case SpvImageFormatR16i:            return Format::R16_SINT;
+        case SpvImageFormatR8i:             return Format::R8_SINT;
+        case SpvImageFormatRgba32ui:        return Format::R32G32B32A32_UINT;
+        case SpvImageFormatRgba16ui:        return Format::R16G16B16A16_UINT;
+        case SpvImageFormatRgba8ui:         return Format::R8G8B8A8_UINT;
+        case SpvImageFormatR32ui:           return Format::R32_UINT;
+        case SpvImageFormatRgb10a2ui:       return Format::A2B10G10R10_UINT_PACK32;
+        case SpvImageFormatRg32ui:          return Format::R32G32_UINT;
+        case SpvImageFormatRg16ui:          return Format::R16G16_UINT;
+        case SpvImageFormatRg8ui:           return Format::R8G8_UINT;
+        case SpvImageFormatR16ui:           return Format::R16_UINT;
+        case SpvImageFormatR8ui:            return Format::R8_UINT;
+        default:                            return Format::UNDEFINED;
     }
 }
 
@@ -112,19 +112,28 @@ format_of(spvc_basetype base_type,
     const std::size_t column = std::clamp<std::size_t>(components, 1, 4) - 1;
     switch (base_type)
     {
-    case SPVC_BASETYPE_FP32:
-    case SPVC_BASETYPE_FP64: return FLOAT32[column];
-    case SPVC_BASETYPE_INT32:
-    case SPVC_BASETYPE_INT64: return INT32[column];
-    case SPVC_BASETYPE_UINT32:
-    case SPVC_BASETYPE_UINT64:
-    case SPVC_BASETYPE_BOOLEAN: return UINT32[column];
-    case SPVC_BASETYPE_FP16: return FLOAT16[column];
-    case SPVC_BASETYPE_INT16: return INT16[column];
-    case SPVC_BASETYPE_UINT16: return UINT16[column];
-    case SPVC_BASETYPE_INT8: return INT8[column];
-    case SPVC_BASETYPE_UINT8: return UINT8[column];
-    default: return Format::UNDEFINED;
+        case SPVC_BASETYPE_FP32:
+        case SPVC_BASETYPE_FP64: 
+            return FLOAT32[column];
+        case SPVC_BASETYPE_INT32:
+        case SPVC_BASETYPE_INT64: 
+            return INT32[column];
+        case SPVC_BASETYPE_UINT32:
+        case SPVC_BASETYPE_UINT64:
+        case SPVC_BASETYPE_BOOLEAN: 
+            return UINT32[column];
+        case SPVC_BASETYPE_FP16: 
+            return FLOAT16[column];
+        case SPVC_BASETYPE_INT16: 
+            return INT16[column];
+        case SPVC_BASETYPE_UINT16: 
+            return UINT16[column];
+        case SPVC_BASETYPE_INT8: 
+            return INT8[column];
+        case SPVC_BASETYPE_UINT8: 
+            return UINT8[column];
+        default: 
+            return Format::UNDEFINED;
     }
 }
 
@@ -312,21 +321,31 @@ private:
         ShaderBinding binding;
         switch (resource_type)
         {
-        case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER: binding.type = DescriptorType::UNIFORM_BUFFER; break;
-        case SPVC_RESOURCE_TYPE_STORAGE_BUFFER: binding.type = DescriptorType::STORAGE_BUFFER; break;
-        case SPVC_RESOURCE_TYPE_STORAGE_IMAGE:
-            binding.type = texel_buffer ? DescriptorType::STORAGE_TEXEL_BUFFER : DescriptorType::STORAGE_IMAGE;
-            binding.image_format = format_of(spvc_type_get_image_storage_format(base_type));
-            break;
-        case SPVC_RESOURCE_TYPE_SAMPLED_IMAGE:
-            binding.type = texel_buffer ? DescriptorType::UNIFORM_TEXEL_BUFFER : DescriptorType::COMBINED_IMAGE_SAMPLER;
-            break;
-        case SPVC_RESOURCE_TYPE_SEPARATE_IMAGE:
-            binding.type = texel_buffer ? DescriptorType::UNIFORM_TEXEL_BUFFER : DescriptorType::SAMPLED_IMAGE;
-            break;
-        case SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS: binding.type = DescriptorType::SAMPLER; break;
-        case SPVC_RESOURCE_TYPE_SUBPASS_INPUT: binding.type = DescriptorType::INPUT_ATTACHMENT; break;
-        default: binding.type = DescriptorType::ACCELERATION_STRUCTURE; break;
+            case SPVC_RESOURCE_TYPE_UNIFORM_BUFFER: 
+                binding.type = DescriptorType::UNIFORM_BUFFER; 
+                break;
+            case SPVC_RESOURCE_TYPE_STORAGE_BUFFER: 
+                binding.type = DescriptorType::STORAGE_BUFFER; 
+                break;
+            case SPVC_RESOURCE_TYPE_STORAGE_IMAGE:
+                binding.type = texel_buffer ? DescriptorType::STORAGE_TEXEL_BUFFER : DescriptorType::STORAGE_IMAGE;
+                binding.image_format = format_of(spvc_type_get_image_storage_format(base_type));
+                break;
+            case SPVC_RESOURCE_TYPE_SAMPLED_IMAGE:
+                binding.type = texel_buffer ? DescriptorType::UNIFORM_TEXEL_BUFFER : DescriptorType::COMBINED_IMAGE_SAMPLER;
+                break;
+            case SPVC_RESOURCE_TYPE_SEPARATE_IMAGE:
+                binding.type = texel_buffer ? DescriptorType::UNIFORM_TEXEL_BUFFER : DescriptorType::SAMPLED_IMAGE;
+                break;
+            case SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS: 
+                binding.type = DescriptorType::SAMPLER; 
+                break;
+            case SPVC_RESOURCE_TYPE_SUBPASS_INPUT: 
+                binding.type = DescriptorType::INPUT_ATTACHMENT; 
+                break;
+            default: 
+                binding.type = DescriptorType::ACCELERATION_STRUCTURE; 
+                break;
         }
 
         // Where it is bound, how many, and how large a block is.

@@ -28,6 +28,8 @@ class VulkanDescriptorSetLayout;
 class VulkanPipelineLayout;
 
 // ------------------------------------------------------------------------------------------- records
+// What are those structs? Aren't the structs in the interface enough? Why is it done that way?
+
 
 /// @brief What commands need to know about a buffer.
 struct BufferRecord

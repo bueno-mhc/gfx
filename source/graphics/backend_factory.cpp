@@ -31,10 +31,10 @@ cmake_option(BackendKind backend) noexcept -> std::string_view
 {
     switch (backend)
     {
-    case BackendKind::NULL_BACKEND: return "GFX_BACKEND_NULL";
-    case BackendKind::VULKAN: return "GFX_BACKEND_VULKAN";
-    case BackendKind::DIRECT3D12: return "GFX_BACKEND_DIRECT3D12";
-    case BackendKind::METAL: return "GFX_BACKEND_METAL";
+        case BackendKind::NULL_BACKEND: return "GFX_BACKEND_NULL";
+        case BackendKind::VULKAN: return "GFX_BACKEND_VULKAN";
+        case BackendKind::DIRECT3D12: return "GFX_BACKEND_DIRECT3D12";
+        case BackendKind::METAL: return "GFX_BACKEND_METAL";
     }
     return "GFX_BACKEND_<NAME>";
 }
@@ -46,16 +46,16 @@ unavailable_reason(BackendKind backend) -> std::optional<std::string>
     switch (backend)
     {
 #if GFX_WITH_NULL_BACKEND
-    case BackendKind::NULL_BACKEND: return null::unavailable_reason();
+        case BackendKind::NULL_BACKEND: return null::unavailable_reason();
 #endif
 #if GFX_WITH_VULKAN_BACKEND
-    case BackendKind::VULKAN: return vulkan::unavailable_reason();
+        case BackendKind::VULKAN: return vulkan::unavailable_reason();
 #endif
 #if GFX_WITH_DIRECT3D12_BACKEND
-    case BackendKind::DIRECT3D12: return direct3d12::unavailable_reason();
+        case BackendKind::DIRECT3D12: return direct3d12::unavailable_reason();
 #endif
 #if GFX_WITH_METAL_BACKEND
-    case BackendKind::METAL: return metal::unavailable_reason();
+        case BackendKind::METAL: return metal::unavailable_reason();
 #endif
     default: return std::nullopt;
     }
@@ -122,12 +122,13 @@ create_instance(BackendKind backend,
     switch (backend)
     {
 #if GFX_WITH_NULL_BACKEND
-    case BackendKind::NULL_BACKEND: return null::create_instance(description);
+        case BackendKind::NULL_BACKEND: return null::create_instance(description);
 #endif
 #if GFX_WITH_VULKAN_BACKEND
-    case BackendKind::VULKAN: return vulkan::create_instance(description);
+        case BackendKind::VULKAN: return vulkan::create_instance(description);
 #endif
-    default: break;
+        default: 
+            break;
     }
     throw BackendCapabilityError({
         .backend = backend,

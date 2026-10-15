@@ -366,70 +366,100 @@ VulkanPhysicalDevice::supports(DeviceFeature feature) const noexcept -> bool
 
     switch (feature)
     {
-    case DeviceFeature::TIMELINE_SEMAPHORE: return features12.timelineSemaphore == VK_TRUE;
-    case DeviceFeature::EVENTS: return true;
-    case DeviceFeature::DYNAMIC_RENDERING: return features13.dynamicRendering == VK_TRUE && features13.synchronization2 == VK_TRUE;
-    case DeviceFeature::DESCRIPTOR_INDEXING:
-        return features12.descriptorIndexing == VK_TRUE && features12.runtimeDescriptorArray == VK_TRUE &&
-               features12.descriptorBindingPartiallyBound == VK_TRUE && features12.descriptorBindingVariableDescriptorCount == VK_TRUE &&
-               features12.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE &&
-               features12.descriptorBindingStorageImageUpdateAfterBind == VK_TRUE &&
-               features12.descriptorBindingStorageBufferUpdateAfterBind == VK_TRUE &&
-               features12.descriptorBindingUpdateUnusedWhilePending == VK_TRUE &&
-               features12.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
-               features12.shaderStorageImageArrayNonUniformIndexing == VK_TRUE &&
-               features12.shaderStorageBufferArrayNonUniformIndexing == VK_TRUE;
-    case DeviceFeature::BUFFER_DEVICE_ADDRESS: return features12.bufferDeviceAddress == VK_TRUE;
-    case DeviceFeature::ASYNCHRONOUS_COMPUTE_QUEUE: return family_with(VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT);
-    case DeviceFeature::DEDICATED_TRANSFER_QUEUE:
-        return family_with(VK_QUEUE_TRANSFER_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
-    case DeviceFeature::SPARSE_BINDING:
-        return features.sparseBinding == VK_TRUE && features.sparseResidencyBuffer == VK_TRUE &&
-               features.sparseResidencyImage2D == VK_TRUE && family_with(VK_QUEUE_SPARSE_BINDING_BIT, 0);
-    case DeviceFeature::SAMPLER_ANISOTROPY: return features.samplerAnisotropy == VK_TRUE;
-    case DeviceFeature::MULTI_DRAW_INDIRECT: return features.multiDrawIndirect == VK_TRUE;
-    case DeviceFeature::DRAW_INDIRECT_COUNT: return features12.drawIndirectCount == VK_TRUE;
-    case DeviceFeature::GEOMETRY_SHADER: return features.geometryShader == VK_TRUE;
-    case DeviceFeature::TESSELLATION_SHADER: return features.tessellationShader == VK_TRUE;
-    case DeviceFeature::MESH_SHADER:
-        return capabilities.has_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME) &&
-               capabilities.mesh_shader_features.meshShader == VK_TRUE && capabilities.mesh_shader_features.taskShader == VK_TRUE;
-    case DeviceFeature::RAY_TRACING:
-        return acceleration_structures && capabilities.has_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
-               capabilities.ray_tracing_features.rayTracingPipeline == VK_TRUE;
-    case DeviceFeature::SHADER_FLOAT16: return features12.shaderFloat16 == VK_TRUE;
-    case DeviceFeature::SHADER_FLOAT64: return features.shaderFloat64 == VK_TRUE;
-    case DeviceFeature::SHADER_INTEGER16: return features.shaderInt16 == VK_TRUE;
-    case DeviceFeature::SHADER_INTEGER64: return features.shaderInt64 == VK_TRUE;
-    case DeviceFeature::FILL_MODE_NON_SOLID: return features.fillModeNonSolid == VK_TRUE;
-    case DeviceFeature::WIDE_LINES: return features.wideLines == VK_TRUE;
-    case DeviceFeature::DEPTH_CLAMP: return features.depthClamp == VK_TRUE;
-    case DeviceFeature::INDEPENDENT_BLEND: return features.independentBlend == VK_TRUE;
-    case DeviceFeature::TIMESTAMP_QUERY: return capabilities.properties.limits.timestampComputeAndGraphics == VK_TRUE;
-    case DeviceFeature::PIPELINE_STATISTICS_QUERY: return features.pipelineStatisticsQuery == VK_TRUE;
-    case DeviceFeature::TEXTURE_COMPRESSION_BC: return features.textureCompressionBC == VK_TRUE;
-    case DeviceFeature::TEXTURE_COMPRESSION_ETC2: return features.textureCompressionETC2 == VK_TRUE;
-    case DeviceFeature::TEXTURE_COMPRESSION_ASTC: return features.textureCompressionASTC_LDR == VK_TRUE;
+        case DeviceFeature::TIMELINE_SEMAPHORE: 
+            return features12.timelineSemaphore == VK_TRUE;
+        case DeviceFeature::EVENTS: 
+            return true;
+        case DeviceFeature::DYNAMIC_RENDERING: 
+            return features13.dynamicRendering == VK_TRUE && features13.synchronization2 == VK_TRUE;
+        case DeviceFeature::DESCRIPTOR_INDEXING:
+            return features12.descriptorIndexing == VK_TRUE && features12.runtimeDescriptorArray == VK_TRUE &&
+                features12.descriptorBindingPartiallyBound == VK_TRUE && features12.descriptorBindingVariableDescriptorCount == VK_TRUE &&
+                features12.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE &&
+                features12.descriptorBindingStorageImageUpdateAfterBind == VK_TRUE &&
+                features12.descriptorBindingStorageBufferUpdateAfterBind == VK_TRUE &&
+                features12.descriptorBindingUpdateUnusedWhilePending == VK_TRUE &&
+                features12.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
+                features12.shaderStorageImageArrayNonUniformIndexing == VK_TRUE &&
+                features12.shaderStorageBufferArrayNonUniformIndexing == VK_TRUE;
+        case DeviceFeature::BUFFER_DEVICE_ADDRESS: 
+            return features12.bufferDeviceAddress == VK_TRUE;
+        case DeviceFeature::ASYNCHRONOUS_COMPUTE_QUEUE: 
+            return family_with(VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT);
+        case DeviceFeature::DEDICATED_TRANSFER_QUEUE:
+            return family_with(VK_QUEUE_TRANSFER_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+        case DeviceFeature::SPARSE_BINDING:
+            return features.sparseBinding == VK_TRUE && features.sparseResidencyBuffer == VK_TRUE &&
+                features.sparseResidencyImage2D == VK_TRUE && family_with(VK_QUEUE_SPARSE_BINDING_BIT, 0);
+        case DeviceFeature::SAMPLER_ANISOTROPY: 
+            return features.samplerAnisotropy == VK_TRUE;
+        case DeviceFeature::MULTI_DRAW_INDIRECT: 
+            return features.multiDrawIndirect == VK_TRUE;
+        case DeviceFeature::DRAW_INDIRECT_COUNT: 
+            return features12.drawIndirectCount == VK_TRUE;
+        case DeviceFeature::GEOMETRY_SHADER: 
+            return features.geometryShader == VK_TRUE;
+        case DeviceFeature::TESSELLATION_SHADER: 
+            return features.tessellationShader == VK_TRUE;
+        case DeviceFeature::MESH_SHADER:
+            return capabilities.has_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME) &&
+                capabilities.mesh_shader_features.meshShader == VK_TRUE && capabilities.mesh_shader_features.taskShader == VK_TRUE;
+        case DeviceFeature::RAY_TRACING:
+            return acceleration_structures && capabilities.has_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
+                capabilities.ray_tracing_features.rayTracingPipeline == VK_TRUE;
+        case DeviceFeature::SHADER_FLOAT16: 
+            return features12.shaderFloat16 == VK_TRUE;
+        case DeviceFeature::SHADER_FLOAT64: 
+            return features.shaderFloat64 == VK_TRUE;
+        case DeviceFeature::SHADER_INTEGER16: 
+            return features.shaderInt16 == VK_TRUE;
+        case DeviceFeature::SHADER_INTEGER64: 
+            return features.shaderInt64 == VK_TRUE;
+        case DeviceFeature::FILL_MODE_NON_SOLID: 
+            return features.fillModeNonSolid == VK_TRUE;
+        case DeviceFeature::WIDE_LINES: 
+            return features.wideLines == VK_TRUE;
+        case DeviceFeature::DEPTH_CLAMP: 
+            return features.depthClamp == VK_TRUE;
+        case DeviceFeature::INDEPENDENT_BLEND: 
+            return features.independentBlend == VK_TRUE;
+        case DeviceFeature::TIMESTAMP_QUERY: 
+            return capabilities.properties.limits.timestampComputeAndGraphics == VK_TRUE;
+        case DeviceFeature::PIPELINE_STATISTICS_QUERY: 
+            return features.pipelineStatisticsQuery == VK_TRUE;
+        case DeviceFeature::TEXTURE_COMPRESSION_BC: 
+            return features.textureCompressionBC == VK_TRUE;
+        case DeviceFeature::TEXTURE_COMPRESSION_ETC2: 
+            return features.textureCompressionETC2 == VK_TRUE;
+        case DeviceFeature::TEXTURE_COMPRESSION_ASTC: 
+            return features.textureCompressionASTC_LDR == VK_TRUE;
 
-    // Presentation needs the render-surface abstraction, which does not exist yet.
-    case DeviceFeature::PRESENTATION: return false;
-    case DeviceFeature::EXTENDED_DYNAMIC_STATE: return true;
-    case DeviceFeature::DEPTH_BOUNDS: return features.depthBounds == VK_TRUE;
-    case DeviceFeature::MULTIVIEW: return features11.multiview == VK_TRUE;
-    case DeviceFeature::VARIABLE_RATE_SHADING:
-        return capabilities.has_extension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) &&
-               capabilities.shading_rate_features.pipelineFragmentShadingRate == VK_TRUE &&
-               capabilities.shading_rate_features.attachmentFragmentShadingRate == VK_TRUE;
-    case DeviceFeature::CONSERVATIVE_RASTERIZATION:
-        return capabilities.has_extension(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
-    case DeviceFeature::RAY_QUERY:
-        return acceleration_structures && capabilities.has_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
-               capabilities.ray_query_features.rayQuery == VK_TRUE;
-    case DeviceFeature::SAMPLER_FILTER_MINMAX: return features12.samplerFilterMinmax == VK_TRUE;
-    case DeviceFeature::MEMORY_BUDGET: return capabilities.has_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        // Presentation needs the render-surface abstraction, which does not exist yet.
+        case DeviceFeature::PRESENTATION: 
+            return false;
+        case DeviceFeature::EXTENDED_DYNAMIC_STATE: 
+            return true;
+        case DeviceFeature::DEPTH_BOUNDS: 
+            return features.depthBounds == VK_TRUE;
+        case DeviceFeature::MULTIVIEW: 
+            return features11.multiview == VK_TRUE;
+        case DeviceFeature::VARIABLE_RATE_SHADING:
+            return capabilities.has_extension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) &&
+                capabilities.shading_rate_features.pipelineFragmentShadingRate == VK_TRUE &&
+                capabilities.shading_rate_features.attachmentFragmentShadingRate == VK_TRUE;
+        case DeviceFeature::CONSERVATIVE_RASTERIZATION:
+            return capabilities.has_extension(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+        case DeviceFeature::RAY_QUERY:
+            return acceleration_structures && capabilities.has_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+                capabilities.ray_query_features.rayQuery == VK_TRUE;
+        case DeviceFeature::SAMPLER_FILTER_MINMAX: 
+            return features12.samplerFilterMinmax == VK_TRUE;
+        case DeviceFeature::MEMORY_BUDGET: 
+            return capabilities.has_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
-    // Breadcrumbs use NVIDIA's diagnostic checkpoints (AMD's buffer markers are not implemented yet).
-    case DeviceFeature::GPU_CRASH_MARKERS: return capabilities.has_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        // Breadcrumbs use NVIDIA's diagnostic checkpoints (AMD's buffer markers are not implemented yet).
+        case DeviceFeature::GPU_CRASH_MARKERS: 
+            return capabilities.has_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     }
     return false;
 }

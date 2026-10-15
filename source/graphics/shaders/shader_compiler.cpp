@@ -42,20 +42,20 @@ glslang_stage_of(ShaderStage stage) noexcept -> std::optional<glslang_stage_t>
 {
     switch (stage)
     {
-    case ShaderStage::VERTEX: return GLSLANG_STAGE_VERTEX;
-    case ShaderStage::TESSELLATION_CONTROL: return GLSLANG_STAGE_TESSCONTROL;
-    case ShaderStage::TESSELLATION_EVALUATION: return GLSLANG_STAGE_TESSEVALUATION;
-    case ShaderStage::GEOMETRY: return GLSLANG_STAGE_GEOMETRY;
-    case ShaderStage::FRAGMENT: return GLSLANG_STAGE_FRAGMENT;
-    case ShaderStage::COMPUTE: return GLSLANG_STAGE_COMPUTE;
-    case ShaderStage::TASK: return GLSLANG_STAGE_TASK;
-    case ShaderStage::MESH: return GLSLANG_STAGE_MESH;
-    case ShaderStage::RAY_GENERATION: return GLSLANG_STAGE_RAYGEN;
-    case ShaderStage::ANY_HIT: return GLSLANG_STAGE_ANYHIT;
-    case ShaderStage::CLOSEST_HIT: return GLSLANG_STAGE_CLOSESTHIT;
-    case ShaderStage::MISS: return GLSLANG_STAGE_MISS;
-    case ShaderStage::INTERSECTION: return GLSLANG_STAGE_INTERSECT;
-    case ShaderStage::CALLABLE: return GLSLANG_STAGE_CALLABLE;
+        case ShaderStage::VERTEX:                   return GLSLANG_STAGE_VERTEX;
+        case ShaderStage::TESSELLATION_CONTROL:     return GLSLANG_STAGE_TESSCONTROL;
+        case ShaderStage::TESSELLATION_EVALUATION:  return GLSLANG_STAGE_TESSEVALUATION;
+        case ShaderStage::GEOMETRY:                 return GLSLANG_STAGE_GEOMETRY;
+        case ShaderStage::FRAGMENT:                 return GLSLANG_STAGE_FRAGMENT;
+        case ShaderStage::COMPUTE:                  return GLSLANG_STAGE_COMPUTE;
+        case ShaderStage::TASK:                     return GLSLANG_STAGE_TASK;
+        case ShaderStage::MESH:                     return GLSLANG_STAGE_MESH;
+        case ShaderStage::RAY_GENERATION:           return GLSLANG_STAGE_RAYGEN;
+        case ShaderStage::ANY_HIT:                  return GLSLANG_STAGE_ANYHIT;
+        case ShaderStage::CLOSEST_HIT:              return GLSLANG_STAGE_CLOSESTHIT;
+        case ShaderStage::MISS:                     return GLSLANG_STAGE_MISS;
+        case ShaderStage::INTERSECTION:             return GLSLANG_STAGE_INTERSECT;
+        case ShaderStage::CALLABLE:                 return GLSLANG_STAGE_CALLABLE;
     default: return std::nullopt;
     }
 }

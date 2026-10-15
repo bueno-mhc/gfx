@@ -487,15 +487,20 @@ VulkanDevice::create_query_pool(const QueryPoolDescription& description) -> std:
     // Each kind of query needs its feature.
     switch (description.type)
     {
-    case QueryType::PIPELINE_STATISTICS: require(DeviceFeature::PIPELINE_STATISTICS_QUERY, "Device::create_query_pool"); break;
-    case QueryType::TIMESTAMP: require(DeviceFeature::TIMESTAMP_QUERY, "Device::create_query_pool"); break;
-    case QueryType::ACCELERATION_STRUCTURE_COMPACTED_SIZE:
-        if (!enabled(DeviceFeature::RAY_QUERY))
-        {
-            require(DeviceFeature::RAY_TRACING, "Device::create_query_pool");
-        }
-        break;
-    case QueryType::OCCLUSION: break;
+        case QueryType::PIPELINE_STATISTICS: 
+            require(DeviceFeature::PIPELINE_STATISTICS_QUERY, "Device::create_query_pool"); 
+            break;
+        case QueryType::TIMESTAMP: 
+            require(DeviceFeature::TIMESTAMP_QUERY, "Device::create_query_pool"); 
+            break;
+        case QueryType::ACCELERATION_STRUCTURE_COMPACTED_SIZE:
+            if (!enabled(DeviceFeature::RAY_QUERY))
+            {
+                require(DeviceFeature::RAY_TRACING, "Device::create_query_pool");
+            }
+            break;
+        case QueryType::OCCLUSION: 
+            break;
     }
     return std::make_unique<VulkanQueryPool>(*this, description);
 }
