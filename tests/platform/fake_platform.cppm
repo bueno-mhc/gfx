@@ -458,6 +458,13 @@ public:
         m_native.emplace_back(event, std::move(text));
     }
 
+    /// @brief Emits @p event now, as a backend does when the system reports something synchronously
+    ///        (e.g. SDL reporting a resize a watcher just made). Call it during a pump.
+    void emit_now(const Event& event)
+    {
+        emit(event);
+    }
+
     /// @brief Calls @p action during the next pump, after the scripted events (e.g. to destroy a window).
     void during_next_pump(std::move_only_function<void()> action)
     {

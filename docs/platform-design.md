@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0 (restructure), P1 (platform foundations) and P2 (input system) done, awaiting validation; next P3 (SDL3 backend)**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0, P1 and P2 committed; P3 (SDL3 backend) done, awaiting validation; next P4 (GLFW backend)**. Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -514,6 +514,45 @@ Doxygen on every public declaration. They lead to these deviations from the requ
 
 Win32, XCB, Cocoa and Web native backends: ignored for now (answer 5; XCB, Cocoa and Web cannot be compiled or tested on
 this machine).
+
+**SDL3 backend as built (P3, 2026-10-16)** — module `gfx.platform.backends.sdl3`
+(`source/platform/backends/sdl3/`, PRIVATE file set, CMake option `GFX_PLATFORM_BACKEND_SDL3`, ON).
+`gfx_require_sdl3()`: an installed SDL3 3.4+ (static library preferred), else release 3.4.10 fetched by
+URL + SHA-256 and built static with video, events, joysticks/gamepads, HIDAPI, haptics, sensors and
+virtual joysticks only (no audio, renderer, GPU API, camera, dialog, tray, OpenGL); SDL's targets stay
+out of module scanning and of the `import std` build. Decisions taken while implementing:
+
+- **One SDL3 platform per process** (SDL's event queue and subsystems are global): a second
+  `create_platform(SDL3)` throws `InvalidUsageError`; a new one may follow a destroyed one.
+- **Real-time event watchers**: SDL's event watch (`SDL_AddEventWatch`) translates the events SDL
+  raises on the platform thread during a pump at once, so `Platform` watchers run inside Windows'
+  modal resize/move loop; their copies in SDL's queue are recognized and skipped when polled (in this
+  pump or the next: SDL's poll stops at a sentinel). Events of other threads are translated when
+  polled. This made `Platform`'s watcher dispatch **re-entrant** (a watcher's action may emit events at
+  once): dispatches nest, and watchers added or removed meanwhile take effect when the outermost
+  dispatch ends (P1 code fixed; it could reallocate the list a running callback lives in).
+- **Timestamps** on the steady clock (SDL's ticks plus the offset measured at start-up).
+- **Windows** are created hidden, set up (limits, aspect, icon, fullscreen) and then shown;
+  `FOCUS_ON_SHOW` maps to SDL's activate-when-shown hint, and is now in the **default flags** of
+  `WindowDescription` (a game window should take the keyboard when it appears). `MOUSE_PASSTHROUGH` is
+  not supported (SDL has no such window): creation names it in a `BackendCapabilityError`. Content scale =
+  the display's content scale (`SDL_GetDisplayContentScale`); framebuffer size = `SDL_GetWindowSizeInPixels`.
+  Window positions throw on Wayland. A window or cursor may outlive its platform: it then refuses to
+  work (`InvalidUsageError`) and its destruction is harmless.
+- **Cursors**: SDL has one cursor, so a window's cursor (and `CursorMode::HIDDEN`) is applied while the
+  mouse is over it; `CAPTURED` = relative mouse mode, `CONFINED` = mouse grab.
+- **Clipboard images**: set as PNG (`SDL_SavePNG_IO`), read as PNG (decoded like every image) or BMP
+  (SDL's loader). `GamepadType::NINTENDO_GAMECUBE` added (SDL 3.4 reports it).
+  `PlatformFeature::GAMEPAD_SENSORS` is false (gfx has no sensor interface yet).
+- **Devices**: gamepads and joysticks present at start-up are opened at once and reported once;
+  gamepads are reported only as gamepads. SDL ignores joystick input while windows exist and none has
+  the focus (its default).
+- **Tests** (`tests/platform/sdl3`, 27): factory, windows (hidden; one test shows, minimizes and restores a
+  window), monitors, cursors, icons, events injected with `SDL_PushEvent`, the watch path (an event
+  raised by a watcher reaches watchers at once and the queue once), waits, virtual gamepads and a flight
+  stick (`SDL_AttachVirtualJoystick`) with rumble and LED requests recorded, a gamepad connected before the
+  platform (reported once), and an InputSystem reading a virtual gamepad. The clipboard test changes the system clipboard, so it runs only with
+  `GFX_TEST_CLIPBOARD=1` (and only when the clipboard holds plain text, which it restores).
 
 ### A17. Prior art per subsystem (summary)
 

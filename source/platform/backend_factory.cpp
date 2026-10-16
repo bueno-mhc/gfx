@@ -7,6 +7,9 @@ import std;
 import gfx.core;
 import gfx.platform.enums;
 import gfx.platform.interface;
+#if GFX_WITH_PLATFORM_SDL3_BACKEND
+import gfx.platform.backends.sdl3;
+#endif
 
 namespace gfx::platform
 {
@@ -14,15 +17,49 @@ namespace gfx::platform
 namespace
 {
 
-/// Why @p backend is not available, or an empty string when it is.
+/// Name of the CMake option that builds @p backend.
+constexpr auto
+cmake_option(PlatformBackendKind backend) noexcept -> std::string_view
+{
+    switch (backend)
+    {
+        case PlatformBackendKind::SDL3:
+            return "GFX_PLATFORM_BACKEND_SDL3";
+        case PlatformBackendKind::GLFW:
+            return "GFX_PLATFORM_BACKEND_GLFW";
+        case PlatformBackendKind::WINDOWS:
+        case PlatformBackendKind::XCB:
+        case PlatformBackendKind::COCOA:
+        case PlatformBackendKind::WEB:
+            break;
+    }
+    return "GFX_PLATFORM_BACKEND_<NAME>";
+}
+
+/// Why @p backend cannot run here (empty when it can), or std::nullopt when it was not built.
 auto
-unavailable_reason(PlatformBackendKind backend) -> std::string
+unavailable_reason(PlatformBackendKind backend) -> std::optional<std::string>
+{
+    switch (backend)
+    {
+#if GFX_WITH_PLATFORM_SDL3_BACKEND
+        case PlatformBackendKind::SDL3:
+            return sdl3::unavailable_reason();
+#endif
+        default:
+            return std::nullopt;
+    }
+}
+
+/// Why @p backend, which was not built, is missing.
+auto
+missing_reason(PlatformBackendKind backend) -> std::string
 {
     switch (backend)
     {
         case PlatformBackendKind::SDL3:
         case PlatformBackendKind::GLFW:
-            return std::format("the {} backend is not part of this build of the library", backend);
+            return std::format("the library was built without the {} backend (configure it with -D{}=ON)", backend, cmake_option(backend));
         case PlatformBackendKind::WINDOWS:
         case PlatformBackendKind::XCB:
         case PlatformBackendKind::COCOA:
@@ -32,23 +69,18 @@ unavailable_reason(PlatformBackendKind backend) -> std::string
     return std::format("unknown platform backend {}", std::to_underlying(backend));
 }
 
-/// Whether @p backend is compiled into the library.
-constexpr auto
-is_built(PlatformBackendKind /*backend*/) noexcept -> bool
-{
-    return false;
-}
-
 } // namespace
 
 auto
 platform_backend_availability(PlatformBackendKind backend) -> PlatformBackendAvailability
 {
-    std::string reason = unavailable_reason(backend);
-    return PlatformBackendAvailability{.backend = backend,
-                                       .built = is_built(backend),
-                                       .available = reason.empty(),
-                                       .reason = std::move(reason)};
+    // Not built, built but unable to run here, or available.
+    const std::optional<std::string> reason = unavailable_reason(backend);
+    if (!reason)
+    {
+        return PlatformBackendAvailability{.backend = backend, .built = false, .available = false, .reason = missing_reason(backend)};
+    }
+    return PlatformBackendAvailability{.backend = backend, .built = true, .available = reason->empty(), .reason = *reason};
 }
 
 auto
@@ -68,16 +100,36 @@ available_platform_backends() -> std::vector<PlatformBackendKind>
 
 auto
 create_platform(PlatformBackendKind backend,
-                const PlatformDescription& /*description*/) -> std::unique_ptr<Platform>
+                const PlatformDescription& description) -> std::unique_ptr<Platform>
 {
-    // Every backend that cannot be created says why.
+    // A backend that cannot be created says why.
     const PlatformBackendAvailability availability = platform_backend_availability(backend);
+    if (!availability.available)
+    {
+        throw BackendCapabilityError({
+            .backend = backend,
+            .operation = "create_platform",
+            .capability = std::format("{} platform", backend),
+            .reason = availability.reason,
+            .suggestion = "use a backend listed by available_platform_backends()",
+        });
+    }
+    switch (backend)
+    {
+#if GFX_WITH_PLATFORM_SDL3_BACKEND
+        case PlatformBackendKind::SDL3:
+            return sdl3::create_platform(description);
+#endif
+        default:
+            break;
+    }
+    static_cast<void>(description);
     throw BackendCapabilityError({
         .backend = backend,
         .operation = "create_platform",
         .capability = std::format("{} platform", backend),
-        .reason = availability.reason,
-        .suggestion = "use a backend listed by available_platform_backends()",
+        .reason = "the backend is available but the factory cannot create it",
+        .suggestion = "report this inconsistency",
     });
 }
 

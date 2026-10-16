@@ -238,6 +238,7 @@ private:
     void deliver_pushed_events();
     void dispatch_to_watchers(const Event& event,
                               std::string_view text);
+    void settle_watchers();
     void remove_event_watcher(std::uint64_t identifier) noexcept;
 
 private:
@@ -249,10 +250,11 @@ private:
     EventQueue m_transfer;
     std::vector<std::move_only_function<void()>> m_deferred;
     std::vector<Watcher> m_watchers;
+    std::vector<Watcher> m_added_watchers;
     std::vector<std::uint64_t> m_removed_watchers;
     std::uint64_t m_next_watcher = 1;
     bool m_pumping = false;
-    bool m_dispatching = false;
+    std::uint32_t m_dispatch_depth = 0;
     std::shared_ptr<Platform* const> m_lifetime;
 };
 
@@ -303,9 +305,10 @@ Platform::events() const noexcept -> EventSpan
 auto
 Platform::add_event_watcher(EventWatcherCallback callback) -> EventWatcher
 {
+    // During a dispatch the watcher waits until the dispatch ends (the running callbacks must not move).
     require_platform_thread("Platform::add_event_watcher");
     const std::uint64_t identifier = m_next_watcher++;
-    m_watchers.push_back({.identifier = identifier, .callback = std::move(callback)});
+    (m_dispatch_depth != 0 ? m_added_watchers : m_watchers).push_back({.identifier = identifier, .callback = std::move(callback)});
     return EventWatcher{m_lifetime, identifier};
 }
 
@@ -509,27 +512,43 @@ Platform::dispatch_to_watchers(const Event& event,
         return;
     }
 
-    // Watchers added meanwhile see the next events; watchers removed meanwhile are skipped.
-    m_dispatching = true;
-    const std::size_t count = m_watchers.size();
+    // Dispatches nest (a watcher's action may emit events, e.g. SDL reporting a resize at once): the
+    // list stays unchanged until the outermost dispatch ends. Watchers added meanwhile see the next
+    // events; watchers removed meanwhile are skipped.
+    ++m_dispatch_depth;
     try
     {
-        for (std::size_t index = 0; index < count; ++index)
+        for (Watcher& watcher : m_watchers)
         {
-            if (!std::ranges::contains(m_removed_watchers, m_watchers[index].identifier))
+            if (!std::ranges::contains(m_removed_watchers, watcher.identifier))
             {
-                m_watchers[index].callback(event, text);
+                watcher.callback(event, text);
             }
         }
     }
     catch (...)
     {
-        m_dispatching = false;
+        if (--m_dispatch_depth == 0)
+        {
+            settle_watchers();
+        }
         throw;
     }
-    m_dispatching = false;
+    if (--m_dispatch_depth == 0)
+    {
+        settle_watchers();
+    }
+}
 
-    // Remove the watchers unregistered during the dispatch.
+void
+Platform::settle_watchers()
+{
+    // The watchers added during the dispatch join; those removed leave.
+    for (Watcher& watcher : m_added_watchers)
+    {
+        m_watchers.push_back(std::move(watcher));
+    }
+    m_added_watchers.clear();
     for (const std::uint64_t identifier : m_removed_watchers)
     {
         std::erase_if(m_watchers, [identifier](const Watcher& watcher)
@@ -543,11 +562,20 @@ Platform::dispatch_to_watchers(const Event& event,
 void
 Platform::remove_event_watcher(std::uint64_t identifier) noexcept
 {
-    // During a dispatch the watcher is only marked; it is removed when the dispatch ends.
-    if (m_dispatching)
+    // During a dispatch the watcher is only marked; it is removed when the outermost dispatch ends.
+    if (m_dispatch_depth != 0)
     {
-        m_removed_watchers.push_back(identifier);
-        return;
+        try
+        {
+            m_removed_watchers.push_back(identifier);
+            return;
+        }
+        catch (...)
+        {
+            // Without memory to defer the removal the watcher stays registered (its callback may be
+            // running: it cannot be replaced here).
+            return;
+        }
     }
     std::erase_if(m_watchers, [identifier](const Watcher& watcher)
     {

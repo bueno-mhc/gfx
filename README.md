@@ -207,6 +207,7 @@ fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed,
 | `GFX_BACKEND_NULL` | `ON` | Null: an instance without physical devices |
 | `GFX_BACKEND_DIRECT3D12` | `ON` on Windows | Direct3D 12 (stub) |
 | `GFX_BACKEND_METAL` | `ON` on Apple platforms | Metal (stub) |
+| `GFX_PLATFORM_BACKEND_SDL3` | `ON` | SDL3 windowing and input (SDL 3.4 found, or 3.4.10 fetched and linked statically) |
 
 ## Project layout
 
@@ -267,13 +268,17 @@ gfx/
 │       │                 Cursor, Window, InputDevices, Platform (event pump, watchers, threads)
 │       ├── input/        module gfx.platform.input: action mapping — compile-time schemas, bindings,
 │       │                 contexts, players, InputSystem and InputFrame, EventChannel, saved bindings
+│       ├── backends/     private modules, reached only through the factory
+│       │   └── sdl3/     module gfx.platform.backends.sdl3 (windows, events, cursors, monitors,
+│       │                 clipboard, gamepads, joysticks, touch)
 │       └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only) and the slot table
     ├── graphics/<area>/  GoogleTest unit tests of the graphics library, one subfolder per area;
     │                     graphics/vulkan: the Vulkan backend on the machine's real GPUs
-    ├── platform/         the platform library, through a test-only fake platform
+    ├── platform/         the platform library, through a test-only fake platform; platform/sdl3: the
+    │                     SDL3 backend with real windows, SDL-injected events and virtual gamepads
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

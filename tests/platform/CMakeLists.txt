@@ -17,3 +17,7 @@ gfx_add_test(gfx_platform_tests
         fake_platform.cppm
         input_test_support.cppm
     LIBRARIES gfx::platform)
+
+if(GFX_PLATFORM_BACKEND_SDL3)
+    add_subdirectory(sdl3)
+endif()

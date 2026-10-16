@@ -24,7 +24,8 @@ invalid_usage_of(const WindowDescription& description) -> std::string
 {
     try
     {
-        validate_window_description(description, WindowFlag::RESIZABLE | WindowFlag::HIGH_PIXEL_DENSITY, PlatformBackendKind::SDL3);
+        validate_window_description(description, WindowFlag::RESIZABLE | WindowFlag::HIGH_PIXEL_DENSITY | WindowFlag::FOCUS_ON_SHOW,
+                                    PlatformBackendKind::SDL3);
     }
     catch (const gfx::InvalidUsageError& error)
     {

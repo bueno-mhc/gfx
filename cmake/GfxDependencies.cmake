@@ -232,6 +232,51 @@ function(gfx_require_stb_image)
     target_include_directories(gfx_stb_image SYSTEM INTERFACE ${stb_image_SOURCE_DIR})
 endfunction()
 
+# gfx_require_sdl3()
+#   Provides gfx::sdl3: SDL 3 (zlib license), the SDL3 platform backend's windowing and input library,
+#   linked statically. An installed SDL3 3.4 or newer is used when present (its static library when
+#   available); otherwise release 3.4.10 is downloaded, checked against its hash and built with only the
+#   subsystems the backend uses (video, events, joysticks and gamepads, HIDAPI, haptics, sensors): no
+#   audio, renderer, GPU API, camera, dialog or tray.
+function(gfx_require_sdl3)
+    if(TARGET gfx::sdl3)
+        return()
+    endif()
+    add_library(gfx_sdl3 INTERFACE)
+    add_library(gfx::sdl3 ALIAS gfx_sdl3)
+    if(NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        find_package(SDL3 3.4 CONFIG QUIET)
+    endif()
+    if(TARGET SDL3::SDL3-static)
+        message(STATUS "gfx: SDL3 ${SDL3_VERSION} found (static library)")
+        target_link_libraries(gfx_sdl3 INTERFACE SDL3::SDL3-static)
+        return()
+    elseif(TARGET SDL3::SDL3)
+        message(STATUS "gfx: SDL3 ${SDL3_VERSION} found (shared library)")
+        target_link_libraries(gfx_sdl3 INTERFACE SDL3::SDL3)
+        return()
+    endif()
+
+    # Built from source: a static library with the subsystems the backend uses.
+    foreach(_gfx_option IN ITEMS SDL_SHARED SDL_TEST_LIBRARY SDL_TESTS SDL_EXAMPLES SDL_INSTALL
+                                 SDL_AUDIO SDL_GPU SDL_RENDER SDL_CAMERA SDL_DIALOG SDL_TRAY SDL_POWER
+                                 SDL_OPENGL SDL_OPENGLES)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_sdl3()" FORCE)
+    endforeach()
+    foreach(_gfx_option IN ITEMS SDL_STATIC SDL_VIDEO SDL_JOYSTICK SDL_HAPTIC SDL_HIDAPI SDL_SENSOR SDL_VULKAN
+                                 SDL_VIRTUAL_JOYSTICK)
+        set(${_gfx_option} ON CACHE BOOL "Set by gfx_require_sdl3()" FORCE)
+    endforeach()
+    FetchContent_Declare(SDL3
+        URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-3.4.10.tar.gz
+        URL_HASH SHA256=12b34280415ec8418c864408b93d008a20a6530687ee613d60bfbd20411f2785
+        SYSTEM)
+    FetchContent_MakeAvailable(SDL3)
+    _gfx_exclude_from_modules(SDL3-static SDL_uclibc)
+    message(STATUS "gfx: SDL3 3.4.10 fetched and built as a static library")
+    target_link_libraries(gfx_sdl3 INTERFACE SDL3::SDL3-static)
+endfunction()
+
 # gfx_require_nlohmann_json()
 #   Provides gfx::nlohmann_json: nlohmann/json (MIT), whose SAX parser reads saved input bindings. The
 #   installed package (MSYS2: mingw-w64-ucrt-x86_64-nlohmann-json) is used when present; otherwise the

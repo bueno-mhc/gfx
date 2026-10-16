@@ -50,3 +50,31 @@ gfx_require_nlohmann_json()
 target_link_libraries(gfx_platform
     PUBLIC gfx::core
     PRIVATE gfx::project_options gfx::stb_image gfx::nlohmann_json)
+
+# Backends: modules of a PRIVATE file set (consumers cannot import them); only the implementation of
+# gfx.platform.backend_factory imports them. GFX_WITH_PLATFORM_<NAME>_BACKEND tells it which were built.
+set(GFX_PLATFORM_BACKEND_MODULES "")
+set(GFX_PLATFORM_BACKEND_SOURCES "")
+if(GFX_PLATFORM_BACKEND_SDL3)
+    gfx_require_sdl3()
+    list(APPEND GFX_PLATFORM_BACKEND_MODULES
+        backends/sdl3/sdl3_backend.cppm
+        backends/sdl3/sdl3_internal.cppm)
+    list(APPEND GFX_PLATFORM_BACKEND_SOURCES
+        backends/sdl3/sdl3_translation.cpp
+        backends/sdl3/sdl3_platform.cpp
+        backends/sdl3/sdl3_events.cpp
+        backends/sdl3/sdl3_window.cpp
+        backends/sdl3/sdl3_input_devices.cpp)
+    target_compile_definitions(gfx_platform PRIVATE GFX_WITH_PLATFORM_SDL3_BACKEND=1)
+    target_link_libraries(gfx_platform PRIVATE gfx::sdl3)
+endif()
+if(GFX_PLATFORM_BACKEND_MODULES)
+    target_sources(gfx_platform
+        PRIVATE
+            FILE_SET backend_modules TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES ${GFX_PLATFORM_BACKEND_MODULES}
+        PRIVATE
+            ${GFX_PLATFORM_BACKEND_SOURCES})
+endif()

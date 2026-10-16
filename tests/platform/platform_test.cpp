@@ -158,6 +158,43 @@ TEST(PlatformTest, WatchersMayUnregisterThemselvesButNotPump)
     EXPECT_EQ(calls, 1);
 }
 
+TEST(PlatformTest, WatcherDispatchesNest)
+{
+    // A watcher's action makes the backend emit at once (a nested dispatch); watchers added and removed
+    // meanwhile take effect when the outermost dispatch ends.
+    FakePlatform platform;
+    std::vector<std::string> calls;
+    EventWatcher added;
+    EventWatcher second;
+    EventWatcher first = platform.add_event_watcher([&](const Event& event, std::string_view)
+    {
+        const Key key = event.as<KeyboardEvent>().key;
+        calls.push_back(std::format("first {}", key));
+        if (key == Key::A)
+        {
+            added = platform.add_event_watcher([&](const Event& later, std::string_view)
+            {
+                calls.push_back(std::format("added {}", later.as<KeyboardEvent>().key));
+            });
+            platform.emit_now(key_down(WindowHandle{}, Key::B));
+            second.reset();
+        }
+    });
+    second = platform.add_event_watcher([&](const Event& event, std::string_view)
+    {
+        calls.push_back(std::format("second {}", event.as<KeyboardEvent>().key));
+    });
+    platform.queue_native_event(key_down(WindowHandle{}, Key::A));
+    platform.queue_native_event(key_down(WindowHandle{}, Key::C));
+    const EventSpan events = platform.poll_events();
+
+    // B was dispatched inside A's dispatch; the watcher added there sees C; the removed one does not.
+    const std::vector<std::string> expected{"first A", "first B", "second B", "first C", "added C"};
+    EXPECT_EQ(calls, expected);
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[1].as<KeyboardEvent>().key, Key::B);
+}
+
 TEST(PlatformTest, WatchersOutlivingThePlatformDetach)
 {
     EventWatcher watcher;

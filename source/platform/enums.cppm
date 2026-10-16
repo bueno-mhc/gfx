@@ -542,6 +542,7 @@ enum class GamepadType : std::uint8_t
     NINTENDO_SWITCH_JOYCON_LEFT,  ///< Left Joy-Con alone.
     NINTENDO_SWITCH_JOYCON_RIGHT, ///< Right Joy-Con alone.
     NINTENDO_SWITCH_JOYCON_PAIR,  ///< Two Joy-Cons used as one gamepad.
+    NINTENDO_GAMECUBE,            ///< GameCube controller (through an adapter).
 };
 
 /// @brief Directions a joystick hat is pushed to (NONE = centered). Bitmask.
@@ -1309,6 +1310,7 @@ struct EnumerationTraits<platform::GamepadType>
         EnumeratorName{platform::GamepadType::NINTENDO_SWITCH_JOYCON_LEFT, "NINTENDO_SWITCH_JOYCON_LEFT"},
         EnumeratorName{platform::GamepadType::NINTENDO_SWITCH_JOYCON_RIGHT, "NINTENDO_SWITCH_JOYCON_RIGHT"},
         EnumeratorName{platform::GamepadType::NINTENDO_SWITCH_JOYCON_PAIR, "NINTENDO_SWITCH_JOYCON_PAIR"},
+        EnumeratorName{platform::GamepadType::NINTENDO_GAMECUBE, "NINTENDO_GAMECUBE"},
     };
 };
 

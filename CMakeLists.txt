@@ -27,6 +27,9 @@ option(GFX_BACKEND_METAL "Build the Metal backend (a stub that is not implemente
 # The platform library (windowing and input). gfx::platform::create_platform() throws a descriptive
 # error for a backend that was not built.
 option(GFX_BUILD_PLATFORM "Build the platform library (windowing and input)" ON)
+include(CMakeDependentOption)
+cmake_dependent_option(GFX_PLATFORM_BACKEND_SDL3 "Build the SDL3 platform backend (SDL3 found or fetched)" ON
+                       "GFX_BUILD_PLATFORM" OFF)
 
 include(GfxToolchainRequirements)
 include(GfxProjectOptions)

@@ -42,7 +42,7 @@ struct WindowDescription
     std::optional<Extent> maximum_size{};                                        ///< Largest size the user can resize to.
     std::optional<AspectRatio> aspect_ratio{};                                   ///< Ratio kept when resizing.
     WindowMode mode = WindowMode::WINDOWED;                                      ///< How it occupies the screen.
-    WindowFlag flags = WindowFlag::RESIZABLE | WindowFlag::HIGH_PIXEL_DENSITY;   ///< Options.
+    WindowFlag flags = WindowFlag::RESIZABLE | WindowFlag::HIGH_PIXEL_DENSITY | WindowFlag::FOCUS_ON_SHOW; ///< Options.
     FullscreenDescription fullscreen{};                                          ///< Fullscreen modes: monitor and video mode.
     SurfaceApi surface_api = SurfaceApi::NONE;                                   ///< Graphics API that will present to it.
     std::span<const ImageData> icon{};                                           ///< Icon, in one or more resolutions.

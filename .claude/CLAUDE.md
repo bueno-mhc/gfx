@@ -224,6 +224,35 @@ Original hard requirements (from the user's initial specification):
   TwoDimensionalBindingsOnButtons, TriggersOnAxes}, CompositesNeedDigitalInputs.
   Gotcha: a helper named `quoted(std::string)` lost to `std::quoted` by argument-dependent lookup —
   named `json_string` instead.
+- **SDL3 backend (P3 as built, 2026-10-16)**: module `gfx.platform.backends.sdl3` in
+  `source/platform/backends/sdl3/` (PRIVATE file set; option `GFX_PLATFORM_BACKEND_SDL3` ON →
+  `GFX_WITH_PLATFORM_SDL3_BACKEND`; the factory imports it under `#if`). Units: `sdl3_backend.cppm`
+  (exports `sdl3::unavailable_reason()`, `sdl3::create_platform()`), internal partition `:internal`
+  (Sdl3Platform, Sdl3Window, Sdl3Cursor, Sdl3InputDevices, records, translation declarations; every
+  member `{}`-initialized), implementation units `sdl3_translation.cpp` (keys = HID scancodes, key codes
+  pass through, modifiers, buttons, axes `/32767`, hats, cursors, `throw_sdl_error` → BackendApiError with
+  SDL_GetError text), `sdl3_platform.cpp` (SDL_Init VIDEO|GAMEPAD, one platform per process via an atomic
+  flag, monitors, clipboard text + PNG/BMP images, cursors, registries; table lookups only here and in
+  the other .cpp units — defect 10), `sdl3_events.cpp` (pump; SDL event watch translates events SDL raises
+  on the platform thread during a pump at once, copies skipped when polled in this pump or the next —
+  SDL's poll stops at a sentinel; `SDL_WaitEventTimeout` in ms, rounded up; wake = registered user
+  event), `sdl3_window.cpp` (created hidden then shown, FOCUS_ON_SHOW via SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN,
+  modes, icons with alternate images, per-window cursor applied on mouse enter, cursor modes, text input
+  + IME hint; windows/cursors hold a weak lifetime token and refuse to work after the platform),
+  `sdl3_input_devices.cpp` (gamepads/joysticks opened at start-up and on ADDED, reported once;
+  rumble/LED capability checked → BackendCapabilityError). SDL headers come through `sdl3_headers.hpp`
+  in each unit's global module fragment (C headers only: fine with `import std`).
+  `gfx_require_sdl3()` (find_package SDL3 3.4, else URL release-3.4.10 + SHA-256
+  12b34280...2785, SYSTEM, static, subsystems trimmed, `_gfx_exclude_from_modules(SDL3-static
+  SDL_uclibc)` — SDL's C++ files otherwise rebuilt the std module with SDL's -Wundef).
+  Interface changes: `WindowDescription::flags` default += FOCUS_ON_SHOW; `GamepadType::NINTENDO_GAMECUBE`;
+  `Platform` watcher dispatch re-entrant (`m_dispatch_depth`, `m_added_watchers`, `settle_watchers()`);
+  FakePlatform::emit_now. Tests: tests/platform/sdl3 (gfx_platform_sdl3_tests, module
+  `gfx.tests.sdl3_support`: pump_until, sdl_window_identifier via HWND match), events injected with
+  SDL_PushEvent, virtual gamepads via SDL_AttachVirtualJoystick (no windows in gamepad tests: SDL drops
+  joystick input while windows exist without focus). **Clipboard**: test opt-in (`GFX_TEST_CLIPBOARD=1`);
+  in Claude's sandboxed shell OpenClipboard fails with ERROR_ACCESS_DENIED (process in a job without UI
+  restrictions; cause not identified) — the user must run it once.
 - **Interface additions in the Vulkan task**: `BufferDescription::sparse`; `BufferViewDescriptor` and
   `AccelerationStructureDescriptor` in the `DescriptorResource` variant.
 - **Handles**: 32-bit (24-bit slot index, 8-bit generation from 1; 0 = null). Value private; users test,
@@ -376,10 +405,11 @@ gfx/
 │   └── platform/  gfx.platform: platform.cppm, enums.cppm (generated Key/KeyCode tables), handles.cppm,
 │                  backend_factory.cppm/.cpp, interface/ (gfx.platform.interface partitions + image.cpp,
 │                  stb_image_implementation.cpp), input/ (gfx.platform.input: input.cppm + partitions
-│                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp);
-│                  backends/{sdl3,glfw}/ arrive in P3/P4
+│                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp),
+│                  backends/sdl3/ (P3); backends/glfw/ arrives in P4
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
-            .cppm/.cpp, input_test_support.cppm + 10 test files), graphics/{backend_factory,
+            .cppm/.cpp, input_test_support.cppm + 10 test files; sdl3/ = SDL3 backend tests),
+            graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
 ```
@@ -415,12 +445,12 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (restructure, e3638c0) and P1 (foundations, 5cc9de0) committed; **P2 (input system) done, awaiting validation** (355 tests Debug + Release); next P3 (SDL3 backend). Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (input system, a42d68a) committed; **P3 (SDL3 backend) done, awaiting validation** (383 tests Debug + Release); next P4 (GLFW backend). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **355**, all passing in Debug and Release, 2026-10-16 (after P2: 68 platform tests,
-32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
+Test count at last report: **383**, all passing in Debug and Release, 2026-10-16 (after P3: 69 platform tests,
+27 SDL3 backend tests (clipboard one skipped unless GFX_TEST_CLIPBOARD=1), 32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
 failure of `CompilationCheck.NamesDoNotCollideWithPlatformMacros` was seen once in a Debug run while the
 Release build ran concurrently (output lost); not reproduced in 5 later runs, 3 of them under the same load.
 
