@@ -142,6 +142,12 @@ unavailable_reason() -> std::string
 }
 
 auto
+is_active() noexcept -> bool
+{
+    return g_platform_exists.load();
+}
+
+auto
 create_platform(const PlatformDescription& description) -> std::unique_ptr<Platform>
 {
     // One SDL3 platform at a time: SDL's event queue and subsystems are process-wide.

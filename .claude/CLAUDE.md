@@ -247,12 +247,36 @@ Original hard requirements (from the user's initial specification):
   SDL_uclibc)` — SDL's C++ files otherwise rebuilt the std module with SDL's -Wundef).
   Interface changes: `WindowDescription::flags` default += FOCUS_ON_SHOW; `GamepadType::NINTENDO_GAMECUBE`;
   `Platform` watcher dispatch re-entrant (`m_dispatch_depth`, `m_added_watchers`, `settle_watchers()`);
-  FakePlatform::emit_now. Tests: tests/platform/sdl3 (gfx_platform_sdl3_tests, module
-  `gfx.tests.sdl3_support`: pump_until, sdl_window_identifier via HWND match), events injected with
+  FakePlatform::emit_now. Tests: tests/platform/backends/sdl3 (gfx_platform_sdl3_tests, module
+  `gfx.tests.sdl3_support`: sdl_window_identifier via HWND match, re-exports gfx.tests.backend_support), events injected with
   SDL_PushEvent, virtual gamepads via SDL_AttachVirtualJoystick (no windows in gamepad tests: SDL drops
   joystick input while windows exist without focus). **Clipboard**: test opt-in (`GFX_TEST_CLIPBOARD=1`);
   in Claude's sandboxed shell OpenClipboard fails with ERROR_ACCESS_DENIED (process in a job without UI
   restrictions; cause not identified) — the user must run it once.
+- **GLFW backend (P4 as built, 2026-10-16)**: module `gfx.platform.backends.glfw` in
+  `source/platform/backends/glfw/` (option `GFX_PLATFORM_BACKEND_GLFW` ON → `GFX_WITH_PLATFORM_GLFW_BACKEND`;
+  `gfx_require_glfw()`: find_package glfw3 3.4, else URL glfw-3.4.zip + SHA-256 b5ec004b...a3e9, SYSTEM,
+  static). Units: `glfw_backend.cppm` (unavailable_reason, is_active, create_platform), `:internal`
+  (GlfwPlatform, GlfwWindow, GlfwCursor, GlfwInputDevices, records), `glfw_translation.cpp` (consteval
+  KEY_TOKENS → GLFW_KEYS table with static_asserts; key codes via glfwGetKeyName; modifier sides from
+  glfwGetKey; `check_glfw()` after calls: FEATURE_UNAVAILABLE/UNIMPLEMENTED/CURSOR_UNAVAILABLE →
+  BackendCapabilityError, else BackendApiError; `clear_glfw_error()`), `glfw_platform.cpp` (glfwInit with
+  hat buttons off, one per process, monitors by GLFWmonitor* list, clipboard text only),
+  `glfw_events.cpp` (callbacks → `deliver()`: emit during a pump, `m_pending` EventQueue otherwise;
+  `with_window` catches exceptions → `record_failure` → rethrown by the pump; process-wide monitor and
+  joystick callbacks through `g_callback_platform`; pump loops until an event, `m_wake_requested` or the
+  deadline), `glfw_window.cpp` (GLFW_NO_API, created hidden, hints; SHOWN/HIDDEN synthesized by
+  show()/hide(); fullscreen through glfwSetWindowMonitor with the windowed place remembered; monitor() =
+  largest overlap), `glfw_input_devices.cpp` (polled diff per pump; triggers (v+1)/2; GUID → USB ids),
+  `glfw_native.cpp/.hpp` (plain TU: glfw3native.h + windows.h; win32/x11/wayland/cocoa_handles()).
+  Factory: one backend active at a time (`active_backend()` via each backend's `is_active()`).
+  Both pumps now wait until an event is emitted, a wake is requested or the deadline passes (spurious
+  wake-ups from messages/events that become no gfx event). Tests: tests/platform/backends/
+  platform_backend_test.cpp (parameterized over available_platform_backends(), 12 × 2),
+  backends/glfw (feature set + messages; input via PostMessageW of WM_KEYDOWN/WM_CHAR/WM_MOUSEMOVE/
+  WM_*BUTTONDOWN/WM_MOUSEWHEEL/WM_CLOSE to the hidden window — GLFW's window procedure handles them),
+  backends/sdl3. `gfx_add_test` gained `MODULE_BASE_DIRECTORY` (backend_test_support.cppm compiled into
+  each executable: a shared module library gave "import 'std' has CRC mismatch").
 - **Interface additions in the Vulkan task**: `BufferDescription::sparse`; `BufferViewDescriptor` and
   `AccelerationStructureDescriptor` in the `DescriptorResource` variant.
 - **Handles**: 32-bit (24-bit slot index, 8-bit generation from 1; 0 = null). Value private; users test,
@@ -406,9 +430,10 @@ gfx/
 │                  backend_factory.cppm/.cpp, interface/ (gfx.platform.interface partitions + image.cpp,
 │                  stb_image_implementation.cpp), input/ (gfx.platform.input: input.cppm + partitions
 │                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp),
-│                  backends/sdl3/ (P3); backends/glfw/ arrives in P4
+│                  backends/sdl3/ (P3), backends/glfw/ (P4)
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
-            .cppm/.cpp, input_test_support.cppm + 10 test files; sdl3/ = SDL3 backend tests),
+            .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
+            sdl3/ + glfw/),
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
@@ -445,12 +470,13 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (input system, a42d68a) committed; **P3 (SDL3 backend) done, awaiting validation** (383 tests Debug + Release); next P4 (GLFW backend). Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c) committed; **P4 (GLFW backend) done, awaiting validation** (405 tests Debug + Release); next P5 (graphics bridge + Vulkan presentation). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **383**, all passing in Debug and Release, 2026-10-16 (after P3: 69 platform tests,
-27 SDL3 backend tests (clipboard one skipped unless GFX_TEST_CLIPBOARD=1), 32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
+Test count at last report: **405**, all passing in Debug and Release, 2026-10-16 (after P4: 69 platform tests,
+24 shared backend tests (12 × SDL3, GLFW), 16 SDL3 + 9 GLFW backend tests (the two clipboard tests skipped
+unless GFX_TEST_CLIPBOARD=1), 32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
 failure of `CompilationCheck.NamesDoNotCollideWithPlatformMacros` was seen once in a Debug run while the
 Release build ran concurrently (output lost); not reproduced in 5 later runs, 3 of them under the same load.
 

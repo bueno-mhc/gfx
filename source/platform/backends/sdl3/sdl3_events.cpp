@@ -97,41 +97,55 @@ Sdl3Platform::pump(EventWaitMode mode,
         }
     };
 
-    // The first event, as the mode says, then everything pending.
-    SDL_Event event{};
-    bool received = false;
-    switch (mode)
+    // The first event, as the mode says, then everything pending. An SDL event that becomes no gfx
+    // event does not end a wait: waits go on until an event, a wake or the deadline.
+    const std::size_t before = events().size();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;)
     {
-        case EventWaitMode::POLL:
+        SDL_Event event{};
+        bool received = false;
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        switch (mode)
+        {
+            case EventWaitMode::POLL:
+                received = SDL_PollEvent(&event);
+                break;
+            case EventWaitMode::WAIT:
+                received = SDL_WaitEvent(&event);
+                break;
+            case EventWaitMode::WAIT_WITH_TIMEOUT:
+                // SDL waits in whole milliseconds: rounded up, so that a wait never ends early.
+                received = SDL_WaitEventTimeout(&event, static_cast<Sint32>(std::clamp<std::chrono::milliseconds::rep>(
+                                                            remaining.count(), 0, std::numeric_limits<Sint32>::max())));
+                break;
+        }
+        bool woken = false;
+        while (received)
+        {
+            rethrow_watch_failure();
+            const auto translated = std::ranges::find_if(m_translated, [&event](const auto& entry) { return same_event(entry.second, event); });
+            if (translated != m_translated.end())
+            {
+                m_translated.erase(translated);
+            }
+            else if (event.type == m_wake_event)
+            {
+                woken = true;
+            }
+            else
+            {
+                translate(event);
+            }
             received = SDL_PollEvent(&event);
-            break;
-        case EventWaitMode::WAIT:
-            received = SDL_WaitEvent(&event);
-            break;
-        case EventWaitMode::WAIT_WITH_TIMEOUT:
-        {
-            // SDL waits in whole milliseconds: round up, so that a wait never ends early.
-            const std::chrono::milliseconds milliseconds = std::chrono::ceil<std::chrono::milliseconds>(timeout);
-            received = SDL_WaitEventTimeout(&event, static_cast<Sint32>(std::clamp<std::chrono::milliseconds::rep>(
-                                                        milliseconds.count(), 0, std::numeric_limits<Sint32>::max())));
-            break;
         }
-    }
-    while (received)
-    {
         rethrow_watch_failure();
-        const auto translated = std::ranges::find_if(m_translated, [&event](const auto& entry) { return same_event(entry.second, event); });
-        if (translated != m_translated.end())
+        if (mode == EventWaitMode::POLL || woken || events().size() > before
+            || (mode == EventWaitMode::WAIT_WITH_TIMEOUT && std::chrono::steady_clock::now() >= deadline))
         {
-            m_translated.erase(translated);
+            return;
         }
-        else if (event.type != m_wake_event)
-        {
-            translate(event);
-        }
-        received = SDL_PollEvent(&event);
     }
-    rethrow_watch_failure();
 }
 
 void

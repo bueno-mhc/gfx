@@ -1,12 +1,6 @@
-// Test support for the SDL3 backend: pumping until an event arrives, and SDL's identifier of a gfx
-// window (tests inject SDL events for it with SDL_PushEvent).
-module;
-
-#include <SDL3/SDL_properties.h>
-#include <SDL3/SDL_stdinc.h>
-#include <SDL3/SDL_video.h>
-
-export module gfx.tests.sdl3_support;
+// Test support for the platform backends: pumping until an event arrives, keeping events beyond the
+// pump that delivered them.
+export module gfx.tests.backend_support;
 
 import std;
 import gfx.platform;
@@ -20,6 +14,19 @@ struct ReceivedEvent
     gfx::platform::Event event{};
     std::string text{};
 };
+
+/// The events of one pump of @p platform, kept with their text.
+inline auto
+pump(gfx::platform::Platform& platform) -> std::vector<ReceivedEvent>
+{
+    std::vector<ReceivedEvent> received;
+    const gfx::platform::EventSpan events = platform.poll_events();
+    for (const gfx::platform::Event& event : events)
+    {
+        received.push_back(ReceivedEvent{.event = event, .text = std::string{events.text(event)}});
+    }
+    return received;
+}
 
 /// Pumps @p platform until an event satisfies @p wanted (or @p timeout passes); every event received
 /// meanwhile is appended to @p received.
@@ -70,35 +77,13 @@ pump_until_type(gfx::platform::Platform& platform,
     return std::nullopt;
 }
 
-/// SDL's identifier of @p window (0 when SDL has no window with its native handle).
+/// The first event of type @p type in @p events (null when none).
 inline auto
-sdl_window_identifier(const gfx::platform::Window& window) -> std::uint32_t
+first_of(const std::vector<ReceivedEvent>& events,
+         gfx::platform::EventType type) -> const ReceivedEvent*
 {
-    // Match the operating-system window of every SDL window.
-    const gfx::NativeWindowHandle native = window.native_handle();
-    const gfx::Win32WindowHandle* const win32 = native.get_if<gfx::Win32WindowHandle>();
-    int count = 0;
-    SDL_Window** const windows = SDL_GetWindows(&count);
-    std::uint32_t identifier = 0;
-    for (int index = 0; windows != nullptr && index < count; ++index)
-    {
-        const void* const hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(windows[index]), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-        if (win32 != nullptr && reinterpret_cast<std::uintptr_t>(hwnd) == win32->window)
-        {
-            identifier = SDL_GetWindowID(windows[index]);
-        }
-    }
-    SDL_free(windows);
-    return identifier;
-}
-
-/// Number of windows SDL holds (destroyed gfx windows stay until the next pump).
-inline auto
-sdl_window_count() -> int
-{
-    int count = 0;
-    SDL_free(SDL_GetWindows(&count));
-    return count;
+    const auto found = std::ranges::find_if(events, [type](const ReceivedEvent& event) { return event.event.type() == type; });
+    return found != events.end() ? &*found : nullptr;
 }
 
 } // namespace gfx::tests

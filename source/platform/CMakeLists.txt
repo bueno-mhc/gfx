@@ -69,6 +69,21 @@ if(GFX_PLATFORM_BACKEND_SDL3)
     target_compile_definitions(gfx_platform PRIVATE GFX_WITH_PLATFORM_SDL3_BACKEND=1)
     target_link_libraries(gfx_platform PRIVATE gfx::sdl3)
 endif()
+if(GFX_PLATFORM_BACKEND_GLFW)
+    gfx_require_glfw()
+    list(APPEND GFX_PLATFORM_BACKEND_MODULES
+        backends/glfw/glfw_backend.cppm
+        backends/glfw/glfw_internal.cppm)
+    list(APPEND GFX_PLATFORM_BACKEND_SOURCES
+        backends/glfw/glfw_translation.cpp
+        backends/glfw/glfw_platform.cpp
+        backends/glfw/glfw_events.cpp
+        backends/glfw/glfw_window.cpp
+        backends/glfw/glfw_input_devices.cpp
+        backends/glfw/glfw_native.cpp)
+    target_compile_definitions(gfx_platform PRIVATE GFX_WITH_PLATFORM_GLFW_BACKEND=1)
+    target_link_libraries(gfx_platform PRIVATE gfx::glfw)
+endif()
 if(GFX_PLATFORM_BACKEND_MODULES)
     target_sources(gfx_platform
         PRIVATE

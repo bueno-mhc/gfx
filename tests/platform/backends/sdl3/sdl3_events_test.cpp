@@ -274,33 +274,4 @@ TEST_F(Sdl3EventsTest, EventsSdlRaisesDuringThePumpReachWatchersAtOnceAndOnlyOnc
     EXPECT_TRUE(pump().empty());
 }
 
-TEST_F(Sdl3EventsTest, WaitsEndOnTimeoutOnWakeAndOnPushedEvents)
-{
-    // Nothing happens: the timeout ends the wait (SDL waits in whole milliseconds).
-    const auto start = std::chrono::steady_clock::now();
-    static_cast<void>(m_platform->wait_events_timeout(30ms));
-    EXPECT_GE(std::chrono::steady_clock::now() - start, 25ms);
-
-    // Another thread wakes an endless wait; the wake-up itself is not an event.
-    std::jthread waker{[this]
-    {
-        std::this_thread::sleep_for(50ms);
-        m_platform->wake();
-    }};
-    const EventSpan woken = m_platform->wait_events();
-    EXPECT_TRUE(woken.empty());
-    waker.join();
-
-    // An event pushed by another thread ends the wait and is delivered.
-    std::jthread pusher{[this]
-    {
-        std::this_thread::sleep_for(50ms);
-        m_platform->push_event(Event::make<EventType::CLIPBOARD_UPDATED>(0ns, ApplicationEvent{}));
-    }};
-    const EventSpan pushed = m_platform->wait_events();
-    pusher.join();
-    ASSERT_EQ(pushed.size(), 1U);
-    EXPECT_EQ(pushed[0].type(), EventType::CLIPBOARD_UPDATED);
-}
-
 } // namespace

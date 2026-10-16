@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0, P1 and P2 committed; P3 (SDL3 backend) done, awaiting validation; next P4 (GLFW backend)**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0 to P3 committed; P4 (GLFW backend) done, awaiting validation; next P5 (graphics bridge and Vulkan presentation)**. Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -503,13 +503,15 @@ Doxygen on every public declaration. They lead to these deviations from the requ
 | Standard cursors | all 12 | 10 (no `WAIT`, `PROGRESS`) |
 | Custom cursors, cursor modes | yes | yes |
 | Clipboard text / image | yes / yes | yes / throws |
-| Keyboard, mouse, wheel (precise + integer) | yes | yes (integer steps accumulated) |
-| Text input / IME composition | yes / yes | yes / throws |
-| Gamepads: buttons, axes, connect | yes (SDL mappings) | yes (SDL_GameControllerDB mappings) |
+| Keyboard, mouse, wheel (precise + integer) | yes | yes (integer steps accumulated; click count always 1; modifier sides read from the key states) |
+| Text input / IME composition | yes / yes | yes (the IME commits characters; the text area is not used) / throws |
+| Window shown / hidden events | from the system | from `show()` / `hide()` only (GLFW has no such callbacks) |
+| Gamepads: buttons, axes, connect | yes (SDL mappings) | yes (GLFW's gamepad mappings); input polled at each pump: it does not end a wait |
 | Gamepad rumble, LEDs, touchpads, sensors | yes | throws |
 | Raw joysticks, hats | yes | yes |
 | Touch | yes | throws |
-| Drop files / text | yes / yes | yes / throws |
+| Drop files / text | yes / yes | yes (at the cursor: GLFW gives no drop position) / throws |
+| Window flags | all but `MOUSE_PASSTHROUGH` | all but `UTILITY` |
 | Native handle | Win32, X11, Wayland, Cocoa (+ Metal layer) | Win32, X11, Wayland, Cocoa |
 
 Win32, XCB, Cocoa and Web native backends: ignored for now (answer 5; XCB, Cocoa and Web cannot be compiled or tested on
@@ -547,12 +549,48 @@ out of module scanning and of the `import std` build. Decisions taken while impl
 - **Devices**: gamepads and joysticks present at start-up are opened at once and reported once;
   gamepads are reported only as gamepads. SDL ignores joystick input while windows exist and none has
   the focus (its default).
-- **Tests** (`tests/platform/sdl3`, 27): factory, windows (hidden; one test shows, minimizes and restores a
-  window), monitors, cursors, icons, events injected with `SDL_PushEvent`, the watch path (an event
-  raised by a watcher reaches watchers at once and the queue once), waits, virtual gamepads and a flight
-  stick (`SDL_AttachVirtualJoystick`) with rumble and LED requests recorded, a gamepad connected before the
-  platform (reported once), and an InputSystem reading a virtual gamepad. The clipboard test changes the system clipboard, so it runs only with
-  `GFX_TEST_CLIPBOARD=1` (and only when the clipboard holds plain text, which it restores).
+- **Tests** (`tests/platform/backends/sdl3`, 16, besides the shared suite of P4): its feature set, deferred
+  window destruction, events injected with `SDL_PushEvent`, the watch path (an event raised by a watcher
+  reaches watchers at once and the queue once), virtual gamepads and a flight stick
+  (`SDL_AttachVirtualJoystick`) with rumble and LED requests recorded, a gamepad connected before the
+  platform (reported once), and an InputSystem reading a virtual gamepad. The clipboard test changes the
+  system clipboard, so it runs only with `GFX_TEST_CLIPBOARD=1` (and only when the clipboard holds plain
+  text, which it restores).
+
+**GLFW backend as built (P4, 2026-10-16)** — module `gfx.platform.backends.glfw`
+(`source/platform/backends/glfw/`, option `GFX_PLATFORM_BACKEND_GLFW`, ON). `gfx_require_glfw()`: an
+installed GLFW 3.4, else release 3.4 fetched by URL + SHA-256 and built static (no examples, tests, docs).
+Windows have no graphics context (`GLFW_NO_API`). Decisions taken while implementing:
+
+- **Key table at compile time** (C7): every GLFW key token maps to a `Key`, checked by `static_assert`s
+  (sorted, no duplicate, only F25 unmapped). GLFW names the ISO key next to left Shift `WORLD_2` on
+  Win32/Wayland and `WORLD_1` on X11: both map to `Key::NON_US_BACKSLASH`; `MENU` maps to `APPLICATION`.
+  Logical keys: the character of the layout (`glfwGetKeyName`) for the main block, code points for
+  Space/Return/Escape/Tab/Backspace/Delete, `KEY_CODE_NON_PRINTABLE_FLAG | HID usage` for the others (as SDL).
+- **Callbacks** emit at once during a pump (watchers run in real time, also inside Windows' resize loop);
+  callbacks GLFW runs outside a pump (e.g. `glfwSetWindowSize` reports the resize synchronously) are kept
+  for the next pump. Exceptions in callbacks wait for the pump (GLFW is C).
+- **Gamepads and joysticks** are polled at each pump (GLFW reports connections only) and reported as the
+  differences; triggers rescaled from GLFW's [-1, 1] to [0, 1]; USB identifiers parsed from SDL-style GUIDs.
+- **Errors**: `glfwGetError()` after each call: `GLFW_FEATURE_UNAVAILABLE`/`UNIMPLEMENTED`/`CURSOR_UNAVAILABLE`
+  → `BackendCapabilityError`, others → `BackendApiError` with GLFW's description.
+- **Native handles** through a plain translation unit (`glfw_native.cpp`: `glfw3native.h` includes
+  `<windows.h>`, toolchain defect 2) behind a std-free header, one query per windowing system.
+- **One backend active at a time** (new factory rule): SDL3 and GLFW both pump the thread's message queue
+  and would dispatch each other's window messages; `create_platform` refuses a second backend with
+  `InvalidUsageError` (each backend also allows one platform of its own).
+- **Waits end on an event, a wake or the deadline** (both backends, fixed while testing): GLFW's wait ends
+  on any system message and SDL's on any SDL event, also those that become no gfx event, so the pumps wait
+  again until an event is emitted, `wake()` is requested, or the timeout passes.
+- **Tests**: the backend-independent tests moved into one parameterized suite run on every available
+  backend (`tests/platform/backends/platform_backend_test.cpp`, 12 tests × 2 backends: factory, the
+  documented exception of each missing feature, windows, resize, states, lifetime, threads, monitors,
+  cursors, icons and modes, waits). GLFW-specific (`backends/glfw`, 9): its feature set and messages, and
+  input through **Win32 messages posted to the window** (GLFW cannot inject events; its own window
+  procedure handles them as real input): keys (repeat, extended keys), characters (surrogate pairs),
+  mouse motion deltas, buttons, wheel steps, close requests, watchers, destroyed windows. The test
+  modules are compiled into each executable (`gfx_add_test(... MODULE_BASE_DIRECTORY ...)`): a module
+  library shared between test targets made GCC report "import 'std' has CRC mismatch".
 
 ### A17. Prior art per subsystem (summary)
 

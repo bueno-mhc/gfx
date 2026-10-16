@@ -277,6 +277,42 @@ function(gfx_require_sdl3)
     target_link_libraries(gfx_sdl3 INTERFACE SDL3::SDL3-static)
 endfunction()
 
+# gfx_require_glfw()
+#   Provides gfx::glfw: GLFW 3.4 (zlib license), the GLFW platform backend's windowing and input
+#   library, linked statically. An installed GLFW 3.4 is used when present; otherwise release 3.4 is
+#   downloaded, checked against its hash and built static (no examples, tests, documentation or
+#   installation).
+function(gfx_require_glfw)
+    if(TARGET gfx::glfw)
+        return()
+    endif()
+    add_library(gfx_glfw INTERFACE)
+    add_library(gfx::glfw ALIAS gfx_glfw)
+    if(NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        find_package(glfw3 3.4 CONFIG QUIET)
+    endif()
+    if(TARGET glfw)
+        get_target_property(_gfx_imported glfw IMPORTED)
+        if(_gfx_imported)
+            message(STATUS "gfx: GLFW ${glfw3_VERSION} found")
+            target_link_libraries(gfx_glfw INTERFACE glfw)
+            return()
+        endif()
+    endif()
+
+    # Built from source: a static library without the extras.
+    foreach(_gfx_option IN ITEMS GLFW_BUILD_EXAMPLES GLFW_BUILD_TESTS GLFW_BUILD_DOCS GLFW_INSTALL)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_glfw()" FORCE)
+    endforeach()
+    FetchContent_Declare(glfw3
+        URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
+        URL_HASH SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
+        SYSTEM)
+    FetchContent_MakeAvailable(glfw3)
+    message(STATUS "gfx: GLFW 3.4 fetched and built as a static library")
+    target_link_libraries(gfx_glfw INTERFACE glfw)
+endfunction()
+
 # gfx_require_nlohmann_json()
 #   Provides gfx::nlohmann_json: nlohmann/json (MIT), whose SAX parser reads saved input bindings. The
 #   installed package (MSYS2: mingw-w64-ucrt-x86_64-nlohmann-json) is used when present; otherwise the

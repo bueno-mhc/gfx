@@ -14,6 +14,9 @@ export namespace gfx::platform::sdl3
 ///        library; a failure to start the video subsystem is reported by create_platform()).
 [[nodiscard]] auto unavailable_reason() -> std::string;
 
+/// @brief Whether an SDL3 platform exists now.
+[[nodiscard]] auto is_active() noexcept -> bool;
+
 /// @brief Creates the SDL3 platform on the calling thread (its platform thread).
 /// @throws InvalidUsageError when an SDL3 platform exists already (SDL has one event queue per
 ///         process), BackendApiError when SDL cannot start its video or gamepad subsystem.

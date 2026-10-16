@@ -30,6 +30,8 @@ option(GFX_BUILD_PLATFORM "Build the platform library (windowing and input)" ON)
 include(CMakeDependentOption)
 cmake_dependent_option(GFX_PLATFORM_BACKEND_SDL3 "Build the SDL3 platform backend (SDL3 found or fetched)" ON
                        "GFX_BUILD_PLATFORM" OFF)
+cmake_dependent_option(GFX_PLATFORM_BACKEND_GLFW "Build the GLFW platform backend (GLFW found or fetched)" ON
+                       "GFX_BUILD_PLATFORM" OFF)
 
 include(GfxToolchainRequirements)
 include(GfxProjectOptions)

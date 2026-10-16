@@ -10,16 +10,26 @@ include(GfxDependencies)
 include(GfxRuntimeDeployment)
 gfx_require_googletest()
 
-# gfx_add_test(<name> SOURCES <file>... [MODULES <file>...] [LIBRARIES <target>...])
-#   SOURCES   : regular translation units (may `#include <gtest/gtest.h>` and `import` modules)
-#   MODULES   : test-only C++ module interface units
-#   LIBRARIES : additional targets to link
+# gfx_add_test(<name> SOURCES <file>... [MODULES <file>...] [MODULE_BASE_DIRECTORY <directory>]
+#              [LIBRARIES <target>...])
+#   SOURCES               : regular translation units (may `#include <gtest/gtest.h>` and `import` modules)
+#   MODULES               : test-only C++ module interface units, compiled into this executable
+#   MODULE_BASE_DIRECTORY : a directory above the current one that MODULES may come from (test modules
+#                           shared by sibling test folders; each executable builds its own copy, as
+#                           module libraries shared between test targets mix `import std` builds)
+#   LIBRARIES             : additional targets to link
 function(gfx_add_test name)
-    cmake_parse_arguments(PARSE_ARGV 1 argument "" "" "SOURCES;MODULES;LIBRARIES")
+    cmake_parse_arguments(PARSE_ARGV 1 argument "" "MODULE_BASE_DIRECTORY" "SOURCES;MODULES;LIBRARIES")
     add_executable(${name})
     target_sources(${name} PRIVATE ${argument_SOURCES})
     if(argument_MODULES)
-        target_sources(${name} PRIVATE FILE_SET CXX_MODULES FILES ${argument_MODULES})
+        if(argument_MODULE_BASE_DIRECTORY)
+            target_sources(${name} PRIVATE FILE_SET CXX_MODULES
+                BASE_DIRS ${argument_MODULE_BASE_DIRECTORY}
+                FILES ${argument_MODULES})
+        else()
+            target_sources(${name} PRIVATE FILE_SET CXX_MODULES FILES ${argument_MODULES})
+        endif()
     endif()
     target_link_libraries(${name} PRIVATE gfx::project_options GTest::gtest_main ${argument_LIBRARIES})
     # Runs before the discovery step below (POST_BUILD commands run in the order they are added).

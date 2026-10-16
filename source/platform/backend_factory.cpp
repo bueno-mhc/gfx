@@ -10,6 +10,9 @@ import gfx.platform.interface;
 #if GFX_WITH_PLATFORM_SDL3_BACKEND
 import gfx.platform.backends.sdl3;
 #endif
+#if GFX_WITH_PLATFORM_GLFW_BACKEND
+import gfx.platform.backends.glfw;
+#endif
 
 namespace gfx::platform
 {
@@ -46,9 +49,33 @@ unavailable_reason(PlatformBackendKind backend) -> std::optional<std::string>
         case PlatformBackendKind::SDL3:
             return sdl3::unavailable_reason();
 #endif
+#if GFX_WITH_PLATFORM_GLFW_BACKEND
+        case PlatformBackendKind::GLFW:
+            return glfw::unavailable_reason();
+#endif
         default:
             return std::nullopt;
     }
+}
+
+/// The backend whose platform exists now, if any: windowing backends share the thread's message
+/// queue (each one would dispatch the other's window messages), so one is active at a time.
+auto
+active_backend() noexcept -> std::optional<PlatformBackendKind>
+{
+#if GFX_WITH_PLATFORM_SDL3_BACKEND
+    if (sdl3::is_active())
+    {
+        return PlatformBackendKind::SDL3;
+    }
+#endif
+#if GFX_WITH_PLATFORM_GLFW_BACKEND
+    if (glfw::is_active())
+    {
+        return PlatformBackendKind::GLFW;
+    }
+#endif
+    return std::nullopt;
 }
 
 /// Why @p backend, which was not built, is missing.
@@ -114,11 +141,26 @@ create_platform(PlatformBackendKind backend,
             .suggestion = "use a backend listed by available_platform_backends()",
         });
     }
+    if (const std::optional<PlatformBackendKind> active = active_backend(); active && *active != backend)
+    {
+        throw InvalidUsageError({
+            .backend = backend,
+            .operation = "create_platform",
+            .problem = std::format("a {} platform exists already; platform backends share the thread's event queue, so one "
+                                   "backend is active at a time",
+                                   *active),
+            .suggestion = std::format("destroy the {} platform first, or keep using it", *active),
+        });
+    }
     switch (backend)
     {
 #if GFX_WITH_PLATFORM_SDL3_BACKEND
         case PlatformBackendKind::SDL3:
             return sdl3::create_platform(description);
+#endif
+#if GFX_WITH_PLATFORM_GLFW_BACKEND
+        case PlatformBackendKind::GLFW:
+            return glfw::create_platform(description);
 #endif
         default:
             break;

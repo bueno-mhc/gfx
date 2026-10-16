@@ -18,6 +18,6 @@ gfx_add_test(gfx_platform_tests
         input_test_support.cppm
     LIBRARIES gfx::platform)
 
-if(GFX_PLATFORM_BACKEND_SDL3)
-    add_subdirectory(sdl3)
+if(GFX_PLATFORM_BACKEND_SDL3 OR GFX_PLATFORM_BACKEND_GLFW)
+    add_subdirectory(backends)
 endif()
