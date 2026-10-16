@@ -7,4 +7,5 @@ export import gfx.core;
 export import gfx.platform.enums;
 export import gfx.platform.handles;
 export import gfx.platform.interface;
+export import gfx.platform.input;
 export import gfx.platform.backend_factory;

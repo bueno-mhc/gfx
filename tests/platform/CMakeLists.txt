@@ -8,7 +8,12 @@ gfx_add_test(gfx_platform_tests
         image_test.cpp
         window_test.cpp
         platform_test.cpp
+        input_schema_test.cpp
+        input_system_test.cpp
+        binding_storage_test.cpp
+        event_channel_test.cpp
         fake_platform.cpp
     MODULES
         fake_platform.cppm
+        input_test_support.cppm
     LIBRARIES gfx::platform)

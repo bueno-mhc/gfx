@@ -265,6 +265,8 @@ gfx/
 │       │                 identifiers ("jump"_action); player slots
 │       ├── interface/    module gfx.platform.interface: events and their queue, images, monitors,
 │       │                 Cursor, Window, InputDevices, Platform (event pump, watchers, threads)
+│       ├── input/        module gfx.platform.input: action mapping — compile-time schemas, bindings,
+│       │                 contexts, players, InputSystem and InputFrame, EventChannel, saved bindings
 │       └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed

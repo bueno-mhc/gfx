@@ -626,6 +626,108 @@ enum class EventWaitMode : std::uint8_t
     WAIT_WITH_TIMEOUT, ///< Block until an event arrives or the timeout expires.
 };
 
+/// @brief Kind of value an action produces (Unreal Enhanced Input's value types).
+enum class ActionValueType : std::uint8_t
+{
+    BUTTON,  ///< Pressed or not (analog sources press it above the actuation threshold).
+    AXIS_1D, ///< One signed value (throttle, zoom).
+    AXIS_2D, ///< Two values, x right and y up (movement, camera).
+};
+
+/// @brief Kind of input a binding reads.
+enum class InputSourceKind : std::uint8_t
+{
+    NONE,           ///< No source.
+    KEY,            ///< A physical key (Key).
+    KEY_CODE,       ///< A logical key (KeyCode): the key the current layout labels so.
+    MOUSE_BUTTON,   ///< A mouse button (MouseButton).
+    MOUSE_AXIS,     ///< Mouse motion or wheel (MouseAxis).
+    GAMEPAD_BUTTON, ///< A gamepad button (GamepadButton).
+    GAMEPAD_AXIS,   ///< A gamepad axis (GamepadAxis).
+};
+
+/// @brief How a binding turns its sources into a value.
+enum class BindingKind : std::uint8_t
+{
+    NONE,           ///< No binding (removed).
+    BUTTON,         ///< One digital or analog source: key, key code, mouse button, gamepad button or axis.
+    CHORD,          ///< A key or key code with required modifiers (Ctrl+S).
+    GAMEPAD_CHORD,  ///< Up to four gamepad buttons held together.
+    MOUSE_AXIS,     ///< Mouse motion or wheel during the frame.
+    COMPOSITE_AXIS, ///< Two digital sources: positive minus negative (1D).
+    COMPOSITE_2D,   ///< Four digital sources: up, down, left, right (2D, e.g. WASD).
+    STICK,          ///< Two gamepad axes (2D; y flipped so that up is positive).
+};
+
+/// @brief How a dead zone filters a value (Unreal's dead zone types).
+enum class DeadzoneKind : std::uint8_t
+{
+    NONE,          ///< No dead zone.
+    AXIAL,         ///< Each axis separately, rescaled from the lower to the upper threshold.
+    RADIAL,        ///< The vector's length below the lower threshold becomes 0; the rest is unchanged.
+    SCALED_RADIAL, ///< The vector's length rescaled from the lower to the upper threshold (smooth sticks).
+};
+
+/// @brief How a value's magnitude maps to the action's (finer control near the center).
+enum class ResponseCurve : std::uint8_t
+{
+    LINEAR,    ///< Unchanged.
+    QUADRATIC, ///< Squared.
+    CUBIC,     ///< Cubed.
+    POWER,     ///< Raised to the binding's exponent.
+};
+
+/// @brief When a binding presses its action (Unreal's triggers).
+enum class TriggerKind : std::uint8_t
+{
+    DOWN, ///< While the binding is actuated.
+    HOLD, ///< While the binding stays actuated, after its hold time.
+    TAP,  ///< For one frame, when the binding is released within its tap time.
+};
+
+/// @brief Mouse motion and wheel axes, as accumulated during a frame.
+enum class MouseAxis : std::uint8_t
+{
+    MOTION_X, ///< Horizontal motion in window coordinates (relative motion when captured).
+    MOTION_Y, ///< Vertical motion (down is positive, as on screen).
+    WHEEL_X,  ///< Horizontal wheel.
+    WHEEL_Y,  ///< Vertical wheel (away from the user is positive).
+};
+
+/// @brief How gamepads find their player.
+enum class GamepadAssignment : std::uint8_t
+{
+    AUTOMATIC, ///< A gamepad that connects goes to the first player without one.
+    MANUAL,    ///< Gamepads go to the player InputSystem::assign_gamepad() names.
+};
+
+/// @brief What is wrong with an input schema (validate_input_schema()).
+enum class InputSchemaProblem : std::uint8_t
+{
+    NONE,                   ///< Nothing.
+    MISSING_NAME,           ///< An action or a binding context has an empty name.
+    DUPLICATE_ACTION,       ///< Two actions have the same name (or names whose hashes collide).
+    DUPLICATE_CONTEXT,      ///< Two binding contexts have the same name (or names whose hashes collide).
+    UNKNOWN_ACTION,         ///< A binding names an action the schema does not declare.
+    UNKNOWN_CONTEXT,        ///< A binding names a context the schema does not declare.
+    MALFORMED_BINDING,      ///< A binding lacks the sources its kind needs (e.g. COMPOSITE_2D needs four digital sources).
+    INCOMPATIBLE_BINDING,   ///< A two-dimensional binding (COMPOSITE_2D, STICK) on an action that is not AXIS_2D.
+    TRIGGER_ON_AXIS,        ///< A HOLD or TAP trigger on an action that is not a BUTTON.
+    INVALID_TRIGGER_TIME,   ///< A HOLD or TAP trigger without a positive time.
+    INVALID_DEADZONE,       ///< A dead zone whose thresholds are not 0 <= lower < upper <= 1.
+    INVALID_RESPONSE_CURVE, ///< A POWER response curve whose exponent is not positive.
+};
+
+/// @brief Kinds of input InputSystem::capture_next_binding() listens to. Bitmask.
+enum class BindingCaptureSource : std::uint8_t
+{
+    NONE           = 0, ///< No bit.
+    KEYBOARD       = 1U << 0, ///< Keys.
+    MOUSE_BUTTON   = 1U << 1, ///< Mouse buttons.
+    GAMEPAD_BUTTON = 1U << 2, ///< Gamepad buttons.
+    GAMEPAD_AXIS   = 1U << 3, ///< Gamepad axes pushed past the actuation threshold.
+};
+
 // =================================================================================================
 // Constants
 // =================================================================================================
@@ -644,6 +746,15 @@ inline constexpr std::size_t DEFAULT_EVENT_TEXT_CAPACITY = 16384;
 
 /// @brief Most local players an InputSystem routes devices to.
 inline constexpr std::uint32_t MAXIMUM_PLAYERS = 8;
+
+/// @brief Magnitude at which an analog source presses a BUTTON action (InputSystemDescription default).
+inline constexpr float DEFAULT_ACTUATION_THRESHOLD = 0.5F;
+
+/// @brief Most sources a binding reads (COMPOSITE_2D reads four, GAMEPAD_CHORD up to four).
+inline constexpr std::size_t MAXIMUM_BINDING_SOURCES = 4;
+
+/// @brief Version of the saved-bindings format (InputSystem::save_bindings()).
+inline constexpr int BINDING_STORAGE_VERSION = 1;
 
 } // namespace gfx::platform
 
@@ -1294,6 +1405,137 @@ struct EnumerationTraits<platform::EventWaitMode>
     };
 };
 
+template<>
+struct EnumerationTraits<platform::ActionValueType>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::ActionValueType::BUTTON, "BUTTON"},
+        EnumeratorName{platform::ActionValueType::AXIS_1D, "AXIS_1D"},
+        EnumeratorName{platform::ActionValueType::AXIS_2D, "AXIS_2D"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::InputSourceKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::InputSourceKind::NONE, "NONE"},
+        EnumeratorName{platform::InputSourceKind::KEY, "KEY"},
+        EnumeratorName{platform::InputSourceKind::KEY_CODE, "KEY_CODE"},
+        EnumeratorName{platform::InputSourceKind::MOUSE_BUTTON, "MOUSE_BUTTON"},
+        EnumeratorName{platform::InputSourceKind::MOUSE_AXIS, "MOUSE_AXIS"},
+        EnumeratorName{platform::InputSourceKind::GAMEPAD_BUTTON, "GAMEPAD_BUTTON"},
+        EnumeratorName{platform::InputSourceKind::GAMEPAD_AXIS, "GAMEPAD_AXIS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::BindingKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::BindingKind::NONE, "NONE"},
+        EnumeratorName{platform::BindingKind::BUTTON, "BUTTON"},
+        EnumeratorName{platform::BindingKind::CHORD, "CHORD"},
+        EnumeratorName{platform::BindingKind::GAMEPAD_CHORD, "GAMEPAD_CHORD"},
+        EnumeratorName{platform::BindingKind::MOUSE_AXIS, "MOUSE_AXIS"},
+        EnumeratorName{platform::BindingKind::COMPOSITE_AXIS, "COMPOSITE_AXIS"},
+        EnumeratorName{platform::BindingKind::COMPOSITE_2D, "COMPOSITE_2D"},
+        EnumeratorName{platform::BindingKind::STICK, "STICK"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::DeadzoneKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::DeadzoneKind::NONE, "NONE"},
+        EnumeratorName{platform::DeadzoneKind::AXIAL, "AXIAL"},
+        EnumeratorName{platform::DeadzoneKind::RADIAL, "RADIAL"},
+        EnumeratorName{platform::DeadzoneKind::SCALED_RADIAL, "SCALED_RADIAL"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::ResponseCurve>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::ResponseCurve::LINEAR, "LINEAR"},
+        EnumeratorName{platform::ResponseCurve::QUADRATIC, "QUADRATIC"},
+        EnumeratorName{platform::ResponseCurve::CUBIC, "CUBIC"},
+        EnumeratorName{platform::ResponseCurve::POWER, "POWER"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::TriggerKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::TriggerKind::DOWN, "DOWN"},
+        EnumeratorName{platform::TriggerKind::HOLD, "HOLD"},
+        EnumeratorName{platform::TriggerKind::TAP, "TAP"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::MouseAxis>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::MouseAxis::MOTION_X, "MOTION_X"},
+        EnumeratorName{platform::MouseAxis::MOTION_Y, "MOTION_Y"},
+        EnumeratorName{platform::MouseAxis::WHEEL_X, "WHEEL_X"},
+        EnumeratorName{platform::MouseAxis::WHEEL_Y, "WHEEL_Y"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::GamepadAssignment>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::GamepadAssignment::AUTOMATIC, "AUTOMATIC"},
+        EnumeratorName{platform::GamepadAssignment::MANUAL, "MANUAL"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::InputSchemaProblem>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::InputSchemaProblem::NONE, "NONE"},
+        EnumeratorName{platform::InputSchemaProblem::MISSING_NAME, "MISSING_NAME"},
+        EnumeratorName{platform::InputSchemaProblem::DUPLICATE_ACTION, "DUPLICATE_ACTION"},
+        EnumeratorName{platform::InputSchemaProblem::DUPLICATE_CONTEXT, "DUPLICATE_CONTEXT"},
+        EnumeratorName{platform::InputSchemaProblem::UNKNOWN_ACTION, "UNKNOWN_ACTION"},
+        EnumeratorName{platform::InputSchemaProblem::UNKNOWN_CONTEXT, "UNKNOWN_CONTEXT"},
+        EnumeratorName{platform::InputSchemaProblem::MALFORMED_BINDING, "MALFORMED_BINDING"},
+        EnumeratorName{platform::InputSchemaProblem::INCOMPATIBLE_BINDING, "INCOMPATIBLE_BINDING"},
+        EnumeratorName{platform::InputSchemaProblem::TRIGGER_ON_AXIS, "TRIGGER_ON_AXIS"},
+        EnumeratorName{platform::InputSchemaProblem::INVALID_TRIGGER_TIME, "INVALID_TRIGGER_TIME"},
+        EnumeratorName{platform::InputSchemaProblem::INVALID_DEADZONE, "INVALID_DEADZONE"},
+        EnumeratorName{platform::InputSchemaProblem::INVALID_RESPONSE_CURVE, "INVALID_RESPONSE_CURVE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<platform::BindingCaptureSource>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{platform::BindingCaptureSource::KEYBOARD, "KEYBOARD"},
+        EnumeratorName{platform::BindingCaptureSource::MOUSE_BUTTON, "MOUSE_BUTTON"},
+        EnumeratorName{platform::BindingCaptureSource::GAMEPAD_BUTTON, "GAMEPAD_BUTTON"},
+        EnumeratorName{platform::BindingCaptureSource::GAMEPAD_AXIS, "GAMEPAD_AXIS"},
+    };
+};
+
 } // namespace gfx
 
 namespace gfx::enumeration_verification
@@ -1318,5 +1560,15 @@ static_assert(verify<platform::HatPosition>(), "EnumerationTraits<platform::HatP
 static_assert(verify<platform::TouchDeviceType>(), "EnumerationTraits<platform::TouchDeviceType>::NAMES is out of sync with the enumeration");
 static_assert(verify<platform::EventType>(), "EnumerationTraits<platform::EventType>::NAMES is out of sync with the enumeration");
 static_assert(verify<platform::EventWaitMode>(), "EnumerationTraits<platform::EventWaitMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::ActionValueType>(), "EnumerationTraits<platform::ActionValueType>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::InputSourceKind>(), "EnumerationTraits<platform::InputSourceKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::BindingKind>(), "EnumerationTraits<platform::BindingKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::DeadzoneKind>(), "EnumerationTraits<platform::DeadzoneKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::ResponseCurve>(), "EnumerationTraits<platform::ResponseCurve>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::TriggerKind>(), "EnumerationTraits<platform::TriggerKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::MouseAxis>(), "EnumerationTraits<platform::MouseAxis>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::GamepadAssignment>(), "EnumerationTraits<platform::GamepadAssignment>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::InputSchemaProblem>(), "EnumerationTraits<platform::InputSchemaProblem>::NAMES is out of sync with the enumeration");
+static_assert(verify<platform::BindingCaptureSource>(), "EnumerationTraits<platform::BindingCaptureSource>::NAMES is out of sync with the enumeration");
 
 } // namespace gfx::enumeration_verification

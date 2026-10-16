@@ -115,4 +115,29 @@ if(GFX_BUILD_PLATFORM)
         SOURCES platform/identifiers_need_a_name.cpp
         EXPECTED_DIAGNOSTIC "an identifier needs a non-empty name|not a constant expression"
         LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(InputSchemaRejectsDuplicateActions
+        SOURCES platform/input_schema_rejects_duplicate_actions.cpp
+        EXPECTED_DIAGNOSTIC "input_schema_error_two_actions_have_the_same_name"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(InputSchemaRejectsUndeclaredActions
+        SOURCES platform/input_schema_rejects_undeclared_actions.cpp
+        EXPECTED_DIAGNOSTIC "input_schema_error_a_binding_names_an_undeclared_action"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(InputSchemaRejectsTwoDimensionalBindingsOnButtons
+        SOURCES platform/input_schema_rejects_two_dimensional_bindings_on_buttons.cpp
+        EXPECTED_DIAGNOSTIC "input_schema_error_a_two_dimensional_binding_needs_an_axis_2d_action"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(InputSchemaRejectsTriggersOnAxes
+        SOURCES platform/input_schema_rejects_triggers_on_axes.cpp
+        EXPECTED_DIAGNOSTIC "input_schema_error_hold_and_tap_triggers_need_a_button_action"
+        LIBRARIES gfx::platform)
+
+    gfx_add_compilation_failure_test(CompositesNeedDigitalInputs
+        SOURCES platform/composites_need_digital_inputs.cpp
+        EXPECTED_DIAGNOSTIC "no matching function for call to 'composite_axis|DigitalInputSourceType"
+        LIBRARIES gfx::platform)
 endif()

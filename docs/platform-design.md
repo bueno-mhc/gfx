@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0 (restructure) and P1 (platform foundations) done, awaiting validation; next P2 (input)**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0 (restructure), P1 (platform foundations) and P2 (input system) done, awaiting validation; next P3 (SDL3 backend)**. Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -289,6 +289,55 @@ modifiers: dead zone, negate, swizzle, response curve; triggers; input consumpti
 keys), Godot `InputMap` (named actions, per-action deadzone, `is_action_just_pressed`, `get_vector`),
 SDL3 gamepad mappings and player indices.
 
+**As built (P2, 2026-10-15)** — module `gfx.platform.input` (`source/platform/input/`), re-exported by
+`gfx.platform`. Differences from the plan above and from snippet C6, decided while implementing:
+
+- **No factory**: `InputSystem` is library code, so it is constructed directly
+  (`InputSystem input{SCHEMA, {.players = 2}}`) instead of `create_input_system()`.
+- **Contexts**: `activate_context(context, player)` returns a `ContextActivation` (RAII layer; `reset()`
+  pops it early). No `push_context`/`pop_context`/`set_contexts`: one way to do it, and a layer cannot be
+  popped by code that did not push it. `ContextDescription` = `priority`, `consumes_input` (default
+  true), **`blocks_lower_contexts`** (modal menus; new) and **`reads_keyboard_during_text_input`**
+  (default false; replaces `blocks_during_text_input`, same default behavior). Consumption is per
+  source: a vehicle context binding W hides W from gameplay's WASD composite, S/A/D still work.
+- **Bindings**: `InputSource {kind, code}` (`InputSourceKind`) + `BindingKind` {BUTTON, CHORD,
+  GAMEPAD_CHORD, MOUSE_AXIS, COMPOSITE_AXIS, COMPOSITE_2D, STICK} instead of one kind per device;
+  builders `single()`, `chord()`, `gamepad_chord()`, `composite_axis()`, `composite_2d()`, `stick()`,
+  `bind(action, binding|input)`. Fluent modifiers are named `with_deadzone()`, `with_curve()`,
+  `inverted()`, `scaled()`, `swizzled()`, `normalized()`, `held_for()`, `tapped_within()` (a member
+  function cannot share the name of the data member `deadzone`). Held chords hide their key from
+  single-key bindings (Ctrl+S does not also press S).
+- **Schema**: `actions(action("jump"), ...)` and `context("gameplay", {...}, bind(...)...)` take names
+  (the identifiers are hashed from them; names are kept for messages and saved bindings).
+  `make_input_schema()` is `consteval`; a problem is a compilation error **naming it** (a call to a
+  non-`constexpr` function such as `input_schema_error_two_actions_have_the_same_name()`), since a
+  `static_assert` cannot inspect function arguments. Run-time schemas: `InputSchemaView` +
+  `check_input_schema()` / `validate_input_schema()` (names in the message). Problems:
+  `InputSchemaProblem` (+ `MISSING_NAME`, `INVALID_TRIGGER_TIME`, `INVALID_RESPONSE_CURVE`).
+  No compile-time source → binding lookup tables: evaluation walks the active contexts' bindings each
+  frame (tens of bindings per player; a lookup table can come later without an API change).
+- **Devices**: `update(events)` only (no `InputDevices` argument): gamepads are tracked from their
+  events (connected, or first button/axis event), assigned automatically or with `assign_gamepad()`;
+  keyboard and mouse go to `assign_keyboard_and_mouse(player)` (player 0 by default).
+- **Frames**: `InputFrame` (partition `:frame`, not `:snapshot`) answers `is_action_pressed`,
+  `was_action_just_pressed`, `was_action_just_released`, `get_action_value`, `get_action_value_2d`,
+  `action_state` (value, edges, pressed duration), with the player **last** (default player 0), plus
+  raw keyboard, mouse and per-player gamepad state and `captured_binding()`. A press and release
+  within one frame press the action for that frame and release it the next.
+- **Triggers** `HOLD`/`TAP` use the update times (`update(events, now)` for tests and replays).
+- **Rebinding**: `bindings()`, `rebind(BindingSlot, binding)`, `add_binding()`, `remove_binding()`,
+  `reset_bindings()`, `find_bindings_using(source)` (conflicts), `capture_next_binding(player, sources,
+  cancel key)` (the captured press does not reach the actions), `add_context()` at run time.
+- **Persistence**: `save_bindings()` writes only lists that differ from the defaults
+  (`{"format": "gfx.input.bindings", "version": 1, "players": [...]}`, inputs as
+  `{"KEY": "SPACE"}`, unnamed key codes as `"U+20AC"`, fields equal to their default omitted).
+  `load_bindings()` is all or nothing and lists every problem with its JSON path. Parsing uses
+  nlohmann/json's SAX parser in a plain translation unit (`json_reader.cpp` behind the std-free header
+  `json_reader.hpp`): its standard headers cannot share a module unit with `import std`.
+- **EventChannel** `{slot_count}` (default 4): batches move through slots with one atomic flag each;
+  when the consumer lags, events wait on the producer side (never blocks, never drops); call `send()`
+  after every pump.
+
 ### A9. Threading model (revised: the model of commercial engines)
 
 Revised 2026-10-15 at the user's request ("the threading model most commonly used in commercial game
@@ -411,7 +460,7 @@ Nothing unsupported is ignored silently.
 
 - `gfx.platform` (umbrella) re-exports `gfx.core`, `gfx.platform.enums`, `gfx.platform.handles`,
   `gfx.platform.interface` (partitions: `:event`, `:window`, `:monitor`, `:cursor`, `:input_devices`,
-  `:platform`), `gfx.platform.input` (partitions `:schema`, `:binding`, `:snapshot`, `:input_system`),
+  `:platform`), `gfx.platform.input` (partitions `:binding`, `:schema`, `:frame`, `:event_channel`, `:input_system`),
   `gfx.platform.backend_factory`.
 - Backends are modules in **PRIVATE CMake file sets** (`gfx.platform.backends.sdl3`, `.glfw`),
   imported only by the factory's implementation unit — as in the graphics library.
@@ -422,8 +471,8 @@ Nothing unsupported is ignored silently.
 ### A14. RAII
 
 `Platform`, `Window`, `Cursor`, `InputSystem`, `EventChannel`, event watcher registrations and
-context activations (`ContextActivation` returned by `push_context`, pops on destruction — optional, the
-explicit `pop_context` also exists) are RAII, non-copyable, movable where meaningful (
+context activations (`ContextActivation` returned by `activate_context`, pops on destruction or
+`reset()`) are RAII, non-copyable, movable where meaningful (
 registrations). Destructors never throw. Deferred native destruction (A10) is internal.
 
 ### A15. Naming conventions (project rules) and deviations from the request
@@ -731,54 +780,66 @@ const float scale = window->content_scale();             // UI scale
 const NativeWindowHandle native = window->native_handle();
 ```
 
-### C6. Compile-time input schema and queries
+### C6. Compile-time input schema and queries (as built in P2)
 
 ```cpp
 using namespace gfx::platform;
 using namespace gfx::platform::literals;
+using namespace std::chrono_literals;
 
-constexpr InputSchema GAME_INPUT = make_input_schema(
-    actions(action("jump"_action, ActionValueType::BUTTON),
-            action("move"_action, ActionValueType::AXIS_2D),
-            action("confirm"_action, ActionValueType::BUTTON),
-            action("back"_action, ActionValueType::BUTTON)),
-    contexts(context("gameplay"_context, {.priority = 0},
-                     bind("jump"_action, Key::SPACE),
-                     bind("jump"_action, GamepadButton::SOUTH),
-                     bind("move"_action, composite_2d(Key::W, Key::S, Key::A, Key::D)),
-                     bind("move"_action, stick(GamepadAxis::LEFT_X, GamepadAxis::LEFT_Y)
-                                             .deadzone(DeadzoneKind::RADIAL, 0.15F)
-                                             .curve(ResponseCurve::QUADRATIC))),
-             context("menu"_context, {.priority = 10, .consumes_input = true},
-                     bind("confirm"_action, Key::RETURN),
-                     bind("confirm"_action, GamepadButton::SOUTH),
-                     bind("back"_action, Key::ESCAPE))));
+constexpr auto GAME_INPUT = make_input_schema(
+    actions(action("jump"),
+            action("move", ActionValueType::AXIS_2D),
+            action("charge"),
+            action("confirm"),
+            action("back")),
+    context("gameplay",
+            bind("jump"_action, Key::SPACE),
+            bind("jump"_action, GamepadButton::SOUTH),
+            bind("move"_action, composite_2d(Key::W, Key::S, Key::A, Key::D)),
+            bind("move"_action, stick(GamepadAxis::LEFT_X, GamepadAxis::LEFT_Y)
+                                    .with_deadzone(DeadzoneKind::SCALED_RADIAL, 0.15F)
+                                    .with_curve(ResponseCurve::QUADRATIC)),
+            bind("charge"_action, single(GamepadButton::WEST).held_for(500ms))),
+    context("menu", {.priority = 10, .consumes_input = true, .blocks_lower_contexts = true},
+            bind("confirm"_action, Key::RETURN),
+            bind("confirm"_action, GamepadButton::SOUTH),
+            bind("back"_action, Key::ESCAPE)));
 
-static_assert(GAME_INPUT.action_count() == 4);
-// static_assert fails at compile time for: a duplicate name, a binding of an undeclared action,
-// composite_2d on a BUTTON action.
+static_assert(GAME_INPUT.actions.size() == 5);
+// Does not compile: a duplicate name, a binding of an undeclared action, composite_2d on a BUTTON
+// action, a HOLD trigger on an axis ("call to non-'constexpr' function
+// 'input_schema_error_two_actions_have_the_same_name()'").
 
-std::unique_ptr<InputSystem> input = create_input_system(GAME_INPUT, {.players = 2});
-input->push_context(PlayerIdentifier{0}, "gameplay"_context);
+InputSystem input{GAME_INPUT, {.players = 2}};
+ContextActivation gameplay = input.activate_context("gameplay"_context);                  // player 0
+ContextActivation gameplay_two = input.activate_context("gameplay"_context, PlayerIdentifier{1});
 
 // The default arrangement: the main thread is the game thread.
 while (running)
 {
-    // Once per game frame, at its start: the frame's input is immutable until the next update().
-    const InputFrame& frame = input->update(platform->poll_events(), platform->input_devices());
-    if (frame.was_action_just_pressed("jump"_action))                   // player 0 by default
+    // Once per game frame, at its start: the frame stays unchanged until the second update() after it.
+    const InputFrame& frame = input.update(platform->poll_events());
+    if (frame.was_action_just_pressed("jump"_action))                    // player 0 by default
     {
         jump();
     }
     const Vector2 move = frame.get_action_value_2d("move"_action);
-    const bool player_two_jumps = frame.is_action_pressed(PlayerIdentifier{1}, "jump"_action);
+    const bool player_two_jumps = frame.is_action_pressed("jump"_action, PlayerIdentifier{1});
     jobs.run(frame);                                                     // the frame's jobs read it by reference
 }
 
 // A separate game thread (Unreal's arrangement where the OS owns the main thread's loop):
-EventChannel channel{{.capacity = 4096}};
-// main thread:  channel.send(platform->poll_events());
-// game thread:  const InputFrame& frame = input->update(channel.receive(), devices);
+EventChannel channel;
+// main thread:  channel.send(platform->poll_events());   // every pump, even an empty one
+// game thread:  const InputFrame& frame = input.update(channel.receive());
+
+// Rebinding menu: capture, check conflicts, rebind, save.
+input.capture_next_binding();                                       // next frame: frame.captured_binding()
+input.rebind({.context = "gameplay"_context, .action = "jump"_action, .slot = 0}, single(Key::J));
+const std::vector<BindingSlot> conflicts = input.find_bindings_using(InputSource::of(Key::J));
+const std::string saved = input.save_bindings();                    // JSON, names only
+input.load_bindings(saved);                                         // all or nothing
 ```
 
 ### C7. GLFW key table at compile time

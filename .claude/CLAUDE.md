@@ -180,6 +180,50 @@ Original hard requirements (from the user's initial specification):
   thread; `defer_release(HandleKey, fn)` for backends; protected `emit`, `require_platform_thread`,
   `release_deferred`), `gfx.platform.backend_factory` (no backend built yet: every kind reports why).
   Tests: tests/platform (fake platform module + implementation unit; 31 tests) and 4 compile-failure tests.
+- **Input system (P2 as built, 2026-10-15)**: module `gfx.platform.input` (`source/platform/input/`,
+  re-exported by `gfx.platform`), partitions `:binding` (InputSource {InputSourceKind, code}; `Binding`
+  {BindingKind BUTTON/CHORD/GAMEPAD_CHORD/MOUSE_AXIS/COMPOSITE_AXIS/COMPOSITE_2D/STICK, 4 sources,
+  modifiers + exact, dead zone, curve, invert, scale, swizzle, normalize, trigger DOWN/HOLD/TAP + time};
+  constexpr builders `single`, `chord`, `gamepad_chord`, `composite_axis`, `composite_2d` (normalized),
+  `stick` (y flipped: up positive), fluent `with_deadzone`/`with_curve`/`inverted`/`scaled`/`swizzled`/
+  `normalized`/`held_for`/`tapped_within`; `bind(action, binding|input)` → ContextBinding), `:schema`
+  (ActionDefinition/ContextDefinition hold **names**, identifier() hashes them; ContextDescription
+  {priority, consumes_input = true, blocks_lower_contexts, reads_keyboard_during_text_input};
+  consteval `action()`, `actions()`, `context()`, `make_input_schema()` → `InputSchema<A, C, B>` (converts
+  to `InputSchemaView` of spans); `check_binding()`, `check_input_schema()` → InputSchemaCheck (indices),
+  `describe_input_schema_problem()`, `validate_input_schema()`; compile errors are calls to non-constexpr
+  `input_schema_error_<problem>()` functions — GCC prints the function name and the schema line, not
+  argument values), `:frame` (InputFrame: is_action_pressed / was_action_just_pressed /
+  was_action_just_released / get_action_value / get_action_value_2d / action_state (pressed_duration),
+  player last (default 0), raw keys/key codes/modifiers/mouse/per-player GamepadState,
+  captured_binding(); unknown action or player → InvalidUsageError; non-exported ActionTable shared by
+  frames), `:event_channel` (SPSC slots with one atomic flag each, overflow kept on the producer side,
+  `send()` every pump), `:input_system` (InputSystem: constructed directly (no factory); `update(events[,
+  now])` → double-buffered frame; `activate_context(context, player)` → RAII ContextActivation (weak
+  lifetime token); add_context; assign_keyboard_and_mouse / assign_gamepad (AUTOMATIC on first event of
+  a gamepad) ; set_text_input_active; bindings / rebind(BindingSlot) / add_binding / remove_binding /
+  reset_bindings / find_bindings_using; capture_next_binding (captured press does not reach actions);
+  save_bindings / load_bindings (all or nothing, every problem with its JSON path); pimpl
+  InputSystemState in input_system.cpp). Evaluation: sticky presses (down or pressed during the frame),
+  contexts by priority then latest activation, per-source consumption, blocking contexts, held chords
+  hide their key from single-key bindings (Ctrl+S ≠ S), largest magnitude wins, BUTTON pressed from
+  actuation_threshold, axes pressed when non-zero, focus lost releases keys and buttons. Saved format
+  `{"format": "gfx.input.bindings", "version": 1, "players": [{"player", "bindings": [{"context",
+  "action", "bindings": [{"kind", "sources": [{"KEY": "SPACE"}], ...non-default fields}]}]}]}`, only lists
+  differing from defaults, unnamed key codes "U+20AC", unknown fields are errors. JSON parsing: nlohmann
+  3.12 (`gfx_require_nlohmann_json()`: find_package else single header by URL + SHA-256) SAX parser in
+  plain TU `json_reader.cpp` behind std-free `json_reader.hpp` (its headers cannot share a module unit
+  with `import std`); writer in binding_storage.cpp. Enums added: ActionValueType, InputSourceKind,
+  BindingKind, DeadzoneKind, ResponseCurve, TriggerKind, MouseAxis, GamepadAssignment, InputSchemaProblem
+  (incl. MISSING_NAME, INVALID_TRIGGER_TIME, INVALID_RESPONSE_CURVE), BindingCaptureSource; constants
+  DEFAULT_ACTUATION_THRESHOLD, MAXIMUM_BINDING_SOURCES, BINDING_STORAGE_VERSION. Deviations from the
+  approved snippet C6 are listed in docs/platform-design.md A8 "As built". Tests: input_schema_test,
+  input_system_test, binding_storage_test (every input name round trips), event_channel_test (real
+  threads), test module `gfx.tests.input_support` (Events builder, GamepadIssuer : HandleIssuer);
+  compile-failure tests InputSchemaRejects{DuplicateActions, UndeclaredActions,
+  TwoDimensionalBindingsOnButtons, TriggersOnAxes}, CompositesNeedDigitalInputs.
+  Gotcha: a helper named `quoted(std::string)` lost to `std::quoted` by argument-dependent lookup —
+  named `json_string` instead.
 - **Interface additions in the Vulkan task**: `BufferDescription::sparse`; `BufferViewDescriptor` and
   `AccelerationStructureDescriptor` in the `DescriptorResource` variant.
 - **Handles**: 32-bit (24-bit slot index, 8-bit generation from 1; 0 = null). Value private; users test,
@@ -331,9 +375,11 @@ gfx/
 │   │              spirv_reflection.cpp, shader_compiler.cpp), backends/{vulkan, null, d3d12, metal}/
 │   └── platform/  gfx.platform: platform.cppm, enums.cppm (generated Key/KeyCode tables), handles.cppm,
 │                  backend_factory.cppm/.cpp, interface/ (gfx.platform.interface partitions + image.cpp,
-│                  stb_image_implementation.cpp); backends/{sdl3,glfw}/ arrive in P3/P4
+│                  stb_image_implementation.cpp), input/ (gfx.platform.input: input.cppm + partitions
+│                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp);
+│                  backends/{sdl3,glfw}/ arrive in P3/P4
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
-            .cppm/.cpp + 6 test files), graphics/{backend_factory,
+            .cppm/.cpp, input_test_support.cppm + 10 test files), graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
 ```
@@ -369,12 +415,14 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | **P0 (restructure) and P1 (platform foundations) done, awaiting validation** (313 tests Debug + Release); next P2 (input system). Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (restructure, e3638c0) and P1 (foundations, 5cc9de0) committed; **P2 (input system) done, awaiting validation** (355 tests Debug + Release); next P3 (SDL3 backend). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **313**, all passing in Debug and Release, 2026-10-15 (after P1; 90 Vulkan tests:
-NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped: no mesh shading/ray tracing, one hardware queue).
+Test count at last report: **355**, all passing in Debug and Release, 2026-10-16 (after P2: 68 platform tests,
+32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
+failure of `CompilationCheck.NamesDoNotCollideWithPlatformMacros` was seen once in a Debug run while the
+Release build ran concurrently (output lost); not reproduced in 5 later runs, 3 of them under the same load.
 
 ### Step 2c as built (production interface, 2026-10-14)
 

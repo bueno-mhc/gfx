@@ -23,16 +23,30 @@ target_sources(gfx_platform
             interface/window.cppm
             interface/input_devices.cppm
             interface/platform.cppm
+            input/input.cppm
+            input/binding.cppm
+            input/schema.cppm
+            input/frame.cppm
+            input/event_channel.cppm
+            input/input_system.cppm
     PRIVATE
         backend_factory.cpp
         interface/image.cpp
-        interface/stb_image_implementation.cpp)
+        interface/stb_image_implementation.cpp
+        input/schema.cpp
+        input/frame.cpp
+        input/event_channel.cpp
+        input/input_system.cpp
+        input/binding_storage.cpp
+        input/json_reader.cpp)
 
 target_compile_features(gfx_platform PUBLIC cxx_std_23)
 
-# Third-party code stays private: stb_image decodes PNG icons and cursors.
+# Third-party code stays private: stb_image decodes PNG icons and cursors, nlohmann/json parses saved
+# input bindings (in json_reader.cpp only).
 include(GfxDependencies)
 gfx_require_stb_image()
+gfx_require_nlohmann_json()
 target_link_libraries(gfx_platform
     PUBLIC gfx::core
-    PRIVATE gfx::project_options gfx::stb_image)
+    PRIVATE gfx::project_options gfx::stb_image gfx::nlohmann_json)

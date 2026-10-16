@@ -232,6 +232,34 @@ function(gfx_require_stb_image)
     target_include_directories(gfx_stb_image SYSTEM INTERFACE ${stb_image_SOURCE_DIR})
 endfunction()
 
+# gfx_require_nlohmann_json()
+#   Provides gfx::nlohmann_json: nlohmann/json (MIT), whose SAX parser reads saved input bindings. The
+#   installed package (MSYS2: mingw-w64-ucrt-x86_64-nlohmann-json) is used when present; otherwise the
+#   single header of release 3.12.0 is downloaded and checked against its hash.
+function(gfx_require_nlohmann_json)
+    if(TARGET gfx::nlohmann_json)
+        return()
+    endif()
+    add_library(gfx_nlohmann_json INTERFACE)
+    add_library(gfx::nlohmann_json ALIAS gfx_nlohmann_json)
+    if(NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        find_package(nlohmann_json 3.11 CONFIG QUIET)
+    endif()
+    if(TARGET nlohmann_json::nlohmann_json)
+        message(STATUS "gfx: nlohmann_json ${nlohmann_json_VERSION} found")
+        target_link_libraries(gfx_nlohmann_json INTERFACE nlohmann_json::nlohmann_json)
+        return()
+    endif()
+    FetchContent_Declare(nlohmann_json_header
+        URL https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp
+        URL_HASH SHA256=aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
+        DOWNLOAD_NO_EXTRACT TRUE
+        SOURCE_DIR ${CMAKE_BINARY_DIR}/_deps/nlohmann_json_header/nlohmann)
+    FetchContent_MakeAvailable(nlohmann_json_header)
+    message(STATUS "gfx: nlohmann_json 3.12.0 fetched")
+    target_include_directories(gfx_nlohmann_json SYSTEM INTERFACE ${CMAKE_BINARY_DIR}/_deps/nlohmann_json_header)
+endfunction()
+
 # gfx_require_spirv_cross()
 #   Provides gfx::spirv_cross: the SPIRV-Cross C API, which reflects shader layouts from SPIR-V.
 function(gfx_require_spirv_cross)
