@@ -104,6 +104,17 @@ Original hard requirements (from the user's initial specification):
   VkSwapchainKHR**, acquire → OUT_OF_DATE; new `SwapchainStatus::TIMEOUT`); `SwapchainState`/`SwapchainRecord`
   + `HandleTables::swapchains` in `:device`; `VulkanQueue::present` checks family + index, chains
   VkPresentIdKHR. `timeout_nanoseconds()` moved to `:common`.
+- **Windowed example + docs (P6, 2026-10-16)**: `examples/windowed/windowed_example.cpp` (option
+  `GFX_BUILD_EXAMPLES`; `examples/` added after `tests/` so `GFX_VULKAN_VALIDATION_LAYER_DIRECTORY` is known;
+  CTest `WindowedExample.{SDL3,GLFW}` label `example`: `--frames 120 --validation`); square drawn with
+  `clear_attachments`; one `pause` action bound in gameplay and menu (a context activated while its key is
+  held sees a new press — possible `ContextDescription::ignore_held_inputs`, user to decide). SDL3 windows
+  emit WINDOW_RESIZED / WINDOW_FRAMEBUFFER_RESIZED only when the size changed (`report_size`,
+  `report_framebuffer_size`; SDL reports unchanged sizes when a window is first shown); WindowSwapchain
+  ignores framebuffer events equal to its extent. `docs/architecture.md`: 13 Mermaid diagrams (checked by
+  rendering with Mermaid 10.9.1 and 11.4.1 from a local http.server page — local files are static snapshots
+  in the browser pane). README: platform section + use cases + Examples; snippets compiled in a temporary
+  target. `.vscode/launch.json`: "gfx: Windowed example" (asks for the backend).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -434,7 +445,8 @@ gfx/
 │           GfxRuntimeDeployment, GfxDependencies (volk, VMA, SPIRV-Cross, glslang, RenderDoc header),
 │           GfxShaders (gfx_add_shaders), GfxTesting,
 │           scripts/{GfxCheckPlatformMacroCollisions, GfxEmbedSpirv}
-├── docs/   platform-design.md (windowing + input design, decisions, phases)
+├── docs/   platform-design.md (windowing + input design, decisions, phases), architecture.md (as built, diagrams)
+├── examples/windowed/  gfx_windowed_example (P6)
 ├── source/ CMakeLists.txt (add_subdirectory core, graphics)
 │   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
 │   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp
@@ -486,11 +498,12 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318) committed; **P5 (Vulkan presentation + gfx.platform.graphics) done, awaiting validation** (429 tests Debug + Release); next P6 (usage example, README platform section, architecture overview with diagrams). Design: [docs/platform-design.md](../docs/platform-design.md) |
-| 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
-| 6 | Final README, architecture overview **with diagrams** of the code as built | |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519) committed; **P6 (windowed example, README platform section, docs/architecture.md) done, awaiting validation** (433 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
+| 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
+| 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **429**, all passing in Debug and Release, 2026-10-16 (after P5: + 24 presentation
+Test count at last report: **433**, all passing in Debug and Release, 2026-10-16 (after P6: + 2 example runs
+`WindowedExample.{SDL3,GLFW}` and `OnlySizesThatChangeAreReported` × 2). After P5: 429 (+ 24 presentation
 tests = 6 × SDL3/GLFW × NVIDIA/Intel, visible windows, validation required). **Check `CMAKE_BUILD_TYPE` in
 build/release/CMakeCache.txt** before trusting a Release run: during P5 it was found set to Debug (cause
 unknown; `cmake --preset release` fixed it) — the Release skips (Debug-only compiler/hot reload) prove it.

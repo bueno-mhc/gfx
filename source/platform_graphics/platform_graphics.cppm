@@ -88,7 +88,8 @@ public:
     WindowSwapchain(const WindowSwapchain&) = delete;
     auto operator=(const WindowSwapchain&) -> WindowSwapchain& = delete;
 
-    /// @brief Notes the events that require recreating the swapchain; pass every event of the pump.
+    /// @brief Notes the events that require recreating the swapchain (a framebuffer size that differs
+    ///        from the images'); pass every event of the pump.
     void handle_event(const Event& event) noexcept;
 
     /// @brief Recreates the swapchain before the next acquisition.

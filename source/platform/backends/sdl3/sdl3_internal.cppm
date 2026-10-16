@@ -164,6 +164,13 @@ public:
     /// returns them as the payload of a window event.
     auto refresh() noexcept -> WindowEvent;
 
+    /// Whether @p size differs from the size the last WINDOW_RESIZED event carried, which it becomes.
+    /// SDL also reports sizes that did not change (when a window is first shown).
+    [[nodiscard]] auto report_size(Extent size) noexcept -> bool;
+
+    /// Whether @p size differs from the size the last WINDOW_FRAMEBUFFER_RESIZED event carried, which it becomes.
+    [[nodiscard]] auto report_framebuffer_size(Extent size) noexcept -> bool;
+
     /// The mouse entered the window: shows its cursor (and hides it in CursorMode::HIDDEN).
     void mouse_entered() const noexcept;
 
@@ -187,6 +194,8 @@ private:
     WindowFlag m_flags = WindowFlag::NONE;
     CursorHandle m_cursor{};
     CursorMode m_cursor_mode = CursorMode::NORMAL;
+    Extent m_reported_size{};             ///< Size of the last WINDOW_RESIZED event (or at creation).
+    Extent m_reported_framebuffer_size{}; ///< Size of the last WINDOW_FRAMEBUFFER_RESIZED event (or at creation).
 };
 
 // ================================================================================================= Cursor

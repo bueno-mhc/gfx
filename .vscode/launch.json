@@ -1,5 +1,5 @@
 {
-    // Debug configurations for the gfx tests: Debug build (build/debug), gdb from MSYS2 UCRT64.
+    // Debug configurations for the gfx tests and the windowed example: Debug build (build/debug), gdb from MSYS2 UCRT64.
     // Both build first and stop in the debugger at the first failed assertion (GTEST_BREAK_ON_FAILURE);
     // when that happens, select the test's own frame in the CALL STACK view.
     "version": "0.2.0",
@@ -55,9 +55,41 @@
                 }
             ],
             "preLaunchTask": "gfx: Build Debug"
+        },
+        {
+            // The windowed example (examples/windowed), with the Vulkan validation layers. Asks for the
+            // platform backend; close the window (or press Escape, then Return) to end it.
+            "name": "gfx: Windowed example",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/examples/windowed/gfx_windowed_example.exe",
+            "args": ["--backend", "${input:platformBackend}", "--validation"],
+            "cwd": "${workspaceFolder}/build/debug",
+            "environment": [
+                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Debug"
         }
     ],
     "inputs": [
+        {
+            "id": "platformBackend",
+            "type": "pickString",
+            "description": "Platform backend of the windowed example",
+            "options": ["sdl3", "glfw"],
+            "default": "sdl3"
+        },
         {
             "id": "testExecutable",
             "type": "pickString",

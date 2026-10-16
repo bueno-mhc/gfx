@@ -206,7 +206,9 @@ Sdl3Window::Sdl3Window(Sdl3Platform& platform,
     // Registered: its events are delivered from now on.
     m_handle = platform.register_window(*this, SDL_GetWindowID(m_window));
     set_native_handle(native_handle_of(m_window));
-    static_cast<void>(refresh());
+    const WindowEvent initial = refresh();
+    m_reported_size = initial.size;
+    m_reported_framebuffer_size = initial.framebuffer_size;
     if (!has_any(description.flags, WindowFlag::HIDDEN))
     {
         show_native();
@@ -256,6 +258,18 @@ auto
 Sdl3Window::native() const noexcept -> SDL_Window*
 {
     return m_window;
+}
+
+auto
+Sdl3Window::report_size(Extent size) noexcept -> bool
+{
+    return std::exchange(m_reported_size, size) != size;
+}
+
+auto
+Sdl3Window::report_framebuffer_size(Extent size) noexcept -> bool
+{
+    return std::exchange(m_reported_framebuffer_size, size) != size;
 }
 
 auto

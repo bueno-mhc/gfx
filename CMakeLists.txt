@@ -16,6 +16,7 @@ project(gfx
     LANGUAGES C CXX)  # C: volk, the Vulkan meta-loader, is a C library built from source
 
 option(GFX_BUILD_TESTS "Build the GoogleTest unit tests and register them with CTest" ON)
+option(GFX_BUILD_EXAMPLES "Build the examples (examples/; the windowed one needs the platform library)" ON)
 option(GFX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
 # Backends. gfx::create_instance() throws a descriptive error for a backend that was not built.
@@ -42,4 +43,9 @@ add_subdirectory(source)
 if(GFX_BUILD_TESTS)
     include(GfxTesting)
     add_subdirectory(tests)
+endif()
+
+# After the tests: the examples' automated runs reuse what the tests found (the validation layers).
+if(GFX_BUILD_EXAMPLES AND GFX_BUILD_PLATFORM)
+    add_subdirectory(examples)
 endif()

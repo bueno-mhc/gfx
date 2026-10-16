@@ -38,9 +38,12 @@ WindowSwapchain::~WindowSwapchain()
 void
 WindowSwapchain::handle_event(const Event& event) noexcept
 {
+    // A framebuffer that now differs from the images (resizing back to the images' size needs nothing).
     if (requires_swapchain_recreation(event, m_window.handle()))
     {
-        m_recreation_requested = true;
+        const Extent size = event.get_if<WindowEvent>()->framebuffer_size;
+        const Extent images = m_swapchain->extent();
+        m_recreation_requested = m_recreation_requested || size.width != images.width || size.height != images.height;
     }
 }
 

@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0 to P4 committed; P5 (graphics bridge and Vulkan presentation) done, awaiting validation; next P6 (usage example and documentation)**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0 to P5 committed; P6 (usage example and documentation) done, awaiting validation: every phase of the plan is implemented**. The code as built, with diagrams: [architecture.md](architecture.md). Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -664,6 +664,37 @@ your validation (project rule: step by step, you commit).
 | **P4 GLFW backend** | same contract; `consteval` `GLFW_KEY_*` → `Key` table; throws for what GLFW lacks (A16) | same suite as SDL3 parameterized over backends; capability tests expect the documented exceptions |
 | **P5 Graphics bridge + Vulkan presentation** (approved) | instance surface extensions (Win32 here; Xlib/XCB/Wayland/Metal compiled on their platforms), `surface_support`, `create_swapchain`, acquire, present, recreation on resize/out-of-date, `gfx.platform.graphics` helper | a visible window presenting cleared frames on both GPUs, resize and minimize handling, validation layers on |
 | **P6 Usage example + docs** | the example of the request (window, title/icon/size, resize, two contexts at compile time, `is_action_pressed("jump"_action)`, `get_action_value_2d("move"_action)`, native handle → swapchain); README (platform section, examples, use cases); CLAUDE.md; **architecture overview with diagrams** of the code as built (`docs/`) | example built and run in CI-like mode (closes itself after N frames) |
+
+**P6 as built (2026-10-16).**
+
+- **Example** `examples/windowed/windowed_example.cpp` (target `gfx_windowed_example`, option
+  `GFX_BUILD_EXAMPLES` ON, built with the platform library and Vulkan): a window with title, two-resolution
+  RGBA icon and size limits; a compile-time schema with five actions and the contexts `gameplay` and `menu`
+  (keyboard and gamepad bindings); `is_action_pressed` / `get_action_value_2d("move"_action)` move a square
+  drawn with `clear_attachments` (no shader needed), `jump` makes it hop, `pause` opens the menu (title
+  changes), `quit` closes, `reset_size` calls `Window::set_size()`; the native handle goes to
+  `surface_support()` and `WindowSwapchain`; frames are paced by `FrameTimeline` + `FrameCommandPools`.
+  Options `--backend`, `--device`, `--frames N` (closes after N frames; the window then does not take the
+  focus), `--validation` (exit code 1 on any validation error). CTest `WindowedExample.SDL3` and
+  `WindowedExample.GLFW` (label `example`) run 120 frames with the validation layers.
+- **Found while writing it**: (1) SDL3 reports `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` (and RESIZED) with an
+  unchanged size when a window is first shown, which recreated the swapchain for nothing: the SDL3 window
+  now remembers the last size each event carried and emits only changes (test
+  `OnlySizesThatChangeAreReported`, on both backends, fails without the fix); `WindowSwapchain` also ignores
+  a framebuffer event whose size equals its images'. (2) A context activated while a key is held sees that
+  key as a new press (the action's previous state is "not pressed"): a menu opened with Escape whose own
+  "back" action were bound to Escape would close at once. The example binds one `pause` action in both
+  contexts, whose state continues across the switch. Unreal's Enhanced Input offers an option to ignore
+  keys held when a mapping context is added; gfx could add `ContextDescription::ignore_held_inputs` (not
+  done: a decision for the user).
+- **README**: a platform section (overview, a window, the input schema, presenting, use cases: pause menu,
+  couch multiplayer, rebinding menu, chat box, separate game thread, jobs reading input, tests and replays;
+  threads, backend differences) and an Examples section; every snippet was compiled with `-Werror` in a
+  temporary target before it was removed.
+- **Architecture overview**: [architecture.md](architecture.md), 13 Mermaid diagrams (libraries and modules,
+  core classes, errors, graphics object model, Vulkan units, shaders, platform object model, the pump, the
+  input pipeline, threads, WindowSwapchain states, one frame, build); each was rendered with Mermaid 10.9 and
+  11.4 to check its syntax.
 
 ---
 

@@ -3,16 +3,27 @@
 A C++23 graphics rendering abstraction that models Vulkan's object model (instance, physical device,
 device, queues, resources, commands, synchronization) above concrete backends. It is written with
 C++ modules and strongly typed numeric handles, is **bindless by default**, and follows **AZDO**
-(Approaching Zero Driver Overhead) principles throughout.
+(Approaching Zero Driver Overhead) principles throughout. A companion **platform library** provides
+windows and input (actions instead of keys) above SDL3 and GLFW, and plugs into the graphics library
+to present frames.
 
-> **Status:** the interface is complete: objects, typed recording, bindless resources, parallel
-> rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame resources,
-> profiling and crash diagnostics. The **Vulkan backend** implements all of it, presentation to
-> windows included. The SPIR-V toolchain (build-time compilation, reflection, Debug-only run-time
+| Library | Import | What it provides |
+|---|---|---|
+| core | `import gfx.core;` (re-exported by the others) | enumeration machinery, errors, handles, identifiers, native window handles |
+| graphics | `import gfx;` | the rendering abstraction and its backends ([below](#gfx)) |
+| platform | `import gfx.platform;` | windows, monitors, cursors, events, input devices, action mapping ([Platform library](#platform-library-windows-and-input)) |
+| bridge | `import gfx.platform.graphics;` | swapchains for platform windows ([Presenting](#presenting-to-a-window)) |
+
+> **Status:** the graphics interface is complete: objects, typed recording, bindless resources,
+> parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
+> resources, profiling and crash diagnostics. The **Vulkan backend** implements all of it, presentation
+> to windows included. The SPIR-V toolchain (build-time compilation, reflection, Debug-only run-time
 > compilation and hot reload) is in place. The Direct3D 12 and Metal backends are stubs that throw
-> "not implemented yet". The **platform library** (windows and input above SDL3 and GLFW,
-> `import gfx.platform;`) and its bridge to swapchains (`import gfx.platform.graphics;`) are in
-> progress: their usage example and documentation come next.
+> "not implemented yet". The **platform library** is complete on its **SDL3 and GLFW** backends
+> (Win32, XCB, Cocoa and Web are reported as not built), and the [windowed example](#examples) runs on
+> both. The design and the decisions behind the platform library are in
+> [docs/platform-design.md](docs/platform-design.md); [docs/architecture.md](docs/architecture.md)
+> describes the code as built, with diagrams.
 
 ```cpp
 import std;
@@ -115,37 +126,8 @@ Shaders are written in **GLSL or HLSL** and reach the backends as **SPIR-V**:
 
 Every function the backend cannot provide on a given GPU throws `BackendCapabilityError`, naming the
 missing feature and how to get it (e.g. `wait_for_frame_latency()` on a GPU without
-`DeviceFeature::FRAME_LATENCY_WAIT`).
-
-**Presenting to a platform window.** `gfx::platform::WindowSwapchain` (module `gfx.platform.graphics`)
-creates the swapchain of a window, recreates it when the framebuffer is resized or the swapchain
-reports itself out of date, skips frames while the window is minimized, and owns the presentation
-semaphores:
-
-```cpp
-import gfx.platform.graphics; // gfx and gfx.platform included
-
-// The window was created with WindowDescription::surface_api = gfx::platform::SurfaceApi::VULKAN.
-gfx::platform::WindowSwapchain presentation{*device, *window}; // FIFO, 3 images, B8G8R8A8_SRGB
-while (running)
-{
-    for (const gfx::platform::Event& event : platform->poll_events())
-    {
-        presentation.handle_event(event); // framebuffer resizes
-    }
-    if (const std::optional<gfx::platform::SwapchainFrame> frame = presentation.acquire())
-    {
-        // Record: frame->image.image from UNDEFINED to COLOR_ATTACHMENT_WRITE, render into
-        // frame->image.view, then to PRESENT. The submission waits on frame->acquired and signals
-        // frame->rendered.
-        const std::array waits{gfx::SemaphoreWait{.semaphore = frame->acquired}};
-        const std::array signals{gfx::SemaphoreSignal{.semaphore = frame->rendered}};
-        const std::array batches{gfx::SubmitDescription{.command_buffers = commands, .waits = waits, .signals = signals}};
-        queue.submit(batches);
-        presentation.present(queue, *frame);
-    }
-}
-```
+`DeviceFeature::FRAME_LATENCY_WAIT`). Presenting to a platform window is described
+[below](#presenting-to-a-window).
 
 **Order of waits and signals.** A queue runs its submissions in order, so a submission must not wait
 for a timeline value that only a later submission to the same hardware queue signals: that signal
@@ -213,6 +195,269 @@ void record_gbuffer(gfx::CommandBuffer& primary, std::span<gfx::FrameCommandPool
 }
 ```
 
+## Platform library: windows and input
+
+`import gfx.platform;` gives windows and input above a **platform backend** (SDL3 or GLFW), in two
+layers that can be used separately:
+
+- **Windowing**: windows (title, icon, size and size limits, aspect ratio, modes from windowed to
+  exclusive fullscreen, minimize/maximize/restore, focus, DPI), monitors and video modes, cursors
+  (standard shapes, custom images, hidden and captured modes), the clipboard, and the **native window
+  handle** a graphics backend creates its surface from.
+- **Input**: normalized events (one 64-byte value type, a `std::variant` payload, delivered as a span:
+  no allocation while pumping), physical keys (`Key`, USB HID positions) and logical keys (`KeyCode`,
+  the symbol of the keyboard layout), mouse, gamepads, joysticks and touch; and an **action mapping**
+  system modeled on Unreal's Enhanced Input and Godot's InputMap: the game asks for actions
+  (`"jump"_action`), not keys.
+
+As in the graphics library, objects are RAII (`std::unique_ptr`), handles are typed numbers
+(`WindowHandle`, `GamepadHandle`, ...), every enumeration lives in one file (`source/platform/enums.cppm`),
+and a backend that cannot do something throws `BackendCapabilityError` naming the backend, the
+operation, the missing feature and a workaround (`platform->supports(PlatformFeature::...)` tells
+beforehand).
+
+### A window
+
+```cpp
+import std;
+import gfx.platform;
+
+using namespace gfx::platform;
+
+int main()
+{
+    // The best backend available here (SDL3, then GLFW); create_platform() explains a missing one.
+    std::unique_ptr<Platform> platform = create_platform(available_platform_backends().front(), {.application_name = "demo"});
+
+    WindowDescription description;
+    description.title = "demo";                                          // UTF-8
+    description.size = gfx::Extent{.width = 1280, .height = 720, .depth = 1};
+    description.minimum_size = gfx::Extent{.width = 320, .height = 180, .depth = 1};
+    description.surface_api = SurfaceApi::VULKAN;                        // prepared for a Vulkan swapchain
+    std::unique_ptr<Window> window = platform->create_window(description);
+    window->set_icon(icons);                                             // RGBA or PNG, several resolutions
+
+    bool running = true;
+    while (running)
+    {
+        // One pump per frame, on the thread that created the platform.
+        for (const Event& event : platform->poll_events())
+        {
+            if (event.type() == EventType::WINDOW_CLOSE_REQUESTED)
+            {
+                running = false;
+            }
+            else if (event.type() == EventType::WINDOW_FRAMEBUFFER_RESIZED)
+            {
+                const gfx::Extent pixels = event.as<WindowEvent>().framebuffer_size;   // swapchain size
+            }
+        }
+    }
+}
+```
+
+`framebuffer_size()` (pixels), `size()` (window coordinates), `content_scale()` (UI scale of the monitor)
+and `is_minimized()` are thread-safe: a render thread reads them without touching the platform.
+
+### Input: actions instead of keys
+
+A game declares its actions and their default bindings in a **schema checked at compile time**, grouped
+in **contexts** (layers such as gameplay, menu, vehicle) that are activated and deactivated at run time:
+
+```cpp
+using namespace gfx::platform;
+using namespace gfx::platform::literals;
+
+constexpr auto INPUT = make_input_schema(
+    actions(action("move", ActionValueType::AXIS_2D),
+            action("jump"),
+            action("pause"),
+            action("quit")),
+    context("gameplay",
+            bind("move"_action, composite_2d(Key::W, Key::S, Key::A, Key::D)),        // up, down, left, right
+            bind("move"_action, stick(GamepadAxis::LEFT_X, GamepadAxis::LEFT_Y)
+                                    .with_deadzone(DeadzoneKind::SCALED_RADIAL, 0.15F)
+                                    .with_curve(ResponseCurve::QUADRATIC)),
+            bind("jump"_action, Key::SPACE),
+            bind("jump"_action, GamepadButton::SOUTH),
+            bind("pause"_action, Key::ESCAPE),
+            bind("pause"_action, GamepadButton::START)),
+    context("menu", {.priority = 10, .consumes_input = true, .blocks_lower_contexts = true},
+            bind("pause"_action, Key::ESCAPE),                                         // closes the menu again
+            bind("quit"_action, Key::RETURN),
+            bind("quit"_action, GamepadButton::SOUTH)));
+// A duplicate action, a binding of an undeclared action, a 2D composite on a button action or a hold
+// trigger on an axis does not compile ("call to non-constexpr function 'input_schema_error_...()'").
+
+InputSystem input{INPUT};
+ContextActivation gameplay = input.activate_context("gameplay"_context);        // active until destroyed
+
+// Once per frame: the events of the pump become a frame of actions.
+const InputFrame& frame = input.update(platform->poll_events());
+if (frame.was_action_just_pressed("jump"_action))
+{
+    jump();
+}
+const gfx::Vector2 move = frame.get_action_value_2d("move"_action);              // dead zone and curve applied
+const bool sprinting = frame.is_action_pressed("sprint"_action);                 // InvalidUsageError: undeclared
+```
+
+Bindings can be single inputs, chords (`chord(Key::S, KeyModifier::CONTROL)` does not also press `S`),
+gamepad chords, mouse axes, 1D and 2D composites and sticks, with dead zones (axial, radial, scaled
+radial), response curves, inversion, scaling, swizzling, and hold or tap triggers
+(`single(GamepadButton::WEST).held_for(500ms)`). The highest-priority active context sees an input
+first; it may consume it or block every context below it.
+
+### Presenting to a window
+
+`import gfx.platform.graphics;` connects the two libraries. The window's native handle is all the
+graphics library needs, and `WindowSwapchain` does the rest: it creates the swapchain, recreates it when
+the framebuffer is resized or the swapchain reports itself out of date, skips frames while the window is
+minimized, and owns the presentation semaphores:
+
+```cpp
+import gfx.platform.graphics;   // gfx and gfx.platform included
+
+const gfx::SurfaceSupport support = physical_device.surface_support(window->native_handle()); // formats, modes
+gfx::platform::WindowSwapchain presentation{*device, *window};                // FIFO, 3 images, B8G8R8A8_SRGB
+for (const gfx::platform::Event& event : events)
+{
+    presentation.handle_event(event);                                         // framebuffer resizes
+}
+if (const std::optional<gfx::platform::SwapchainFrame> frame = presentation.acquire())
+{
+    // Record: frame->image.image from UNDEFINED to COLOR_ATTACHMENT_WRITE, render into
+    // frame->image.view, then to PRESENT. The submission waits on frame->acquired and signals
+    // frame->rendered.
+    const std::array waits{gfx::SemaphoreWait{.semaphore = frame->acquired}};
+    const std::array signals{gfx::SemaphoreSignal{.semaphore = frame->rendered}};
+    const std::array batches{gfx::SubmitDescription{.command_buffers = commands, .waits = waits, .signals = signals}};
+    queue.submit(batches);
+    presentation.present(queue, *frame);
+}
+```
+
+The [windowed example](#examples) shows the whole loop, with frame pacing (`FrameTimeline`,
+`FrameCommandPools`).
+
+### Use cases
+
+**A pause menu above gameplay.** The menu context has a higher priority and blocks the contexts below
+it, so gameplay actions read nothing while it is open. An action bound in both contexts keeps its
+state across the switch, so the key that opens the menu does not also close it:
+
+```cpp
+std::optional<ContextActivation> menu;
+if (frame.was_action_just_pressed("pause"_action))
+{
+    if (menu)
+    {
+        menu.reset();                                           // back to gameplay
+    }
+    else
+    {
+        menu = input.activate_context("menu"_context);          // above gameplay until reset
+    }
+}
+```
+
+**Couch multiplayer.** Each player has their own contexts, gamepad and action states; the keyboard
+and mouse belong to one player:
+
+```cpp
+InputSystem input{INPUT, {.players = 2, .gamepad_assignment = GamepadAssignment::AUTOMATIC}};  // first gamepad used joins
+ContextActivation first = input.activate_context("gameplay"_context, PlayerIdentifier{0});
+ContextActivation second = input.activate_context("gameplay"_context, PlayerIdentifier{1});
+input.assign_gamepad(gamepad, PlayerIdentifier{1});                                  // or route explicitly
+const bool second_jumps = frame.is_action_pressed("jump"_action, PlayerIdentifier{1});
+```
+
+**A rebinding menu.** Capture the next input, find conflicts, rebind, save the result (JSON naming
+keys, not numbers), and load it at the next start (all or nothing; errors give the JSON path):
+
+```cpp
+input.capture_next_binding();                                       // the next press does not reach the actions
+if (const auto& captured = input.frame().captured_binding(); captured && !captured->canceled)
+{
+    const std::vector<BindingSlot> conflicts = input.find_bindings_using(captured->binding.sources[0]);
+    input.rebind({.context = "gameplay"_context, .action = "jump"_action, .slot = 0}, captured->binding);
+}
+std::ofstream{"bindings.json"} << input.save_bindings();
+```
+
+**Typing in a chat box.** Text arrives as `TEXT_INPUT` events (UTF-8, after the input method's
+composition), separate from key presses; while text input is active, keyboard bindings read nothing,
+so typing "w" does not move the character:
+
+```cpp
+window->start_text_input({.area = chat_box_rectangle});
+input.set_text_input_active(true);
+for (const Event& event : events)
+{
+    if (event.type() == EventType::TEXT_INPUT)
+    {
+        chat_line += events.text(event);
+    }
+}
+```
+
+**A game thread separate from the main thread.** The main thread owns the platform and pumps it (the
+operating system requires it on some platforms); an `EventChannel` hands each pump's events to the game
+thread without locks:
+
+```cpp
+EventChannel channel;
+// main thread, every pump (even an empty one):  channel.send(platform->poll_events());
+// game thread, every frame:                     const InputFrame& frame = input.update(channel.receive());
+```
+
+**Jobs reading input while the next frame is prepared.** `InputFrame` is immutable once `update()`
+returns and stays valid until the second `update()` after it, so job threads read it by reference
+without locks while the game thread builds the next one (double buffering).
+
+**Tests and replays.** `platform->push_event(event)` injects events from any thread (they arrive at the
+next pump), and `input.update(events, time)` evaluates them at a given time, which makes hold and tap
+triggers testable.
+
+### Threads
+
+| Who | May call |
+|---|---|
+| The thread that created the platform | everything: pumps, windows, cursors, the clipboard, input devices |
+| Any thread | `Window::framebuffer_size()`, `size()`, `content_scale()`, `is_minimized()`, `native_handle()`; `Platform::push_event()`, `wake()` |
+| The game thread (one) | `InputSystem` (`update()`, contexts, rebinding) |
+| Any number of readers | an `InputFrame` returned by `update()`, until the second `update()` after it |
+
+### Backends
+
+| Feature | SDL3 | GLFW |
+|---|---|---|
+| Windows, modes, monitors, standard and custom cursors, text clipboard, keyboard, mouse, gamepads, joysticks | yes | yes |
+| Window icons, positions | yes | yes (not on Wayland; no icons on macOS) |
+| Occlusion state, IME composition, image clipboard, dropped text, touch | yes | no |
+| Gamepad rumble, trigger rumble, LEDs, touchpads | yes | no |
+| Gamepad sensors | not yet in gfx | no |
+
+What a backend lacks throws `BackendCapabilityError` where it is used; `Platform::supports()` reports it
+beforehand. One backend is active at a time (both pump the same thread's message queue).
+
+## Examples
+
+`examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
+input schema with two contexts declared at compile time, and Vulkan frames presented through
+`WindowSwapchain`. A square moves with W A S D, the arrow keys or a gamepad's left stick; Space or
+the South button makes it hop; Escape or Start opens a pause menu where Return or South quits;
+Backspace restores the initial size.
+
+```bash
+build/debug/examples/windowed/gfx_windowed_example.exe --backend glfw
+```
+
+`--backend sdl3|glfw` picks the platform backend, `--device <index>` the GPU, `--validation` enables
+the Vulkan validation layers (the exit code is then 1 if they report an error), and `--frames <count>`
+closes the window after that many frames. CTest runs it this way on every platform backend
+(`ctest --preset debug -L example`).
+
 ## Requirements (Windows)
 
 | Tool | Version verified | Notes |
@@ -242,6 +487,9 @@ fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed,
 | `GFX_BACKEND_METAL` | `ON` on Apple platforms | Metal (stub) |
 | `GFX_PLATFORM_BACKEND_SDL3` | `ON` | SDL3 windowing and input (SDL 3.4 found, or 3.4.10 fetched and linked statically) |
 | `GFX_PLATFORM_BACKEND_GLFW` | `ON` | GLFW windowing and input (GLFW 3.4 found, or fetched and linked statically) |
+| `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
+| `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one needs the platform library and Vulkan) |
+| `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
 ## Project layout
 
@@ -259,7 +507,9 @@ gfx/
 │   ├── GfxShaders.cmake                 gfx_add_shaders(): GLSL/HLSL to SPIR-V at build time
 │   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
 │   └── scripts/                         CMake scripts run by builds and tests (SPIR-V embedding, ...)
-├── docs/                 design documents (docs/platform-design.md: windowing and input)
+├── docs/                 platform-design.md (windowing and input: decisions and plan),
+│                         architecture.md (the code as built, with diagrams)
+├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,

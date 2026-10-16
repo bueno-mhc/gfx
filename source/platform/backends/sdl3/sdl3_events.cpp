@@ -332,11 +332,18 @@ Sdl3Platform::translate_window_event(const SDL_Event& event)
         case SDL_EVENT_WINDOW_MOVED:
             emit(window_event<EventType::WINDOW_MOVED>(handle, time, state));
             break;
+        // Sizes are events only when they changed (SDL also reports them when a window is first shown).
         case SDL_EVENT_WINDOW_RESIZED:
-            emit(window_event<EventType::WINDOW_RESIZED>(handle, time, state));
+            if (window->report_size(state.size))
+            {
+                emit(window_event<EventType::WINDOW_RESIZED>(handle, time, state));
+            }
             break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-            emit(window_event<EventType::WINDOW_FRAMEBUFFER_RESIZED>(handle, time, state));
+            if (window->report_framebuffer_size(state.framebuffer_size))
+            {
+                emit(window_event<EventType::WINDOW_FRAMEBUFFER_RESIZED>(handle, time, state));
+            }
             break;
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
             emit(window_event<EventType::WINDOW_CONTENT_SCALE_CHANGED>(handle, time, state));

@@ -242,6 +242,18 @@ TEST_P(PlatformBackendTest, ResizingIsReportedWithTheNewSizes)
     EXPECT_THROW(window->set_size(gfx::Extent{.width = 0, .height = 10, .depth = 1}), gfx::InvalidUsageError);
 }
 
+TEST_P(PlatformBackendTest, OnlySizesThatChangeAreReported)
+{
+    // A window shown at its size reports no resize (SDL reports the unchanged sizes of a window first shown).
+    const std::unique_ptr<Window> window = m_platform->create_window(hidden_window());
+    window->show();
+    std::vector<ReceivedEvent> received;
+    ASSERT_TRUE(gfx::tests::pump_until(*m_platform, [](const Event& event) { return event.type() == EventType::WINDOW_SHOWN; }, received));
+    (void)gfx::tests::pump_until(*m_platform, [](const Event&) { return false; }, received, 300ms);
+    EXPECT_EQ(gfx::tests::first_of(received, EventType::WINDOW_RESIZED), nullptr);
+    EXPECT_EQ(gfx::tests::first_of(received, EventType::WINDOW_FRAMEBUFFER_RESIZED), nullptr);
+}
+
 TEST_P(PlatformBackendTest, WindowsMoveBetweenStates)
 {
     // Shown (a window appears briefly), minimized, restored, hidden.
