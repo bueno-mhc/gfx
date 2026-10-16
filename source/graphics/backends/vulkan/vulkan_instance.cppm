@@ -1,6 +1,7 @@
 /// @file vulkan_instance.cppm
-/// @brief Internal partition: VulkanInstance (VkInstance, validation layers, debug messenger) and
-///        VulkanPhysicalDevice (properties, limits, features, formats and queue families, queried once).
+/// @brief Internal partition: VulkanInstance (VkInstance, validation layers, debug messenger, window
+///        surfaces) and VulkanPhysicalDevice (properties, limits, features, formats and queue families,
+///        queried once).
 module;
 
 #include <volk.h>
@@ -48,6 +49,8 @@ struct PhysicalDeviceCapabilities
     VkPhysicalDeviceFragmentShadingRateFeaturesKHR shading_rate_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
     VkPhysicalDeviceFaultFeaturesEXT fault_features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDevicePresentIdFeaturesKHR present_id_features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait_features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
 
     VkPhysicalDeviceMemoryProperties memory_properties{};
     std::vector<VkQueueFamilyProperties> queue_families;
@@ -81,6 +84,15 @@ public:
     [[nodiscard]] auto format_support(Format format) const -> FormatSupport override;
     [[nodiscard]] auto surface_support(const NativeWindowHandle& window) const -> SurfaceSupport override;
     [[nodiscard]] auto create_device(const DeviceDescription& description) -> std::unique_ptr<Device> override;
+
+    /// @brief What a swapchain for @p surface can use.
+    [[nodiscard]] auto surface_support(VkSurfaceKHR surface,
+                                       std::string_view operation) const -> SurfaceSupport;
+
+    /// @brief Whether queue family @p family can present to @p surface.
+    [[nodiscard]] auto can_present(std::uint32_t family,
+                                   VkSurfaceKHR surface,
+                                   std::string_view operation) const -> bool;
 
     /// @brief The native physical device.
     [[nodiscard]] auto native() const noexcept -> VkPhysicalDevice
@@ -145,6 +157,30 @@ public:
         return m_validation_layers;
     }
 
+    /// @brief Whether VK_KHR_surface and the surface extension of window system @p kind are enabled.
+    [[nodiscard]] auto supports_window_system(NativeWindowKind kind) const noexcept -> bool
+    {
+        return m_window_systems[static_cast<std::size_t>(std::to_underlying(kind))];
+    }
+
+    /// @brief Whether any window system can be presented to (VK_KHR_surface is enabled).
+    [[nodiscard]] auto has_surfaces() const noexcept -> bool
+    {
+        return m_surfaces;
+    }
+
+    /// @brief Whether VK_EXT_swapchain_colorspace is enabled (HDR and wide-gamut color spaces).
+    [[nodiscard]] auto has_extended_color_spaces() const noexcept -> bool
+    {
+        return m_extended_color_spaces;
+    }
+
+    /// @brief Creates a surface for @p window (the caller destroys it with vkDestroySurfaceKHR).
+    /// @throws InvalidUsageError when @p window names no window, BackendCapabilityError when its window
+    ///         system cannot be presented to.
+    [[nodiscard]] auto create_surface(const NativeWindowHandle& window,
+                                      std::string_view operation) const -> VkSurfaceKHR;
+
     /// @brief Forwards a message to the application's debug callback (if its severity is wanted).
     void report(DebugMessageSeverity severity, DebugMessageType type, std::string_view text) const;
 
@@ -153,10 +189,35 @@ private:
     VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
     bool m_debug_utils = false;
     bool m_validation_layers = false;
+    bool m_surfaces = false;
+    bool m_extended_color_spaces = false;
+    std::array<bool, ENUMERATOR_COUNT<NativeWindowKind>> m_window_systems{};
     DebugMessageSeverity m_reported_severities = DebugMessageSeverity::NONE;
     std::function<void(const DebugMessage&)> m_debug_callback;
     std::vector<std::unique_ptr<VulkanPhysicalDevice>> m_physical_devices;
     std::string m_debug_name;
+};
+
+/// @brief A window surface (VkSurfaceKHR), destroyed with the object.
+class WindowSurface
+{
+public:
+    WindowSurface(const VulkanInstance& instance,
+                  const NativeWindowHandle& window,
+                  std::string_view operation);
+    ~WindowSurface();
+    WindowSurface(const WindowSurface&) = delete;
+    auto operator=(const WindowSurface&) -> WindowSurface& = delete;
+
+    /// @brief The native surface.
+    [[nodiscard]] auto native() const noexcept -> VkSurfaceKHR
+    {
+        return m_surface;
+    }
+
+private:
+    VkInstance m_instance{VK_NULL_HANDLE};
+    VkSurfaceKHR m_surface{VK_NULL_HANDLE};
 };
 
 } // namespace gfx::vulkan

@@ -110,6 +110,7 @@ enum class DeviceFeature : std::uint8_t
     SAMPLER_FILTER_MINMAX,     ///< Minimum/maximum sampler reduction.
     MEMORY_BUDGET,             ///< Memory budget and usage queries per heap.
     GPU_CRASH_MARKERS,         ///< GPU-written markers that locate a crash (breadcrumbs).
+    FRAME_LATENCY_WAIT,        ///< Swapchain::wait_for_frame_latency() (waits for presentation to complete).
 };
 
 // =================================================================================================
@@ -796,6 +797,7 @@ enum class SwapchainStatus : std::uint8_t
     SUBOPTIMAL,   ///< Usable, but should be recreated (e.g. after a resize).
     OUT_OF_DATE,  ///< Unusable; must be recreated.
     SURFACE_LOST, ///< The window surface no longer exists.
+    TIMEOUT,      ///< No image became available before the timeout (Swapchain::acquire_next_image()).
 };
 
 // =================================================================================================
@@ -1187,6 +1189,7 @@ struct EnumerationTraits<DeviceFeature>
         EnumeratorName{DeviceFeature::SAMPLER_FILTER_MINMAX, "SAMPLER_FILTER_MINMAX"},
         EnumeratorName{DeviceFeature::MEMORY_BUDGET, "MEMORY_BUDGET"},
         EnumeratorName{DeviceFeature::GPU_CRASH_MARKERS, "GPU_CRASH_MARKERS"},
+        EnumeratorName{DeviceFeature::FRAME_LATENCY_WAIT, "FRAME_LATENCY_WAIT"},
     };
 };
 
@@ -1975,6 +1978,7 @@ struct EnumerationTraits<SwapchainStatus>
         EnumeratorName{SwapchainStatus::SUBOPTIMAL, "SUBOPTIMAL"},
         EnumeratorName{SwapchainStatus::OUT_OF_DATE, "OUT_OF_DATE"},
         EnumeratorName{SwapchainStatus::SURFACE_LOST, "SURFACE_LOST"},
+        EnumeratorName{SwapchainStatus::TIMEOUT, "TIMEOUT"},
     };
 };
 

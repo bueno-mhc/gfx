@@ -91,10 +91,25 @@ Original hard requirements (from the user's initial specification):
   descriptive BackendCapabilityError; backends can forward to it or throw their own reason).
 - **Factory boundary**: backends are separate modules in PRIVATE CMake file sets; only the factory's
   implementation unit imports them; native headers only in backend global module fragments.
-- **Backends** (2026-10-15): **Vulkan implemented** (everything except presentation); Null = an instance
-  without physical devices; D3D12 and Metal are stubs throwing "not implemented yet". **Render surface**
-  (user): to be abstracted later with SDL/GLFW/... implementations — no surface code or interface yet;
-  `create_swapchain`, `Queue::present`, `surface_support` throw naming the missing abstraction.
+- **Backends** (2026-10-15): **Vulkan implemented** (presentation since P5, 2026-10-16); Null = an instance
+  without physical devices; D3D12 and Metal are stubs throwing "not implemented yet". **Vulkan presentation
+  (P5)**: instance enables VK_KHR_surface + every offered window-system surface extension +
+  VK_EXT_swapchain_colorspace; surfaces created in plain TU `vulkan_surface.cpp` (std-free
+  `vulkan_surface.hpp`, one function per window system, via vkGetInstanceProcAddr); `WindowSurface` RAII
+  in `:instance`; PRESENTATION and new **`DeviceFeature::FRAME_LATENCY_WAIT`** (present_id + present_wait;
+  NVIDIA yes, Intel no → wait_for_frame_latency throws) automatic; VK_EXT_hdr_metadata when offered;
+  `VulkanSwapchain` declared in `vulkan_swapchain.cpp` (validates family/format/color space/mode/usage
+  against the surface listing what it supports; images + views registered in the image tables, not owned,
+  not bindless; resize waits device idle, recreates with oldSwapchain; **zero-area window = no
+  VkSwapchainKHR**, acquire → OUT_OF_DATE; new `SwapchainStatus::TIMEOUT`); `SwapchainState`/`SwapchainRecord`
+  + `HandleTables::swapchains` in `:device`; `VulkanQueue::present` checks family + index, chains
+  VkPresentIdKHR. `timeout_nanoseconds()` moved to `:common`.
+- **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
+  re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
+  constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
+  + semaphores: acquisition semaphores image_count + 1 recycled when an image comes back, rendering
+  semaphores one per image; acquire() → nullopt when minimized/zero area/timeout; recreates on framebuffer
+  resize, SUBOPTIMAL/OUT_OF_DATE (retry once), new swapchain on SURFACE_LOST; `recreation_count()`).
 - **Backend factory** (`gfx.backend_factory`, re-exported by `gfx`): `backend_availability()`,
   `available_backends()`, `create_instance(BackendKind, InstanceDescription)`; each backend module
   exports `unavailable_reason()` + `create_instance()`; CMake options `GFX_BACKEND_{VULKAN,NULL,
@@ -431,9 +446,10 @@ gfx/
 │                  stb_image_implementation.cpp), input/ (gfx.platform.input: input.cppm + partitions
 │                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp),
 │                  backends/sdl3/ (P3), backends/glfw/ (P4)
+│   └── platform_graphics/  gfx.platform.graphics (P5): platform_graphics.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
-            sdl3/ + glfw/),
+            sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
@@ -468,13 +484,17 @@ gfx/
 | — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
 | 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | done, committed (6bacc72, 1bbb792) |
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
-| 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation waits for the render-surface abstraction |
+| 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c) committed; **P4 (GLFW backend) done, awaiting validation** (405 tests Debug + Release); next P5 (graphics bridge + Vulkan presentation). Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318) committed; **P5 (Vulkan presentation + gfx.platform.graphics) done, awaiting validation** (429 tests Debug + Release); next P6 (usage example, README platform section, architecture overview with diagrams). Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm, no backend is implemented | |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | |
 
-Test count at last report: **405**, all passing in Debug and Release, 2026-10-16 (after P4: 69 platform tests,
+Test count at last report: **429**, all passing in Debug and Release, 2026-10-16 (after P5: + 24 presentation
+tests = 6 × SDL3/GLFW × NVIDIA/Intel, visible windows, validation required). **Check `CMAKE_BUILD_TYPE` in
+build/release/CMakeCache.txt** before trusting a Release run: during P5 it was found set to Debug (cause
+unknown; `cmake --preset release` fixed it) — the Release skips (Debug-only compiler/hot reload) prove it.
+Before P5: 405 (after P4: 69 platform tests,
 24 shared backend tests (12 × SDL3, GLFW), 16 SDL3 + 9 GLFW backend tests (the two clipboard tests skipped
 unless GFX_TEST_CLIPBOARD=1), 32 compilation tests; 90 Vulkan tests: NVIDIA 89 + RenderDoc via CTest; Intel 81 + 9 skipped). One unexplained
 failure of `CompilationCheck.NamesDoNotCollideWithPlatformMacros` was seen once in a Debug run while the

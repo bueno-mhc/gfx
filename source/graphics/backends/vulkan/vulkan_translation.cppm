@@ -987,4 +987,97 @@ from_vulkan_memory_properties(VkMemoryPropertyFlags flags) noexcept -> MemoryPro
     return properties;
 }
 
+
+// ------------------------------------------------------------------------------------------- presentation
+
+/// @brief Vulkan color space of @p color_space.
+[[nodiscard]] constexpr auto
+to_vulkan(ColorSpace color_space) noexcept -> VkColorSpaceKHR
+{
+    switch (color_space)
+    {
+        case ColorSpace::SRGB_NONLINEAR:
+            return VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        case ColorSpace::EXTENDED_SRGB_LINEAR:
+            return VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+        case ColorSpace::DISPLAY_P3_NONLINEAR:
+            return VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT;
+        case ColorSpace::HDR10_ST2084:
+            return VK_COLOR_SPACE_HDR10_ST2084_EXT;
+    }
+    return VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+}
+
+/// @brief gfx color space of @p color_space (std::nullopt for color spaces gfx does not name).
+[[nodiscard]] constexpr auto
+from_vulkan(VkColorSpaceKHR color_space) noexcept -> std::optional<ColorSpace>
+{
+    switch (color_space)
+    {
+        case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+            return ColorSpace::SRGB_NONLINEAR;
+        case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT:
+            return ColorSpace::EXTENDED_SRGB_LINEAR;
+        case VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT:
+            return ColorSpace::DISPLAY_P3_NONLINEAR;
+        case VK_COLOR_SPACE_HDR10_ST2084_EXT:
+            return ColorSpace::HDR10_ST2084;
+        default:
+            return std::nullopt;
+    }
+}
+
+/// @brief Vulkan present mode of @p mode.
+[[nodiscard]] constexpr auto
+to_vulkan(PresentMode mode) noexcept -> VkPresentModeKHR
+{
+    switch (mode)
+    {
+        case PresentMode::IMMEDIATE:
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        case PresentMode::MAILBOX:
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        case PresentMode::FIFO:
+            return VK_PRESENT_MODE_FIFO_KHR;
+        case PresentMode::FIFO_RELAXED:
+            return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+/// @brief gfx present mode of @p mode (std::nullopt for modes gfx does not name).
+[[nodiscard]] constexpr auto
+from_vulkan(VkPresentModeKHR mode) noexcept -> std::optional<PresentMode>
+{
+    switch (mode)
+    {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:
+            return PresentMode::IMMEDIATE;
+        case VK_PRESENT_MODE_MAILBOX_KHR:
+            return PresentMode::MAILBOX;
+        case VK_PRESENT_MODE_FIFO_KHR:
+            return PresentMode::FIFO;
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+            return PresentMode::FIFO_RELAXED;
+        default:
+            return std::nullopt;
+    }
+}
+
+/// @brief gfx image usage of Vulkan image usage flags (the bits gfx names).
+[[nodiscard]] constexpr auto
+from_vulkan_image_usage(VkImageUsageFlags flags) noexcept -> ImageUsage
+{
+    ImageUsage usage = ImageUsage::NONE;
+    for (const auto& entry : EnumerationTraits<ImageUsage>::NAMES)
+    {
+        const VkImageUsageFlags bits = to_vulkan(entry.value);
+        if (bits != 0 && (flags & bits) == bits)
+        {
+            usage |= entry.value;
+        }
+    }
+    return usage;
+}
+
 } // namespace gfx::vulkan

@@ -223,6 +223,25 @@ struct PipelineCacheRecord
     VkPipelineCache cache = VK_NULL_HANDLE;
 };
 
+/// @brief What presentation needs to know about a swapchain. Owned by the swapchain, which updates it
+///        when it is recreated (a swapchain is externally synchronized: resize(), acquire_next_image()
+///        and presentations of one swapchain never run concurrently).
+struct SwapchainState
+{
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;   ///< Null while the window has no area (minimized).
+    std::uint32_t image_count = 0;               ///< Images of the native swapchain.
+    std::vector<bool> presenting_families{};     ///< Per queue family: whether it can present to the window.
+    bool present_identifiers = false;            ///< Presentations carry identifiers (VK_KHR_present_id).
+    std::uint64_t presented = 0;                 ///< Identifier of the last presentation (since the last recreation).
+    const Swapchain* swapchain_object = nullptr; ///< The swapchain (for its name in errors).
+};
+
+/// @brief A swapchain.
+struct SwapchainRecord
+{
+    SwapchainState* state = nullptr;
+};
+
 /// @brief A debug label as a GPU breadcrumb (CrashDiagnostic::BREADCRUMBS): command buffers write
 ///        checkpoints pointing at these nodes when labels begin and end; after a device loss, the last
 ///        checkpoint each queue reached names the labels the GPU was inside (the parents' chain).
@@ -260,6 +279,7 @@ struct HandleTables
     gfx::backends::HandleTable<QueryPoolTag, QueryPoolRecord> query_pools{BackendKind::VULKAN};
     gfx::backends::HandleTable<AccelerationStructureTag, AccelerationStructureRecord> acceleration_structures{BackendKind::VULKAN};
     gfx::backends::HandleTable<PipelineCacheTag, PipelineCacheRecord> pipeline_caches{BackendKind::VULKAN};
+    gfx::backends::HandleTable<SwapchainTag, SwapchainRecord> swapchains{BackendKind::VULKAN};
 };
 
 // ---------------------------------------------------------------------------------------------- queues
@@ -355,6 +375,7 @@ private:
     std::vector<VkSemaphoreSubmitInfo> m_waits;
     std::vector<VkSemaphoreSubmitInfo> m_signals;
     std::vector<TimelineBatch> m_timeline_batches;
+    std::vector<VkSemaphore> m_present_waits;
 };
 
 // --------------------------------------------------------------------------------------------- deleter
@@ -621,6 +642,12 @@ public:
         return m_crash_diagnostics;
     }
 
+    /// @brief Whether VK_EXT_hdr_metadata is enabled (Swapchain::set_hdr_metadata()).
+    [[nodiscard]] auto has_hdr_metadata() const noexcept -> bool
+    {
+        return m_hdr_metadata;
+    }
+
     /// @brief Names a native object in debugging tools (when VK_EXT_debug_utils is enabled).
     void name_object(VkObjectType type, std::uint64_t handle, std::string_view name) const;
 
@@ -661,6 +688,7 @@ private:
     VkPipelineStageFlags2 m_supported_stages = 0;
     VkAccessFlags2 m_supported_access = 0;
     CrashDiagnostic m_crash_diagnostics = CrashDiagnostic::NONE;
+    bool m_hdr_metadata = false;
     CaptureTool m_capture_tool = CaptureTool::NONE;
     std::atomic<bool> m_capturing{false};
     TaskScheduler m_task_scheduler;

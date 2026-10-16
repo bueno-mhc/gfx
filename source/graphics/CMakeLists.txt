@@ -96,6 +96,8 @@ if(GFX_BACKEND_VULKAN)
         backends/vulkan/vulkan_pipelines.cpp
         backends/vulkan/vulkan_commands.cpp
         backends/vulkan/vulkan_diagnostics.cpp
+        backends/vulkan/vulkan_swapchain.cpp
+        backends/vulkan/vulkan_surface.cpp
         backends/vulkan/renderdoc_capture.cpp
         backends/vulkan/vma_implementation.cpp)
     target_compile_definitions(gfx PRIVATE GFX_WITH_VULKAN_BACKEND=1)

@@ -394,12 +394,89 @@ VulkanQueue::record_timeline_batches(std::span<const TimelineBatch> batches,
 }
 
 auto
-VulkanQueue::present(const PresentDescription& /*presentation*/) -> SwapchainStatus
+VulkanQueue::present(const PresentDescription& presentation) -> SwapchainStatus
 {
-    throw_unsupported("Queue::present", "presentation (render surface)",
-                      "presentation needs the render-surface abstraction (with SDL, GLFW and native window back ends), which is "
-                      "not implemented yet",
-                      "render offscreen and read the images back, until window surfaces are supported");
+    static constexpr std::string_view OPERATION = "Queue::present";
+    HandleTables& handles = m_device.handles();
+    SwapchainState& state = *handles.swapchains.get(presentation.swapchain, OPERATION).state;
+
+    // A swapchain without images (the window has no area) stays out of date until it is resized.
+    if (state.swapchain == VK_NULL_HANDLE)
+    {
+        return SwapchainStatus::OUT_OF_DATE;
+    }
+
+    // This queue presents to the window, an image that exists.
+    if (validates(ValidationLevel::CREATION))
+    {
+        const std::string_view swapchain_name = state.swapchain_object->debug_name();
+        if (!state.presenting_families[m_native.family])
+        {
+            throw InvalidUsageError({
+                .backend = BackendKind::VULKAN,
+                .operation = std::string{OPERATION},
+                .problem = std::format("{} queue '{}' (family {}) cannot present to the window of swapchain '{}'", m_type, m_debug_name,
+                                       m_native.family, swapchain_name),
+                .suggestion = "present from the queue type named by SwapchainDescription::present_queue",
+            });
+        }
+        if (presentation.image_index >= state.image_count)
+        {
+            throw InvalidUsageError({
+                .backend = BackendKind::VULKAN,
+                .operation = std::string{OPERATION},
+                .problem = std::format("image {} of swapchain '{}' does not exist; it has {} images", presentation.image_index,
+                                       swapchain_name, state.image_count),
+                .suggestion = "present the index returned by Swapchain::acquire_next_image()",
+            });
+        }
+    }
+
+    // The identifier of the presentation, for waits on it (Swapchain::wait_for_frame_latency()).
+    const std::uint64_t identifier = state.presented + 1;
+    const VkPresentIdKHR present_identifier{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+        .swapchainCount = 1,
+        .pPresentIds = &identifier,
+    };
+    VkResult result = VK_SUCCESS;
+    {
+        const std::scoped_lock lock{m_native.mutex};
+
+        // Binary semaphores the rendering signals.
+        m_present_waits.clear();
+        for (const SemaphoreHandle wait : presentation.waits)
+        {
+            m_present_waits.push_back(handles.semaphores.get(wait, OPERATION).semaphore);
+        }
+        const VkPresentInfoKHR information{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = state.present_identifiers ? &present_identifier : nullptr,
+            .waitSemaphoreCount = static_cast<std::uint32_t>(m_present_waits.size()),
+            .pWaitSemaphores = m_present_waits.data(),
+            .swapchainCount = 1,
+            .pSwapchains = &state.swapchain,
+            .pImageIndices = &presentation.image_index,
+        };
+        result = m_device.functions().vkQueuePresentKHR(m_native.queue, &information);
+    }
+
+    // The semaphore waits run even when the presentation is refused (OUT_OF_DATE): the identifier is used.
+    state.presented = identifier;
+    switch (result)
+    {
+        case VK_SUCCESS:
+            return SwapchainStatus::OPTIMAL;
+        case VK_SUBOPTIMAL_KHR:
+            return SwapchainStatus::SUBOPTIMAL;
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            return SwapchainStatus::OUT_OF_DATE;
+        case VK_ERROR_SURFACE_LOST_KHR:
+            return SwapchainStatus::SURFACE_LOST;
+        default:
+            m_device.check_result(result, OPERATION, "vkQueuePresentKHR");
+            return SwapchainStatus::OPTIMAL;
+    }
 }
 
 void

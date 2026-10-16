@@ -7,10 +7,12 @@ C++ modules and strongly typed numeric handles, is **bindless by default**, and 
 
 > **Status:** the interface is complete: objects, typed recording, bindless resources, parallel
 > rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame resources,
-> profiling and crash diagnostics. The **Vulkan backend** implements all of it except presentation,
-> which waits for the render-surface abstraction (windows through SDL, GLFW, ...). The SPIR-V
-> toolchain (build-time compilation, reflection, Debug-only run-time compilation and hot reload) is
-> in place. The Direct3D 12 and Metal backends are stubs that throw "not implemented yet".
+> profiling and crash diagnostics. The **Vulkan backend** implements all of it, presentation to
+> windows included. The SPIR-V toolchain (build-time compilation, reflection, Debug-only run-time
+> compilation and hot reload) is in place. The Direct3D 12 and Metal backends are stubs that throw
+> "not implemented yet". The **platform library** (windows and input above SDL3 and GLFW,
+> `import gfx.platform;`) and its bridge to swapchains (`import gfx.platform.graphics;`) are in
+> progress: their usage example and documentation come next.
 
 ```cpp
 import std;
@@ -109,10 +111,41 @@ Shaders are written in **GLSL or HLSL** and reach the backends as **SPIR-V**:
 | Pipelines | pipeline cache, background compilation on the application's task scheduler, hot reload in Debug builds |
 | Features | cost-free features enabled automatically; ray tracing, ray queries, mesh shaders, variable-rate shading, sparse resources and crash markers on request (`DeviceDescription::required_features`) |
 | Diagnostics | validation layers and debug messenger, object names, debug labels, RenderDoc captures from code (`Device::begin_capture`), breadcrumbs (NVIDIA diagnostic checkpoints) and `VK_EXT_device_fault` reports when the device is lost |
+| Presentation | surfaces of Win32 windows (Xlib, XCB, Wayland and Metal compiled on their platforms), swapchains recreated on resize (none while the window is minimized), `VK_KHR_present_wait` for `Swapchain::wait_for_frame_latency()`, `VK_EXT_hdr_metadata`, HDR and wide-gamut color spaces (`VK_EXT_swapchain_colorspace`) |
 
 Every function the backend cannot provide on a given GPU throws `BackendCapabilityError`, naming the
-missing feature and how to get it. Swapchains, presentation and surface queries throw until the
-render-surface abstraction exists.
+missing feature and how to get it (e.g. `wait_for_frame_latency()` on a GPU without
+`DeviceFeature::FRAME_LATENCY_WAIT`).
+
+**Presenting to a platform window.** `gfx::platform::WindowSwapchain` (module `gfx.platform.graphics`)
+creates the swapchain of a window, recreates it when the framebuffer is resized or the swapchain
+reports itself out of date, skips frames while the window is minimized, and owns the presentation
+semaphores:
+
+```cpp
+import gfx.platform.graphics; // gfx and gfx.platform included
+
+// The window was created with WindowDescription::surface_api = gfx::platform::SurfaceApi::VULKAN.
+gfx::platform::WindowSwapchain presentation{*device, *window}; // FIFO, 3 images, B8G8R8A8_SRGB
+while (running)
+{
+    for (const gfx::platform::Event& event : platform->poll_events())
+    {
+        presentation.handle_event(event); // framebuffer resizes
+    }
+    if (const std::optional<gfx::platform::SwapchainFrame> frame = presentation.acquire())
+    {
+        // Record: frame->image.image from UNDEFINED to COLOR_ATTACHMENT_WRITE, render into
+        // frame->image.view, then to PRESENT. The submission waits on frame->acquired and signals
+        // frame->rendered.
+        const std::array waits{gfx::SemaphoreWait{.semaphore = frame->acquired}};
+        const std::array signals{gfx::SemaphoreSignal{.semaphore = frame->rendered}};
+        const std::array batches{gfx::SubmitDescription{.command_buffers = commands, .waits = waits, .signals = signals}};
+        queue.submit(batches);
+        presentation.present(queue, *frame);
+    }
+}
+```
 
 **Order of waits and signals.** A queue runs its submissions in order, so a submission must not wait
 for a timeline value that only a later submission to the same hardware queue signals: that signal
@@ -260,20 +293,22 @@ gfx/
 │   │   └── backends/     private modules, reached only through the factory
 │   │       ├── vulkan/   module gfx.backends.vulkan (partitions + one implementation unit per area)
 │   │       └── null/, d3d12/, metal/
-│   └── platform/         the platform library: windowing and input (`import gfx.platform;`, in progress)
-│       ├── enums.cppm    every platform enumeration and constant (keys as USB HID usages, key codes,
-│       │                 buttons, axes, modifiers, cursors, window modes and flags, event types)
-│       ├── handles.cppm  window, monitor, cursor and device handles; action and binding-context
-│       │                 identifiers ("jump"_action); player slots
-│       ├── interface/    module gfx.platform.interface: events and their queue, images, monitors,
-│       │                 Cursor, Window, InputDevices, Platform (event pump, watchers, threads)
-│       ├── input/        module gfx.platform.input: action mapping — compile-time schemas, bindings,
-│       │                 contexts, players, InputSystem and InputFrame, EventChannel, saved bindings
-│       ├── backends/     private modules, reached only through the factory
-│       │   ├── sdl3/     module gfx.platform.backends.sdl3 (windows, events, cursors, monitors,
-│       │   │             clipboard, gamepads, joysticks, touch)
-│       │   └── glfw/     module gfx.platform.backends.glfw (the same contract; throws for what GLFW lacks)
-│       └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
+│   ├── platform/         the platform library: windowing and input (`import gfx.platform;`, in progress)
+│   │   ├── enums.cppm    every platform enumeration and constant (keys as USB HID usages, key codes,
+│   │   │                 buttons, axes, modifiers, cursors, window modes and flags, event types)
+│   │   ├── handles.cppm  window, monitor, cursor and device handles; action and binding-context
+│   │   │                 identifiers ("jump"_action); player slots
+│   │   ├── interface/    module gfx.platform.interface: events and their queue, images, monitors,
+│   │   │                 Cursor, Window, InputDevices, Platform (event pump, watchers, threads)
+│   │   ├── input/        module gfx.platform.input: action mapping — compile-time schemas, bindings,
+│   │   │                 contexts, players, InputSystem and InputFrame, EventChannel, saved bindings
+│   │   ├── backends/     private modules, reached only through the factory
+│   │   │   ├── sdl3/     module gfx.platform.backends.sdl3 (windows, events, cursors, monitors,
+│   │   │   │             clipboard, gamepads, joysticks, touch)
+│   │   │   └── glfw/     module gfx.platform.backends.glfw (the same contract; throws for what GLFW lacks)
+│   │   └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
+│   └── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
+│                           (swapchain_description_for(), WindowSwapchain)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only) and the slot table
@@ -282,6 +317,8 @@ gfx/
     ├── platform/         the platform library, through a test-only fake platform; platform/backends:
     │                     every backend with real windows (one parameterized suite), then sdl3/
     │                     (SDL-injected events, virtual gamepads) and glfw/ (Win32 messages)
+    ├── platform_graphics/  presentation to visible windows: every platform backend x every GPU,
+    │                     with the validation layers (cleared frames read back, resize, minimize)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

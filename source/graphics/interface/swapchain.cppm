@@ -15,7 +15,8 @@ export namespace gfx
 struct SwapchainDescription
 {
     NativeWindowHandle window{};                          ///< Window presented to (Window::native_handle() of the platform library).
-    Extent extent{};                                      ///< Image size (usually the window's client size).
+    Extent extent{};                                      ///< Image size where the window system lets the swapchain
+                                                          ///< choose it (Wayland); elsewhere the window's size is used.
     Format format = Format::B8G8R8A8_SRGB;                ///< Image format.
     ColorSpace color_space = ColorSpace::SRGB_NONLINEAR;  ///< Color space.
     PresentMode present_mode = PresentMode::FIFO;         ///< Presentation mode.
@@ -50,41 +51,50 @@ struct AcquiredImage
 };
 
 /// @brief Images presented to a window. Acquire an image, render into it (waiting on the acquisition
-///        semaphore), then present it (waiting on the rendering semaphore).
+///        semaphore), then present it (waiting on the rendering semaphore). Externally synchronized:
+///        acquire_next_image(), resize() and the presentations of one swapchain must not run
+///        concurrently. gfx::platform::WindowSwapchain (module gfx.platform.graphics) manages the
+///        semaphores and recreations for a platform window.
 class Swapchain : public BackendObject
 {
 public:
     /// @brief Handle naming this swapchain in presentations.
     [[nodiscard]] virtual auto handle() const noexcept -> SwapchainHandle = 0;
 
-    /// @brief Size of the images.
+    /// @brief Size of the images (0 x 0 while the window has no area, e.g. minimized).
     [[nodiscard]] virtual auto extent() const noexcept -> Extent = 0;
 
     /// @brief Format of the images.
     [[nodiscard]] virtual auto format() const noexcept -> Format = 0;
 
-    /// @brief Number of images.
+    /// @brief Number of images (0 while the window has no area).
     [[nodiscard]] virtual auto image_count() const noexcept -> std::uint32_t = 0;
 
     /// @brief Acquires the next image to render into.
-    /// @param signal  Semaphore signaled when the image may be written.
-    /// @param fence   Fence signaled at the same time (null handle = none).
+    /// @param signal  Binary semaphore signaled when the image may be written.
+    /// @param fence   Fence signaled at the same time (null handle = none; at least one of the two).
     /// @param timeout Maximum wait for an image.
-    /// @return The image, or the status explaining why none was acquired (OUT_OF_DATE, SURFACE_LOST).
+    /// @return The image, or the status explaining why none was acquired: OUT_OF_DATE (recreate with
+    ///         resize(); also while the window has no area), SURFACE_LOST (create a new swapchain) or TIMEOUT.
     [[nodiscard]] virtual auto acquire_next_image(SemaphoreHandle signal,
                                                   FenceHandle fence = {},
                                                   std::chrono::nanoseconds timeout = WAIT_INDEFINITELY)
         -> std::expected<AcquiredImage, SwapchainStatus> = 0;
 
-    /// @brief Recreates the images with a new size (after the window was resized).
+    /// @brief Recreates the images for the window's current size (@p extent where the window system lets
+    ///        the swapchain choose it), after a resize or an OUT_OF_DATE / SUBOPTIMAL status. Waits until
+    ///        the device is idle first; the images get new handles. While the window has no area there
+    ///        are no images, and acquisitions report OUT_OF_DATE.
     virtual void resize(Extent extent) = 0;
 
     /// @brief Blocks until fewer than SwapchainDescription::maximum_frame_latency frames wait for
     ///        presentation: call it before sampling input, to keep latency low (DXGI frame latency
     ///        waitable object, VK_KHR_present_wait).
+    /// @throws BackendCapabilityError when the device lacks DeviceFeature::FRAME_LATENCY_WAIT.
     [[nodiscard]] virtual auto wait_for_frame_latency(std::chrono::nanoseconds timeout = WAIT_INDEFINITELY) -> WaitStatus = 0;
 
-    /// @brief Describes the HDR content presented (HDR color spaces).
+    /// @brief Describes the HDR content presented (HDR color spaces); kept across resize().
+    /// @throws BackendCapabilityError when the device cannot pass HDR metadata to the display.
     virtual void set_hdr_metadata(const HdrMetadata& metadata) = 0;
 };
 

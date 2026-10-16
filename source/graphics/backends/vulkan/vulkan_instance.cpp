@@ -1,8 +1,10 @@
 /// @file vulkan_instance.cpp
-/// @brief VulkanInstance and VulkanPhysicalDevice.
+/// @brief VulkanInstance, VulkanPhysicalDevice and window surfaces.
 module;
 
 #include <volk.h>
+
+#include "vulkan_surface.hpp"
 
 module gfx.backends.vulkan;
 
@@ -22,6 +24,29 @@ namespace
 {
 
 constexpr std::string_view VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
+
+/// @brief The surface extension of each window system Vulkan presents to (NUL-terminated names).
+constexpr std::array<std::pair<NativeWindowKind, std::string_view>, 5> SURFACE_EXTENSIONS{{
+    {NativeWindowKind::WINDOWS, "VK_KHR_win32_surface"},
+    {NativeWindowKind::XLIB, "VK_KHR_xlib_surface"},
+    {NativeWindowKind::XCB, "VK_KHR_xcb_surface"},
+    {NativeWindowKind::WAYLAND, "VK_KHR_wayland_surface"},
+    {NativeWindowKind::COCOA, "VK_EXT_metal_surface"},
+}};
+
+/// @brief The surface extension of window system @p kind (empty when Vulkan cannot present to it).
+auto
+surface_extension(NativeWindowKind kind) noexcept -> std::string_view
+{
+    for (const auto& [system, extension] : SURFACE_EXTENSIONS)
+    {
+        if (system == kind)
+        {
+            return extension;
+        }
+    }
+    return {};
+}
 
 /// @brief Appends @p structure to a pNext chain whose last pNext is @p tail, and returns the new tail.
 template<class Structure>
@@ -198,6 +223,14 @@ VulkanPhysicalDevice::query_capabilities()
     {
         tail = append(tail, capabilities.fault_features);
     }
+    if (capabilities.has_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME))
+    {
+        tail = append(tail, capabilities.present_id_features);
+    }
+    if (capabilities.has_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME))
+    {
+        tail = append(tail, capabilities.present_wait_features);
+    }
     vkGetPhysicalDeviceFeatures2(m_physical_device, &features);
     capabilities.features = features.features;
 
@@ -218,6 +251,8 @@ VulkanPhysicalDevice::query_capabilities()
     capabilities.mesh_shader_features.pNext = nullptr;
     capabilities.shading_rate_features.pNext = nullptr;
     capabilities.fault_features.pNext = nullptr;
+    capabilities.present_id_features.pNext = nullptr;
+    capabilities.present_wait_features.pNext = nullptr;
 }
 
 void
@@ -433,10 +468,8 @@ VulkanPhysicalDevice::supports(DeviceFeature feature) const noexcept -> bool
             return features.textureCompressionETC2 == VK_TRUE;
         case DeviceFeature::TEXTURE_COMPRESSION_ASTC: 
             return features.textureCompressionASTC_LDR == VK_TRUE;
-
-        // Presentation needs the render-surface abstraction, which does not exist yet.
-        case DeviceFeature::PRESENTATION: 
-            return false;
+        case DeviceFeature::PRESENTATION:
+            return m_instance.has_surfaces() && capabilities.has_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         case DeviceFeature::EXTENDED_DYNAMIC_STATE: 
             return true;
         case DeviceFeature::DEPTH_BOUNDS: 
@@ -458,8 +491,14 @@ VulkanPhysicalDevice::supports(DeviceFeature feature) const noexcept -> bool
             return capabilities.has_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
         // Breadcrumbs use NVIDIA's diagnostic checkpoints (AMD's buffer markers are not implemented yet).
-        case DeviceFeature::GPU_CRASH_MARKERS: 
+        case DeviceFeature::GPU_CRASH_MARKERS:
             return capabilities.has_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+
+        // Waiting for presentation needs identifiers on presents (VK_KHR_present_id) and waits on them.
+        case DeviceFeature::FRAME_LATENCY_WAIT:
+            return supports(DeviceFeature::PRESENTATION) && capabilities.has_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                capabilities.has_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME) &&
+                capabilities.present_id_features.presentId == VK_TRUE && capabilities.present_wait_features.presentWait == VK_TRUE;
     }
     return false;
 }
@@ -486,11 +525,100 @@ VulkanPhysicalDevice::format_support(Format format) const -> FormatSupport
 }
 
 auto
-VulkanPhysicalDevice::surface_support(const NativeWindowHandle& /*window*/) const -> SurfaceSupport
+VulkanPhysicalDevice::surface_support(const NativeWindowHandle& window) const -> SurfaceSupport
 {
-    throw_unsupported("PhysicalDevice::surface_support", "presentation (render surface)",
-                      "the render-surface abstraction (with SDL, GLFW and native window back ends) is not implemented yet",
-                      "render offscreen and read the images back, until window surfaces are supported");
+    constexpr std::string_view OPERATION = "PhysicalDevice::surface_support";
+
+    // Presentation needs VK_KHR_swapchain on the device.
+    if (!supports(DeviceFeature::PRESENTATION))
+    {
+        throw_unsupported(OPERATION, "presentation",
+                          std::format("'{}' cannot present: {}", m_properties.name,
+                                      m_instance.has_surfaces() ? "the device lacks VK_KHR_swapchain"
+                                                                : "the Vulkan loader offers no VK_KHR_surface"),
+                          "render offscreen, or choose a physical device whose supports(DeviceFeature::PRESENTATION) is true");
+    }
+
+    // A temporary surface for the window, and a queue family that presents to it.
+    const WindowSurface surface{m_instance, window, OPERATION};
+    bool presentable = false;
+    for (std::uint32_t family = 0; family < m_capabilities.queue_families.size() && !presentable; ++family)
+    {
+        presentable = can_present(family, surface.native(), OPERATION);
+    }
+    if (!presentable)
+    {
+        throw_unsupported(OPERATION, "presentation to this window",
+                          std::format("no queue family of '{}' can present to the {} window", m_properties.name, window.kind()),
+                          "choose the physical device that drives the window's display");
+    }
+    return surface_support(surface.native(), OPERATION);
+}
+
+auto
+VulkanPhysicalDevice::surface_support(VkSurfaceKHR surface,
+                                      std::string_view operation) const -> SurfaceSupport
+{
+    SurfaceSupport support;
+
+    // Image counts, size (none when the swapchain chooses it, as on Wayland) and usages.
+    VkSurfaceCapabilitiesKHR capabilities{};
+    check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physical_device, surface, &capabilities), operation,
+          "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    support.minimum_image_count = capabilities.minImageCount;
+    support.maximum_image_count = capabilities.maxImageCount;
+    if (capabilities.currentExtent.width != std::numeric_limits<std::uint32_t>::max())
+    {
+        support.current_extent = {.width = capabilities.currentExtent.width, .height = capabilities.currentExtent.height};
+    }
+    else
+    {
+        support.current_extent = {.width = 0, .height = 0};
+    }
+    support.supported_usage = from_vulkan_image_usage(capabilities.supportedUsageFlags);
+
+    // Formats and color spaces gfx names.
+    std::uint32_t count = 0;
+    check(vkGetPhysicalDeviceSurfaceFormatsKHR(m_physical_device, surface, &count, nullptr), operation,
+          "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    check(vkGetPhysicalDeviceSurfaceFormatsKHR(m_physical_device, surface, &count, formats.data()), operation,
+          "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    for (const VkSurfaceFormatKHR& native : std::span{formats}.first(count))
+    {
+        const Format format = from_vulkan(native.format);
+        const std::optional<ColorSpace> color_space = from_vulkan(native.colorSpace);
+        if (format != Format::UNDEFINED && color_space)
+        {
+            support.formats.push_back({.format = format, .color_space = *color_space});
+        }
+    }
+
+    // Presentation modes gfx names.
+    check(vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical_device, surface, &count, nullptr), operation,
+          "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    std::vector<VkPresentModeKHR> modes(count);
+    check(vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical_device, surface, &count, modes.data()), operation,
+          "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    for (const VkPresentModeKHR native : std::span{modes}.first(count))
+    {
+        if (const std::optional<PresentMode> mode = from_vulkan(native))
+        {
+            support.present_modes.push_back(*mode);
+        }
+    }
+    return support;
+}
+
+auto
+VulkanPhysicalDevice::can_present(std::uint32_t family,
+                                  VkSurfaceKHR surface,
+                                  std::string_view operation) const -> bool
+{
+    VkBool32 supported = VK_FALSE;
+    check(vkGetPhysicalDeviceSurfaceSupportKHR(m_physical_device, family, surface, &supported), operation,
+          "vkGetPhysicalDeviceSurfaceSupportKHR");
+    return supported == VK_TRUE;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -564,6 +692,27 @@ VulkanInstance::VulkanInstance(const InstanceDescription& description)
     {
         enabled_extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+
+    // Window surfaces: VK_KHR_surface with the extension of every window system the loader offers, and
+    // the HDR and wide-gamut color spaces.
+    if (has_extension(VK_KHR_SURFACE_EXTENSION_NAME))
+    {
+        enabled_extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+        m_surfaces = true;
+        for (const auto& [kind, extension] : SURFACE_EXTENSIONS)
+        {
+            if (has_extension(extension))
+            {
+                enabled_extensions.push_back(extension.data());
+                m_window_systems[static_cast<std::size_t>(std::to_underlying(kind))] = true;
+            }
+        }
+        if (has_extension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
+        {
+            enabled_extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            m_extended_color_spaces = true;
+        }
     }
 
     // The messenger forwards validation messages to the application (also while the instance is created).
@@ -674,6 +823,89 @@ VulkanInstance::report(DebugMessageSeverity severity,
 }
 
 auto
+VulkanInstance::create_surface(const NativeWindowHandle& window,
+                               std::string_view operation) const -> VkSurfaceKHR
+{
+    // A window, of a window system this instance presents to.
+    const NativeWindowKind kind = window.kind();
+    if (kind == NativeWindowKind::NONE)
+    {
+        throw InvalidUsageError({
+            .backend = BackendKind::VULKAN,
+            .operation = std::string{operation},
+            .problem = "the window handle names no window (NativeWindowKind::NONE)",
+            .suggestion = "pass the native handle of a platform window (gfx::platform::Window::native_handle())",
+        });
+    }
+    const std::string_view extension = surface_extension(kind);
+    if (extension.empty())
+    {
+        throw_unsupported(operation, std::format("presentation to a {} window", kind),
+                          std::format("Vulkan has no surface for {} windows", kind),
+                          "use a backend that presents to them (WebGPU for HTML canvases)");
+    }
+    if (!supports_window_system(kind))
+    {
+        throw_unsupported(operation, std::format("presentation to a {} window", kind),
+                          std::format("the Vulkan loader offers no {}{}", m_surfaces ? extension : "VK_KHR_surface",
+                                      m_surfaces ? "" : " (no window system can be presented to)"),
+                          "install a Vulkan driver for this window system, or render offscreen");
+    }
+
+    // The surface, through the window system's own creation function.
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkResult result = VK_ERROR_EXTENSION_NOT_PRESENT;
+    switch (kind)
+    {
+        case NativeWindowKind::WINDOWS:
+        {
+            const Win32WindowHandle& handle = *window.get_if<Win32WindowHandle>();
+            result = surface::create_win32(m_instance, vkGetInstanceProcAddr, handle.instance, handle.window, &surface);
+            break;
+        }
+        case NativeWindowKind::XLIB:
+        {
+            const XlibWindowHandle& handle = *window.get_if<XlibWindowHandle>();
+            result = surface::create_xlib(m_instance, vkGetInstanceProcAddr, handle.display, handle.window, &surface);
+            break;
+        }
+        case NativeWindowKind::XCB:
+        {
+            const XcbWindowHandle& handle = *window.get_if<XcbWindowHandle>();
+            result = surface::create_xcb(m_instance, vkGetInstanceProcAddr, handle.connection, handle.window, &surface);
+            break;
+        }
+        case NativeWindowKind::WAYLAND:
+        {
+            const WaylandWindowHandle& handle = *window.get_if<WaylandWindowHandle>();
+            result = surface::create_wayland(m_instance, vkGetInstanceProcAddr, handle.display, handle.surface, &surface);
+            break;
+        }
+        case NativeWindowKind::COCOA:
+        {
+            const CocoaWindowHandle& handle = *window.get_if<CocoaWindowHandle>();
+            result = surface::create_metal(m_instance, vkGetInstanceProcAddr, handle.metal_layer, &surface);
+            break;
+        }
+        case NativeWindowKind::NONE:
+        case NativeWindowKind::WEB_CANVAS:
+            break;
+    }
+
+    // The extension is enabled, so a missing function means this build lacks the window system's headers.
+    if (result == VK_ERROR_EXTENSION_NOT_PRESENT)
+    {
+        throw_unsupported(operation, std::format("presentation to a {} window", kind),
+                          std::format("this build of gfx has no {} support (the window system's headers were not found "
+                                      "when it was built)",
+                                      extension),
+                          "install the window system's development headers and rebuild gfx");
+    }
+    check(result, operation, "vkCreate*SurfaceKHR");
+    return surface;
+}
+
+auto
 VulkanInstance::backend() const noexcept -> BackendKind
 {
     return BackendKind::VULKAN;
@@ -710,6 +942,23 @@ VulkanInstance::physical_device(std::size_t index) -> PhysicalDevice&
         });
     }
     return *m_physical_devices[index];
+}
+
+// ---------------------------------------------------------------------------------------------------
+// WindowSurface
+// ---------------------------------------------------------------------------------------------------
+
+WindowSurface::WindowSurface(const VulkanInstance& instance,
+                             const NativeWindowHandle& window,
+                             std::string_view operation)
+    : m_instance{instance.native()}
+    , m_surface{instance.create_surface(window, operation)}
+{
+}
+
+WindowSurface::~WindowSurface()
+{
+    vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
 }
 
 } // namespace gfx::vulkan

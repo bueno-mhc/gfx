@@ -90,18 +90,20 @@ TEST_F(VulkanInstanceTest, FormatSupportReportsWhatFormatsCanBeUsedFor)
     EXPECT_EQ(device.format_support(Format::UNDEFINED).optimal_tiling_usage, ImageUsage::NONE);
 }
 
-TEST_F(VulkanInstanceTest, PresentationAwaitsTheRenderSurfaceAbstraction)
+TEST_F(VulkanInstanceTest, SurfacesNeedAWindowOfAWindowSystemVulkanPresentsTo)
 {
+    // Window surfaces are supported; the surfaces themselves are tested on real windows (tests/platform_graphics).
     const PhysicalDevice& device = physical_device();
-    EXPECT_FALSE(device.supports(DeviceFeature::PRESENTATION));
+    EXPECT_TRUE(device.supports(DeviceFeature::PRESENTATION));
+    EXPECT_THROW((void)device.surface_support({}), InvalidUsageError);
     try
     {
-        (void)device.surface_support({});
+        (void)device.surface_support(NativeWindowHandle{WebCanvasHandle{.selector = {'#', 'c'}}});
         FAIL() << "surface_support must throw";
     }
     catch (const BackendCapabilityError& error)
     {
-        EXPECT_TRUE(contains(error.what(), "render-surface abstraction")) << error.what();
+        EXPECT_TRUE(contains(error.what(), "Vulkan has no surface for WEB_CANVAS windows")) << error.what();
     }
 }
 

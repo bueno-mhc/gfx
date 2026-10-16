@@ -101,7 +101,8 @@ struct SurfaceSupport
     std::vector<PresentMode> present_modes{};       ///< Presentation modes.
     std::uint32_t minimum_image_count = 0;          ///< Fewest swapchain images.
     std::uint32_t maximum_image_count = 0;          ///< Most swapchain images (0 = no limit).
-    Extent current_extent{};                        ///< The window's size.
+    Extent current_extent{};                        ///< The window's size in pixels (0 x 0 while minimized, or
+                                                    ///< when the swapchain chooses it, as on Wayland).
     ImageUsage supported_usage = ImageUsage::NONE;  ///< Usages swapchain images allow.
 };
 
@@ -138,6 +139,9 @@ public:
     [[nodiscard]] virtual auto format_support(Format format) const -> FormatSupport = 0;
 
     /// @brief What a swapchain for @p window can use (formats, color spaces, present modes, image counts).
+    /// @throws InvalidUsageError when @p window names no window; BackendCapabilityError when the device
+    ///         cannot present (DeviceFeature::PRESENTATION), the backend cannot present to the window's
+    ///         window system, or no queue family of the device presents to the window.
     [[nodiscard]] virtual auto surface_support(const NativeWindowHandle& window) const -> SurfaceSupport = 0;
 
     /// @brief Creates a logical device.

@@ -42,6 +42,7 @@ constexpr std::array AUTOMATIC_FEATURES{
     DeviceFeature::TEXTURE_COMPRESSION_ASTC,   DeviceFeature::EXTENDED_DYNAMIC_STATE,
     DeviceFeature::DEPTH_BOUNDS,               DeviceFeature::MULTIVIEW,
     DeviceFeature::SAMPLER_FILTER_MINMAX,      DeviceFeature::MEMORY_BUDGET,
+    DeviceFeature::PRESENTATION,               DeviceFeature::FRAME_LATENCY_WAIT,
 };
 
 /// @brief Most native queues a device uses (the deleter records the progress of each).
@@ -147,12 +148,8 @@ VulkanDevice::enable_features(const DeviceDescription& description)
     missing.erase(first, last);
     if (!missing.empty())
     {
-        const bool presentation = std::ranges::contains(missing, DeviceFeature::PRESENTATION);
         throw_unsupported("PhysicalDevice::create_device", feature_list(missing),
-                          std::format("'{}' does not support {}{}", m_physical_device.properties().name, feature_list(missing),
-                                      presentation ? " (presentation awaits the render-surface abstraction, which is not "
-                                                     "implemented yet)"
-                                                   : ""),
+                          std::format("'{}' does not support {}", m_physical_device.properties().name, feature_list(missing)),
                           "remove them from DeviceDescription::required_features (or crash_diagnostics), or choose a physical "
                           "device whose PhysicalDevice::supports() reports them");
     }
@@ -292,6 +289,8 @@ VulkanDevice::create_device(const DeviceDescription& description)
     VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceFragmentShadingRateFeaturesKHR shading_rate{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
     VkPhysicalDeviceFaultFeaturesEXT fault{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDevicePresentIdFeaturesKHR present_id{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
     if (enabled(DeviceFeature::RAY_TRACING) || enabled(DeviceFeature::RAY_QUERY))
     {
         m_extensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
@@ -349,6 +348,26 @@ VulkanDevice::create_device(const DeviceDescription& description)
         fault.deviceFault = VK_TRUE;
         fault.deviceFaultVendorBinary = capabilities.fault_features.deviceFaultVendorBinary;
         append(fault);
+    }
+
+    // Presentation: swapchains, waits for presentations, and HDR metadata when the device offers it.
+    if (enabled(DeviceFeature::PRESENTATION))
+    {
+        m_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        if (capabilities.has_extension(VK_EXT_HDR_METADATA_EXTENSION_NAME))
+        {
+            m_extensions.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME);
+            m_hdr_metadata = true;
+        }
+    }
+    if (enabled(DeviceFeature::FRAME_LATENCY_WAIT))
+    {
+        m_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        m_extensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        present_id.presentId = VK_TRUE;
+        present_wait.presentWait = VK_TRUE;
+        append(present_id);
+        append(present_wait);
     }
 
     // Stages and accesses barriers may name with these features.
@@ -680,15 +699,6 @@ VulkanDevice::bindless_usage() const noexcept -> BindlessTableUsage
     {
         return {};
     }
-}
-
-auto
-VulkanDevice::create_swapchain(const SwapchainDescription& /*description*/) -> std::unique_ptr<Swapchain>
-{
-    throw_unsupported("Device::create_swapchain", "presentation (render surface)",
-                      "swapchains need the render-surface abstraction (with SDL, GLFW and native window back ends), which is "
-                      "not implemented yet",
-                      "render offscreen and read the images back, until window surfaces are supported");
 }
 
 void

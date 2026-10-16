@@ -53,8 +53,21 @@ TEST_F(VulkanDeviceTest, AskingForAQueueThatWasNotRequestedSaysSo)
 
 TEST_F(VulkanInstanceTest, MissingRequiredFeaturesAreAllNamed)
 {
+    // Every feature the device lacks, next to one it has.
     PhysicalDevice& device = physical_device();
-    const std::array features{DeviceFeature::PRESENTATION, DeviceFeature::TIMELINE_SEMAPHORE};
+    std::vector<DeviceFeature> features;
+    for (const auto& entry : EnumerationTraits<DeviceFeature>::NAMES)
+    {
+        if (!device.supports(entry.value))
+        {
+            features.push_back(entry.value);
+        }
+    }
+    if (features.empty())
+    {
+        GTEST_SKIP() << "'" << device.properties().name << "' supports every feature";
+    }
+    features.push_back(DeviceFeature::TIMELINE_SEMAPHORE);
     try
     {
         (void)device.create_device({.required_features = features});
@@ -62,8 +75,11 @@ TEST_F(VulkanInstanceTest, MissingRequiredFeaturesAreAllNamed)
     }
     catch (const BackendCapabilityError& error)
     {
-        EXPECT_TRUE(contains(error.what(), "does not support PRESENTATION")) << error.what();
-        EXPECT_TRUE(contains(error.what(), "render-surface abstraction")) << error.what();
+        EXPECT_TRUE(contains(error.what(), std::format("does not support {}", features.front()))) << error.what();
+        for (const DeviceFeature feature : std::span{features}.first(features.size() - 1))
+        {
+            EXPECT_TRUE(contains(error.what(), to_string(feature))) << error.what();
+        }
         EXPECT_FALSE(contains(error.what(), "TIMELINE_SEMAPHORE")) << error.what();
     }
 }
@@ -171,18 +187,19 @@ TEST_F(VulkanDeviceTest, EmptySubmissionsAdvanceTheDeleter)
     EXPECT_EQ(runs, 3);
 }
 
-TEST_F(VulkanDeviceTest, SwapchainsAwaitTheRenderSurfaceAbstraction)
+TEST_F(VulkanDeviceTest, SwapchainsNeedAWindow)
 {
+    // Presentation itself is tested on real windows (tests/platform_graphics).
     try
     {
         (void)m_device->create_swapchain({});
         FAIL() << "create_swapchain must throw";
     }
-    catch (const BackendCapabilityError& error)
+    catch (const InvalidUsageError& error)
     {
-        EXPECT_TRUE(contains(error.what(), "render-surface abstraction")) << error.what();
+        EXPECT_TRUE(contains(error.what(), "names no window")) << error.what();
     }
-    EXPECT_THROW((void)m_device->queue(QueueType::GRAPHICS).present({}), BackendCapabilityError);
+    EXPECT_THROW((void)m_device->queue(QueueType::GRAPHICS).present({}), InvalidHandleError);
 }
 
 TEST_F(VulkanDeviceTest, DevicesOfBothGpusCanCoexist)

@@ -20,22 +20,6 @@ import :device;
 namespace gfx::vulkan
 {
 
-namespace
-{
-
-/// @brief A timeout in Vulkan nanoseconds (WAIT_INDEFINITELY = UINT64_MAX, negative = 0).
-auto
-timeout_nanoseconds(std::chrono::nanoseconds timeout) noexcept -> std::uint64_t
-{
-    if (timeout == WAIT_INDEFINITELY)
-    {
-        return std::numeric_limits<std::uint64_t>::max();
-    }
-    return timeout.count() < 0 ? 0 : static_cast<std::uint64_t>(timeout.count());
-}
-
-} // namespace
-
 /// @brief A fence (VkFence).
 class VulkanFence final : public Fence
 {

@@ -191,6 +191,10 @@ public:
     [[nodiscard]] virtual auto create_query_pool(const QueryPoolDescription& description) -> std::unique_ptr<QueryPool> = 0;
 
     /// @brief Creates a swapchain for a window (DeviceFeature::PRESENTATION).
+    /// @throws InvalidUsageError when the description names no window or no queue of the device;
+    ///         BackendCapabilityError when the presenting queue cannot present to the window, or the window's
+    ///         surface lacks the format and color space, presentation mode or usage (the error lists what
+    ///         it supports; PhysicalDevice::surface_support() too).
     [[nodiscard]] virtual auto create_swapchain(const SwapchainDescription& description) -> std::unique_ptr<Swapchain> = 0;
 
     // ----------------------------------------------------------------------------- frame capture

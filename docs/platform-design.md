@@ -1,6 +1,6 @@
 # gfx platform: windowing and input — architecture, design decisions and plan
 
-Status: **approved 2026-10-15; P0 to P3 committed; P4 (GLFW backend) done, awaiting validation; next P5 (graphics bridge and Vulkan presentation)**. Revisions after the user's answers:
+Status: **approved 2026-10-15; P0 to P4 committed; P5 (graphics bridge and Vulkan presentation) done, awaiting validation; next P6 (usage example and documentation)**. Revisions after the user's answers:
 events and `NativeWindowHandle` use `std::variant` (user preference over a tagged union), backends SDL3 and
 GLFW only, threading model of commercial engines (A9).
 
@@ -164,6 +164,47 @@ small header-free helper module (`gfx.platform.graphics`, built only when both l
 (recreate on `WINDOW_FRAMEBUFFER_RESIZED` or `SwapchainStatus::OUT_OF_DATE`). Implementing Vulkan
 presentation (surface, swapchain, acquire, present) is part of this work (answer 7) — without it
 the windowed example cannot run.
+
+**As built (P5, 2026-10-16).** *Vulkan presentation* (`source/graphics/backends/vulkan/`):
+
+- **Instance**: `VK_KHR_surface`, the surface extension of every window system the loader offers
+  (`VK_KHR_win32_surface` here; Xlib, XCB, Wayland and Metal when their loaders offer them) and
+  `VK_EXT_swapchain_colorspace`. Surfaces are created in a plain translation unit (`vulkan_surface.cpp`,
+  behind the std-free `vulkan_surface.hpp`: the platform headers need `<windows.h>`, defect 2), one function
+  per window system, loaded through `vkGetInstanceProcAddr`. Errors name the case: an empty handle
+  (`InvalidUsageError`), a canvas (Vulkan has no surface for it), a window system the loader does not offer,
+  or one this build lacks the headers for (`BackendCapabilityError`).
+- **Device**: `PRESENTATION` (`VK_KHR_swapchain`) and the new **`DeviceFeature::FRAME_LATENCY_WAIT`**
+  (`VK_KHR_present_id` + `VK_KHR_present_wait`) are automatic features; `VK_EXT_hdr_metadata` when offered.
+  The NVIDIA GPU has `FRAME_LATENCY_WAIT`, the Intel one does not: there `Swapchain::wait_for_frame_latency()`
+  throws `BackendCapabilityError` (the documented limitation; pace with a `FrameTimeline`).
+- **`surface_support()`**: formats and color spaces gfx names, present modes, image counts, current extent
+  (0 × 0 while minimized or when the swapchain chooses it), usages; it throws when no queue family of the
+  device presents to the window.
+- **Swapchain** (`vulkan_swapchain.cpp`, class declared in the unit): checks the presenting queue's family,
+  the format/color space, present mode and usage against the surface (the error lists what it supports);
+  images and color views are registered in the image tables (not owned, not bindless) so barriers and
+  rendering take their handles; `resize()` waits for the device to be idle and recreates with
+  `oldSwapchain`; **a window without area has no swapchain** (acquisitions report `OUT_OF_DATE`);
+  acquisition maps `TIMEOUT`/`NOT_READY` to the new `SwapchainStatus::TIMEOUT`; HDR metadata is kept across
+  recreations. `Queue::present()` checks the queue's family and the image index, chains `VkPresentIdKHR`
+  when `FRAME_LATENCY_WAIT` is enabled, presents under the native queue's mutex and maps the results.
+
+*Bridge* (`source/platform_graphics/`, target `gfx::platform_graphics`, module `gfx.platform.graphics`,
+re-exports `gfx` and `gfx.platform`, built with the platform library):
+
+- `swapchain_description_for(window, base)`: native handle + framebuffer size, the rest from `base`.
+- `requires_swapchain_recreation(event, window)` / `(status)`: the resize rule as two `constexpr` functions.
+- **`WindowSwapchain`**: owns the swapchain and the presentation semaphores. Acquisition semaphores: one per
+  image plus one; the semaphore of an image's previous acquisition is free again when the image comes back
+  (its presentation, hence the rendering that waited on the semaphore, is over); rendering semaphores: one
+  per image (reusing one per frame in flight is a validation error: the presentation engine may still hold
+  it). `acquire()` returns `std::nullopt` while the window is minimized or has no area and on timeouts;
+  recreates on framebuffer-resize events, `SUBOPTIMAL`/`OUT_OF_DATE` (retrying once) and replaces the
+  swapchain on `SURFACE_LOST`; recreation waits for the device to be idle and resets the semaphores.
+- **Tests** (`tests/platform_graphics/presentation_test.cpp`, 6 tests × SDL3/GLFW × both GPUs = 24, validation
+  layers on and required): surface support, cleared frames read back from the swapchain image (more frames
+  than images), resize, minimize/restore, frame latency (or its documented error), unsupported settings.
 
 ### A6. Event model: one value type, `std::variant` payload, no allocation
 
