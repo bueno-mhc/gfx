@@ -136,6 +136,19 @@ public:
         return m_log;
     }
 
+    /// What one clear_attachments() call cleared.
+    struct RecordedClear
+    {
+        std::vector<ClearAttachment> attachments{};
+        std::vector<ClearRectangle> rectangles{};
+    };
+
+    /// Every clear_attachments() call, in order.
+    [[nodiscard]] auto clears() const noexcept -> const std::vector<RecordedClear>&
+    {
+        return m_clears;
+    }
+
     [[nodiscard]] auto push_constant_bytes() const noexcept -> const std::vector<std::byte>&
     {
         return m_push_constant_bytes;
@@ -380,6 +393,7 @@ protected:
     void record_clear_attachments(std::span<const ClearAttachment> attachments, std::span<const ClearRectangle> rectangles) override
     {
         m_log.push_back(std::format("clear_attachments {} {}", attachments.size(), rectangles.size()));
+        m_clears.push_back({.attachments = {attachments.begin(), attachments.end()}, .rectangles = {rectangles.begin(), rectangles.end()}});
     }
 
     void record_set_stencil_reference(StencilFace faces, std::uint32_t reference) override
@@ -517,6 +531,7 @@ private:
     const PipelineLayout* m_bindless_layout = &default_bindless_layout();
     std::uint32_t m_parallel_passes = 0;
     std::vector<std::string> m_log;
+    std::vector<RecordedClear> m_clears;
     std::vector<std::byte> m_push_constant_bytes;
 };
 
@@ -1115,7 +1130,13 @@ public:
 
     [[nodiscard]] auto memory_statistics() const -> MemoryStatistics override
     {
-        return Device::memory_statistics();
+        return m_memory_statistics;
+    }
+
+    /// What memory_statistics() reports.
+    void set_memory_statistics(const MemoryStatistics& statistics) noexcept
+    {
+        m_memory_statistics = statistics;
     }
 
     [[nodiscard]] auto create_buffer_view(const BufferViewDescription& description) -> std::unique_ptr<BufferView> override
@@ -1268,6 +1289,7 @@ private:
     std::map<std::uint32_t, const PipelineLayout*> m_pipeline_layouts;
     FakeTimelineSemaphore* m_last_timeline = nullptr;
     FakeQueryPool* m_last_query_pool = nullptr;
+    MemoryStatistics m_memory_statistics{};
 };
 
 class FakePhysicalDevice final : public Fake<PhysicalDevice>

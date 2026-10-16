@@ -1,12 +1,12 @@
-# The windowed example: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation]
+# The windowed example: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation] [--metrics]
 add_executable(gfx_windowed_example windowed_example.cpp)
 target_link_libraries(gfx_windowed_example PRIVATE gfx::platform_graphics gfx::project_options)
 gfx_deploy_runtime_dependencies(gfx_windowed_example)
 
-# One automated run per platform backend: 120 frames, with the validation layers when the tests found
-# them (tests/graphics/vulkan); any validation error fails the run.
+# One automated run per platform backend: 120 frames with the metrics overlay (drawn in Debug builds), with
+# the validation layers when the tests found them (tests/graphics/vulkan); any validation error fails the run.
 if(GFX_BUILD_TESTS)
-    set(_gfx_example_arguments --frames 120)
+    set(_gfx_example_arguments --frames 120 --metrics)
     set(_gfx_example_environment "")
     if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
         list(APPEND _gfx_example_arguments --validation)

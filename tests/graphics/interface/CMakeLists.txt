@@ -8,6 +8,7 @@ gfx_add_test(gfx_interface_tests
         bindless_test.cpp
         pipeline_validation_test.cpp
         synchronization_test.cpp
+        debug_overlay_test.cpp
     MODULES
         fake_backend.cppm
     LIBRARIES gfx::gfx)

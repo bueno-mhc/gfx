@@ -3,12 +3,15 @@
 //
 // A square moves with the "move" action (W A S D, the arrow keys or a gamepad's left stick) and hops
 // on "jump" (Space or the gamepad's South button). "pause" (Escape or Start) opens a menu context that
-// blocks gameplay: there "quit" (Return or South) closes the window, "pause" resumes. "reset_size"
-// (Backspace or Back) gives the window its initial size again.
+// blocks gameplay: there "quit" (Return or South) closes the window, "resume" (Escape, Start or East)
+// goes back. "reset_size" (Backspace or Back) gives the window its initial size again. In Debug builds,
+// "toggle_metrics" (F3) shows or hides the frame metrics: frame rate, frame times, GPU time, commands
+// and memory.
 //
-// Usage: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation]
+// Usage: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation] [--metrics]
 //   --frames N     closes after N presented frames (automated runs; the window then does not take the focus)
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
+//   --metrics      shows the frame metrics from the start (Debug builds)
 import std;
 import gfx.platform.graphics; // gfx (graphics), gfx.platform (windows and input), and the bridge between them
 
@@ -27,8 +30,10 @@ constexpr auto INPUT = make_input_schema(
     actions(action("move", ActionValueType::AXIS_2D),
             action("jump"),
             action("pause"),
+            action("resume"),
             action("quit"),
-            action("reset_size")),
+            action("reset_size"),
+            action("toggle_metrics")),
     context("gameplay",
             bind("move"_action, composite_2d(Key::W, Key::S, Key::A, Key::D)),
             bind("move"_action, composite_2d(Key::UP, Key::DOWN, Key::LEFT, Key::RIGHT)),
@@ -39,16 +44,22 @@ constexpr auto INPUT = make_input_schema(
             bind("pause"_action, GamepadButton::START),
             bind("reset_size"_action, Key::BACKSPACE),
             bind("reset_size"_action, GamepadButton::BACK)),
-    // The menu sits above gameplay and hides it while active. "pause" is bound in both contexts: one
-    // action keeps its state when the menu opens, so the key that opened the menu does not close it.
+    // The menu sits above gameplay and hides it while active. Escape both opens it (gameplay's "pause")
+    // and closes it (the menu's "resume"): contexts ignore keys already held when they start reading
+    // them (ContextDescription::ignore_held_inputs), so the press that opens the menu does not also close it.
     context("menu",
             {.priority = 10, .consumes_input = true, .blocks_lower_contexts = true},
-            bind("pause"_action, Key::ESCAPE),
-            bind("pause"_action, GamepadButton::START),
+            bind("resume"_action, Key::ESCAPE),
+            bind("resume"_action, GamepadButton::START),
+            bind("resume"_action, GamepadButton::EAST),
             bind("quit"_action, Key::RETURN),
-            bind("quit"_action, GamepadButton::SOUTH)));
+            bind("quit"_action, GamepadButton::SOUTH)),
+    // Debug keys, above everything and always active.
+    context("debug",
+            {.priority = 100},
+            bind("toggle_metrics"_action, Key::F3)));
 
-static_assert(INPUT.actions.size() == 5 && INPUT.contexts.size() == 2);
+static_assert(INPUT.actions.size() == 7 && INPUT.contexts.size() == 3);
 
 // ------------------------------------------------------------------------------------------------- settings
 
@@ -68,6 +79,7 @@ struct Options
     std::optional<std::size_t> physical_device{};
     std::optional<std::uint64_t> frames{};
     bool validation = false;
+    bool metrics = false;
 };
 
 /// The command line, or std::nullopt after printing the usage.
@@ -102,9 +114,14 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.validation = true;
         }
+        else if (argument == "--metrics")
+        {
+            options.metrics = true;
+        }
         else
         {
-            std::println(std::cerr, "usage: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation]");
+            std::println(std::cerr, "usage: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation] "
+                                    "[--metrics]");
             return std::nullopt;
         }
     }
@@ -242,10 +259,24 @@ run(const Options& options) -> int
     gfx::FrameCommandPools command_pools{*device, {.queue_type = gfx::QueueType::GRAPHICS, .debug_name = "example commands"},
                                          timeline.timeline(), FRAMES_IN_FLIGHT};
 
+    // Debug builds: frame metrics in an overlay (F3), with the GPU time of each frame when timestamps work.
+    gfx::FrameMetrics metrics{*device};
+    gfx::DebugOverlay overlay{{.visible = options.metrics}};
+    std::optional<gfx::GpuProfiler> profiler;
+    if (gfx::FrameMetrics::enabled() && physical_device.supports(gfx::DeviceFeature::TIMESTAMP_QUERY))
+    {
+        profiler.emplace(*device, FRAMES_IN_FLIGHT);
+    }
+    if (!gfx::DebugOverlay::enabled())
+    {
+        std::println("the frame metrics (F3) exist in Debug builds only");
+    }
+
     // ---------------------------------------------------------------------------------- the loop
 
     InputSystem input{INPUT};
     const ContextActivation gameplay = input.activate_context("gameplay"_context);
+    const ContextActivation debug = input.activate_context("debug"_context);
     Game game;
     std::uint64_t presented = 0;
     auto previous_time = std::chrono::steady_clock::now();
@@ -278,17 +309,19 @@ run(const Options& options) -> int
         previous_time = now;
         if (frame.was_action_just_pressed("pause"_action))
         {
-            // The menu opens above gameplay, or closes.
-            if (game.menu)
-            {
-                game.menu.reset();
-                window->set_title(TITLE);
-            }
-            else
-            {
-                game.menu = input.activate_context("menu"_context);
-                window->set_title(PAUSED_TITLE);
-            }
+            // The menu opens above gameplay...
+            game.menu = input.activate_context("menu"_context);
+            window->set_title(PAUSED_TITLE);
+        }
+        if (frame.was_action_just_pressed("resume"_action))
+        {
+            // ...and closes again.
+            game.menu.reset();
+            window->set_title(TITLE);
+        }
+        if (frame.was_action_just_pressed("toggle_metrics"_action))
+        {
+            overlay.toggle();
         }
         if (frame.was_action_just_pressed("quit"_action))
         {
@@ -330,6 +363,7 @@ run(const Options& options) -> int
         }
         const std::uint64_t frame_number = timeline.begin_frame();
         command_pools.begin_frame(frame_number);
+        metrics.begin_frame();
 
         // The square, in pixels, inside the image.
         const gfx::Extent extent = presentation.extent();
@@ -340,30 +374,55 @@ run(const Options& options) -> int
         const auto top = static_cast<std::int32_t>(std::clamp((game.position.y - hop - SQUARE_SIZE / 2) * scale, 0.0F,
                                                               static_cast<float>(extent.height - std::min(side, extent.height))));
 
-        // Record: clear the image, clear the square's rectangle, hand the image to presentation.
+        // Record: clear the image, clear the square's rectangle, draw the metrics (when shown), hand the
+        // image to presentation.
         gfx::CommandBuffer& commands = command_pools.command_buffer();
         {
             gfx::GraphicsRecorder recorder{commands};
-            const std::array to_attachment{
-                gfx::image_barrier(image->image.image, gfx::ResourceState::UNDEFINED, gfx::ResourceState::COLOR_ATTACHMENT_WRITE)};
-            recorder.barrier({.image_barriers = to_attachment});
+            const auto record = [&]
             {
-                const std::array<float, 4> background = game.menu ? std::array{0.01F, 0.01F, 0.01F, 1.0F} : std::array{0.02F, 0.03F, 0.08F, 1.0F};
-                const std::array attachments{gfx::ColorAttachment{.view = image->image.view, .clear_color = background}};
-                gfx::RenderingScope scope = recorder.begin_rendering({
-                    .area = {.width = extent.width, .height = extent.height},
-                    .color_attachments = attachments,
-                    .debug_name = "scene",
-                });
-                const std::array<float, 4> color = game.menu ? std::array{0.2F, 0.2F, 0.2F, 1.0F} : std::array{1.0F, 0.3F, 0.02F, 1.0F};
-                const std::array square{gfx::ClearAttachment{.color = color}};
-                const std::array area{gfx::ClearRectangle{.area = {.x = left, .y = top, .width = side, .height = side}}};
-                scope.clear_attachments(square, area);
+                const std::array to_attachment{
+                    gfx::image_barrier(image->image.image, gfx::ResourceState::UNDEFINED, gfx::ResourceState::COLOR_ATTACHMENT_WRITE)};
+                recorder.barrier({.image_barriers = to_attachment});
+                {
+                    const std::array<float, 4> background = game.menu ? std::array{0.01F, 0.01F, 0.01F, 1.0F} : std::array{0.02F, 0.03F, 0.08F, 1.0F};
+                    const std::array attachments{gfx::ColorAttachment{.view = image->image.view, .clear_color = background}};
+                    const gfx::Rectangle render_area{.width = extent.width, .height = extent.height};
+                    gfx::RenderingScope scope = recorder.begin_rendering({
+                        .area = render_area,
+                        .color_attachments = attachments,
+                        .debug_name = "scene",
+                    });
+                    const std::array<float, 4> color = game.menu ? std::array{0.2F, 0.2F, 0.2F, 1.0F} : std::array{1.0F, 0.3F, 0.02F, 1.0F};
+                    const std::array square{gfx::ClearAttachment{.color = color}};
+                    const std::array area{gfx::ClearRectangle{.area = {.x = left, .y = top, .width = side, .height = side}}};
+                    scope.clear_attachments(square, area);
+                    if (overlay.is_visible())
+                    {
+                        // The previous frame's metrics, at twice the window's content scale.
+                        overlay.set_scale(static_cast<std::uint32_t>(std::lround(2.0F * window->content_scale())));
+                        overlay.draw(scope, render_area, metrics.text());
+                    }
+                }
+                const std::array to_present{
+                    gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE, gfx::ResourceState::PRESENT)};
+                recorder.barrier({.image_barriers = to_present});
+            };
+
+            // With the GPU time of the whole frame when the profiler exists (it reads the frame the GPU finished).
+            if (profiler)
+            {
+                profiler->begin_frame(frame_number, recorder);
+                metrics.set_gpu_timings(profiler->timings());
+                const gfx::GpuProfilerScope timing = profiler->scope(recorder, "frame");
+                record();
             }
-            const std::array to_present{
-                gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE, gfx::ResourceState::PRESENT)};
-            recorder.barrier({.image_barriers = to_present});
+            else
+            {
+                record();
+            }
         }
+        metrics.count(commands);
 
         // Submit: wait for the image, signal the presentation and the frame timeline; then present.
         const std::array command_buffers{commands.handle()};

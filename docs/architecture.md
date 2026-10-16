@@ -242,7 +242,12 @@ from `ResourceState` pairs (`image_barrier(image, before, after)`).
 Per-frame helpers built on the interfaces (backend-independent): `FrameTimeline` (frame N signals N on a
 timeline semaphore; the CPU runs at most `frames_in_flight` frames ahead), `FrameCommandPools` (one pool
 per thread and frame in flight), `TransientBufferAllocator` (lock-free bump allocation in persistently
-mapped memory), `Uploader` (staged uploads with barriers), `GpuProfiler` (timestamp scopes).
+mapped memory), `Uploader` (staged uploads with barriers), `GpuProfiler` (timestamp scopes), and, in Debug
+builds only (no-ops elsewhere), `FrameMetrics` (frame rate, CPU frame times over a period, the frame's
+`CommandStatistics` summed over its command buffers, GPU timings, device memory) and `DebugOverlay`
+(lines of text in a rendering pass: a built-in 5 x 7 font, checked at compile time, drawn as two
+`clear_attachments()` calls - one for the panel, one for every lit run of every glyph row - so it needs
+no shader, pipeline or texture and works with any color format).
 
 ### 3.3 Vulkan backend
 
@@ -426,7 +431,7 @@ flowchart LR
     schema["InputSchema<br/>(consteval: actions, contexts,<br/>default bindings)"] --> system
     devices --> system["InputSystem::update()"]
     subgraph evaluation["per player"]
-        order["active contexts:<br/>priority, then latest activation"] --> bindings["bindings: read sources<br/>(consumed sources and blocked<br/>contexts read nothing;<br/>held chords hide their key)"]
+        order["active contexts:<br/>priority, then latest activation"] --> bindings["bindings: read sources<br/>(consumed sources and blocked<br/>contexts read nothing;<br/>held chords hide their key;<br/>inputs held when a context<br/>starts reading them wait<br/>for a release)"]
         bindings --> shape["dead zone, curve, inversion,<br/>scale, swizzle, normalize"]
         shape --> triggers["triggers: down, hold, tap"]
         triggers --> states["action states:<br/>largest magnitude wins;<br/>pressed, just pressed/released,<br/>value, duration"]
@@ -439,6 +444,11 @@ flowchart LR
   (priority, consumes input, blocks lower contexts) and bindings. A wrong schema is a compile error whose
   message names the problem (`input_schema_error_two_actions_have_the_same_name()`).
 - **Contexts** are activated per player and stay active while the returned `ContextActivation` lives.
+- **Held inputs** (`ContextDescription::ignore_held_inputs`, on by default): each binding remembers which of
+  its digital sources it could read in the previous frame; a source it starts to read (its context was
+  activated, a context above stopped blocking or consuming it, text input ended) while held since an
+  earlier frame reads as released until it is released. Presses that begin in the frame count; sticks,
+  triggers and mouse motion are never ignored.
 - **Players** own contexts, a gamepad (assigned automatically on first use or explicitly) and their action
   states; the keyboard and mouse belong to one player.
 - **Rebinding**: `rebind`, `add_binding`, `remove_binding`, `capture_next_binding` (the captured press

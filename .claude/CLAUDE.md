@@ -107,14 +107,28 @@ Original hard requirements (from the user's initial specification):
 - **Windowed example + docs (P6, 2026-10-16)**: `examples/windowed/windowed_example.cpp` (option
   `GFX_BUILD_EXAMPLES`; `examples/` added after `tests/` so `GFX_VULKAN_VALIDATION_LAYER_DIRECTORY` is known;
   CTest `WindowedExample.{SDL3,GLFW}` label `example`: `--frames 120 --validation`); square drawn with
-  `clear_attachments`; one `pause` action bound in gameplay and menu (a context activated while its key is
-  held sees a new press — possible `ContextDescription::ignore_held_inputs`, user to decide). SDL3 windows
+  `clear_attachments`; Escape opens the menu (gameplay "pause") and closes it (menu "resume"); F3
+  "toggle_metrics" in an always-active "debug" context (priority 100); `--metrics`. SDL3 windows
   emit WINDOW_RESIZED / WINDOW_FRAMEBUFFER_RESIZED only when the size changed (`report_size`,
   `report_framebuffer_size`; SDL reports unchanged sizes when a window is first shown); WindowSwapchain
   ignores framebuffer events equal to its extent. `docs/architecture.md`: 13 Mermaid diagrams (checked by
   rendering with Mermaid 10.9.1 and 11.4.1 from a local http.server page — local files are static snapshots
   in the browser pane). README: platform section + use cases + Examples; snippets compiled in a temporary
   target. `.vscode/launch.json`: "gfx: Windowed example" (asks for the backend).
+- **Follow-up after P6 (user, 2026-10-16)**: **`ContextDescription::ignore_held_inputs`** (default true,
+  Unreal's "ignore all pressed keys until release"): per binding per source (`PlayerBinding::readable_sources`
+  / `ignored_sources` / `readable_frame`; `InputSystemState::update_ignored_sources`, `held_since_earlier_frame`
+  = down && !pressed this frame, `can_read_digital`): a digital source that becomes readable (activation,
+  unblocked, no longer consumed, text input ended) while held since an earlier frame reads as released until
+  released; analog never ignored. **Frame metrics, Debug only** (no-ops in Release, `enabled()`):
+  `gfx.interface:frame_metrics` (`FrameMetrics`, `FrameMetricsDescription{averaging_period 500ms}`,
+  `FrameMetricsSnapshot`; begin_frame(now)/count(command buffer)/set_gpu_timings/snapshot/text) and
+  `:debug_overlay` (`DebugOverlay`, `DebugOverlayDescription{visible=false, scale 2, position, colors}`;
+  draw(RenderingCommands&, area, lines) = 2 clear_attachments calls (panel + glyph runs); font table
+  `gfx::debug_font::PATTERNS` → consteval `GLYPHS`, 5x7, printable ASCII, others '?'; static constexpr
+  GLYPH_WIDTH/HEIGHT/ADVANCE, LINE_ADVANCE, PADDING). `CommandStatistics::operator+=`. Fake backend:
+  `FakeCommandBuffer::clears()`, `FakeDevice::set_memory_statistics()`. Font preview rendered with a
+  stdlib-only Python PNG script from the table (scratchpad) to check legibility.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -498,11 +512,13 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519) committed; **P6 (windowed example, README platform section, docs/architecture.md) done, awaiting validation** (433 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) done, awaiting validation** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **433**, all passing in Debug and Release, 2026-10-16 (after P6: + 2 example runs
+Test count at last report: **451**, all passing in Debug and Release, 2026-10-16 (after the P6 follow-up:
++ 5 held-input tests, 9 FrameMetrics/DebugOverlay unit tests (7 skip in Release), overlay read back from a
+swapchain image × 4 (skip in Release)). After P6: 433 (+ 2 example runs
 `WindowedExample.{SDL3,GLFW}` and `OnlySizesThatChangeAreReported` × 2). After P5: 429 (+ 24 presentation
 tests = 6 × SDL3/GLFW × NVIDIA/Intel, visible windows, validation required). **Check `CMAKE_BUILD_TYPE` in
 build/release/CMakeCache.txt** before trusting a Release run: during P5 it was found set to Debug (cause

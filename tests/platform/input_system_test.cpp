@@ -230,11 +230,13 @@ TEST_F(InputSystemTest, HigherContextsConsumeTheirSourcesAndBlockingContextsHide
         EXPECT_TRUE(paused.was_action_just_released("move"_action));
     }
 
-    // The menu popped: the keys still held reach gameplay again.
+    // The menu popped: Space, pressed while it blocked gameplay, counts for gameplay once pressed again
+    // (ContextDescription::ignore_held_inputs).
     EXPECT_FALSE(m_input.is_context_active("menu"_context));
     const InputFrame& resumed = step();
     EXPECT_TRUE(resumed.was_action_just_released("pause"_action));
-    EXPECT_TRUE(resumed.was_action_just_pressed("jump"_action));
+    EXPECT_FALSE(resumed.is_action_pressed("jump"_action));
+    EXPECT_TRUE(step(Events{}.key_up(Key::SPACE).key_down(Key::SPACE)).was_action_just_pressed("jump"_action));
 }
 
 TEST_F(InputSystemTest, ActivationsAreRaiiLayers)
@@ -273,9 +275,96 @@ TEST_F(InputSystemTest, TextInputSilencesKeyboardBindingsOutsideTextContexts)
     EXPECT_TRUE(typing.is_action_pressed("send_message"_action));
     EXPECT_TRUE(typing.is_action_pressed("shoot"_action));
 
-    // Text input over: the held key reaches gameplay.
+    // Text input over: the key held while typing counts for gameplay once pressed again.
     m_input.set_text_input_active(false);
-    EXPECT_TRUE(step().was_action_just_pressed("jump"_action));
+    EXPECT_FALSE(step().is_action_pressed("jump"_action));
+    EXPECT_TRUE(step(Events{}.key_up(Key::SPACE).key_down(Key::SPACE)).was_action_just_pressed("jump"_action));
+}
+
+TEST_F(InputSystemTest, ContextsIgnoreInputsHeldWhenTheyStartReadingThem)
+{
+    // Escape, held when the menu opens, presses the menu's "pause" only once pressed again.
+    step(Events{}.key_down(Key::ESCAPE));
+    {
+        ContextActivation menu = m_input.activate_context("menu"_context);
+        EXPECT_FALSE(step().is_action_pressed("pause"_action));
+        step(Events{}.key_up(Key::ESCAPE));
+        EXPECT_TRUE(step(Events{}.key_down(Key::ESCAPE)).was_action_just_pressed("pause"_action));
+
+        // A key and a mouse button pressed while the menu blocks gameplay...
+        step(Events{}.key_down(Key::SPACE).mouse_down(MouseButton::LEFT));
+    }
+
+    // ...count for gameplay once pressed again, after the menu is gone.
+    const InputFrame& resumed = step();
+    EXPECT_FALSE(resumed.is_action_pressed("jump"_action));
+    EXPECT_FALSE(resumed.is_action_pressed("shoot"_action));
+    const InputFrame& again = step(Events{}.key_up(Key::SPACE).key_down(Key::SPACE).mouse_up(MouseButton::LEFT).mouse_down(MouseButton::LEFT));
+    EXPECT_TRUE(again.was_action_just_pressed("jump"_action));
+    EXPECT_TRUE(again.was_action_just_pressed("shoot"_action));
+}
+
+TEST_F(InputSystemTest, APressInTheFrameAContextStartsReadingCounts)
+{
+    // Activated before the update that brings the press: the press is new.
+    ContextActivation menu = m_input.activate_context("menu"_context);
+    EXPECT_TRUE(step(Events{}.key_down(Key::ESCAPE)).was_action_just_pressed("pause"_action));
+}
+
+TEST_F(InputSystemTest, OnlyTheHeldSourcesOfABindingAreIgnored)
+{
+    // W, held for the vehicle (which consumes it), is ignored by the gameplay composite once the vehicle
+    // is left; D, pressed then, moves.
+    {
+        ContextActivation vehicle = m_input.activate_context("vehicle"_context);
+        EXPECT_FLOAT_EQ(step(Events{}.key_down(Key::W)).get_action_value("accelerate"_action), 1.0F);
+    }
+    const gfx::Vector2 move = step(Events{}.key_down(Key::D)).get_action_value_2d("move"_action);
+    EXPECT_FLOAT_EQ(move.x, 1.0F);
+    EXPECT_FLOAT_EQ(move.y, 0.0F);
+}
+
+TEST_F(InputSystemTest, HeldGamepadButtonsAreIgnoredButNotAxes)
+{
+    // Pressed while the menu blocks gameplay: the button waits for a new press, the trigger counts at once.
+    const GamepadHandle gamepad = GamepadIssuer::gamepad(0);
+    {
+        ContextActivation menu = m_input.activate_context("menu"_context);
+        const InputFrame& paused = step(Events{}
+                                            .gamepad_connected(gamepad)
+                                            .gamepad_down(gamepad, GamepadButton::SOUTH)
+                                            .gamepad_axis(gamepad, GamepadAxis::RIGHT_TRIGGER, 1.0F));
+        EXPECT_FALSE(paused.is_action_pressed("jump"_action));
+        EXPECT_FALSE(paused.is_action_pressed("accelerate"_action));
+    }
+    const InputFrame& resumed = step();
+    EXPECT_FALSE(resumed.is_action_pressed("jump"_action));
+    EXPECT_FLOAT_EQ(resumed.get_action_value("accelerate"_action), 1.0F);
+    step(Events{}.gamepad_up(gamepad, GamepadButton::SOUTH));
+    EXPECT_TRUE(step(Events{}.gamepad_down(gamepad, GamepadButton::SOUTH)).was_action_just_pressed("jump"_action));
+}
+
+/// Contexts that read held inputs at once (ignore_held_inputs = false).
+constexpr auto IMMEDIATE_SCHEMA = make_input_schema(
+    actions(action("jump"),
+            action("pause")),
+    context("gameplay", {.ignore_held_inputs = false},
+            bind("jump"_action, Key::SPACE)),
+    context("menu", {.priority = 10, .blocks_lower_contexts = true, .ignore_held_inputs = false},
+            bind("pause"_action, Key::ESCAPE)));
+
+TEST(InputSystemHeldInputsTest, ContextsMayReadHeldInputsAtOnce)
+{
+    // Keys held before the menu opens press its actions at once, and gameplay's again when it closes.
+    InputSystem input{IMMEDIATE_SCHEMA};
+    const ContextActivation gameplay = input.activate_context("gameplay"_context);
+    EXPECT_TRUE(input.update(Events{}.key_down(Key::ESCAPE).key_down(Key::SPACE).span(), 16ms).is_action_pressed("jump"_action));
+    std::optional<ContextActivation> menu = input.activate_context("menu"_context);
+    const InputFrame& paused = input.update(Events{}.span(), 32ms);
+    EXPECT_TRUE(paused.was_action_just_pressed("pause"_action));
+    EXPECT_FALSE(paused.is_action_pressed("jump"_action));
+    menu.reset();
+    EXPECT_TRUE(input.update(Events{}.span(), 48ms).was_action_just_pressed("jump"_action));
 }
 
 TEST_F(InputSystemTest, LosingFocusReleasesKeysAndButtons)

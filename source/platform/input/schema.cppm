@@ -55,6 +55,15 @@ struct ContextDescription
     bool consumes_input = true;                    ///< Sources bound here are hidden from lower-priority contexts.
     bool blocks_lower_contexts = false;            ///< Lower-priority contexts read nothing (modal menus).
     bool reads_keyboard_during_text_input = false; ///< Keyboard bindings keep working while text input is active.
+    bool ignore_held_inputs = true;                ///< Inputs already held when the context starts reading them
+                                                   ///< count only once released and pressed again (see below).
+
+    // ignore_held_inputs: a context starts reading an input when it is activated, when a context above
+    // stops blocking it or consuming that input, or when text input ends. A key, mouse button or gamepad
+    // button held from an earlier frame at that moment reads as released in this context until it is
+    // released, so the key that opens a menu does not also press the menu's actions, and the key that
+    // closes it does not press gameplay's (Unreal's "ignore all pressed keys until release"). A press
+    // that begins in the same frame counts. Analog inputs (sticks, triggers, mouse motion) are not ignored.
 
     constexpr bool operator==(const ContextDescription&) const = default;
 };

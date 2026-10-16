@@ -71,6 +71,14 @@ struct PresentedFrame
     Extent extent{};
     std::uint32_t first_pixel = 0;
     std::uint32_t last_pixel = 0;
+    std::vector<std::uint32_t> pixels{};
+
+    /// The pixel at (@p x, @p y).
+    [[nodiscard]] auto pixel(std::uint32_t x,
+                             std::uint32_t y) const -> std::uint32_t
+    {
+        return pixels.at(std::size_t{y} * extent.width + x);
+    }
 };
 
 /// A visible window of the backend under test on the device under test.
@@ -181,10 +189,13 @@ protected:
         return condition();
     }
 
-    /// Acquires an image, clears it to @p color, copies it for reading, presents it and waits for the
-    /// GPU. std::nullopt when no image was acquired (minimized window).
+    /// Acquires an image, clears it to @p color (then draws @p lines with @p overlay, if given), copies it
+    /// for reading, presents it and waits for the GPU. std::nullopt when no image was acquired (minimized
+    /// window).
     auto present_cleared_frame(WindowSwapchain& presentation,
-                               const ClearColor& color) -> std::optional<PresentedFrame>
+                               const ClearColor& color,
+                               gfx::DebugOverlay* overlay = nullptr,
+                               std::span<const std::string> lines = {}) -> std::optional<PresentedFrame>
     {
         const std::optional<SwapchainFrame> frame = presentation.acquire(5s);
         if (!frame)
@@ -208,10 +219,12 @@ protected:
             recorder.barrier({.image_barriers = to_attachment});
             {
                 const std::array attachments{gfx::ColorAttachment{.view = frame->image.view, .clear_color = color.value}};
-                const gfx::RenderingScope scope = recorder.begin_rendering({
-                    .area = {.width = extent.width, .height = extent.height},
-                    .color_attachments = attachments,
-                });
+                const gfx::Rectangle area{.width = extent.width, .height = extent.height};
+                gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
+                if (overlay != nullptr)
+                {
+                    overlay->draw(scope, area, lines);
+                }
             }
             const std::array to_copy{gfx::image_barrier(frame->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE,
                                                         gfx::ResourceState::TRANSFER_SOURCE)};
@@ -239,17 +252,26 @@ protected:
         // What the window shows.
         readback->invalidate_mapped_range();
         const std::span<std::uint32_t> pixels = readback->mapped_elements<std::uint32_t>();
-        return PresentedFrame{.status = status, .extent = extent, .first_pixel = pixels.front(), .last_pixel = pixels.back()};
+        return PresentedFrame{
+            .status = status,
+            .extent = extent,
+            .first_pixel = pixels.front(),
+            .last_pixel = pixels.back(),
+            .pixels = {pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(std::size_t{extent.width} * extent.height)},
+        };
     }
 
-    /// Presents frames cleared to @p color until one is acquired (pumping events in between), for at
-    /// most @p timeout.
+    /// Presents frames cleared to @p color (with @p overlay's @p lines, if given) until one is acquired
+    /// (pumping events in between), for at most @p timeout.
     auto present_when_possible(WindowSwapchain& presentation,
                                const ClearColor& color,
+                               gfx::DebugOverlay* overlay = nullptr,
+                               std::span<const std::string> lines = {},
                                std::chrono::milliseconds timeout = 3000ms) -> std::optional<PresentedFrame>
     {
         std::optional<PresentedFrame> frame;
-        (void)pump_until(presentation, [&] { return (frame = present_cleared_frame(presentation, color)).has_value(); }, timeout);
+        (void)pump_until(presentation, [&] { return (frame = present_cleared_frame(presentation, color, overlay, lines)).has_value(); },
+                         timeout);
         return frame;
     }
 
@@ -354,6 +376,32 @@ TEST_P(PresentationTest, FrameLatencyWaitsForPresentation)
         ASSERT_TRUE(present_when_possible(presentation, color).has_value());
     }
     EXPECT_EQ(presentation.swapchain().wait_for_frame_latency(5s), gfx::WaitStatus::SIGNALED);
+}
+
+TEST_P(PresentationTest, TheDebugOverlayIsDrawnIntoTheWindow)
+{
+    if constexpr (!gfx::DEBUG_BUILD)
+    {
+        GTEST_SKIP() << "the debug overlay draws in Debug builds only";
+    }
+
+    // '|' at scale 4 from the corner: a blue panel 44 pixels wide, a green bar at x 20 to 23 from y 12 on.
+    WindowSwapchain presentation{*m_device, *m_window, swapchain_description()};
+    gfx::DebugOverlay overlay{{
+        .visible = true,
+        .scale = 4,
+        .position = {.x = 0, .y = 0, .z = 0},
+        .text_color = GREEN.value,
+        .background_color = BLUE.value,
+    }};
+    const std::vector<std::string> lines{"|"};
+    const std::optional<PresentedFrame> frame = present_when_possible(presentation, RED, &overlay, lines);
+    ASSERT_TRUE(frame.has_value());
+    const gfx::Format format = presentation.format();
+    EXPECT_EQ(frame->pixel(0, 0), expected_pixel(format, BLUE));
+    EXPECT_EQ(frame->pixel(21, 30), expected_pixel(format, GREEN));
+    EXPECT_EQ(frame->pixel(10, 30), expected_pixel(format, BLUE));
+    EXPECT_EQ(frame->pixel(60, 5), expected_pixel(format, RED));
 }
 
 TEST_P(PresentationTest, UnsupportedSettingsAreNamed)

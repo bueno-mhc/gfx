@@ -134,6 +134,7 @@ TEST(InputSchemaTest, TheDesignDocumentSchemaCompiles)
                 bind("back"_action, Key::ESCAPE)));
     static_assert(GAME_INPUT.actions.size() == 5);
     static_assert(!GAME_INPUT.contexts[1].description.reads_keyboard_during_text_input);
+    static_assert(GAME_INPUT.contexts[1].description.ignore_held_inputs);
     const InputSystem input{GAME_INPUT, {.players = 2}};
     EXPECT_EQ(input.player_count(), 2U);
 }

@@ -163,6 +163,40 @@ safe.
 Set it with `InstanceDescription::validation_level`; `enable_validation` additionally enables the
 native API's validation (Vulkan validation layers, Direct3D 12 debug layer).
 
+### Frame metrics (Debug builds)
+
+`FrameMetrics` measures each frame: the frame rate and CPU frame times (average, minimum and maximum
+over half a second), the commands of the frame's command buffers (draws, indirect draws, dispatches,
+ray traces, pipeline, descriptor-set and vertex-buffer binds, push constants, barriers, transfers,
+passes), GPU timings from a `GpuProfiler`, and device memory. `DebugOverlay` draws them over the
+frame with a built-in pixel font (cleared rectangles: no shader, pipeline or font texture), and is
+shown or hidden with `toggle()`. Both exist only for **Debug builds**: in other builds they do nothing
+(`enabled()` is false) and code using them compiles unchanged.
+
+```cpp
+gfx::FrameMetrics metrics{*device};
+gfx::DebugOverlay overlay;                                        // hidden until toggle()
+gfx::GpuProfiler profiler{*device, FRAMES_IN_FLIGHT};
+
+// Each frame:
+metrics.begin_frame();                                            // closes the previous frame
+profiler.begin_frame(frame_number, recorder);
+metrics.set_gpu_timings(profiler.timings());
+{
+    const gfx::GpuProfilerScope timing = profiler.scope(recorder, "frame");
+    gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
+    // ... the frame ...
+    overlay.draw(scope, area, metrics.text());                    // last in the pass
+}
+metrics.count(commands);                                          // after recording each command buffer
+if (frame.was_action_just_pressed("toggle_metrics"_action))       // e.g. F3 in an always-active context
+{
+    overlay.toggle();
+}
+```
+
+The overlay shows the previous frame's numbers, its own two clears included (as transfers).
+
 ### Recording in parallel
 
 Command buffers are not thread-safe, like every native command buffer: threads record into their own
@@ -272,6 +306,7 @@ constexpr auto INPUT = make_input_schema(
     actions(action("move", ActionValueType::AXIS_2D),
             action("jump"),
             action("pause"),
+            action("resume"),
             action("quit")),
     context("gameplay",
             bind("move"_action, composite_2d(Key::W, Key::S, Key::A, Key::D)),        // up, down, left, right
@@ -283,7 +318,7 @@ constexpr auto INPUT = make_input_schema(
             bind("pause"_action, Key::ESCAPE),
             bind("pause"_action, GamepadButton::START)),
     context("menu", {.priority = 10, .consumes_input = true, .blocks_lower_contexts = true},
-            bind("pause"_action, Key::ESCAPE),                                         // closes the menu again
+            bind("resume"_action, Key::ESCAPE),                                        // Escape closes the menu again
             bind("quit"_action, Key::RETURN),
             bind("quit"_action, GamepadButton::SOUTH)));
 // A duplicate action, a binding of an undeclared action, a 2D composite on a button action or a hold
@@ -306,7 +341,12 @@ Bindings can be single inputs, chords (`chord(Key::S, KeyModifier::CONTROL)` doe
 gamepad chords, mouse axes, 1D and 2D composites and sticks, with dead zones (axial, radial, scaled
 radial), response curves, inversion, scaling, swizzling, and hold or tap triggers
 (`single(GamepadButton::WEST).held_for(500ms)`). The highest-priority active context sees an input
-first; it may consume it or block every context below it.
+first; it may consume it or block every context below it. A context ignores keys and buttons that are
+already held when it starts reading them (it is activated, a context above it goes away, or text input
+ends) until they are released: the Escape that opens a menu does not also press the menu's "resume", and
+the Escape that closes it does not press gameplay's "pause" (`ContextDescription::ignore_held_inputs`,
+on by default, like Unreal's "ignore all pressed keys until release"; sticks and triggers are never
+ignored).
 
 ### Presenting to a window
 
@@ -343,21 +383,18 @@ The [windowed example](#examples) shows the whole loop, with frame pacing (`Fram
 ### Use cases
 
 **A pause menu above gameplay.** The menu context has a higher priority and blocks the contexts below
-it, so gameplay actions read nothing while it is open. An action bound in both contexts keeps its
-state across the switch, so the key that opens the menu does not also close it:
+it, so gameplay actions read nothing while it is open. One key may open and close it: the press that
+opens the menu is ignored by the menu until the key is released (`ignore_held_inputs`):
 
 ```cpp
 std::optional<ContextActivation> menu;
-if (frame.was_action_just_pressed("pause"_action))
+if (frame.was_action_just_pressed("pause"_action))              // gameplay: Escape
 {
-    if (menu)
-    {
-        menu.reset();                                           // back to gameplay
-    }
-    else
-    {
-        menu = input.activate_context("menu"_context);          // above gameplay until reset
-    }
+    menu = input.activate_context("menu"_context);              // above gameplay until reset
+}
+if (frame.was_action_just_pressed("resume"_action))             // menu: Escape as well
+{
+    menu.reset();
 }
 ```
 
@@ -444,18 +481,20 @@ beforehand. One backend is active at a time (both pump the same thread's message
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
-input schema with two contexts declared at compile time, and Vulkan frames presented through
+input schema with three contexts declared at compile time, and Vulkan frames presented through
 `WindowSwapchain`. A square moves with W A S D, the arrow keys or a gamepad's left stick; Space or
-the South button makes it hop; Escape or Start opens a pause menu where Return or South quits;
-Backspace restores the initial size.
+the South button makes it hop; Escape or Start opens a pause menu where Return or South quits and
+Escape, Start or East resumes; Backspace restores the initial size; in Debug builds, F3 shows or hides
+the frame metrics.
 
 ```bash
 build/debug/examples/windowed/gfx_windowed_example.exe --backend glfw
 ```
 
 `--backend sdl3|glfw` picks the platform backend, `--device <index>` the GPU, `--validation` enables
-the Vulkan validation layers (the exit code is then 1 if they report an error), and `--frames <count>`
-closes the window after that many frames. CTest runs it this way on every platform backend
+the Vulkan validation layers (the exit code is then 1 if they report an error), `--metrics` shows the
+frame metrics from the start, and `--frames <count>` closes the window after that many frames. CTest
+runs it with `--frames 120 --metrics --validation` on every platform backend
 (`ctest --preset debug -L example`).
 
 ## Requirements (Windows)

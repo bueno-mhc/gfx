@@ -207,13 +207,16 @@ struct ContextRecord
     std::vector<DefaultBinding> defaults{};
 };
 
-/// A binding of a player, with its trigger state.
+/// A binding of a player, with its trigger state and what it ignores (ContextDescription::ignore_held_inputs).
 struct PlayerBinding
 {
     std::uint32_t action = 0;
     Binding binding{};
     bool actuated = false;
     std::chrono::nanoseconds actuation_start{};
+    std::uint8_t readable_sources = 0; ///< Digital sources (bits by index) it could read in frame readable_frame.
+    std::uint8_t ignored_sources = 0;  ///< Digital sources held when it began to read them: released until released.
+    std::uint64_t readable_frame = 0;  ///< Frame readable_sources describes.
 };
 
 /// An activation of a context for a player.
@@ -656,6 +659,98 @@ struct InputSystemState
         return std::ranges::find(view.consumed, source) != view.consumed.end();
     }
 
+    /// Whether digital source @p source is held since an earlier frame (down, and not pressed during this one).
+    [[nodiscard]] auto held_since_earlier_frame(InputSource source,
+                                                const DeviceView& view) const noexcept -> bool
+    {
+        const std::bitset<InputFrame::KEY_SLOTS> held_keys = keys_down & ~keys_pressed;
+        switch (source.kind)
+        {
+            case InputSourceKind::KEY:
+                return source.code < InputFrame::KEY_SLOTS && held_keys.test(source.code);
+            case InputSourceKind::KEY_CODE:
+                for (std::size_t slot = 0; slot < InputFrame::KEY_SLOTS; ++slot)
+                {
+                    if (held_keys.test(slot) && std::to_underlying(key_codes[slot]) == source.code)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            case InputSourceKind::MOUSE_BUTTON:
+            {
+                const MouseButtonMask bit = mouse_bit(static_cast<MouseButton>(source.code));
+                return has_any(mouse_down, bit) && !has_any(mouse_pressed, bit);
+            }
+            case InputSourceKind::GAMEPAD_BUTTON:
+            {
+                const std::uint32_t bit = gamepad_bit(static_cast<GamepadButton>(source.code));
+                return view.gamepad != nullptr && (view.gamepad->buttons & bit) != 0 && (view.gamepad->pressed & bit) == 0;
+            }
+            case InputSourceKind::NONE:
+            case InputSourceKind::MOUSE_AXIS:
+            case InputSourceKind::GAMEPAD_AXIS:
+                return false;
+        }
+        return false;
+    }
+
+    /// Whether a binding seeing @p view can read digital source @p source (analog sources: never ignored).
+    [[nodiscard]] static auto can_read_digital(InputSource source,
+                                               const DeviceView& view) noexcept -> bool
+    {
+        if (is_consumed(source, view))
+        {
+            return false;
+        }
+        switch (source.kind)
+        {
+            case InputSourceKind::KEY:
+            case InputSourceKind::KEY_CODE:
+                return view.keyboard;
+            case InputSourceKind::MOUSE_BUTTON:
+                return view.mouse;
+            case InputSourceKind::GAMEPAD_BUTTON:
+                return view.gamepad != nullptr;
+            case InputSourceKind::NONE:
+            case InputSourceKind::MOUSE_AXIS:
+            case InputSourceKind::GAMEPAD_AXIS:
+                return false;
+        }
+        return false;
+    }
+
+    /// The sources of @p entry to read as released (ContextDescription::ignore_held_inputs): those it starts
+    /// to read this frame while they are held since an earlier frame, until they are released.
+    auto update_ignored_sources(PlayerBinding& entry,
+                                const DeviceView& view,
+                                bool blocked) const noexcept -> std::uint8_t
+    {
+        // What it could read the previous frame (nothing when its context was not evaluated then).
+        const std::uint8_t previously_readable = entry.readable_frame + 1 == frame_number ? entry.readable_sources : std::uint8_t{0};
+        std::uint8_t readable = 0;
+        std::uint8_t held = 0;
+        for (std::size_t index = 0; index < entry.binding.source_count(); ++index)
+        {
+            const InputSource source = entry.binding.sources[index];
+            const auto bit = static_cast<std::uint8_t>(1U << index);
+            if (!blocked && can_read_digital(source, view))
+            {
+                readable |= bit;
+            }
+            if (held_since_earlier_frame(source, view))
+            {
+                held |= bit;
+            }
+        }
+
+        // Newly readable held sources join the ignored ones; a release ends the ignoring.
+        entry.ignored_sources = static_cast<std::uint8_t>((entry.ignored_sources | (readable & ~previously_readable)) & held);
+        entry.readable_sources = readable;
+        entry.readable_frame = frame_number;
+        return entry.ignored_sources;
+    }
+
     /// Whether key @p slot (or one producing key code @p source) is down for @p view.
     [[nodiscard]] auto key_down(InputSource source,
                                 const DeviceView& view,
@@ -733,11 +828,16 @@ struct InputSystemState
                && modifiers_match(binding.modifiers, view.modifiers, binding.exact_modifiers);
     }
 
-    /// Raw value of @p binding for @p view, before the modifiers.
+    /// Raw value of @p binding for @p view, before the modifiers; the sources in @p ignored (bits by index)
+    ///        read as released.
     [[nodiscard]] auto read_binding(const Binding& binding,
-                                    const DeviceView& view) const noexcept -> Vector2
+                                    const DeviceView& view,
+                                    std::uint8_t ignored = 0) const noexcept -> Vector2
     {
-        const auto source = [&](std::size_t index) { return read_source(binding.sources[index], view); };
+        const auto source = [&](std::size_t index)
+        {
+            return ((ignored >> index) & 1U) != 0 ? 0.0F : read_source(binding.sources[index], view);
+        };
         switch (binding.kind)
         {
             case BindingKind::NONE:
@@ -746,7 +846,7 @@ struct InputSystemState
             case BindingKind::MOUSE_AXIS:
                 return Vector2{.x = source(0)};
             case BindingKind::CHORD:
-                return Vector2{.x = chord_held(binding, view) ? 1.0F : 0.0F};
+                return Vector2{.x = (ignored & 1U) == 0 && chord_held(binding, view) ? 1.0F : 0.0F};
             case BindingKind::GAMEPAD_CHORD:
             {
                 bool held = true;
@@ -824,7 +924,8 @@ struct InputSystemState
             const DeviceView view = device_view(player_index, record);
             for (PlayerBinding& entry : player.bindings[context])
             {
-                const Vector2 value = blocked ? Vector2{} : shape(read_binding(entry.binding, view), entry.binding);
+                const std::uint8_t ignored = record.description.ignore_held_inputs ? update_ignored_sources(entry, view, blocked) : std::uint8_t{0};
+                const Vector2 value = blocked ? Vector2{} : shape(read_binding(entry.binding, view, ignored), entry.binding);
                 offer(entry, value, now);
             }
 

@@ -222,6 +222,23 @@ struct CommandStatistics
     std::uint32_t transfers = 0;             ///< Copies, fills, updates, blits, resolves and clears.
     std::uint32_t rendering_passes = 0;      ///< Rendering passes begun (parallel ones included).
 
+    /// @brief Adds the counts of @p other (the command buffers of a frame, for instance).
+    constexpr auto operator+=(const CommandStatistics& other) noexcept -> CommandStatistics&
+    {
+        draws += other.draws;
+        indirect_draws += other.indirect_draws;
+        dispatches += other.dispatches;
+        ray_traces += other.ray_traces;
+        pipeline_binds += other.pipeline_binds;
+        descriptor_set_binds += other.descriptor_set_binds;
+        push_constant_writes += other.push_constant_writes;
+        vertex_buffer_binds += other.vertex_buffer_binds;
+        barriers += other.barriers;
+        transfers += other.transfers;
+        rendering_passes += other.rendering_passes;
+        return *this;
+    }
+
     constexpr bool operator==(const CommandStatistics&) const = default;
 };
 

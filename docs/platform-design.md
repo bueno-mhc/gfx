@@ -683,10 +683,8 @@ your validation (project rule: step by step, you commit).
   `OnlySizesThatChangeAreReported`, on both backends, fails without the fix); `WindowSwapchain` also ignores
   a framebuffer event whose size equals its images'. (2) A context activated while a key is held sees that
   key as a new press (the action's previous state is "not pressed"): a menu opened with Escape whose own
-  "back" action were bound to Escape would close at once. The example binds one `pause` action in both
-  contexts, whose state continues across the switch. Unreal's Enhanced Input offers an option to ignore
-  keys held when a mapping context is added; gfx could add `ContextDescription::ignore_held_inputs` (not
-  done: a decision for the user).
+  "back" action were bound to Escape would close at once. Unreal's Enhanced Input ignores keys held when a
+  mapping context is added; the user asked for the same option (see the follow-up below).
 - **README**: a platform section (overview, a window, the input schema, presenting, use cases: pause menu,
   couch multiplayer, rebinding menu, chat box, separate game thread, jobs reading input, tests and replays;
   threads, backend differences) and an Examples section; every snippet was compiled with `-Werror` in a
@@ -695,6 +693,29 @@ your validation (project rule: step by step, you commit).
   core classes, errors, graphics object model, Vulkan units, shaders, platform object model, the pump, the
   input pipeline, threads, WindowSwapchain states, one frame, build); each was rendered with Mermaid 10.9 and
   11.4 to check its syntax.
+
+**Follow-up (user, 2026-10-16): held inputs and frame metrics.**
+
+- **`ContextDescription::ignore_held_inputs`** (default `true`, as Unreal's "ignore all pressed keys until
+  release"): a context ignores digital inputs (keys, key codes, mouse and gamepad buttons) that are held since
+  an earlier frame when it starts reading them - when it is activated, when a context above stops blocking
+  it or consuming the input, or when text input ends - until they are released. Tracked per binding and per
+  source (`PlayerBinding::readable_sources`, `ignored_sources`, `readable_frame`): one held key of a WASD
+  composite is ignored while a fresh key of it moves. Presses that begin in the frame count; analog inputs
+  are never ignored; `false` restores the earlier behavior. Two P2 tests that asserted the earlier behavior
+  were updated; five new tests (each fails without the feature) and one for `false`. The example's menu now
+  has its own `resume` action on Escape.
+- **Frame metrics, Debug builds only** (graphics library, `gfx.interface` partitions `:frame_metrics` and
+  `:debug_overlay`; no-ops in other builds, `enabled()` false): `FrameMetrics` (frame rate and CPU frame
+  times averaged over 500 ms with minimum and maximum, `CommandStatistics` summed over the frame's command
+  buffers - `CommandStatistics::operator+=` added -, GPU timings from a `GpuProfiler`, `memory_statistics()`
+  once per period; `text()` formats them) and `DebugOverlay` (toggleable, hidden by default; a 5 x 7 font
+  for printable ASCII built and checked at compile time; drawn as two `clear_attachments()` calls, so no
+  shader, pipeline or font texture is needed and any color format works). The example shows them with F3
+  (an always-active `debug` context at priority 100) or `--metrics`; CTest runs it with `--metrics`.
+  Tests: fake-backend unit tests (averaging, counting, text, panel and glyph rectangles, clipping, scale,
+  unprintable characters, Release no-ops) and a presentation test reading the overlay back from a real
+  swapchain image on both platform backends and both GPUs.
 
 ---
 
