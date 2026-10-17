@@ -129,6 +129,25 @@ Original hard requirements (from the user's initial specification):
   GLYPH_WIDTH/HEIGHT/ADVANCE, LINE_ADVANCE, PADDING). `CommandStatistics::operator+=`. Fake backend:
   `FakeCommandBuffer::clears()`, `FakeDevice::set_memory_statistics()`. Font preview rendered with a
   stdlib-only Python PNG script from the table (scratchpad) to check legibility.
+- **UI library (U0 as built, 2026-10-17)**: `source/ui/`, target `gfx::ui` (`gfx_ui`, option `GFX_BUILD_UI` ON),
+  namespace `gfx::ui`, `import gfx.ui;` (re-exports gfx.core). `gfx.ui.enums` (UiSubsystem {GRAPHICS, FONT,
+  INPUT, PLATFORM, ACCESSIBILITY}, BACKEND_LIBRARY "gfx::ui"; FontFormat, FontDecoderKind, SdfKind, AtlasTexelFormat,
+  AtlasCompression, AtlasSectionKind (values stored in .uiatlas: stable), AtlasPackerKind, TextDirection;
+  UI_ATLAS_MAGIC "GFXUIATL", UI_ATLAS_VERSION_MAJOR/MINOR, UI_ATLAS_ENDIANNESS_TAG, UI_ATLAS_ALIGNMENT 8,
+  UI_ATLAS_HEADER_SIZE 64), `gfx.ui.handles` (8 Handle kinds, 11 Identifier kinds, `GlyphIndex`, concepts UiHandle/
+  FontResourceHandle/UiIdentifier, literals `_window` `_panel` `_dock_space` `_tab` `_menu` `_popup` `_table`),
+  `gfx.ui.errors`: **`using UiCapabilityError = BackendCapabilityError;`** (core class is `final`, core unchanged)
+  + `throw_unsupported(UiSubsystem, operation, capability, reason, suggestion)` → "[gfx::ui::FONT] ...".
+  Font pipeline helpers in GfxDependencies.cmake (all static, `gfx::` targets): brotli decoder 1.2.0, FreeType
+  2.14.3 (WOFF via its own zlib — `CMAKE_DISABLE_FIND_PACKAGE_ZLIB`; WOFF2 via preset `BROTLIDEC_*` cache vars;
+  alias `Freetype::Freetype` for msdfgen), msdfgen 1.13 + msdf-atlas-gen 1.4, HarfBuzz 14.2.1 + subset (requires
+  FreeType first: HarfBuzz enables hb-ft whenever a `freetype` target exists; CMake build warns "community-
+  maintained"; `-Wno-stringop-overread` on its targets for GCC: hb_memcmp false positive in Release), zstd 1.5.7 (`SOURCE_SUBDIR build/cmake`), stb_truetype 1.26 — **always fetched** (atlas bytes;
+  HarfBuzz/zstd pinning is a refinement of answer 10 to validate); SheenBidi 3.0.0 and libunibreak 7.0 found
+  first, else fetched (none installed here: find branches untested). `gfx_require_ui_test_fonts()`: Noto Sans,
+  Arabic, Hebrew (variable, google/fonts 47d54ca1) into `<build>/ui-test-fonts`. Facts: Noto Sans Arabic shapes
+  dotted letters as dotless body + dot glyph (test joining with seen/meem); msdf-atlas-gen output is identical
+  with 1 and 4 threads.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -473,9 +492,11 @@ gfx/
 │                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp),
 │                  backends/sdl3/ (P3), backends/glfw/ (P4)
 │   └── platform_graphics/  gfx.platform.graphics (P5): platform_graphics.cppm/.cpp
+│   └── ui/        gfx.ui (U0): ui.cppm, enums.cppm, handles.cppm, errors.cppm
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
+            ui/ (ui_foundations_test.cpp; font_libraries_test.cpp = plain TU, fetched OFL fonts),
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
@@ -512,11 +533,13 @@ gfx/
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
-| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) done, awaiting validation** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
+| P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); **U0 (foundations) done, awaiting validation** (§B "U0 as built"); U1 (atlas build) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **451**, all passing in Debug and Release, 2026-10-16 (after the P6 follow-up:
+Test count at last report: **468**, all passing in Debug and Release, 2026-10-17 (after U0: + 7 gfx_ui_tests,
+9 gfx_ui_font_library_tests, 2 UI compile-failure tests; skips: Debug 4, Release 27). Before U0: 451 (after the P6 follow-up:
 + 5 held-input tests, 9 FrameMetrics/DebugOverlay unit tests (7 skip in Release), overlay read back from a
 swapchain image × 4 (skip in Release)). After P6: 433 (+ 2 example runs
 `WindowedExample.{SDL3,GLFW}` and `OnlySizesThatChangeAreReported` × 2). After P5: 429 (+ 24 presentation
@@ -643,6 +666,14 @@ After a gap analysis against Unreal RHI / NVRHI / Diligent / The Forge / Dawn, t
 
 ## 10. Open questions (asked, not answered yet)
 
+00. ~~**UI system (2026-10-16)**~~ ANSWERED 2026-10-17 (docs/ui-design.md §D): audio ignored altogether; build on
+    gfx.platform; same repository (source/ui); core unchanged (Handle/Identifier); UiCapabilityError yes (alias);
+    delete DebugOverlay's bitmap font in U3; build-time atlas + `#embed` + consteval validation; .notdef + report
+    now, optional run-time SDF cache later; phases U0–U10 in order; FreeType fetched and pinned; UIA vs AccessKit
+    decided in U9 after a trial; fetched OFL test fonts. Facts: GCC 16 has flat_map/mdspan/pmr, no constexpr cmath;
+    `#embed` works in modules (C++26 extension: -Wno-c++26-extensions on generated files only); MSYS2 packages
+    exist for freetype, harfbuzz, libunibreak, woff2, brotli, zstd (only zstd is installed); none for msdfgen,
+    msdf-atlas-gen, SheenBidi.
 0. **Platform library (2026-10-15)** — answers recorded in docs/platform-design.md §D: restructure into
    source/{core,graphics,platform} (graphics namespace/modules unchanged) YES; one error hierarchy in
    core (`BackendIdentity`) YES; `NativeWindowHandle` in core with OS handles only YES; naming deviations

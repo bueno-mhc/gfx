@@ -6,4 +6,7 @@ if(GFX_BUILD_PLATFORM)
     add_subdirectory(platform)          # the platform library (windowing and input)
     add_subdirectory(platform_graphics) # presentation to platform windows (gfx.platform.graphics)
 endif()
+if(GFX_BUILD_UI)
+    add_subdirectory(ui)        # the UI library, and the font pipeline's third-party libraries
+endif()
 add_subdirectory(compilation)  # code that must not compile, and naming checks

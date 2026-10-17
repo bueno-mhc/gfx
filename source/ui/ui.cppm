@@ -1,0 +1,10 @@
+/// @file ui.cppm
+/// @brief Umbrella module: `import gfx.ui;` provides the whole public API of the UI library (a hybrid
+///        immediate/retained UI whose text is rendered from SDF/MSDF font atlases), gfx.core included.
+///        The design, and the phases that build it, are in docs/ui-design.md.
+export module gfx.ui;
+
+export import gfx.core;
+export import gfx.ui.enums;
+export import gfx.ui.handles;
+export import gfx.ui.errors;

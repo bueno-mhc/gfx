@@ -13,6 +13,7 @@ to present frames.
 | graphics | `import gfx;` | the rendering abstraction and its backends ([below](#gfx)) |
 | platform | `import gfx.platform;` | windows, monitors, cursors, events, input devices, action mapping ([Platform library](#platform-library-windows-and-input)) |
 | bridge | `import gfx.platform.graphics;` | swapchains for platform windows ([Presenting](#presenting-to-a-window)) |
+| ui (in progress) | `import gfx.ui;` | immediate-mode UI over retained state, every text through SDF/MSDF atlases built at build time ([design](docs/ui-design.md)) |
 
 > **Status:** the graphics interface is complete: objects, typed recording, bindless resources,
 > parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
@@ -23,7 +24,9 @@ to present frames.
 > (Win32, XCB, Cocoa and Web are reported as not built), and the [windowed example](#examples) runs on
 > both. The design and the decisions behind the platform library are in
 > [docs/platform-design.md](docs/platform-design.md); [docs/architecture.md](docs/architecture.md)
-> describes the code as built, with diagrams.
+> describes the code as built, with diagrams. The **UI library** is being built in phases
+> ([docs/ui-design.md](docs/ui-design.md)): its foundations (enumerations, handles, errors and the
+> font pipeline's libraries) are in place; widgets, atlases and text arrive in the next phases.
 
 ```cpp
 import std;
@@ -517,6 +520,11 @@ control) are downloaded and built with CMake's `FetchContent`. GoogleTest is alw
 source on Windows and linked statically. volk and RenderDoc's in-application API header are always
 fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed, the test
 `VulkanCapture.RenderDoc` captures a test's work through `Device::begin_capture()`.
+The UI library's font pipeline is fetched at pinned versions, so that atlases are byte-for-byte
+reproducible: FreeType 2.14.3 (with Brotli 1.2.0 for WOFF2), msdfgen 1.13, msdf-atlas-gen 1.4,
+HarfBuzz 14.2.1, zstd 1.5.7 and stb_truetype 1.26; SheenBidi 3.0.0 and libunibreak 7.0 are used
+from the system when installed. With the tests on, configuring downloads the OFL test fonts (Noto
+Sans, Arabic, Hebrew) into `<build>/ui-test-fonts`, checked against their hashes.
 
 | CMake option | Default | Backend |
 |---|---|---|
@@ -527,6 +535,7 @@ fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed,
 | `GFX_PLATFORM_BACKEND_SDL3` | `ON` | SDL3 windowing and input (SDL 3.4 found, or 3.4.10 fetched and linked statically) |
 | `GFX_PLATFORM_BACKEND_GLFW` | `ON` | GLFW windowing and input (GLFW 3.4 found, or fetched and linked statically) |
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
+| `GFX_BUILD_UI` | `ON` | The UI library (in progress) and its font pipeline |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one needs the platform library and Vulkan) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
@@ -582,7 +591,7 @@ gfx/
 │   │   └── backends/     private modules, reached only through the factory
 │   │       ├── vulkan/   module gfx.backends.vulkan (partitions + one implementation unit per area)
 │   │       └── null/, d3d12/, metal/
-│   ├── platform/         the platform library: windowing and input (`import gfx.platform;`, in progress)
+│   ├── platform/         the platform library: windowing and input (`import gfx.platform;`)
 │   │   ├── enums.cppm    every platform enumeration and constant (keys as USB HID usages, key codes,
 │   │   │                 buttons, axes, modifiers, cursors, window modes and flags, event types)
 │   │   ├── handles.cppm  window, monitor, cursor and device handles; action and binding-context
@@ -596,8 +605,10 @@ gfx/
 │   │   │   │             clipboard, gamepads, joysticks, touch)
 │   │   │   └── glfw/     module gfx.platform.backends.glfw (the same contract; throws for what GLFW lacks)
 │   │   └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
-│   └── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
-│                           (swapchain_description_for(), WindowSwapchain)
+│   ├── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
+│   │                       (swapchain_description_for(), WindowSwapchain)
+│   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
+│                         errors.cppm
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only) and the slot table
@@ -608,6 +619,8 @@ gfx/
     │                     (SDL-injected events, virtual gamepads) and glfw/ (Win32 messages)
     ├── platform_graphics/  presentation to visible windows: every platform backend x every GPU,
     │                     with the validation layers (cleared frames read back, resize, minimize)
+    ├── ui/               the UI library, and the font pipeline's libraries as gfx builds them
+    │                     (fetched OFL fonts)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

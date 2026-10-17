@@ -141,3 +141,16 @@ if(GFX_BUILD_PLATFORM)
         EXPECTED_DIAGNOSTIC "no matching function for call to 'composite_axis|DigitalInputSourceType"
         LIBRARIES gfx::platform)
 endif()
+
+# ------------------------------------------------------------------------------ ui
+if(GFX_BUILD_UI)
+    gfx_add_compilation_failure_test(UiHandlesOfDifferentKindsDoNotCompare
+        SOURCES ui/ui_handles_of_different_kinds_do_not_compare.cpp
+        EXPECTED_DIAGNOSTIC "no match for 'operator=='"
+        LIBRARIES gfx::ui)
+
+    gfx_add_compilation_failure_test(UiIdentifiersOfDifferentKindsDoNotMix
+        SOURCES ui/ui_identifiers_of_different_kinds_do_not_mix.cpp
+        EXPECTED_DIAGNOSTIC "conversion from .*PopupTag.* to non-scalar type"
+        LIBRARIES gfx::ui)
+endif()

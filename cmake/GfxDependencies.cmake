@@ -416,3 +416,292 @@ function(gfx_require_glslang)
     add_library(gfx::glslang ALIAS gfx_glslang)
     target_link_libraries(gfx_glslang INTERFACE glslang::glslang glslang::glslang-default-resource-limits)
 endfunction()
+
+# ==============================================================================
+# The UI library's font pipeline (docs/ui-design.md A5). What the atlas tool uses to produce atlas
+# bytes - FreeType, msdfgen, msdf-atlas-gen, HarfBuzz (subsetting) and zstd - is always fetched at a
+# pinned version, so that the same font and descriptor give the same .uiatlas on every machine. What
+# only the run time uses - SheenBidi, libunibreak - comes from the system when installed.
+# ==============================================================================
+
+# gfx_require_brotli_decoder()
+#   Provides gfx::brotli_decoder: the decoder of Brotli 1.2.0 (MIT), which FreeType needs to read WOFF2
+#   fonts, built as a static library from its C sources (Brotli's own CMake project would switch
+#   BUILD_SHARED_LIBS on for the whole build).
+function(gfx_require_brotli_decoder)
+    if(TARGET gfx::brotli_decoder)
+        return()
+    endif()
+    FetchContent_Declare(gfx_brotli
+        URL https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz
+        URL_HASH SHA256=816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec
+        SOURCE_SUBDIR gfx-sources-only)
+    FetchContent_MakeAvailable(gfx_brotli)
+    file(GLOB _gfx_brotli_sources ${gfx_brotli_SOURCE_DIR}/c/common/*.c ${gfx_brotli_SOURCE_DIR}/c/dec/*.c)
+    add_library(gfx_brotli_decoder STATIC ${_gfx_brotli_sources})
+    add_library(gfx::brotli_decoder ALIAS gfx_brotli_decoder)
+    target_include_directories(gfx_brotli_decoder SYSTEM PUBLIC ${gfx_brotli_SOURCE_DIR}/c/include)
+    message(STATUS "gfx: Brotli 1.2.0 decoder fetched (for WOFF2 fonts)")
+endfunction()
+
+# gfx_require_freetype()
+#   Provides gfx::freetype (and Freetype::Freetype, which msdfgen expects): FreeType 2.14.3 (FreeType
+#   License), the font decoder of the atlas tool: TrueType, OpenType CFF/CFF2, collections, WOFF (with
+#   FreeType's own zlib copy), WOFF2 (Brotli) and variable fonts. Always fetched and pinned (reproducible
+#   atlases), built static without PNG, BZip2 or HarfBuzz.
+function(gfx_require_freetype)
+    if(TARGET gfx::freetype)
+        return()
+    endif()
+    gfx_require_brotli_decoder()
+    foreach(_gfx_option IN ITEMS FT_DISABLE_HARFBUZZ FT_DISABLE_BZIP2 FT_DISABLE_PNG FT_REQUIRE_BROTLI
+                                 FT_ENABLE_ERROR_STRINGS SKIP_INSTALL_ALL)
+        set(${_gfx_option} ON CACHE BOOL "Set by gfx_require_freetype()" FORCE)
+    endforeach()
+    set(FT_DISABLE_BROTLI OFF CACHE BOOL "Set by gfx_require_freetype()" FORCE)
+    # FreeType finds Brotli with find_path and find_library: these answers point it at the decoder built here.
+    FetchContent_GetProperties(gfx_brotli SOURCE_DIR _gfx_brotli_directory)
+    set(BROTLIDEC_INCLUDE_DIRS ${_gfx_brotli_directory}/c/include CACHE PATH "Set by gfx_require_freetype()" FORCE)
+    set(BROTLIDEC_LIBRARIES gfx_brotli_decoder CACHE STRING "Set by gfx_require_freetype()" FORCE)
+    # The zlib copy inside FreeType rather than the system one: the same code everywhere, no DLL to deploy.
+    set(CMAKE_DISABLE_FIND_PACKAGE_ZLIB TRUE)
+    FetchContent_Declare(freetype
+        URL https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz
+        URL_HASH SHA256=36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f
+        SYSTEM)
+    FetchContent_MakeAvailable(freetype)
+    _gfx_require_targets("FreeType" freetype)
+    add_library(Freetype::Freetype ALIAS freetype)
+    add_library(gfx::freetype ALIAS freetype)
+    message(STATUS "gfx: FreeType 2.14.3 fetched and built as a static library (WOFF, WOFF2, variable fonts)")
+endfunction()
+
+# gfx_require_msdfgen()
+#   Provides gfx::msdfgen (msdfgen 1.13, MIT: distance fields of glyph outlines, loaded through FreeType)
+#   and gfx::msdf_atlas_gen (msdf-atlas-gen 1.4, MIT: atlas packing and generation). Always fetched and
+#   pinned, built static without vcpkg, Skia, SVG, PNG or the Artery Font format.
+function(gfx_require_msdfgen)
+    if(TARGET gfx::msdfgen)
+        return()
+    endif()
+    gfx_require_freetype()
+    foreach(_gfx_option IN ITEMS MSDFGEN_CORE_ONLY MSDFGEN_BUILD_STANDALONE MSDFGEN_USE_VCPKG MSDFGEN_USE_SKIA
+                                 MSDFGEN_USE_OPENMP MSDFGEN_INSTALL MSDF_ATLAS_BUILD_STANDALONE MSDF_ATLAS_USE_VCPKG
+                                 MSDF_ATLAS_USE_SKIA MSDF_ATLAS_INSTALL BUILD_SHARED_LIBS)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_msdfgen()" FORCE)
+    endforeach()
+    foreach(_gfx_option IN ITEMS MSDFGEN_DISABLE_SVG MSDFGEN_DISABLE_PNG MSDF_ATLAS_NO_ARTERY_FONT MSDF_ATLAS_MSDFGEN_EXTERNAL)
+        set(${_gfx_option} ON CACHE BOOL "Set by gfx_require_msdfgen()" FORCE)
+    endforeach()
+    FetchContent_Declare(msdfgen
+        URL https://github.com/Chlumsky/msdfgen/archive/refs/tags/v1.13.tar.gz
+        URL_HASH SHA256=93cd1ad8918c1a78c5c96e82d4f4c77f0eb86c2e7e8579a0967e54196c4b7167
+        SYSTEM)
+    FetchContent_Declare(msdf_atlas_gen
+        URL https://github.com/Chlumsky/msdf-atlas-gen/archive/refs/tags/v1.4.tar.gz
+        URL_HASH SHA256=57db9548b30905b18640ceab5011144e9d362f33a53748bef6be53dd743c9992
+        SYSTEM)
+    FetchContent_MakeAvailable(msdfgen msdf_atlas_gen)
+    _gfx_require_targets("msdfgen" msdfgen::msdfgen-core msdfgen::msdfgen-ext msdf-atlas-gen::msdf-atlas-gen)
+    _gfx_exclude_from_modules(msdfgen-core msdfgen-ext msdf-atlas-gen)
+    add_library(gfx_msdfgen INTERFACE)
+    add_library(gfx::msdfgen ALIAS gfx_msdfgen)
+    target_link_libraries(gfx_msdfgen INTERFACE msdfgen::msdfgen-core msdfgen::msdfgen-ext)
+    add_library(gfx_msdf_atlas_gen INTERFACE)
+    add_library(gfx::msdf_atlas_gen ALIAS gfx_msdf_atlas_gen)
+    target_link_libraries(gfx_msdf_atlas_gen INTERFACE msdf-atlas-gen::msdf-atlas-gen)
+    message(STATUS "gfx: msdfgen 1.13 and msdf-atlas-gen 1.4 fetched and built as static libraries")
+endfunction()
+
+# gfx_require_harfbuzz()
+#   Provides gfx::harfbuzz (text shaping) and gfx::harfbuzz_subset (font subsetting, used by the atlas
+#   tool): HarfBuzz 14.2.1 (MIT), always fetched and pinned, built static without GLib, ICU, the
+#   rasterizer, the vector and GPU libraries or the utilities. HarfBuzz builds its FreeType helpers (hb-ft)
+#   whenever a `freetype` target exists, whatever HB_HAVE_FREETYPE says: FreeType is required first so
+#   the build is the same whichever function a project calls first (gfx shapes with HarfBuzz's own font
+#   functions; hb-ft only adds a link to the pinned FreeType).
+function(gfx_require_harfbuzz)
+    if(TARGET gfx::harfbuzz)
+        return()
+    endif()
+    gfx_require_freetype()
+    foreach(_gfx_option IN ITEMS HB_HAVE_GLIB HB_HAVE_ICU HB_HAVE_GRAPHITE2 HB_HAVE_CAIRO HB_BUILD_UTILS
+                                 HB_BUILD_RASTER HB_BUILD_VECTOR HB_BUILD_GPU HB_HAVE_GOBJECT HB_HAVE_INTROSPECTION
+                                 BUILD_SHARED_LIBS)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_harfbuzz()" FORCE)
+    endforeach()
+    set(HB_BUILD_SUBSET ON CACHE BOOL "Set by gfx_require_harfbuzz()" FORCE)
+    FetchContent_Declare(harfbuzz
+        URL https://github.com/harfbuzz/harfbuzz/releases/download/14.2.1/harfbuzz-14.2.1.tar.xz
+        URL_HASH SHA256=a54a5d8e9380a41fbb762ce367bcbf7704792dfca0d93f1bbca86c5a57902e0e
+        SYSTEM)
+    FetchContent_MakeAvailable(harfbuzz)
+    _gfx_require_targets("HarfBuzz" harfbuzz harfbuzz-subset)
+    _gfx_exclude_from_modules(harfbuzz harfbuzz-subset)
+    # Optimized GCC builds report the memcmp() of HarfBuzz's hb_memcmp() wrapper with a length range GCC's
+    # value-range analysis cannot exclude (-Wstringop-overread); the warning is about HarfBuzz's code only.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(harfbuzz PRIVATE -Wno-stringop-overread)
+        target_compile_options(harfbuzz-subset PRIVATE -Wno-stringop-overread)
+    endif()
+    add_library(gfx_harfbuzz INTERFACE)
+    add_library(gfx::harfbuzz ALIAS gfx_harfbuzz)
+    target_link_libraries(gfx_harfbuzz INTERFACE harfbuzz)
+    add_library(gfx_harfbuzz_subset INTERFACE)
+    add_library(gfx::harfbuzz_subset ALIAS gfx_harfbuzz_subset)
+    target_link_libraries(gfx_harfbuzz_subset INTERFACE harfbuzz-subset)
+    message(STATUS "gfx: HarfBuzz 14.2.1 fetched and built as static libraries (shaping, subsetting)")
+endfunction()
+
+# gfx_require_zstd()
+#   Provides gfx::zstd: zstd 1.5.7 (BSD), which compresses atlas pixels at build time and decompresses
+#   them when an atlas is loaded. Always fetched and pinned (compressed bytes may differ between versions),
+#   built static without programs, tests, legacy formats, dictionary builder or threads.
+function(gfx_require_zstd)
+    if(TARGET gfx::zstd)
+        return()
+    endif()
+    foreach(_gfx_option IN ITEMS ZSTD_BUILD_PROGRAMS ZSTD_BUILD_TESTS ZSTD_BUILD_SHARED ZSTD_BUILD_CONTRIB ZSTD_LEGACY_SUPPORT
+                                 ZSTD_MULTITHREAD_SUPPORT ZSTD_BUILD_DICTBUILDER)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_zstd()" FORCE)
+    endforeach()
+    set(ZSTD_BUILD_STATIC ON CACHE BOOL "Set by gfx_require_zstd()" FORCE)
+    FetchContent_Declare(zstd
+        URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+        URL_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+        SOURCE_SUBDIR build/cmake
+        SYSTEM)
+    FetchContent_MakeAvailable(zstd)
+    _gfx_require_targets("zstd" libzstd_static)
+    add_library(gfx_zstd INTERFACE)
+    add_library(gfx::zstd ALIAS gfx_zstd)
+    target_link_libraries(gfx_zstd INTERFACE libzstd_static)
+    target_include_directories(gfx_zstd SYSTEM INTERFACE ${zstd_SOURCE_DIR}/lib)
+    message(STATUS "gfx: zstd 1.5.7 fetched and built as a static library")
+endfunction()
+
+# gfx_require_sheenbidi()
+#   Provides gfx::sheenbidi: SheenBidi (Apache-2.0), the Unicode bidirectional algorithm (UAX #9) and
+#   script runs (UAX #24). An installed SheenBidi is used when present; otherwise release 3.0.0 is
+#   downloaded, checked against its hash and built static (one unity source file).
+function(gfx_require_sheenbidi)
+    if(TARGET gfx::sheenbidi)
+        return()
+    endif()
+    add_library(gfx_sheenbidi INTERFACE)
+    add_library(gfx::sheenbidi ALIAS gfx_sheenbidi)
+    if(NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        find_package(SheenBidi CONFIG QUIET)
+    endif()
+    if(TARGET SheenBidi::SheenBidi)
+        message(STATUS "gfx: SheenBidi ${SheenBidi_VERSION} found")
+        target_link_libraries(gfx_sheenbidi INTERFACE SheenBidi::SheenBidi)
+        return()
+    endif()
+    set(SB_CONFIG_UNITY ON CACHE BOOL "Set by gfx_require_sheenbidi()" FORCE)
+    foreach(_gfx_option IN ITEMS SB_CONFIG_EXPERIMENTAL_TEXT_API BUILD_GENERATOR BUILD_SHARED_LIBS)
+        set(${_gfx_option} OFF CACHE BOOL "Set by gfx_require_sheenbidi()" FORCE)
+    endforeach()
+    FetchContent_Declare(sheenbidi
+        URL https://github.com/Tehreer/SheenBidi/archive/refs/tags/v3.0.0.tar.gz
+        URL_HASH SHA256=86c56014034739ba39a24c23eb00323b0bf6f737354f665786015fca842af786
+        SYSTEM)
+    FetchContent_MakeAvailable(sheenbidi)
+    _gfx_require_targets("SheenBidi" SheenBidi::SheenBidi)
+    _gfx_exclude_from_modules(SheenBidi)
+    target_link_libraries(gfx_sheenbidi INTERFACE SheenBidi::SheenBidi)
+    message(STATUS "gfx: SheenBidi 3.0.0 fetched and built as a static library")
+endfunction()
+
+# gfx_require_libunibreak()
+#   Provides gfx::libunibreak: libunibreak (zlib license), line breaking (UAX #14) and grapheme and word
+#   boundaries (UAX #29). An installed libunibreak (MSYS2: mingw-w64-ucrt-x86_64-libunibreak) is used when
+#   present; otherwise release 7.0 is downloaded, checked against its hash and the sources of its library
+#   are built static (it has no CMake project).
+function(gfx_require_libunibreak)
+    if(TARGET gfx::libunibreak)
+        return()
+    endif()
+    add_library(gfx_libunibreak INTERFACE)
+    add_library(gfx::libunibreak ALIAS gfx_libunibreak)
+    if(NOT FETCHCONTENT_TRY_FIND_PACKAGE_MODE STREQUAL "NEVER")
+        find_path(GFX_LIBUNIBREAK_INCLUDE_DIRECTORY NAMES linebreak.h graphemebreak.h)
+        find_library(GFX_LIBUNIBREAK_LIBRARY NAMES libunibreak.a unibreak)
+    endif()
+    if(GFX_LIBUNIBREAK_INCLUDE_DIRECTORY AND GFX_LIBUNIBREAK_LIBRARY)
+        message(STATUS "gfx: libunibreak found (${GFX_LIBUNIBREAK_LIBRARY})")
+        target_include_directories(gfx_libunibreak SYSTEM INTERFACE ${GFX_LIBUNIBREAK_INCLUDE_DIRECTORY})
+        target_link_libraries(gfx_libunibreak INTERFACE ${GFX_LIBUNIBREAK_LIBRARY})
+        return()
+    endif()
+    FetchContent_Declare(libunibreak
+        URL https://github.com/adah1972/libunibreak/releases/download/libunibreak_7_0/libunibreak-7.0.tar.gz
+        URL_HASH SHA256=8c9a6e121736cd0d5c890ae3ae96f3f4010a19aa040f1dbded833a62a87717d3)
+    FetchContent_MakeAvailable(libunibreak)
+    # The library sources of its makefiles (the *data.c tables are included by them).
+    set(_gfx_libunibreak_sources linebreak.c linebreakdata.c linebreakdef.c wordbreak.c graphemebreak.c
+                                 eastasianwidthdef.c emojidef.c unibreakbase.c unibreakdef.c)
+    list(TRANSFORM _gfx_libunibreak_sources PREPEND ${libunibreak_SOURCE_DIR}/src/)
+    add_library(gfx_libunibreak_static STATIC ${_gfx_libunibreak_sources})
+    target_include_directories(gfx_libunibreak_static SYSTEM PUBLIC ${libunibreak_SOURCE_DIR}/src)
+    target_link_libraries(gfx_libunibreak INTERFACE gfx_libunibreak_static)
+    message(STATUS "gfx: libunibreak 7.0 fetched and built as a static library")
+endfunction()
+
+# gfx_require_stb_truetype()
+#   Provides gfx::stb_truetype: stb_truetype.h (public domain / MIT), the second font decoder (TrueType,
+#   OpenType CFF, collections) and the outline source of the fallback SDF kernel. Same pinned stb commit
+#   as stb_image.
+function(gfx_require_stb_truetype)
+    if(TARGET gfx::stb_truetype)
+        return()
+    endif()
+    add_library(gfx_stb_truetype INTERFACE)
+    add_library(gfx::stb_truetype ALIAS gfx_stb_truetype)
+    FetchContent_Declare(stb_truetype
+        URL https://raw.githubusercontent.com/nothings/stb/f1c79c02822848a9bed4315b12c8c8f3761e1296/stb_truetype.h
+        URL_HASH SHA256=ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab
+        DOWNLOAD_NO_EXTRACT TRUE)
+    FetchContent_MakeAvailable(stb_truetype)
+    message(STATUS "gfx: stb_truetype 1.26 fetched")
+    target_include_directories(gfx_stb_truetype SYSTEM INTERFACE ${stb_truetype_SOURCE_DIR})
+endfunction()
+
+# gfx_require_ui_test_fonts()
+#   Downloads the fonts the UI tests use (SIL Open Font License 1.1; never committed) from a pinned commit
+#   of github.com/google/fonts, checked against their hashes, into <build>/ui-test-fonts, and sets
+#   GFX_UI_TEST_FONT_DIRECTORY in the caller's scope: Noto Sans (Latin, Greek, Cyrillic), Noto Sans Arabic
+#   and Noto Sans Hebrew, all variable TrueType fonts (axes wdth and wght), with their licenses.
+function(gfx_require_ui_test_fonts)
+    set(_gfx_directory ${CMAKE_BINARY_DIR}/ui-test-fonts)
+    set(_gfx_base https://raw.githubusercontent.com/google/fonts/47d54ca1ebb14fd864695f1d39dc734f39017c33/ofl)
+    set(_gfx_fonts
+        "NotoSans.ttf|notosans/NotoSans%5Bwdth%2Cwght%5D.ttf|bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d"
+        "NotoSans-OFL.txt|notosans/OFL.txt|cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+        "NotoSansArabic.ttf|notosansarabic/NotoSansArabic%5Bwdth%2Cwght%5D.ttf|63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e"
+        "NotoSansArabic-OFL.txt|notosansarabic/OFL.txt|07fc70bfeb985cc1a87a8587d0a0c80bab11c86c9dc3fd95b6f0cb332f983e96"
+        "NotoSansHebrew.ttf|notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf|7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88"
+        "NotoSansHebrew-OFL.txt|notosanshebrew/OFL.txt|9b9fe028b5ba74d231659a1bbaf0ed09b11e759d1ca6a070999e16d151616b47")
+    foreach(_gfx_font IN LISTS _gfx_fonts)
+        string(REPLACE "|" ";" _gfx_parts "${_gfx_font}")
+        list(GET _gfx_parts 0 _gfx_name)
+        list(GET _gfx_parts 1 _gfx_path)
+        list(GET _gfx_parts 2 _gfx_hash)
+        set(_gfx_file ${_gfx_directory}/${_gfx_name})
+        if(EXISTS ${_gfx_file})
+            file(SHA256 ${_gfx_file} _gfx_actual)
+            if(_gfx_actual STREQUAL _gfx_hash)
+                continue()
+            endif()
+        endif()
+        file(DOWNLOAD ${_gfx_base}/${_gfx_path} ${_gfx_file} EXPECTED_HASH SHA256=${_gfx_hash} TLS_VERIFY ON STATUS _gfx_status)
+        list(GET _gfx_status 0 _gfx_code)
+        if(NOT _gfx_code EQUAL 0)
+            list(GET _gfx_status 1 _gfx_message)
+            message(FATAL_ERROR "gfx: the UI test font ${_gfx_name} could not be downloaded from ${_gfx_base}/${_gfx_path}: "
+                                "${_gfx_message}. Turn GFX_BUILD_TESTS off, or retry with network access.")
+        endif()
+    endforeach()
+    message(STATUS "gfx: UI test fonts (OFL) in ${_gfx_directory}")
+    set(GFX_UI_TEST_FONT_DIRECTORY ${_gfx_directory} PARENT_SCOPE)
+endfunction()
