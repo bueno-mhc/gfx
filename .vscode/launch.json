@@ -115,6 +115,8 @@
                 { "label": "font libraries - FreeTypeTest.*, HarfBuzzTest.*, MsdfAtlasGenTest.*, ... (third-party font pipeline)", "value": "ui/gfx_ui_font_library_tests.exe" },
                 { "label": "atlas tools - AtlasFormatTest.*, AtlasViewTest.*, FontDecoderTest.*, SdfGeneratorTest.*, AtlasPackerTest.*, AtlasBuilderTest.*, ...", "value": "ui/gfx_ui_atlas_tools_tests.exe" },
                 { "label": "atlas embed - AtlasEmbedTest.* (atlases built by gfx_add_ui_atlas and embedded)", "value": "ui/gfx_ui_atlas_embed_tests.exe" },
+                { "label": "text       - FontAtlasTest.*, FontLibraryTest.*, TextLayoutTest.*, TextLayoutCacheTest.*", "value": "ui/gfx_ui_text_tests.exe" },
+                { "label": "text allocation - TextAllocationTest.* (counts operator new)", "value": "ui/gfx_ui_text_allocation_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
             "default": "graphics/handles/gfx_handles_tests.exe"

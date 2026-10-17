@@ -448,11 +448,13 @@ endfunction()
 #   Provides gfx::freetype (and Freetype::Freetype, which msdfgen expects): FreeType 2.14.3 (FreeType
 #   License), the font decoder of the atlas tool: TrueType, OpenType CFF/CFF2, collections, WOFF (with
 #   FreeType's own zlib copy), WOFF2 (Brotli) and variable fonts. Always fetched and pinned (reproducible
-#   atlases), built static without PNG, BZip2 or HarfBuzz.
+#   atlases), built static without PNG, BZip2 or HarfBuzz. HarfBuzz is configured first (see
+#   gfx_require_harfbuzz()).
 function(gfx_require_freetype)
     if(TARGET gfx::freetype)
         return()
     endif()
+    gfx_require_harfbuzz()
     gfx_require_brotli_decoder()
     foreach(_gfx_option IN ITEMS FT_DISABLE_HARFBUZZ FT_DISABLE_BZIP2 FT_DISABLE_PNG FT_REQUIRE_BROTLI
                                  FT_ENABLE_ERROR_STRINGS SKIP_INSTALL_ALL)
@@ -517,14 +519,14 @@ endfunction()
 #   Provides gfx::harfbuzz (text shaping) and gfx::harfbuzz_subset (font subsetting, used by the atlas
 #   tool): HarfBuzz 14.2.1 (MIT), always fetched and pinned, built static without GLib, ICU, the
 #   rasterizer, the vector and GPU libraries or the utilities. HarfBuzz builds its FreeType helpers (hb-ft)
-#   whenever a `freetype` target exists, whatever HB_HAVE_FREETYPE says: FreeType is required first so
-#   the build is the same whichever function a project calls first (gfx shapes with HarfBuzz's own font
-#   functions; hb-ft only adds a link to the pinned FreeType).
+#   whenever a `freetype` target exists, whatever HB_HAVE_FREETYPE says, and the UI library links HarfBuzz
+#   into applications: gfx_require_freetype() configures HarfBuzz before FreeType, so HarfBuzz never links
+#   FreeType, whichever function a project calls first (gfx shapes with HarfBuzz's own font functions).
 function(gfx_require_harfbuzz)
     if(TARGET gfx::harfbuzz)
         return()
     endif()
-    gfx_require_freetype()
+    set(HB_HAVE_FREETYPE OFF CACHE BOOL "Set by gfx_require_harfbuzz()" FORCE)
     foreach(_gfx_option IN ITEMS HB_HAVE_GLIB HB_HAVE_ICU HB_HAVE_GRAPHITE2 HB_HAVE_CAIRO HB_BUILD_UTILS
                                  HB_BUILD_RASTER HB_BUILD_VECTOR HB_BUILD_GPU HB_HAVE_GOBJECT HB_HAVE_INTROSPECTION
                                  BUILD_SHARED_LIBS)

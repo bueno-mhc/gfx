@@ -69,3 +69,40 @@ set_tests_properties(UiAtlasTool.FailsWhenRequiredCharactersAreMissing PROPERTIE
 add_test(NAME UiAtlasTool.SameInputsGiveSameBytes
     COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:gfx_ui_atlas_builder> -DFONT=${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
             -DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/GfxCompareAtlasBuilds.cmake)
+
+# Text: fonts, layout (bidi, scripts, fallback, shaping, line breaking, alignment), the cache, carets;
+# atlases built for it at build time and embedded.
+gfx_add_test(gfx_ui_text_tests
+    SOURCES font_atlas_test.cpp text_layout_test.cpp
+    MODULES text_test_support.cppm
+    LIBRARIES gfx::ui)
+foreach(atlas IN ITEMS
+        "text_latin|NotoSans.ttf|BASIC_LATIN,LATIN_1_SUPPLEMENT,U+2013-U+2014,U+2018-U+201D,U+2026,U+FFFD|"
+        "text_latin_basic|NotoSans.ttf|BASIC_LATIN|NO_SHAPING_FONT"
+        "text_hebrew|NotoSansHebrew.ttf|U+05D0-U+05EA,U+0020|"
+        "text_arabic|NotoSansArabic.ttf|U+0621-U+064A,U+064B-U+0652,U+0660-U+0669,U+0020|")
+    string(REPLACE "|" ";" parts "${atlas}")
+    list(GET parts 0 name)
+    list(GET parts 1 font)
+    list(GET parts 2 characters)
+    list(GET parts 3 options)
+    string(REPLACE "," ";" characters "${characters}")
+    gfx_add_ui_atlas(gfx_ui_text_tests
+        NAME ${name}
+        FONT ${GFX_UI_TEST_FONT_DIRECTORY}/${font}
+        CHARACTERS ${characters}
+        KIND MTSDF SIZE 32 RANGE 4 ${options}
+        EMBED MODULE gfx.tests.${name} NAMESPACE gfx::tests::text_atlases
+        OUTPUT_VARIABLE ${name}_file)
+endforeach()
+target_compile_definitions(gfx_ui_text_tests PRIVATE GFX_TEST_TEXT_LATIN_ATLAS="${text_latin_file}")
+
+# No allocation when a cached layout is laid out again (operator new counted in this executable).
+gfx_add_test(gfx_ui_text_allocation_tests
+    SOURCES text_allocation_test.cpp
+    LIBRARIES gfx::ui)
+gfx_add_ui_atlas(gfx_ui_text_allocation_tests
+    NAME allocation_latin
+    FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
+    CHARACTERS BASIC_LATIN
+    EMBED MODULE gfx.tests.allocation_latin NAMESPACE gfx::tests::text_atlases)

@@ -5,6 +5,14 @@
 add_library(gfx_ui)
 add_library(gfx::ui ALIAS gfx_ui)
 
+# Text at run time: HarfBuzz (shaping), SheenBidi (bidi, scripts), libunibreak (line breaking) and zstd
+# (atlas pages); their headers stay in the implementation units.
+include(GfxDependencies)
+gfx_require_harfbuzz()
+gfx_require_zstd()
+gfx_require_sheenbidi()
+gfx_require_libunibreak()
+
 target_sources(gfx_ui
     PUBLIC
         FILE_SET public_modules TYPE CXX_MODULES
@@ -15,13 +23,29 @@ target_sources(gfx_ui
             handles.cppm
             errors.cppm
             font/atlas/atlas_format.cppm
+            text/unicode.cppm
+            text/text.cppm
+            text/font_atlas.cppm
+            text/font_library.cppm
+            text/text_layout.cppm
     PRIVATE
-        font/atlas/atlas_format.cpp)
+        FILE_SET internal_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            text/engine.cppm
+    PRIVATE
+        font/atlas/atlas_format.cpp
+        text/font_atlas.cpp
+        text/font_library.cpp
+        text/bidi.cpp
+        text/line_breaking.cpp
+        text/shaping.cpp
+        text/text_layout.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)
 target_link_libraries(gfx_ui
     PUBLIC gfx::core
-    PRIVATE gfx::project_options)
+    PRIVATE gfx::project_options gfx::harfbuzz gfx::zstd gfx::sheenbidi gfx::libunibreak)
 
 # ==============================================================================
 # gfx::ui_atlas_tools: the build-time font pipeline (`import gfx.ui.atlas_tools;`): font decoders
@@ -32,7 +56,6 @@ if(NOT GFX_BUILD_UI_ATLAS_TOOLS)
     return()
 endif()
 
-include(GfxDependencies)
 gfx_require_freetype()
 gfx_require_msdfgen()
 gfx_require_harfbuzz()

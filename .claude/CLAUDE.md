@@ -170,6 +170,21 @@ Original hard requirements (from the user's initial specification):
   start contours elsewhere (MSDF colors differ, true distances within 2/255); `GfxRuntimeDeployment` list is now a
   cache variable (include guard is global). Preview helper (scratchpad, not in repo): stdlib Python 3.14 script with
   `compression.zstd` decoding pages to PNG.
+- **UI text (U2 as built, 2026-10-17)** — docs/ui-design.md §B "U2 as built". `gfx.ui.unicode` (constexpr UTF-8),
+  `atlas_covers()`/`first_missing_character()` (constexpr, in atlas_format), `gfx.ui.text` (source/ui/text/):
+  `FontAtlas` (load(span) in place / load(vector&&) / load_file; pages + shaping font decompressed once, CPU only —
+  images are U3's), `FontLibrary` (FontAtlasHandle/FontHandle via core HandleTable in the .cpp; FontDescription{atlas,
+  fallbacks, size, language, shaping}), `TextLayoutEngine::layout(text, font, TextLayoutDescription) noexcept` →
+  TextLayout view (valid until new_frame()); `caret_position`, `hit_test`. Internal partition `:engine`: BidiParagraph
+  (SheenBidi, UTF-32, levels + scripts + visual line runs), find_line_breaks/find_grapheme_breaks (libunibreak UTF-32,
+  call_once init), HarfBuzzShaper (one hb_font per atlas keeps the atlas alive; reused buffer; monotone graphemes),
+  shape_basic (cmap, longest ligature, pair kerning). Engine works on uint32 code points + byte offset table. Atlas per
+  char: first in chain; Common/Inherited stick to the previous atlas. AUTOMATIC shaping: basic for LTR
+  Latin/Greek/Cyrillic/Common runs without marks. Cache: hash buckets + intrusive LRU, entries used this frame never
+  evicted (overflow deque → CACHE_FULL). HarfBuzz is now configured before FreeType (no hb-ft in apps). Tests use atlases
+  from gfx_add_ui_atlas (text_latin, text_latin_basic NO_SHAPING_FONT, text_hebrew, text_arabic; module
+  gfx.tests.text_support); allocation test replaces operator new. Visual check: CPU MTSDF render of a layout (temporary
+  test, PGM → PNG with a stdlib script in the scratchpad).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -516,7 +531,9 @@ gfx/
 │                  binding, schema, frame, event_channel, input_system; .cpp units + json_reader.hpp/.cpp),
 │                  backends/sdl3/ (P3), backends/glfw/ (P4)
 │   └── platform_graphics/  gfx.platform.graphics (P5): platform_graphics.cppm/.cpp
-│   └── ui/        gfx.ui (U0): ui.cppm, enums.cppm, handles.cppm, errors.cppm; font/atlas/atlas_format.cppm (U1,
+│   └── ui/        gfx.ui (U0): ui.cppm, enums.cppm, handles.cppm, errors.cppm; text/ (U2: unicode.cppm, gfx.ui.text
+│                  partitions + engine.cppm internal + font_atlas/font_library/bidi/line_breaking/shaping/text_layout .cpp);
+│                  font/atlas/atlas_format.cppm (U1,
 │                  in gfx.ui); font/ = gfx.ui.atlas_tools (U1): atlas_tools.cppm, implementations.cppm (internal),
 │                  source/, decoders/ (+ freetype_library.hpp/.cpp plain TU), sdf/ (+ msdfgen_kernel plain TU),
 │                  atlas/ (+ rectangle_packer plain TU), shaping/; tools/atlas_builder/ (gfx_ui_atlas_builder)
@@ -525,7 +542,8 @@ gfx/
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
             ui/ (ui_foundations_test.cpp; font_libraries_test.cpp = plain TU, fetched OFL fonts; U1: atlas_*_test.cpp,
             font_*_test.cpp, sdf_generator_test.cpp, module gfx.tests.ui_atlas_support, xxhash_reference plain TU,
-            atlas_embed_test.cpp + gfx_add_ui_atlas, scripts/GfxCompareAtlasBuilds.cmake),
+            atlas_embed_test.cpp + gfx_add_ui_atlas, scripts/GfxCompareAtlasBuilds.cmake; U2: font_atlas_test.cpp,
+            text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp),
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
@@ -563,11 +581,12 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 committed (b1b4ba4); **U1 (atlas build) done, awaiting validation** (§B "U1 as built"); U2 (atlas load + text) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4) and U1 (4ba8362) committed; **U2 (atlas load + text) done, awaiting validation** (§B "U2 as built"); U3 (rendering) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **522**, all passing in Debug and Release, 2026-10-17 (after U1: + 48
+Test count at last report: **542**, all passing in Debug and Release, 2026-10-17 (after U2: + 19 gfx_ui_text_tests,
+1 gfx_ui_text_allocation_tests). Before U2: 522 (after U1: + 48
 gfx_ui_atlas_tools_tests, 2 gfx_ui_atlas_embed_tests, 4 UiAtlasTool.* CLI tests; skips Debug 4, Release 27). Before U1:
 468 (after U0: + 7 gfx_ui_tests,
 9 gfx_ui_font_library_tests, 2 UI compile-failure tests; skips: Debug 4, Release 27). Before U0: 451 (after the P6 follow-up:

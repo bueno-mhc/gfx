@@ -25,9 +25,10 @@ to present frames.
 > both. The design and the decisions behind the platform library are in
 > [docs/platform-design.md](docs/platform-design.md); [docs/architecture.md](docs/architecture.md)
 > describes the code as built, with diagrams. The **UI library** is being built in phases
-> ([docs/ui-design.md](docs/ui-design.md)): its foundations and its [font atlases](#ui-font-atlases)
-> (any font format turned into SDF/MSDF atlases at build time, checked at compile time) are in place;
-> text layout, rendering and widgets arrive in the next phases.
+> ([docs/ui-design.md](docs/ui-design.md)): its foundations, its [font atlases](#ui-font-atlases)
+> (any font format turned into SDF/MSDF atlases at build time, checked at compile time) and its
+> [text layout](#ui-text-layout) (bidi, fallback fonts, shaping, line breaking) are in place; rendering
+> and widgets arrive in the next phases.
 
 ```cpp
 import std;
@@ -514,6 +515,38 @@ ligatures for simple scripts, and a subset of the font for HarfBuzz (the request
 form shaping can substitute them with). The same inputs give the same bytes. `gfx_ui_atlas_builder --help`
 lists the tool's options; the format is described in [docs/ui-atlas-format.md](docs/ui-atlas-format.md),
 and `import gfx.ui.atlas_tools;` builds atlases from C++ (custom decoders, generators and packers included).
+`gfx::ui::atlas_covers(interface_font, u8"Ångström")` checks in a `static_assert` that an embedded atlas
+has every character of a label.
+
+## UI text layout
+
+Atlases are loaded into a `FontLibrary`; a font is an atlas, the atlases to fall back on for the
+characters it lacks, a size and a language. A `TextLayoutEngine` turns UTF-8 text into positioned glyphs:
+paragraphs, bidi levels (SheenBidi), scripts, the fallback atlas of every character, shaping (HarfBuzz with
+the atlas's subset font, or a basic shaper for simple left-to-right runs), line breaking (libunibreak),
+visual reordering and alignment. Layouts are cached: laying the same text out again allocates nothing.
+
+```cpp
+import gfx.ui;
+import my_application.fonts;
+
+gfx::ui::FontLibrary fonts;
+const gfx::ui::FontAtlasHandle latin = fonts.add_atlas(gfx::ui::FontAtlas::load(interface_font));
+const gfx::ui::FontHandle body = fonts.add_font({.atlas = latin, .size = 16.0F});
+gfx::ui::TextLayoutEngine text{fonts};
+
+// Every frame: laying the same text out again is a cache hit (no allocation).
+text.new_frame();
+const gfx::ui::TextLayout layout = text.layout("Hello, world: text wraps at word boundaries.", body, {.wrap_width = 200.0F});
+for (const gfx::ui::LaidOutGlyph& glyph : layout.glyphs)
+{
+    // glyph.atlas and glyph.glyph name its box in an atlas page; glyph.x, glyph.y its pen position.
+}
+```
+
+`caret_position()` and `hit_test()` map byte offsets to caret positions and back. Problems never throw
+during a frame: they are reported in `TextLayout::problems` (unknown font, invalid UTF-8, missing glyphs
+drawn as `.notdef`, a run that needed a shaping font, a full cache).
 
 ## Examples
 
@@ -645,6 +678,8 @@ gfx/
 │   │                       (swapchain_description_for(), WindowSwapchain)
 │   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
 │       │                 errors.cppm
+│       ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
+│       │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
 │       ├── font/         atlas/atlas_format.cppm: the .uiatlas format and AtlasView (in gfx.ui);
 │       │                 the atlas tools (gfx.ui.atlas_tools): source/ (fonts, characters), decoders/
 │       │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
@@ -661,7 +696,8 @@ gfx/
     ├── platform_graphics/  presentation to visible windows: every platform backend x every GPU,
     │                     with the validation layers (cleared frames read back, resize, minimize)
     ├── ui/               the UI library, the atlas tools (every format, decoder, generator, packer),
-    │                     embedded atlases, and the font pipeline's libraries (fetched OFL fonts)
+    │                     embedded atlases, text layout (and its allocation count), and the font
+    │                     pipeline's libraries (fetched OFL fonts)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

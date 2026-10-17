@@ -8,6 +8,7 @@ export module gfx.ui.atlas_format;
 import std;
 import gfx.ui.enums;
 import gfx.ui.handles;
+import gfx.ui.unicode;
 
 export namespace gfx::ui
 {
@@ -1204,6 +1205,51 @@ AtlasView::ligature_at(std::size_t index) const noexcept -> Ligature
         ligature.components[component] = GlyphIndex{load<std::uint32_t>(m_blob, at + LigatureRecord::COMPONENTS + 4 * component)};
     }
     return ligature;
+}
+
+// =================================================================================================
+// Coverage
+// =================================================================================================
+
+/// @brief The first drawn character of the UTF-8 @p text that @p atlas lacks (control characters, line
+///        breaks among them, need no glyph), or nullopt when it has them all. U+FFFD stands for invalid
+///        bytes, and for every character when @p atlas is not a valid atlas.
+template<class Character>
+    requires std::same_as<Character, char> || std::same_as<Character, char8_t>
+[[nodiscard]] constexpr auto
+first_missing_character(std::span<const std::byte> atlas,
+                        std::basic_string_view<Character> text) noexcept -> std::optional<char32_t>
+{
+    const std::expected<AtlasView, AtlasReadError> view = AtlasView::parse(atlas, AtlasVerification::STRUCTURE);
+    for (const Utf8CodePoint point : Utf8CodePoints<Character>{text})
+    {
+        if (!point.valid || !view.has_value())
+        {
+            return REPLACEMENT_CHARACTER;
+        }
+        if (is_drawn(point.code_point) && !view->find_character(point.code_point).has_value())
+        {
+            return point.code_point;
+        }
+    }
+    return std::nullopt;
+}
+
+/// @brief Whether @p atlas has a glyph for every drawn character of the UTF-8 @p text, e.g.
+///        `static_assert(gfx::ui::atlas_covers(editor_font, u8"Ångström ±"))` on an embedded atlas.
+[[nodiscard]] constexpr auto
+atlas_covers(std::span<const std::byte> atlas,
+             std::u8string_view text) noexcept -> bool
+{
+    return !first_missing_character(atlas, text).has_value();
+}
+
+/// @brief Whether @p atlas has a glyph for every drawn character of the UTF-8 @p text.
+[[nodiscard]] constexpr auto
+atlas_covers(std::span<const std::byte> atlas,
+             std::string_view text) noexcept -> bool
+{
+    return !first_missing_character(atlas, text).has_value();
 }
 
 } // namespace gfx::ui

@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 committed;
-U1 built, awaiting validation (§B, "U1 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 and U1
+committed; U2 built, awaiting validation (§B, "U2 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -490,6 +490,69 @@ report, and your validation (you commit).
   characters, several pages, refused descriptions, custom decoder and packer)), `gfx_ui_atlas_embed_tests` (2, plus
   `static_assert`s on two embedded atlases, one validated with every checksum at compile time), and CTest runs of
   the tool (`UiAtlasTool.*`: help, unknown option, required characters, same bytes with 1 and 8 threads).
+
+
+### U2 as built (2026-10-17)
+
+- **Modules** (all in `gfx::ui`, re-exported by `gfx.ui`): `gfx.ui.unicode` (constexpr UTF-8: `decode_utf8`,
+  `Utf8CodePoints`, `is_valid_utf8`, `is_drawn`), `gfx.ui.atlas_format` gains **`atlas_covers(atlas, text)`** and
+  `first_missing_character()` (constexpr: `static_assert(atlas_covers(editor_font, u8"Ångström"))`), and
+  **`gfx.ui.text`** (`source/ui/text/`): `FontAtlas`, `FontLibrary`, `TextLayoutEngine` (partitions `:font_atlas`,
+  `:font_library`, `:text_layout`; internal `:engine`; units `font_atlas.cpp` (zstd), `font_library.cpp` (handle
+  tables), `bidi.cpp` (SheenBidi), `line_breaking.cpp` (libunibreak), `shaping.cpp` (HarfBuzz and the basic shaper),
+  `text_layout.cpp`). `gfx_ui` links HarfBuzz, zstd, SheenBidi and libunibreak privately.
+- **`FontAtlas`**: `load(span)` reads an embedded atlas in place, `load(std::vector&&)` keeps the bytes,
+  `load_file(path)`; validated (checksums by default), pages and shaping font decompressed once; immutable,
+  shared through `std::shared_ptr<const FontAtlas>`. A damaged atlas → `InvalidUsageError` with the reason; another
+  major format version → `UiCapabilityError`.
+- **`FontLibrary`**: `add_atlas` → `FontAtlasHandle`, `add_font(FontDescription{atlas, fallbacks, size, language,
+  shaping})` → `FontHandle` (unknown atlases and non-positive sizes refused), `remove_font`, `remove_atlas` (refused
+  while a font uses it); lock-free lookups (core `HandleTable`, kept in the implementation unit).
+- **`TextLayoutEngine::layout(text, font, TextLayoutDescription{wrap_width, alignment, direction, line_spacing})`**
+  → `TextLayout` (glyphs: atlas, glyph, x, y on the baseline, advance, byte cluster, direction; lines: glyph and text
+  ranges, left, width without trailing whitespace, top, baseline, height, direction; width, height, missing glyphs,
+  `TextLayoutProblem` flags), `noexcept`. The pipeline, on code points (clusters mapped back to byte offsets, so
+  invalid bytes never shift them): paragraphs at line and paragraph separators (CR LF one) → SheenBidi levels (base
+  direction automatic, or forced) and scripts → the atlas of every character: the first of the chain that has it;
+  characters of the Common and Inherited scripts (spaces, punctuation, marks) stay in the previous character's atlas
+  when it has them; none → the first atlas's `.notdef`, counted → runs of one level, script and atlas → shaping:
+  `TextShaping::AUTOMATIC` uses the basic shaper (character map, longest standard ligature, pair kerning from the
+  atlas) for left-to-right Latin, Greek, Cyrillic and common runs without combining marks, HarfBuzz otherwise (the
+  whole paragraph as context, monotone grapheme clusters, the font's language) → greedy line breaking at UAX #14
+  opportunities, never inside a cluster, a word wider than the line broken at a grapheme boundary, trailing whitespace
+  hanging → SheenBidi visual runs per line → alignment (START, END, LEFT, CENTER, RIGHT in the wrap width, or the widest
+  line) → line metrics of the font's first atlas.
+- **Cache**: fixed capacity (`TextLayoutEngineDescription::cache_capacity`, 1024), hashed (xxHash64 of the text, the
+  font, the description) with chained buckets and an intrusive least-recently-used list; entries reuse their storage.
+  `new_frame()` starts a frame; layouts returned before stay valid until then; an entry used this frame is never
+  replaced — when all are, the layout lives in a per-frame overflow (`CACHE_FULL`). A hit allocates nothing (counted
+  by a test that replaces `operator new`). `statistics()`: hits, misses, evictions, overflows, cached.
+- **Carets**: `caret_position(layout, byte offset)` (inside a ligature, the ligature's width is shared; right-to-left
+  clusters start on their right) and `hit_test(layout, x, y)` (the nearest cluster edge).
+- **Deviations from the design, for your validation**:
+  1. Pages are decompressed into CPU memory by `FontAtlas`; the renderer of U3 creates the images, so `gfx::ui` still
+     depends on core only.
+  2. HarfBuzz objects belong to the layout engine (one HarfBuzz font per atlas, a reused buffer), not to `FontAtlas`:
+     atlases stay plain immutable data that any thread shares.
+  3. Fallback chains are an ordered list of atlases per font (with the stickiness above), not per-script tables: the
+     first atlas that has a character draws it. The language is per font.
+  4. HarfBuzz is always built; the design's "basic shaper when HarfBuzz is not built" is not an option yet (the basic
+     shaper is the fast path, and the shaper of atlases without a shaping font). Tell me if you want the option.
+  5. A paragraph is shaped once and broken afterwards (no reshaping across a line break); tabs lay out as spaces (tab
+     stops later); control characters are not drawn.
+  6. `gfx_require_freetype()` now configures HarfBuzz first, so HarfBuzz never builds its FreeType helpers: before,
+     linking HarfBuzz into an application would have linked FreeType too.
+- **Facts found**: SheenBidi's lines give their runs in visual order; HarfBuzz gives right-to-left glyphs in visual
+  order; SheenBidi and libunibreak headers work next to `import std` in a global module fragment (as HarfBuzz and zstd
+  do); libunibreak has UTF-32 entry points.
+- **Verified by eye**: a temporary test rendered a layout (Latin with kerning and ligatures, a Hebrew word inside
+  Latin text, joined Arabic, wrapping) on the CPU from the MTSDF pages; the image was checked and the test removed.
+- **Tests**: `gfx_ui_text_tests` (19: embedded, owned and file atlases, damaged and newer atlases, the font library,
+  `static_assert` coverage checks; baselines, kerning and ligatures, the basic shaper against HarfBuzz on Latin text,
+  Arabic joining, Hebrew reordered inside Latin, right-to-left paragraphs, fallback and missing glyphs, line breaking
+  within the width, long words between graphemes, paragraphs and empty lines, alignment, problems, the cache (hits,
+  overflow, eviction, clear), carets and hit tests) with atlases built by `gfx_add_ui_atlas()`;
+  `gfx_ui_text_allocation_tests` (cached layouts allocate nothing over 100 frames).
 
 ---
 

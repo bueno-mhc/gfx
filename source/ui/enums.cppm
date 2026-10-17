@@ -197,6 +197,43 @@ enum class AtlasProblem : std::uint8_t
     MALFORMED_SECTION,         ///< A section's content is inconsistent (sizes, counts, ordering, compression).
 };
 
+/// @brief Base direction of a paragraph of text.
+enum class ParagraphDirection : std::uint8_t
+{
+    AUTOMATIC,     ///< From the first strong character (UAX #9 rules P2 and P3); left to right when there is none.
+    LEFT_TO_RIGHT, ///< Left to right, whatever the text.
+    RIGHT_TO_LEFT, ///< Right to left, whatever the text.
+};
+
+/// @brief Horizontal alignment of the lines of a text in its width.
+enum class TextAlignment : std::uint8_t
+{
+    START,  ///< Where the paragraph's direction starts: left for left-to-right paragraphs, right otherwise.
+    END,    ///< Where it ends.
+    LEFT,   ///< Left, whatever the direction.
+    CENTER, ///< Centered.
+    RIGHT,  ///< Right, whatever the direction.
+};
+
+/// @brief Which shaper turns runs of characters into glyphs.
+enum class TextShaping : std::uint8_t
+{
+    AUTOMATIC, ///< The basic shaper for left-to-right Latin, Greek, Cyrillic and common characters; HarfBuzz otherwise.
+    BASIC,     ///< The basic shaper (character map, standard ligatures, pair kerning) for every run.
+    HARFBUZZ,  ///< HarfBuzz for every run (needs the atlas's shaping font).
+};
+
+/// @brief What went wrong while laying a text out (the layout is still made: these are reported).
+enum class TextLayoutProblem : std::uint8_t
+{
+    NONE            = 0,       ///< No bit.
+    UNKNOWN_FONT    = 1U << 0, ///< The font handle names no font: the layout is empty.
+    INVALID_UTF8    = 1U << 1, ///< Bytes that are not UTF-8 were laid out as U+FFFD.
+    MISSING_GLYPHS  = 1U << 2, ///< Characters no atlas of the font's chain has were drawn as `.notdef`.
+    NO_SHAPING_FONT = 1U << 3, ///< A run needed HarfBuzz but its atlas has no shaping font: the basic shaper shaped it.
+    CACHE_FULL      = 1U << 4, ///< Every cache entry was in use this frame: the layout lives until the next frame only.
+};
+
 /// @brief How the atlas tool embeds a `.uiatlas` blob into a generated C++ module.
 enum class AtlasEmbedding : std::uint8_t
 {
@@ -229,6 +266,9 @@ inline constexpr std::size_t UI_ATLAS_HEADER_SIZE = 64;
 /// @brief Version of the atlas generator, stored in every atlas: raised whenever the same inputs would
 ///        produce different bytes (the pixels, the packing or the tables).
 inline constexpr std::uint32_t UI_ATLAS_GENERATOR_VERSION = 1;
+
+/// @brief U+FFFD, which stands for bytes that are not UTF-8.
+inline constexpr char32_t REPLACEMENT_CHARACTER = U'\uFFFD';
 
 /// @brief Largest number of glyphs a ligature of the LIGATURES section replaces.
 inline constexpr std::size_t MAXIMUM_LIGATURE_COMPONENTS = 4;
@@ -477,6 +517,54 @@ struct EnumerationTraits<ui::AtlasProblem>
 };
 
 template<>
+struct EnumerationTraits<ui::ParagraphDirection>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::ParagraphDirection::AUTOMATIC, "AUTOMATIC"},
+        EnumeratorName{ui::ParagraphDirection::LEFT_TO_RIGHT, "LEFT_TO_RIGHT"},
+        EnumeratorName{ui::ParagraphDirection::RIGHT_TO_LEFT, "RIGHT_TO_LEFT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::TextAlignment>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TextAlignment::START, "START"},
+        EnumeratorName{ui::TextAlignment::END, "END"},
+        EnumeratorName{ui::TextAlignment::LEFT, "LEFT"},
+        EnumeratorName{ui::TextAlignment::CENTER, "CENTER"},
+        EnumeratorName{ui::TextAlignment::RIGHT, "RIGHT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::TextShaping>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TextShaping::AUTOMATIC, "AUTOMATIC"},
+        EnumeratorName{ui::TextShaping::BASIC, "BASIC"},
+        EnumeratorName{ui::TextShaping::HARFBUZZ, "HARFBUZZ"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::TextLayoutProblem>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TextLayoutProblem::UNKNOWN_FONT, "UNKNOWN_FONT"},
+        EnumeratorName{ui::TextLayoutProblem::INVALID_UTF8, "INVALID_UTF8"},
+        EnumeratorName{ui::TextLayoutProblem::MISSING_GLYPHS, "MISSING_GLYPHS"},
+        EnumeratorName{ui::TextLayoutProblem::NO_SHAPING_FONT, "NO_SHAPING_FONT"},
+        EnumeratorName{ui::TextLayoutProblem::CACHE_FULL, "CACHE_FULL"},
+    };
+};
+
+template<>
 struct EnumerationTraits<ui::AtlasEmbedding>
 {
     static constexpr bool IS_BITMASK = false;
@@ -511,6 +599,10 @@ static_assert(verify<ui::AtlasGlyphFlag>(), "EnumerationTraits<ui::AtlasGlyphFla
 static_assert(verify<ui::AtlasVerification>(), "EnumerationTraits<ui::AtlasVerification>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AtlasProblem>(), "EnumerationTraits<ui::AtlasProblem>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AtlasEmbedding>(), "EnumerationTraits<ui::AtlasEmbedding>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::ParagraphDirection>(), "EnumerationTraits<ui::ParagraphDirection>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TextAlignment>(), "EnumerationTraits<ui::TextAlignment>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TextShaping>(), "EnumerationTraits<ui::TextShaping>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TextLayoutProblem>(), "EnumerationTraits<ui::TextLayoutProblem>::NAMES is out of sync with the enumeration");
 static_assert(ui::CHARACTER_SET_RANGES.size() == ENUMERATOR_COUNT<ui::CharacterSet>,
               "CHARACTER_SET_RANGES needs one range per CharacterSet");
 static_assert(std::ranges::all_of(ui::CHARACTER_SET_RANGES, [](const ui::CharacterRange& range) { return range.first <= range.last; }),
