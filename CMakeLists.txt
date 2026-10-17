@@ -32,6 +32,10 @@ option(GFX_BUILD_PLATFORM "Build the platform library (windowing and input)" ON)
 # HarfBuzz, zstd, SheenBidi and libunibreak (docs/ui-design.md).
 option(GFX_BUILD_UI "Build the UI library (immediate/retained widgets, SDF/MSDF text)" ON)
 include(CMakeDependentOption)
+# The UI's build-time font pipeline (gfx::ui_atlas_tools and the atlas tool gfx_add_ui_atlas() runs);
+# without it, applications load atlases built elsewhere.
+cmake_dependent_option(GFX_BUILD_UI_ATLAS_TOOLS "Build the UI atlas tools (font decoders, SDF generators, atlas tool)" ON
+                       "GFX_BUILD_UI" OFF)
 cmake_dependent_option(GFX_PLATFORM_BACKEND_SDL3 "Build the SDL3 platform backend (SDL3 found or fetched)" ON
                        "GFX_BUILD_PLATFORM" OFF)
 cmake_dependent_option(GFX_PLATFORM_BACKEND_GLFW "Build the GLFW platform backend (GLFW found or fetched)" ON

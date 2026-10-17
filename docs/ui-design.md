@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 built,
-awaiting validation (§B, "U0 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 committed;
+U1 built, awaiting validation (§B, "U1 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -407,28 +407,116 @@ report, and your validation (you commit).
   compile-failure tests `UiHandlesOfDifferentKindsDoNotCompare` and `UiIdentifiersOfDifferentKindsDoNotMix`;
   the platform-macro collision scan covers `source/ui`.
 
+
+### U1 as built (2026-10-17)
+
+- **Libraries**: the runtime part of the format joins `gfx::ui` (module `gfx.ui.atlas_format`, re-exported by
+  `gfx.ui`); the build-time pipeline is a library of its own, **`gfx::ui_atlas_tools`** (`import gfx.ui.atlas_tools;`,
+  option `GFX_BUILD_UI_ATLAS_TOOLS`, ON with `GFX_BUILD_UI`), so applications that only load atlases never link
+  FreeType, msdfgen or HarfBuzz's subsetter. The atlas tool `gfx_ui_atlas_builder` links it.
+- **`gfx.ui.atlas_format`** (`source/ui/font/atlas/atlas_format.cppm`): `atlas_layout` (record offsets as
+  `static constexpr` members of `Header`, `SectionEntry`, `Descriptor`, `FaceMetrics`, `AxisRecord`, `Table`,
+  `GlyphRecord`, `CharacterRecord`, `KerningRecord`, `LigatureRecord`; constexpr little-endian `load`/`store`;
+  `texel_size`, `channel_count`, `texel_format_fits`), constexpr `xxhash64` (checked against zstd's xxHash for every
+  length up to 400 bytes), `font_tag`/`font_tag_name`, the decoded records (`AtlasHeader`, `AtlasSection`,
+  `AtlasDescriptor`, `AtlasFaceMetrics` with `AtlasText` names, `AtlasGlyph` with `GlyphPlaneBounds` (em, y up)
+  and `GlyphTexelBounds` (texels, y down), `CharacterMapping`, `KerningPair`, `Ligature`), and **`AtlasView`**:
+  `parse(blob, AtlasVerification)` validates header, table, required sections, descriptor, table sizes, ordering,
+  references and (by default) every checksum, returning `std::expected<AtlasView, AtlasReadError>`
+  (`describe_atlas_error()`); lookups by binary search (`find_glyph`, `find_character`, `find_kerning`), pages,
+  shaping font. Usable in constant expressions; `parse()` of a temporary `std::vector` is deleted (the view would
+  dangle). The format is documented in [ui-atlas-format.md](ui-atlas-format.md).
+- **`gfx.ui.atlas_tools`** (`source/ui/font/`): `FontSource` (file or memory, shared bytes, xxHash64) and constexpr
+  `detect_font_format()`; `CharacterSelection` (CharacterSet names, `U+XXXX`, `U+XXXX-U+YYYY`, UTF-8 text without
+  controls; `format_code_point()`); `GlyphOutline`/`OutlineBuilder` (font units, closed contours, lines, quadratic
+  and cubic curves); `FontDecoder`/`FontFace` with **FreeType** (TrueType, CFF, CFF2, collections, WOFF, WOFF2,
+  variable fonts; through the plain translation unit `freetype_library.cpp`, FreeType's headers include
+  `<stdio.h>`) and **stb_truetype** (TrueType, CFF, collections; reads fvar for axes and instances, COLR for color
+  glyphs, OS/2 and post for metrics); `SdfGenerator` with **msdfgen** (SDF, PSDF, MSDF, MTSDF; plain unit
+  `msdfgen_kernel.cpp`) and the **built-in** kernel (SDF; curves flattened within 0.01 texel, only the pieces of
+  lines on the outline of the filled area kept, so overlapping contours have no inner edges; within 0.0025 of
+  msdfgen's values); `AtlasPacker` with **TIGHT** (msdf-atlas-gen's rectangle packer, plain unit
+  `rectangle_packer.cpp`; smallest power-of-two or multiple-of-4 square, then pages of the maximum dimension) and
+  **GRID**; `write_atlas(AtlasContent)` (zstd level 19 single-threaded for pixels and the shaping font, every
+  checksum, parsed back before it returns); **`AtlasBuilder`** (`use_decoder`, `use_generator`, `use_packer` for
+  custom implementations) and `build_atlas()`, with `AtlasBuildReport` (missing characters, color glyphs, pages,
+  pair tables, sizes).
+- **The build pipeline**: open the face → resolve the variation (axis values or a named instance, checked against
+  the axes) → **hb-subset** the font: requested characters, closure over hb-subset's default layout features, the
+  `.notdef` outline, no hinting, every axis pinned (a static instance; HarfBuzz's instancer gives the advances
+  FreeType gives) → reopen the subset with the same decoder, so glyph indices are those of the shaping font → read
+  every glyph on the calling thread → boxes and fields on worker threads (`std::jthread`, an atomic index; the bytes
+  do not depend on the thread count) → pack → quantize into pages (8-bit `round(clamp(v) × 255)`, or binary16) →
+  pair kerning and standard ligatures (2 to 4 characters) for the basic shaper, found by shaping every pair of
+  Latin, Greek, Cyrillic and common characters with HarfBuzz (no locale: the default language system) → write.
+  Without a shaping font (`shaping_font = false`, then no kerning and no ligatures), the face itself is read (its
+  variation applied by the decoder: FreeType only).
+- **Tool and CMake**: `gfx_ui_atlas_builder --font --output [--characters] [--text-file] [--variation]
+  [--named-instance] [--kind --size --range --padding ...] [--depfile] [--embed-module --module-name --constant
+  --namespace --embedding] [--require-all-characters]` (`--help`); **`gfx_add_ui_atlas()`** in
+  `cmake/GfxUiAtlas.cmake`: checks the description when CMake configures, runs the tool with a depfile (the font and
+  text files), and with `EMBED` adds a generated module exporting `inline constexpr std::array<std::byte, N>
+  <NAME>` — `#embed` on GCC 15 and Clang 19 or later (`-Wno-c++26-extensions` on that file only), byte literals
+  otherwise (`EMBEDDING BYTE_LIST`).
+- **Deviations from the design, for your validation**:
+  1. The CMake module is `cmake/GfxUiAtlas.cmake` (not `cmake/atlas.cmake`): the project's modules are named
+     `Gfx*`, which also keeps a generic name out of consumers' `CMAKE_MODULE_PATH`.
+  2. The atlas tools are a separate library and option (above), not part of `gfx::ui`.
+  3. The reader of the format (`AtlasView`, compile-time validation included) came in U1: the writer checks its
+     output with it and the tests read every section. U2 keeps `FontAtlas` (pages uploaded as images), the
+     coverage helpers (`atlas_covers()`), fallback chains and the shapers.
+  4. Format details refined from A7: the page geometry is in DESCRIPTOR (readable without decompressing), with one
+     PIXELS section per page; FACE_METRICS keeps font units; every table starts with its count and record size;
+     the header gives the section table's offset; glyph texel bounds are y-down (Vulkan's image origin).
+  5. msdf-atlas-gen is used for packing only: its `GlyphGeometry` loads glyphs through msdfgen's FreeType handle,
+     which would tie generation to one decoder, so gfx builds the msdfgen shape from its own outline and applies
+     msdf-atlas-gen's steps itself (normalize, orientation fix, box with half the range, miters and padding, sign
+     correction by scanline, error correction after it).
+  6. Test fonts: Source Sans 3 is fetched too (OpenType CFF, variable CFF2, WOFF, WOFF2; Adobe's release branch,
+     OFL); collections are assembled by the tests from two Noto fonts. Inter and the CJK font still arrive in U2.
+- **Facts found**: hb-subset removes the `.notdef` outline unless `HB_SUBSET_FLAGS_NOTDEF_OUTLINE` is set;
+  `hb_subset_input_pin_all_axes_to_default()` resets axes pinned before it (call it first); FreeType's
+  `FT_Load_Sfnt_Table(face, 0, ...)` returns the tables it decoded from WOFF and WOFF2; HarfBuzz's static
+  `harfbuzz-subset` repeats symbols of `harfbuzz` (linked with `--allow-multiple-definition`, which gfx already
+  uses); stb_truetype truncates fractional CFF coordinates where FreeType rounds them, and the two may start
+  TrueType contours at other points (same boxes; true distances within 2/255, MSDF colors may differ);
+  `GfxRuntimeDeployment.cmake` kept its runtime list in a directory variable behind a global include guard (now a
+  cache variable).
+- **Tests**: `gfx_ui_atlas_tools_tests` (48: xxHash64 and layout, writer round trip, compression, refused content,
+  every kind of damaged blob, format detection, character selections, outline builder, every decoder on every
+  format and their agreement, variable fonts, generators (msdfgen fields, every kind, built-in against msdfgen,
+  refusals), packers (no overlap, spacing, pages, grid), the builder (content, reproducibility with 1 and 8 threads,
+  every kind and texel format, every font format, closure for Arabic shaping, instances, no shaping font, missing
+  characters, several pages, refused descriptions, custom decoder and packer)), `gfx_ui_atlas_embed_tests` (2, plus
+  `static_assert`s on two embedded atlases, one validated with every checksum at compile time), and CTest runs of
+  the tool (`UiAtlasTool.*`: help, unknown option, required characters, same bytes with 1 and 8 threads).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)
 
 ### C1. Atlas at build time, checked at compile time
 
+As built in U1 (`cmake/GfxUiAtlas.cmake`; `atlas_covers()` arrives in U2):
+
 ```cmake
-# cmake/atlas.cmake
+include(GfxUiAtlas)
 gfx_add_ui_atlas(editor
-    NAME editor_font                       # module editor.fonts, constant editor_font
+    NAME editor_font                                   # editor_font.uiatlas, constant editor_font
     FONT ${fonts_SOURCE_DIR}/Inter-Regular.ttf
-    CHARACTERS "LATIN_1 GENERAL_PUNCTUATION ARROWS"   # named ranges, files of text, or code point lists
+    CHARACTERS BASIC_LATIN LATIN_1_SUPPLEMENT GENERAL_PUNCTUATION ARROWS   # sets, U+XXXX, U+XXXX-U+YYYY
+    TEXT_FILES strings/labels.txt                      # and every character of these UTF-8 files
     KIND MTSDF SIZE 40 RANGE 6 PADDING 2
-    EMBED)                                 # also embed it in a generated module
+    EMBED MODULE editor.fonts)                         # also embed it in a generated module
 ```
 
 ```cpp
 import gfx.ui;
-import editor.fonts;   // generated: inline constexpr std::array<std::byte, N> editor_font{#embed ...}
+import editor.fonts;   // generated: inline constexpr std::array<std::byte, N> editor_font (#embed)
 
-static_assert(gfx::ui::atlas_header(editor_font).kind == gfx::ui::SdfKind::MTSDF);
-static_assert(gfx::ui::atlas_covers(editor_font, u8"Ångström — ±→"), "a label uses a character the atlas lacks");
+constexpr auto EDITOR_FONT = gfx::ui::AtlasView::parse(editor_font, gfx::ui::AtlasVerification::STRUCTURE);
+static_assert(EDITOR_FONT.has_value() && EDITOR_FONT->descriptor().kind == gfx::ui::SdfKind::MTSDF);
+static_assert(EDITOR_FONT->find_character(U'→').has_value(), "a label uses a character the atlas lacks");
 ```
 
 ### C2. Context, fonts and a frame

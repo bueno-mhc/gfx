@@ -25,8 +25,9 @@ to present frames.
 > both. The design and the decisions behind the platform library are in
 > [docs/platform-design.md](docs/platform-design.md); [docs/architecture.md](docs/architecture.md)
 > describes the code as built, with diagrams. The **UI library** is being built in phases
-> ([docs/ui-design.md](docs/ui-design.md)): its foundations (enumerations, handles, errors and the
-> font pipeline's libraries) are in place; widgets, atlases and text arrive in the next phases.
+> ([docs/ui-design.md](docs/ui-design.md)): its foundations and its [font atlases](#ui-font-atlases)
+> (any font format turned into SDF/MSDF atlases at build time, checked at compile time) are in place;
+> text layout, rendering and widgets arrive in the next phases.
 
 ```cpp
 import std;
@@ -481,6 +482,39 @@ triggers testable.
 What a backend lacks throws `BackendCapabilityError` where it is used; `Platform::supports()` reports it
 beforehand. One backend is active at a time (both pump the same thread's message queue).
 
+## UI font atlases
+
+Every text of the UI library is drawn from signed distance fields (SDF, PSDF, MSDF or MTSDF), built when
+the program is built: `gfx_add_ui_atlas()` runs the atlas tool on a font (TrueType, OpenType CFF and CFF2,
+collections, WOFF, WOFF2, variable fonts at any instance) and can embed the result in a module, which
+`gfx::ui::AtlasView` reads at compile time and at run time.
+
+```cmake
+include(GfxUiAtlas)
+gfx_add_ui_atlas(my_application
+    NAME interface_font
+    FONT fonts/NotoSans.ttf
+    CHARACTERS BASIC_LATIN LATIN_1_SUPPLEMENT U+2013-U+2014 U+20AC   # sets, ranges, code points
+    VARIATION wght=500                                        # or NAMED_INSTANCE Bold
+    KIND MTSDF SIZE 40 RANGE 6
+    EMBED MODULE my_application.fonts)
+```
+
+```cpp
+import gfx.ui;
+import my_application.fonts; // generated: inline constexpr std::array<std::byte, N> interface_font
+
+constexpr auto INTERFACE_FONT = gfx::ui::AtlasView::parse(interface_font, gfx::ui::AtlasVerification::STRUCTURE);
+static_assert(INTERFACE_FONT.has_value(), "the atlas is valid");
+static_assert(INTERFACE_FONT->find_character(U'é').has_value(), "a label uses a character the atlas lacks");
+```
+
+An atlas holds its pages (zstd-compressed), glyph boxes and metrics, the character map, kerning and
+ligatures for simple scripts, and a subset of the font for HarfBuzz (the requested characters and every
+form shaping can substitute them with). The same inputs give the same bytes. `gfx_ui_atlas_builder --help`
+lists the tool's options; the format is described in [docs/ui-atlas-format.md](docs/ui-atlas-format.md),
+and `import gfx.ui.atlas_tools;` builds atlases from C++ (custom decoders, generators and packers included).
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -524,7 +558,8 @@ The UI library's font pipeline is fetched at pinned versions, so that atlases ar
 reproducible: FreeType 2.14.3 (with Brotli 1.2.0 for WOFF2), msdfgen 1.13, msdf-atlas-gen 1.4,
 HarfBuzz 14.2.1, zstd 1.5.7 and stb_truetype 1.26; SheenBidi 3.0.0 and libunibreak 7.0 are used
 from the system when installed. With the tests on, configuring downloads the OFL test fonts (Noto
-Sans, Arabic, Hebrew) into `<build>/ui-test-fonts`, checked against their hashes.
+Sans, Arabic, Hebrew; Source Sans 3 as OpenType CFF, CFF2, WOFF and WOFF2) into `<build>/ui-test-fonts`,
+checked against their hashes.
 
 | CMake option | Default | Backend |
 |---|---|---|
@@ -535,7 +570,8 @@ Sans, Arabic, Hebrew) into `<build>/ui-test-fonts`, checked against their hashes
 | `GFX_PLATFORM_BACKEND_SDL3` | `ON` | SDL3 windowing and input (SDL 3.4 found, or 3.4.10 fetched and linked statically) |
 | `GFX_PLATFORM_BACKEND_GLFW` | `ON` | GLFW windowing and input (GLFW 3.4 found, or fetched and linked statically) |
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
-| `GFX_BUILD_UI` | `ON` | The UI library (in progress) and its font pipeline |
+| `GFX_BUILD_UI` | `ON` | The UI library (in progress) |
+| `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one needs the platform library and Vulkan) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
@@ -608,7 +644,12 @@ gfx/
 │   ├── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
 │   │                       (swapchain_description_for(), WindowSwapchain)
 │   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
-│                         errors.cppm
+│       │                 errors.cppm
+│       ├── font/         atlas/atlas_format.cppm: the .uiatlas format and AtlasView (in gfx.ui);
+│       │                 the atlas tools (gfx.ui.atlas_tools): source/ (fonts, characters), decoders/
+│       │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
+│       │                 builder), shaping/ (hb-subset, pair tables)
+│       └── tools/atlas_builder/  gfx_ui_atlas_builder, the atlas tool gfx_add_ui_atlas() runs
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only) and the slot table
@@ -619,8 +660,8 @@ gfx/
     │                     (SDL-injected events, virtual gamepads) and glfw/ (Win32 messages)
     ├── platform_graphics/  presentation to visible windows: every platform backend x every GPU,
     │                     with the validation layers (cleared frames read back, resize, minimize)
-    ├── ui/               the UI library, and the font pipeline's libraries as gfx builds them
-    │                     (fetched OFL fonts)
+    ├── ui/               the UI library, the atlas tools (every format, decoder, generator, packer),
+    │                     embedded atlases, and the font pipeline's libraries (fetched OFL fonts)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

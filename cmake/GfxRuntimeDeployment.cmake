@@ -3,16 +3,18 @@
 # ==============================================================================
 include_guard(GLOBAL)
 
-# Runtime libraries of the MinGW toolchain.
-set(GFX_TOOLCHAIN_RUNTIME_LIBRARIES "")
+# Runtime libraries of the MinGW toolchain. A cache variable: the include guard is global, so the
+# directory that includes this file first must not be the only one that sees the list.
+set(_gfx_toolchain_runtime_libraries "")
 if(MINGW)
     cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH _gfx_toolchain_binary_directory)
     foreach(_gfx_library IN ITEMS libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
         if(EXISTS "${_gfx_toolchain_binary_directory}/${_gfx_library}")
-            list(APPEND GFX_TOOLCHAIN_RUNTIME_LIBRARIES "${_gfx_toolchain_binary_directory}/${_gfx_library}")
+            list(APPEND _gfx_toolchain_runtime_libraries "${_gfx_toolchain_binary_directory}/${_gfx_library}")
         endif()
     endforeach()
 endif()
+set(GFX_TOOLCHAIN_RUNTIME_LIBRARIES "${_gfx_toolchain_runtime_libraries}" CACHE INTERNAL "Runtime libraries of the toolchain")
 
 # gfx_deploy_runtime_dependencies(<target>)
 #   Copies the shared libraries a Windows executable depends on (imported DLL targets plus the

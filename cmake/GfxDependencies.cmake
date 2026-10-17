@@ -668,24 +668,32 @@ function(gfx_require_stb_truetype)
 endfunction()
 
 # gfx_require_ui_test_fonts()
-#   Downloads the fonts the UI tests use (SIL Open Font License 1.1; never committed) from a pinned commit
-#   of github.com/google/fonts, checked against their hashes, into <build>/ui-test-fonts, and sets
-#   GFX_UI_TEST_FONT_DIRECTORY in the caller's scope: Noto Sans (Latin, Greek, Cyrillic), Noto Sans Arabic
-#   and Noto Sans Hebrew, all variable TrueType fonts (axes wdth and wght), with their licenses.
+#   Downloads the fonts the UI tests use (SIL Open Font License 1.1; never committed), checked against
+#   their hashes, into <build>/ui-test-fonts, and sets GFX_UI_TEST_FONT_DIRECTORY in the caller's scope:
+#   from a pinned commit of github.com/google/fonts, Noto Sans (Latin, Greek, Cyrillic), Noto Sans Arabic
+#   and Noto Sans Hebrew (variable TrueType, axes wdth and wght); from a pinned commit of the release
+#   branch of github.com/adobe-fonts/source-sans, Source Sans 3 as OpenType CFF, variable OpenType CFF2
+#   (axis wght), WOFF and WOFF2 (of its TrueType build); with their licenses.
 function(gfx_require_ui_test_fonts)
     set(_gfx_directory ${CMAKE_BINARY_DIR}/ui-test-fonts)
-    set(_gfx_base https://raw.githubusercontent.com/google/fonts/47d54ca1ebb14fd864695f1d39dc734f39017c33/ofl)
+    set(_gfx_noto https://raw.githubusercontent.com/google/fonts/47d54ca1ebb14fd864695f1d39dc734f39017c33/ofl)
+    set(_gfx_source_sans https://raw.githubusercontent.com/adobe-fonts/source-sans/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e)
     set(_gfx_fonts
-        "NotoSans.ttf|notosans/NotoSans%5Bwdth%2Cwght%5D.ttf|bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d"
-        "NotoSans-OFL.txt|notosans/OFL.txt|cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
-        "NotoSansArabic.ttf|notosansarabic/NotoSansArabic%5Bwdth%2Cwght%5D.ttf|63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e"
-        "NotoSansArabic-OFL.txt|notosansarabic/OFL.txt|07fc70bfeb985cc1a87a8587d0a0c80bab11c86c9dc3fd95b6f0cb332f983e96"
-        "NotoSansHebrew.ttf|notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf|7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88"
-        "NotoSansHebrew-OFL.txt|notosanshebrew/OFL.txt|9b9fe028b5ba74d231659a1bbaf0ed09b11e759d1ca6a070999e16d151616b47")
+        "NotoSans.ttf|${_gfx_noto}/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf|bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d"
+        "NotoSans-OFL.txt|${_gfx_noto}/notosans/OFL.txt|cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+        "NotoSansArabic.ttf|${_gfx_noto}/notosansarabic/NotoSansArabic%5Bwdth%2Cwght%5D.ttf|63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e"
+        "NotoSansArabic-OFL.txt|${_gfx_noto}/notosansarabic/OFL.txt|07fc70bfeb985cc1a87a8587d0a0c80bab11c86c9dc3fd95b6f0cb332f983e96"
+        "NotoSansHebrew.ttf|${_gfx_noto}/notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf|7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88"
+        "NotoSansHebrew-OFL.txt|${_gfx_noto}/notosanshebrew/OFL.txt|9b9fe028b5ba74d231659a1bbaf0ed09b11e759d1ca6a070999e16d151616b47"
+        "SourceSans3-Regular.otf|${_gfx_source_sans}/OTF/SourceSans3-Regular.otf|08df266400933d3178d081a45f94a08814c3e55b4b7dd2e0ff69cb1329f13ab6"
+        "SourceSans3VF-Upright.otf|${_gfx_source_sans}/VF/SourceSans3VF-Upright.otf|3d0dfd6a3a644ab3d462a737923ffac41fb0ae007ce9ba83c24e6bfa76aa56c7"
+        "SourceSans3-Regular.ttf.woff|${_gfx_source_sans}/WOFF/TTF/SourceSans3-Regular.ttf.woff|56413337e96f5764882f3e18eaa654eec27515ec7c3de3520eec9e36b25371b9"
+        "SourceSans3-Regular.ttf.woff2|${_gfx_source_sans}/WOFF2/TTF/SourceSans3-Regular.ttf.woff2|53492fb3a0def77354f166a55d09b63a10855e91c206c7620a81cf56e97f8ec3"
+        "SourceSans3-LICENSE.md|${_gfx_source_sans}/LICENSE.md|56af9b9c6715597e458284a474dc118a50a4150e9d547c70f7b4a33c3e6a9328")
     foreach(_gfx_font IN LISTS _gfx_fonts)
         string(REPLACE "|" ";" _gfx_parts "${_gfx_font}")
         list(GET _gfx_parts 0 _gfx_name)
-        list(GET _gfx_parts 1 _gfx_path)
+        list(GET _gfx_parts 1 _gfx_url)
         list(GET _gfx_parts 2 _gfx_hash)
         set(_gfx_file ${_gfx_directory}/${_gfx_name})
         if(EXISTS ${_gfx_file})
@@ -694,11 +702,11 @@ function(gfx_require_ui_test_fonts)
                 continue()
             endif()
         endif()
-        file(DOWNLOAD ${_gfx_base}/${_gfx_path} ${_gfx_file} EXPECTED_HASH SHA256=${_gfx_hash} TLS_VERIFY ON STATUS _gfx_status)
+        file(DOWNLOAD ${_gfx_url} ${_gfx_file} EXPECTED_HASH SHA256=${_gfx_hash} TLS_VERIFY ON STATUS _gfx_status)
         list(GET _gfx_status 0 _gfx_code)
         if(NOT _gfx_code EQUAL 0)
             list(GET _gfx_status 1 _gfx_message)
-            message(FATAL_ERROR "gfx: the UI test font ${_gfx_name} could not be downloaded from ${_gfx_base}/${_gfx_path}: "
+            message(FATAL_ERROR "gfx: the UI test font ${_gfx_name} could not be downloaded from ${_gfx_url}: "
                                 "${_gfx_message}. Turn GFX_BUILD_TESTS off, or retry with network access.")
         endif()
     endforeach()
