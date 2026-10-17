@@ -234,6 +234,25 @@ enum class TextLayoutProblem : std::uint8_t
     CACHE_FULL      = 1U << 4, ///< Every cache entry was in use this frame: the layout lives until the next frame only.
 };
 
+/// @brief What a draw command samples.
+enum class DrawTextureKind : std::uint8_t
+{
+    NONE,      ///< Nothing (shapes, solid triangles): compatible with any texture.
+    FONT_PAGE, ///< A page of a font atlas, uploaded by the renderer.
+    IMAGE,     ///< An image of the application, named by its bindless sampled-image index.
+};
+
+/// @brief How the UI shader draws a vertex's primitive (bits 0 to 7 of UiVertex::mode; the values are the
+///        shader's).
+enum class UiShaderMode : std::uint8_t
+{
+    SOLID,        ///< The vertex color (triangles, with alpha for anti-aliased fringes).
+    SHAPE,        ///< A rounded box evaluated as a signed distance: rectangles, borders, circles, lines.
+    GLYPH,        ///< A glyph of a distance-field atlas, with its outline.
+    GLYPH_SHADOW, ///< A glyph's shadow or glow: its true distance, softened.
+    IMAGE,        ///< A texture, tinted by the vertex color.
+};
+
 /// @brief How the atlas tool embeds a `.uiatlas` blob into a generated C++ module.
 enum class AtlasEmbedding : std::uint8_t
 {
@@ -565,6 +584,30 @@ struct EnumerationTraits<ui::TextLayoutProblem>
 };
 
 template<>
+struct EnumerationTraits<ui::DrawTextureKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::DrawTextureKind::NONE, "NONE"},
+        EnumeratorName{ui::DrawTextureKind::FONT_PAGE, "FONT_PAGE"},
+        EnumeratorName{ui::DrawTextureKind::IMAGE, "IMAGE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::UiShaderMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::UiShaderMode::SOLID, "SOLID"},
+        EnumeratorName{ui::UiShaderMode::SHAPE, "SHAPE"},
+        EnumeratorName{ui::UiShaderMode::GLYPH, "GLYPH"},
+        EnumeratorName{ui::UiShaderMode::GLYPH_SHADOW, "GLYPH_SHADOW"},
+        EnumeratorName{ui::UiShaderMode::IMAGE, "IMAGE"},
+    };
+};
+
+template<>
 struct EnumerationTraits<ui::AtlasEmbedding>
 {
     static constexpr bool IS_BITMASK = false;
@@ -599,6 +642,8 @@ static_assert(verify<ui::AtlasGlyphFlag>(), "EnumerationTraits<ui::AtlasGlyphFla
 static_assert(verify<ui::AtlasVerification>(), "EnumerationTraits<ui::AtlasVerification>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AtlasProblem>(), "EnumerationTraits<ui::AtlasProblem>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AtlasEmbedding>(), "EnumerationTraits<ui::AtlasEmbedding>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::DrawTextureKind>(), "EnumerationTraits<ui::DrawTextureKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::UiShaderMode>(), "EnumerationTraits<ui::UiShaderMode>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::ParagraphDirection>(), "EnumerationTraits<ui::ParagraphDirection>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::TextAlignment>(), "EnumerationTraits<ui::TextAlignment>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::TextShaping>(), "EnumerationTraits<ui::TextShaping>::NAMES is out of sync with the enumeration");

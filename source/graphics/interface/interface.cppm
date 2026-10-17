@@ -52,6 +52,5 @@ export import :transient_buffer_allocator;
 export import :uploader;
 export import :gpu_profiler;
 export import :frame_metrics;
-export import :debug_overlay;
 export import :physical_device;
 export import :instance;

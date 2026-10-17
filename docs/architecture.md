@@ -244,10 +244,9 @@ timeline semaphore; the CPU runs at most `frames_in_flight` frames ahead), `Fram
 per thread and frame in flight), `TransientBufferAllocator` (lock-free bump allocation in persistently
 mapped memory), `Uploader` (staged uploads with barriers), `GpuProfiler` (timestamp scopes), and, in Debug
 builds only (no-ops elsewhere), `FrameMetrics` (frame rate, CPU frame times over a period, the frame's
-`CommandStatistics` summed over its command buffers, GPU timings, device memory) and `DebugOverlay`
-(lines of text in a rendering pass: a built-in 5 x 7 font, checked at compile time, drawn as two
-`clear_attachments()` calls - one for the panel, one for every lit run of every glyph row - so it needs
-no shader, pipeline or texture and works with any color format).
+`CommandStatistics` summed over its command buffers, GPU timings, device memory) as lines of text. The
+UI library's `gfx::ui::DebugOverlay` draws those lines (distance-field text over a translucent panel,
+through `gfx::ui::UiRenderer`); the graphics library has no text of its own.
 
 ### 3.3 Vulkan backend
 
@@ -547,7 +546,7 @@ flowchart LR
 | `tests/graphics/*` | enumerations, errors, handles, the interfaces through a fake backend, shader layouts and validation, shader tools; `vulkan`: the Vulkan backend on every GPU of the machine with the validation layers (any message fails a test) |
 | `tests/platform` | the platform library through a fake platform: events, windows, the pump, watchers, threads, the input system (schemas, contexts, players, triggers, rebinding, saved bindings, `EventChannel`) |
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
-| `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, resize, minimize, frame latency, unsupported settings |
+| `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, the UI renderer drawing into the window (with the UI library), resize, minimize, frame latency, unsupported settings |
 | `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, ...) and a check that no enumerator collides with a platform macro |
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
 

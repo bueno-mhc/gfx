@@ -11,4 +11,11 @@ if(GFX_BACKEND_VULKAN AND (GFX_PLATFORM_BACKEND_SDL3 OR GFX_PLATFORM_BACKEND_GLF
     endif()
     target_compile_definitions(gfx_presentation_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_layer_directory}")
     target_include_directories(gfx_presentation_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
+    # With the UI library, the UI renderer draws into the windows too.
+    if(TARGET gfx_ui)
+        target_link_libraries(gfx_presentation_tests PRIVATE gfx::ui)
+        target_compile_definitions(gfx_presentation_tests PRIVATE GFX_TEST_WITH_UI=1)
+    else()
+        target_compile_definitions(gfx_presentation_tests PRIVATE GFX_TEST_WITH_UI=0)
+    endif()
 endif()

@@ -122,13 +122,10 @@ Original hard requirements (from the user's initial specification):
   unblocked, no longer consumed, text input ended) while held since an earlier frame reads as released until
   released; analog never ignored. **Frame metrics, Debug only** (no-ops in Release, `enabled()`):
   `gfx.interface:frame_metrics` (`FrameMetrics`, `FrameMetricsDescription{averaging_period 500ms}`,
-  `FrameMetricsSnapshot`; begin_frame(now)/count(command buffer)/set_gpu_timings/snapshot/text) and
-  `:debug_overlay` (`DebugOverlay`, `DebugOverlayDescription{visible=false, scale 2, position, colors}`;
-  draw(RenderingCommands&, area, lines) = 2 clear_attachments calls (panel + glyph runs); font table
-  `gfx::debug_font::PATTERNS` → consteval `GLYPHS`, 5x7, printable ASCII, others '?'; static constexpr
-  GLYPH_WIDTH/HEIGHT/ADVANCE, LINE_ADVANCE, PADDING). `CommandStatistics::operator+=`. Fake backend:
-  `FakeCommandBuffer::clears()`, `FakeDevice::set_memory_statistics()`. Font preview rendered with a
-  stdlib-only Python PNG script from the table (scratchpad) to check legibility.
+  `FrameMetricsSnapshot`; begin_frame(now)/count(command buffer)/set_gpu_timings/snapshot/text).
+  `CommandStatistics::operator+=`. Fake backend: `FakeCommandBuffer::clears()`, `FakeDevice::set_memory_statistics()`.
+  The graphics `:debug_overlay` (5x7 bitmap font drawn with clear_attachments) was **deleted in U3**: the overlay is
+  now `gfx::ui::DebugOverlay` (SDF text); FrameMetrics tests in tests/graphics/interface/frame_metrics_test.cpp.
 - **UI library (U0 as built, 2026-10-17)**: `source/ui/`, target `gfx::ui` (`gfx_ui`, option `GFX_BUILD_UI` ON),
   namespace `gfx::ui`, `import gfx.ui;` (re-exports gfx.core). `gfx.ui.enums` (UiSubsystem {GRAPHICS, FONT,
   INPUT, PLATFORM, ACCESSIBILITY}, BACKEND_LIBRARY "gfx::ui"; FontFormat, FontDecoderKind, SdfKind, AtlasTexelFormat,
@@ -185,6 +182,30 @@ Original hard requirements (from the user's initial specification):
   from gfx_add_ui_atlas (text_latin, text_latin_basic NO_SHAPING_FONT, text_hebrew, text_arabic; module
   gfx.tests.text_support); allocation test replaces operator new. Visual check: CPU MTSDF render of a layout (temporary
   test, PGM → PNG with a stdlib script in the scratchpad).
+- **UI rendering (U3 as built, 2026-10-17)** — docs/ui-design.md §B "U3 as built" (6 deviations for validation, incl.
+  gfx_ui now links graphics PUBLIC). `gfx.ui.draw` (source/ui/draw/: Color (sRGB-encoded, not premultiplied, packed()
+  red low byte), UiRectangle, Transform2D (rotation clockwise on screen, about(), right-to-left composition),
+  DrawTexture, UiVertex (48 bytes, static_assert), DrawCommand, TextStyle, DrawList, UiDrawData{lists span of const
+  DrawList* const, width, height}), `gfx.ui.debug_overlay` (DebugOverlay: draw(list, engine, fonts, font, lines) →
+  panel rect; app provides the font), `gfx.ui.renderer` (source/ui/render/: UiRenderer(device, fonts,
+  UiRendererDescription{color_format, samples, frames_in_flight, geometry_bytes_per_frame 8 MiB, debug_name});
+  begin_frame(frame) / prepare(GraphicsRecorder&, data) before the pass (lazy page upload, staging released after
+  frames_in_flight) / record(RenderingCommands&, data) / statistics(); pimpl State). Shaders ui.vert/ui.frag via
+  gfx_add_shaders (module gfx.ui.shaders): vertex pulling from a bindless storage buffer (12 uint words per vertex),
+  shader mode per vertex (UiShaderMode SOLID/SHAPE/GLYPH/GLYPH_SHADOW/IMAGE in bits 0-7, SdfKind bits 8-15), commands
+  split only on clip or texture change (shapes join any command), 32-bit indices, push constants {scale, translation,
+  vertex buffer, vertex word, texture, sampler, flags (bit 0 sRGB → colors converted to linear)}. Shape edges: analytic
+  rounded-box gradient mapped through dFdx/dFdy(local) (finite differences of the distance gave √2 at corners on
+  Intel → 218 instead of 255). Polyline fringe 1 px centered on the edge (ImGui convention; thinner fades). Enumerations
+  DrawTextureKind, UiShaderMode (`TEXT` is a windows.h macro → GLYPH). Tests: gfx_ui_draw_tests (draw_list_test.cpp
+  18 CPU; renderer_test.cpp 17 × every GPU: fixture derives VulkanDeviceTest + WithParamInterface<size_t>, whose
+  `physical_device()` is now virtual; text compared with ui.frag's math evaluated on the CPU from the list's vertices +
+  bilinear page sampling; `GFX_TEST_PICTURE_DIRECTORY` dumps every picture as PPM — ppm_to_png.py in the scratchpad);
+  allocation test for a refilled DrawList; presentation `TheUiIsDrawnIntoTheWindow` (GFX_TEST_WITH_UI); windowed example
+  overlay via UI (GFX_EXAMPLE_WITH_UI, atlas `windowed.fonts` overlay_font, Noto Sans MTSDF 32/4). Coverage sampled
+  at pixel centers along a 45° edge overestimates by ~2% (CPU = GPU). **CMake gotcha**: file-scope `set()` in a module
+  with `include_guard(GLOBAL)` is visible only to the first including directory → put lists inside functions or use
+  CACHE INTERNAL (fixed GfxUiAtlas, GfxShaders, GfxDependencies' GFX_VULKAN_SDK_TAG, GfxRuntimeDeployment).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -536,14 +557,17 @@ gfx/
 │                  font/atlas/atlas_format.cppm (U1,
 │                  in gfx.ui); font/ = gfx.ui.atlas_tools (U1): atlas_tools.cppm, implementations.cppm (internal),
 │                  source/, decoders/ (+ freetype_library.hpp/.cpp plain TU), sdf/ (+ msdfgen_kernel plain TU),
-│                  atlas/ (+ rectangle_packer plain TU), shaping/; tools/atlas_builder/ (gfx_ui_atlas_builder)
+│                  atlas/ (+ rectangle_packer plain TU), shaping/; tools/atlas_builder/ (gfx_ui_atlas_builder);
+│                  draw/ (U3: draw.cppm + draw_list.cpp = gfx.ui.draw, debug_overlay.cppm/.cpp), render/ (U3:
+│                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag)
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
             ui/ (ui_foundations_test.cpp; font_libraries_test.cpp = plain TU, fetched OFL fonts; U1: atlas_*_test.cpp,
             font_*_test.cpp, sdf_generator_test.cpp, module gfx.tests.ui_atlas_support, xxhash_reference plain TU,
             atlas_embed_test.cpp + gfx_add_ui_atlas, scripts/GfxCompareAtlasBuilds.cmake; U2: font_atlas_test.cpp,
-            text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp),
+            text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp; U3: draw_list_test.cpp,
+            renderer_test.cpp = gfx_ui_draw_tests with atlas gfx.tests.draw_latin),
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
             (vulkan: real GPUs, shaders/ via gfx_add_shaders), compilation/{handles,enums,interface,platform}/
@@ -581,11 +605,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4) and U1 (4ba8362) committed; **U2 (atlas load + text) done, awaiting validation** (§B "U2 as built"); U3 (rendering) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a) committed; **U3 (rendering) done, awaiting validation** (§B "U3 as built"); U4 (core immediate mode) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **542**, all passing in Debug and Release, 2026-10-17 (after U2: + 19 gfx_ui_text_tests,
+Test count at last report: **590**, all passing in Debug and Release, 2026-10-17 (after U3: + 52 gfx_ui_draw_tests =
+18 CPU + 17 × 2 GPUs, + 1 allocation test, − 5 DebugOverlay unit tests; presentation overlay test replaced by the UI one;
+skips Debug 4, Release 19). Before U3: 542 (after U2: + 19 gfx_ui_text_tests,
 1 gfx_ui_text_allocation_tests). Before U2: 522 (after U1: + 48
 gfx_ui_atlas_tools_tests, 2 gfx_ui_atlas_embed_tests, 4 UiAtlasTool.* CLI tests; skips Debug 4, Release 27). Before U1:
 468 (after U0: + 7 gfx_ui_tests,

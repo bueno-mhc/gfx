@@ -57,8 +57,9 @@ endfunction()
 # -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER to build every one of them from source.
 # ------------------------------------------------------------------------------
 
-# Release of the Vulkan SDK the fetched Khronos repositories (and volk) are taken from.
-set(GFX_VULKAN_SDK_TAG "vulkan-sdk-1.4.350.0")
+# Release of the Vulkan SDK the fetched Khronos repositories (and volk) are taken from (a cache variable:
+# the include guard is global, so directories including this file later do not run this line).
+set(GFX_VULKAN_SDK_TAG "vulkan-sdk-1.4.350.0" CACHE INTERNAL "Vulkan SDK release of the fetched Khronos repositories")
 
 # _gfx_report_dependency(<package> <description>)
 #   Tells whether FetchContent_MakeAvailable(<package>) found <package> on the system or built it.

@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 and U1
-committed; U2 built, awaiting validation (§B, "U2 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0, U1
+and U2 committed; U3 built, awaiting validation (§B, "U3 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -553,6 +553,91 @@ report, and your validation (you commit).
   within the width, long words between graphemes, paragraphs and empty lines, alignment, problems, the cache (hits,
   overflow, eviction, clear), carets and hit tests) with atlases built by `gfx_add_ui_atlas()`;
   `gfx_ui_text_allocation_tests` (cached layouts allocate nothing over 100 frames).
+
+### U3 as built (2026-10-17)
+
+- **Modules** (in `gfx::ui`, re-exported by `gfx.ui`): **`gfx.ui.draw`** (`source/ui/draw/`: `Color` (sRGB-encoded,
+  not premultiplied; `packed()` RGBA8, red in the low byte), `UiRectangle`, `Transform2D` (translation, scaling,
+  rotation clockwise on screen, `about(pivot, transform)`, composed right to left), `DrawTexture`, `UiVertex`,
+  `DrawCommand`, `TextStyle`, `DrawList`, `UiDrawData`; `draw_list.cpp`), **`gfx.ui.debug_overlay`** (`DebugOverlay`)
+  and **`gfx.ui.renderer`** (`source/ui/render/`: `UiRenderer`, `UiRendererDescription`, `UiRendererStatistics`;
+  shaders `ui.vert`/`ui.frag` compiled by `gfx_add_shaders()` into module `gfx.ui.shaders`). Enumerations added:
+  `DrawTextureKind`, `UiShaderMode` (SOLID, SHAPE, GLYPH, GLYPH_SHADOW, IMAGE).
+- **`DrawList`**: `add_rectangle_filled` / `add_rectangle` (border inside the edge; corner radius), `add_circle_filled`
+  / `add_circle` (ring), `add_line` (square ends), `add_polyline` (mitered joins, open or closed), `add_convex_polygon_filled`
+  (either winding), `add_image(bindless sampled-image index, rectangle, tint, texture coordinates)`, `add_text(fonts,
+  layout, origin, TextStyle{color, outline color and width, shadow color, offset, softness})`; `push/pop_clip_rectangle`
+  (intersected with the current clip), `push/pop_transform` (composed with the current transform). Rectangles, borders,
+  circles, rings and lines are **one quad each**, evaluated by the fragment shader as a rounded box's signed distance (a
+  quad a screen pixel larger than the shape, whatever the transform); polylines (four vertices per point) and polygons
+  (a fan and a fringe) are triangles with an anti-aliased fringe a pixel wide **centered on the edge**, so they cover
+  their exact area (ImGui's convention; a line thinner than a pixel fades instead); text is a quad per glyph with a box,
+  its shadow's quads first. A new command starts only when the **clip rectangle or the texture** changes: shapes sample
+  nothing, so they join any command (the whole metrics overlay, panel and text, is one draw). `clear()` keeps the
+  arrays: a list refilled every frame allocates nothing once grown (counted by a test).
+- **Shaders**: vertices are **pulled from a bindless storage buffer** (12 words per 48-byte `UiVertex`; no vertex input
+  state); the shader mode is **per vertex** (`UiVertex::mode`: `UiShaderMode` in bits 0–7, the atlas's `SdfKind` in bits
+  8–15), so one pipeline and one draw serve every primitive of a command. Shapes: rounded-box distance, the edge one
+  screen pixel wide from the distance's **analytic gradient mapped to the screen through the derivatives of the shape's
+  frame coordinates** (exact under any affine transform). Glyphs: median of the MSDF channels (the single channel of an
+  SDF), the field's range in screen pixels from `fwidth` of the texture coordinates (correct under scale and rotation),
+  outline from the MTSDF true distance under the fill, shadows and glows from the true distance softened by
+  `shadow_softness`. On an sRGB target the vertex colors are converted to linear (flag in the push constants), so colors
+  read back as given; blending is non-premultiplied alpha.
+- **`UiRenderer(device, fonts, UiRendererDescription{color_format, samples, frames_in_flight, geometry_bytes_per_frame
+  (8 MiB), debug_name})`**: one graphics pipeline on the bindless layout, one linear clamp-to-edge sampler, geometry in a
+  `TransientBufferAllocator` (STORAGE | INDEX, persistently mapped). Per frame: `begin_frame(frame)` (the frame's region;
+  staging buffers of finished frames released), `prepare(GraphicsRecorder&, data)` **before the rendering pass** (atlas
+  pages a command samples uploaded once: image, view, staging buffer, barriers), `record(RenderingCommands&, data)` in
+  the pass (every list's vertices and indices copied, pipeline, viewport, index buffer; per command its scissor clamped
+  to the viewport, push constants, `draw_indexed` with the list's vertex offset). A frame whose geometry does not fit its
+  region draws nothing and reports its commands as skipped; a command whose page is not resident is skipped.
+  `statistics()`: draw calls, vertices, indices, skipped commands, resident pages, uploaded bytes.
+- **The metrics overlay**: `gfx::ui::DebugOverlay(DebugOverlayDescription{visible, position, padding, corner_radius,
+  text style, background})`: `draw(list, text engine, fonts, font, lines)` joins the lines (a reused buffer), lays them out
+  (a cache hit while they are unchanged), adds a rounded translucent panel and the text, and returns the panel; `toggle()`,
+  `set_visible()`, `set_position()`. **The graphics library's `DebugOverlay` and its bitmap font are deleted**
+  (`debug_overlay.cppm` and its test); `FrameMetrics` stays (its tests now in `frame_metrics_test.cpp`).
+- **Deviations from the design, for your validation**:
+  1. `gfx_ui` now links the graphics library (PUBLIC) for the renderer, so `import gfx.ui;` brings the renderer.
+     A separate `gfx_ui_renderer` target would keep the rest of the UI library graphics-free; tell me if you want it.
+  2. A9 listed a shader mode and a vertex offset per command: the mode is per vertex (fewer commands and draws) and the
+     vertex offset is the list's, applied by the renderer. Indices are 32-bit only (A9: 16 or 32).
+  3. `UiDrawData` holds the lists and the target size, not the display scale (A9): the scale arrives with `UiContext`
+     in U4; until then the application sizes its fonts (the example multiplies the overlay font by the window's content
+     scale).
+  4. `record()` takes `RenderingCommands&` (A9: `RenderingScope&`), so a parallel rendering part can record the UI too;
+     uploads need `prepare()` before the pass, because copies and barriers cannot be recorded inside one.
+  5. The overlay is a panel and text in a `DrawList`, not yet a UI window (§0-6 said "a UI window": windows arrive in U4).
+     It is not Debug-only itself: it draws the lines it is given, and `FrameMetrics::text()` is empty outside Debug.
+     The application provides its font (an atlas it builds with `gfx_add_ui_atlas()`).
+  6. One sampler (linear, clamp to edge) for atlas pages and images; per-image samplers when images get their own API.
+- **Other changes**: the presentation test `TheDebugOverlayIsDrawnIntoTheWindow` became `TheUiIsDrawnIntoTheWindow`
+  (shapes of the UI renderer read back from the swapchain image; built when the UI library is); the windowed example
+  draws its overlay with the UI library when the UI library and its atlas tool are built (Noto Sans, Basic Latin, MTSDF
+  32 px, range 4, embedded), and F3 prints a note otherwise; the Vulkan test fixture's `physical_device()` is virtual,
+  so a fixture can be parameterized over the machine's GPUs. CMake: file-scope variables of modules with a global
+  include guard are only visible to the directory that included them first — the atlas option lists of `GfxUiAtlas`,
+  `GfxShaders`' script path and stage list and `GfxDependencies`' Vulkan SDK tag are now inside the functions or cache
+  variables (found when the example's directory called `gfx_add_ui_atlas()`). `UiShaderMode::TEXT` was renamed `GLYPH`:
+  `TEXT` is a `<windows.h>` macro (found by the macro-collision check).
+- **Facts found**: finite differences of the distance itself are wrong at a box's corners, where the distance changes
+  direction: on the Intel GPU the gradient came out √2 long there, leaving the corner pixels of an axis-aligned rectangle
+  at 218 instead of 255 — hence the analytic gradient. Coverage sampled at pixel centers along a 45° edge is a few percent
+  off the exact area depending on where the edge falls (2.1% for the test's line, the same on the CPU and both GPUs).
+- **Verified by eye**: the GPU tests can write every picture they read back (`GFX_TEST_PICTURE_DIRECTORY`); text at
+  15 px (the overlay), 40 px, scaled, rotated, outlined and shadowed, and the shapes, were checked on both GPUs.
+- **Tests**: `gfx_ui_draw_tests`: 18 on the CPU (colors, rectangles, transforms; every primitive's vertices and indices,
+  margins under scale, radii and borders limited, empty and transparent primitives, polyline miters and thin lines,
+  polygons of either winding, commands split on clip and texture, images, glyph quads from the atlas's plane bounds and
+  texels, shadows and outlines, unknown atlases, clear; the overlay) and 17 on each GPU with the validation layers (sharp
+  edges on pixel boundaries and half-covered pixels between, rounded shapes' areas and symmetry, borders and rings, lines
+  and rotated rectangles, polygons and polylines, edges one pixel wide under scale, clips, several lists, images through
+  their bindless index, sRGB targets, text compared with ui.frag's computation done on the CPU from the draw list and the
+  atlas page — plain, scaled, rotated, outlined and shadowed — glyph stems full with one-pixel edges standing on the
+  baseline, the overlay at 15 px, pages uploaded once over three frames, geometry beyond the budget skipped);
+  `gfx_ui_text_allocation_tests` + a draw list refilled every frame (every primitive, text, the overlay) allocates
+  nothing; the presentation test on 2 platform backends × 2 GPUs; the windowed example with `--metrics --validation`.
 
 ---
 

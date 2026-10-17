@@ -52,6 +52,7 @@ struct Entry
     float height = 0;
     std::uint32_t missing_glyph_count = 0;
     TextLayoutProblem problems = TextLayoutProblem::NONE;
+    float font_size = 0;
     std::uint64_t frame = 0;
     std::uint32_t newer = NO_ENTRY;
     std::uint32_t older = NO_ENTRY;
@@ -60,7 +61,7 @@ struct Entry
     [[nodiscard]] auto view() const noexcept -> TextLayout
     {
         return {.glyphs = glyphs, .lines = lines, .width = width, .height = height, .missing_glyph_count = missing_glyph_count,
-                .problems = problems};
+                .problems = problems, .font_size = font_size};
     }
 };
 
@@ -249,6 +250,7 @@ struct TextLayoutEngine::State
         entry.height = 0;
         entry.missing_glyph_count = 0;
         entry.problems = TextLayoutProblem::NONE;
+        entry.font_size = font.size;
         line_shifts.clear();
 
         // The chain of atlases.

@@ -51,7 +51,6 @@ set(GFX_INTERFACE_MODULES
     interface/uploader.cppm
     interface/gpu_profiler.cppm
     interface/frame_metrics.cppm
-    interface/debug_overlay.cppm
     interface/physical_device.cppm
     interface/instance.cppm)
 

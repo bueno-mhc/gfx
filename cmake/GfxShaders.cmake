@@ -6,13 +6,16 @@ include_guard(GLOBAL)
 
 find_program(GFX_GLSLANG_EXECUTABLE NAMES glslangValidator glslang
     DOC "glslang compiler used by gfx_add_shaders() (GLSL and HLSL to SPIR-V)")
-set(GFX_EMBED_SPIRV_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/scripts/GfxEmbedSpirv.cmake")
+# Cache variables, not directory ones: the include guard is global, so every directory that calls the
+# function must see them (not only the first that included this file).
+set(GFX_EMBED_SPIRV_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/scripts/GfxEmbedSpirv.cmake" CACHE INTERNAL "Script of gfx_add_shaders()")
 
 # Shader stage of each file extension: <extension>=<gfx::ShaderStage enumerator>.
 set(_GFX_SHADER_STAGES
     vert=VERTEX tesc=TESSELLATION_CONTROL tese=TESSELLATION_EVALUATION geom=GEOMETRY frag=FRAGMENT
     comp=COMPUTE task=TASK mesh=MESH rgen=RAY_GENERATION rint=INTERSECTION rahit=ANY_HIT
-    rchit=CLOSEST_HIT rmiss=MISS rcall=CALLABLE)
+    rchit=CLOSEST_HIT rmiss=MISS rcall=CALLABLE
+    CACHE INTERNAL "Shader stages of gfx_add_shaders()")
 
 # gfx_add_shaders(<target>
 #     SHADERS <file>...               GLSL: <name>.<stage>[.glsl]   HLSL: <name>.<stage>.hlsl

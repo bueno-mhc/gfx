@@ -173,26 +173,24 @@ native API's validation (Vulkan validation layers, Direct3D 12 debug layer).
 `FrameMetrics` measures each frame: the frame rate and CPU frame times (average, minimum and maximum
 over half a second), the commands of the frame's command buffers (draws, indirect draws, dispatches,
 ray traces, pipeline, descriptor-set and vertex-buffer binds, push constants, barriers, transfers,
-passes), GPU timings from a `GpuProfiler`, and device memory. `DebugOverlay` draws them over the
-frame with a built-in pixel font (cleared rectangles: no shader, pipeline or font texture), and is
-shown or hidden with `toggle()`. Both exist only for **Debug builds**: in other builds they do nothing
-(`enabled()` is false) and code using them compiles unchanged.
+passes), GPU timings from a `GpuProfiler`, and device memory. It exists only for **Debug builds**: in
+other builds it does nothing (`enabled()` is false, `text()` is empty) and code using it compiles
+unchanged. The UI library's `gfx::ui::DebugOverlay` shows its lines as distance-field text over a
+translucent rounded panel (see [UI drawing](#ui-drawing)), shown or hidden with `toggle()`.
 
 ```cpp
 gfx::FrameMetrics metrics{*device};
-gfx::DebugOverlay overlay;                                        // hidden until toggle()
 gfx::GpuProfiler profiler{*device, FRAMES_IN_FLIGHT};
+gfx::ui::DebugOverlay overlay;                                    // hidden until toggle()
+gfx::ui::DrawList overlay_list;
 
 // Each frame:
 metrics.begin_frame();                                            // closes the previous frame
 profiler.begin_frame(frame_number, recorder);
 metrics.set_gpu_timings(profiler.timings());
-{
-    const gfx::GpuProfilerScope timing = profiler.scope(recorder, "frame");
-    gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
-    // ... the frame ...
-    overlay.draw(scope, area, metrics.text());                    // last in the pass
-}
+overlay_list.clear();
+overlay.draw(overlay_list, text, fonts, overlay_font, metrics.text()); // the previous frame's numbers
+// ... the frame, then overlay_list drawn by a gfx::ui::UiRenderer (UI drawing) ...
 metrics.count(commands);                                          // after recording each command buffer
 if (frame.was_action_just_pressed("toggle_metrics"_action))       // e.g. F3 in an always-active context
 {
@@ -200,7 +198,7 @@ if (frame.was_action_just_pressed("toggle_metrics"_action))       // e.g. F3 in 
 }
 ```
 
-The overlay shows the previous frame's numbers, its own two clears included (as transfers).
+The overlay shows the previous frame's numbers, its own draw included.
 
 ### Recording in parallel
 
@@ -548,6 +546,39 @@ for (const gfx::ui::LaidOutGlyph& glyph : layout.glyphs)
 during a frame: they are reported in `TextLayout::problems` (unknown font, invalid UTF-8, missing glyphs
 drawn as `.notdef`, a run that needed a shaping font, a full cache).
 
+## UI drawing
+
+A `DrawList` collects what to draw, in order, in pixels of the target (y down): rectangles (filled,
+bordered, with rounded corners), circles and rings, lines, polylines and convex polygons, images (by
+bindless index) and laid-out text, under a stack of transforms (`Transform2D`: translation, scale,
+rotation) and a stack of clip rectangles. The fragment shader evaluates shapes as signed distances and
+glyphs from their atlas's distance field, so edges stay one pixel wide at any scale or rotation; text can
+have an outline and a soft shadow or glow (`TextStyle`). `UiRenderer` draws lists through the graphics
+interfaces: one pipeline on the bindless layout, vertices pulled from a per-frame transient buffer, one
+indexed draw per clip rectangle and texture, atlas pages uploaded the first time they are drawn.
+
+```cpp
+gfx::ui::UiRenderer renderer{*device, fonts, {.color_format = presentation.format(), .frames_in_flight = FRAMES_IN_FLIGHT}};
+gfx::ui::DrawList list;
+
+// Each frame:
+list.clear();
+list.add_rectangle_filled({.left = 20, .top = 20, .right = 220, .bottom = 76}, {.red = 0.1F, .green = 0.1F, .blue = 0.12F, .alpha = 0.9F}, 8);
+list.add_text(fonts, text.layout("Settings", body), {.x = 32, .y = 36}, {.shadow_color = {.alpha = 0.6F}, .shadow_offset = {.x = 1, .y = 1}});
+const std::array lists{&list};
+const gfx::ui::UiDrawData ui{.lists = lists, .width = static_cast<float>(extent.width), .height = static_cast<float>(extent.height)};
+renderer.begin_frame(frame_number);                               // the frame's region of the geometry buffer
+renderer.prepare(recorder, ui);                                   // before the pass: uploads new atlas pages
+{
+    gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
+    renderer.record(scope, ui);
+}
+```
+
+Colors are sRGB-encoded and not premultiplied: on an sRGB target the shader converts them to linear, so
+they read back as given. `statistics()` reports draws, vertices, resident pages, uploaded bytes and the
+commands skipped when a frame's geometry exceeds `UiRendererDescription::geometry_bytes_per_frame`.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -555,7 +586,8 @@ input schema with three contexts declared at compile time, and Vulkan frames pre
 `WindowSwapchain`. A square moves with W A S D, the arrow keys or a gamepad's left stick; Space or
 the South button makes it hop; Escape or Start opens a pause menu where Return or South quits and
 Escape, Start or East resumes; Backspace restores the initial size; in Debug builds, F3 shows or hides
-the frame metrics.
+the frame metrics (drawn by the UI library when it is built with its atlas tool: the example builds its
+overlay's font atlas with `gfx_add_ui_atlas()`).
 
 ```bash
 build/debug/examples/windowed/gfx_windowed_example.exe --backend glfw
@@ -680,6 +712,9 @@ gfx/
 │       │                 errors.cppm
 │       ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
 │       │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
+│       ├── draw/         gfx.ui.draw: DrawList, Color, Transform2D, TextStyle, UiDrawData;
+│       │                 gfx.ui.debug_overlay: DebugOverlay (frame metrics as SDF text)
+│       ├── render/       gfx.ui.renderer: UiRenderer; shaders/ui.vert, ui.frag (embedded by gfx_add_shaders())
 │       ├── font/         atlas/atlas_format.cppm: the .uiatlas format and AtlasView (in gfx.ui);
 │       │                 the atlas tools (gfx.ui.atlas_tools): source/ (fonts, characters), decoders/
 │       │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
@@ -694,10 +729,12 @@ gfx/
     │                     every backend with real windows (one parameterized suite), then sdl3/
     │                     (SDL-injected events, virtual gamepads) and glfw/ (Win32 messages)
     ├── platform_graphics/  presentation to visible windows: every platform backend x every GPU,
-    │                     with the validation layers (cleared frames read back, resize, minimize)
+    │                     with the validation layers (cleared frames read back, the UI renderer's
+    │                     shapes in the window, resize, minimize)
     ├── ui/               the UI library, the atlas tools (every format, decoder, generator, packer),
-    │                     embedded atlases, text layout (and its allocation count), and the font
-    │                     pipeline's libraries (fetched OFL fonts)
+    │                     embedded atlases, text layout (and its allocation count), draw lists, the
+    │                     renderer on every GPU (shapes and text read back, text compared with the field
+    │                     evaluated on the CPU), and the font pipeline's libraries (fetched OFL fonts)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

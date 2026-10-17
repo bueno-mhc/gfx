@@ -1,4 +1,5 @@
-// A cached layout allocates nothing: this executable counts every operator new while it lays texts out.
+// A cached layout allocates nothing, and neither does a draw list refilled every frame: this executable
+// counts every operator new while it lays texts out and fills lists.
 #include <gtest/gtest.h>
 
 import std;
@@ -96,6 +97,52 @@ TEST(TextAllocationTest, CachedLayoutsAllocateNothing)
     EXPECT_EQ(g_allocations.load(), 0U);
     EXPECT_GT(glyphs, 0U);
     EXPECT_EQ(engine.statistics().misses, 6U);
+}
+
+TEST(TextAllocationTest, DrawListsRefilledEveryFrameAllocateNothing)
+{
+    FontLibrary library;
+    const FontAtlasHandle atlas = library.add_atlas(FontAtlas::load(gfx::tests::text_atlases::allocation_latin));
+    const FontHandle font = library.add_font({.atlas = atlas});
+    TextLayoutEngine engine{library};
+    DrawList list;
+    DebugOverlay overlay{{.visible = true}};
+    const std::vector<std::string> lines{"60.0 fps   16.67 ms", "draws 12   dispatches 3"};
+    const std::array points{gfx::Vector2{.x = 0, .y = 0}, gfx::Vector2{.x = 40, .y = 10}, gfx::Vector2{.x = 20, .y = 40}};
+
+    // Every kind of primitive, clipped and transformed, with text and the overlay: the first frames grow
+    // the list's arrays, the next ones reuse them.
+    const auto fill = [&]
+    {
+        engine.new_frame();
+        list.clear();
+        list.push_clip_rectangle({.left = 0, .top = 0, .right = 300, .bottom = 200});
+        list.push_transform(Transform2D::about({.x = 50, .y = 50}, Transform2D::rotation(0.3F)));
+        list.add_rectangle_filled({.left = 0, .top = 0, .right = 100, .bottom = 30}, {.red = 1, .alpha = 1}, 6);
+        list.add_rectangle({.left = 0, .top = 0, .right = 100, .bottom = 30}, {.green = 1, .alpha = 1}, 2);
+        list.add_circle_filled({.x = 20, .y = 20}, 8, {.blue = 1, .alpha = 1});
+        list.add_line({.x = 0, .y = 0}, {.x = 90, .y = 60}, {.red = 1, .alpha = 1}, 3);
+        list.add_polyline(points, {.green = 1, .alpha = 1}, 2, true);
+        list.add_convex_polygon_filled(points, {.blue = 1, .alpha = 1});
+        list.add_image(4, {.left = 10, .top = 10, .right = 42, .bottom = 42});
+        list.add_text(library, engine.layout("Hello, world", font), {.x = 5, .y = 60}, {.shadow_color = {.alpha = 0.5F}, .shadow_offset = {.x = 1, .y = 1}});
+        list.pop_transform();
+        list.pop_clip_rectangle();
+        static_cast<void>(overlay.draw(list, engine, library, font, lines));
+    };
+    fill();
+    fill();
+    const std::size_t vertices = list.vertices().size();
+    g_allocations = 0;
+    g_counting = true;
+    for (int frame = 0; frame < 100; ++frame)
+    {
+        fill();
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(list.vertices().size(), vertices);
+    EXPECT_GT(vertices, 100U);
 }
 
 } // namespace

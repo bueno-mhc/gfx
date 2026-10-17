@@ -4,16 +4,6 @@
 # ==============================================================================
 include_guard(GLOBAL)
 
-# Values the tool accepts for the options that name an enumerator (checked when CMake configures).
-set(_GFX_UI_ATLAS_KINDS SDF PSDF MSDF MTSDF)
-set(_GFX_UI_ATLAS_DECODERS FREETYPE STB_TRUETYPE)
-set(_GFX_UI_ATLAS_GENERATORS MSDFGEN BUILT_IN)
-set(_GFX_UI_ATLAS_COLORINGS SIMPLE INK_TRAP DISTANCE)
-set(_GFX_UI_ATLAS_TEXEL_FORMATS R8_UNORM R8G8B8A8_UNORM R16_SFLOAT R16G16B16A16_SFLOAT)
-set(_GFX_UI_ATLAS_PACKERS TIGHT GRID)
-set(_GFX_UI_ATLAS_COMPRESSIONS ZSTD NONE)
-set(_GFX_UI_ATLAS_EMBEDDINGS EMBED_DIRECTIVE BYTE_LIST)
-
 # gfx_add_ui_atlas(<target>
 #     NAME <identifier>                atlas <identifier>.uiatlas; with EMBED, also the C++ constant
 #     FONT <file>                      TrueType, OpenType (CFF, CFF2), collection, WOFF or WOFF2 font
@@ -51,6 +41,16 @@ function(gfx_add_ui_atlas target)
         "NAME;FONT;FACE_INDEX;NAMED_INSTANCE;DECODER;KIND;SIZE;RANGE;PADDING;ANGLE_THRESHOLD;MITER_LIMIT;COLORING;GENERATOR;TEXEL_FORMAT;PACKER;MAXIMUM_DIMENSION;SPACING;COMPRESSION;COMPRESSION_LEVEL;OUTPUT_VARIABLE;MODULE;NAMESPACE;EMBEDDING"
         "CHARACTERS;TEXT_FILES;VARIATION")
     set(context "gfx_add_ui_atlas(${target})")
+    # Values the tool accepts for the options that name an enumerator (checked when CMake configures; set
+    # here, not beside the include guard, so that every directory calling the function has them).
+    set(_GFX_UI_ATLAS_KINDS SDF PSDF MSDF MTSDF)
+    set(_GFX_UI_ATLAS_DECODERS FREETYPE STB_TRUETYPE)
+    set(_GFX_UI_ATLAS_GENERATORS MSDFGEN BUILT_IN)
+    set(_GFX_UI_ATLAS_COLORINGS SIMPLE INK_TRAP DISTANCE)
+    set(_GFX_UI_ATLAS_TEXEL_FORMATS R8_UNORM R8G8B8A8_UNORM R16_SFLOAT R16G16B16A16_SFLOAT)
+    set(_GFX_UI_ATLAS_PACKERS TIGHT GRID)
+    set(_GFX_UI_ATLAS_COMPRESSIONS ZSTD NONE)
+    set(_GFX_UI_ATLAS_EMBEDDINGS EMBED_DIRECTIVE BYTE_LIST)
     if(argument_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "${context}: unknown arguments ${argument_UNPARSED_ARGUMENTS}.")
     endif()

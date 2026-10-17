@@ -1,7 +1,7 @@
 /// @file frame_metrics.cppm
 /// @brief FrameMetrics: what each frame costs - frame rate, CPU frame times, the commands of the frame's
-///        command buffers, GPU timings and device memory - collected in Debug builds for a DebugOverlay
-///        (or a log). In other builds it collects nothing.
+///        command buffers, GPU timings and device memory - collected in Debug builds for an overlay
+///        (gfx::ui::DebugOverlay) or a log. In other builds it collects nothing.
 export module gfx.interface:frame_metrics;
 
 import std;
@@ -47,7 +47,7 @@ struct FrameMetricsSnapshot
 /// ... record the frame's command buffers ...
 /// metrics.count(commands);
 /// metrics.set_gpu_timings(profiler.timings());
-/// overlay.draw(scope, area, metrics.text());
+/// overlay.draw(list, text, fonts, font, metrics.text());   // gfx::ui::DebugOverlay
 /// @endcode
 class FrameMetrics
 {
@@ -133,7 +133,7 @@ public:
         return m_snapshot;
     }
 
-    /// @brief The snapshot as lines of text, for a DebugOverlay (empty in builds other than Debug).
+    /// @brief The snapshot as lines of text, for an overlay (empty in builds other than Debug).
     [[nodiscard]] auto text() const -> std::vector<std::string>
     {
         if constexpr (!DEBUG_BUILD)

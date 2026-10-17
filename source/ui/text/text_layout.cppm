@@ -63,6 +63,7 @@ struct TextLayout
     float height = 0;                                   ///< Pixels: every line.
     std::uint32_t missing_glyph_count = 0;              ///< Characters drawn as `.notdef`.
     TextLayoutProblem problems = TextLayoutProblem::NONE; ///< What went wrong.
+    float font_size = 0;                                ///< Pixels per em of the font (glyph boxes scale by it).
 };
 
 /// @brief Where a caret stands.

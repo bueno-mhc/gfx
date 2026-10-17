@@ -28,6 +28,9 @@ target_sources(gfx_ui
             text/font_atlas.cppm
             text/font_library.cppm
             text/text_layout.cppm
+            draw/draw.cppm
+            draw/debug_overlay.cppm
+            render/renderer.cppm
     PRIVATE
         FILE_SET internal_modules TYPE CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
@@ -40,12 +43,22 @@ target_sources(gfx_ui
         text/bidi.cpp
         text/line_breaking.cpp
         text/shaping.cpp
-        text/text_layout.cpp)
+        text/text_layout.cpp
+        draw/draw_list.cpp
+        draw/debug_overlay.cpp
+        render/renderer.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)
 target_link_libraries(gfx_ui
-    PUBLIC gfx::core
+    PUBLIC gfx::core gfx::gfx
     PRIVATE gfx::project_options gfx::harfbuzz gfx::zstd gfx::sheenbidi gfx::libunibreak)
+
+# The renderer's shaders, compiled at build time into the private module gfx.ui.shaders.
+include(GfxShaders)
+gfx_add_shaders(gfx_ui
+    MODULE gfx.ui.shaders
+    NAMESPACE gfx::ui::shaders
+    SHADERS render/shaders/ui.vert render/shaders/ui.frag)
 
 # ==============================================================================
 # gfx::ui_atlas_tools: the build-time font pipeline (`import gfx.ui.atlas_tools;`): font decoders

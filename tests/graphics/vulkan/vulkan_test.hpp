@@ -120,8 +120,9 @@ protected:
     /// @brief Releases the objects of derived fixtures before the instance is destroyed.
     virtual void release() {}
 
-    /// @brief The physical device the tests run on (GFX_TEST_PHYSICAL_DEVICE, or the best one).
-    [[nodiscard]] auto physical_device() -> PhysicalDevice&
+    /// @brief The physical device the tests run on (GFX_TEST_PHYSICAL_DEVICE, or the best one); fixtures
+    ///        parameterized over the machine's GPUs return theirs.
+    [[nodiscard]] virtual auto physical_device() -> PhysicalDevice&
     {
         if (const char* index = std::getenv("GFX_TEST_PHYSICAL_DEVICE"))
         {

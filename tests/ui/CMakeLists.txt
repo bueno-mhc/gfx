@@ -106,3 +106,21 @@ gfx_add_ui_atlas(gfx_ui_text_allocation_tests
     FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
     CHARACTERS BASIC_LATIN
     EMBED MODULE gfx.tests.allocation_latin NAMESPACE gfx::tests::text_atlases)
+
+# Drawing: draw lists and the debug overlay (on the CPU), and the renderer on every GPU of the machine with
+# the Vulkan validation layers (found by tests/graphics/vulkan; its fixtures in vulkan_test.hpp).
+gfx_add_test(gfx_ui_draw_tests
+    SOURCES draw_list_test.cpp renderer_test.cpp
+    LIBRARIES gfx::ui)
+gfx_add_ui_atlas(gfx_ui_draw_tests
+    NAME draw_latin
+    FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
+    CHARACTERS BASIC_LATIN
+    KIND MTSDF SIZE 32 RANGE 4
+    EMBED MODULE gfx.tests.draw_latin NAMESPACE gfx::tests::draw_atlases)
+set(_gfx_layer_directory "")
+if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
+    set(_gfx_layer_directory "${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
+endif()
+target_compile_definitions(gfx_ui_draw_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_layer_directory}")
+target_include_directories(gfx_ui_draw_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
