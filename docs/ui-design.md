@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0, U1
-and U2 committed; U3 built, awaiting validation (§B, "U3 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U3
+committed; U4 built, awaiting validation (§B, "U4 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -638,6 +638,99 @@ report, and your validation (you commit).
   baseline, the overlay at 15 px, pages uploaded once over three frames, geometry beyond the budget skipped);
   `gfx_ui_text_allocation_tests` + a draw list refilled every frame (every primitive, text, the overlay) allocates
   nothing; the presentation test on 2 platform backends × 2 GPUs; the windowed example with `--metrics --validation`.
+
+### U4 as built (2026-10-18)
+
+- **Your decision (2026-10-18)**: the keyboard, mouse and cursor enumerations moved to core — `Key`, `KeyCode` (with
+  `KEY_CODE_NON_PRINTABLE_FLAG`), `KeyModifier`, `MouseButton`, `MouseButtonMask` and, for the same reason (the UI asks
+  for cursor shapes), **`CursorShape`** — in `gfx.core.enums`, namespace `gfx`; `gfx.platform.enums` names them in
+  `gfx::platform` with using-declarations, so the platform library and its tests are unchanged. `gfx::ui` still depends
+  on core and graphics only.
+- **Modules** (in `gfx::ui`, re-exported by `gfx.ui`): **`gfx.ui.style`** (`Style`: every size, padding, rounding and
+  alignment, `scaled()`; `Theme` {name, style, a `Color` per `StyleColor`}; constexpr `builtin_theme(ThemeKind)`: DARK,
+  LIGHT and CLASSIC with Dear ImGui's colors, HIGH_CONTRAST of gfx's; `style_float()`/`style_vector()` map a
+  `StyleVariable` to its member), **`gfx.ui.input`** (`UiFrameInput`: time, display size in UI units, pixels per unit,
+  focus, mouse position and button events and buttons held, wheel, key events, modifiers, typed text;
+  `UiPlatformServices` (clipboard, cursor, text input, links) and `UiNullPlatformServices`), **`gfx.ui.context`**
+  (partitions `:types` (descriptions, `UiFrameReport`, `UiFrameIssue`, `UiFrameStatistics`, `KeyChord`, the value types
+  of the declared widgets, concepts `ArithmeticValue` and `TextLike`), `:frame` (`UiFrame`), `:context` (`UiContext`,
+  `UiDrawDataLease`, `UiDockBuilder`); internal partition `:state`; units `context.cpp`, `windows.cpp`, `layout.cpp`,
+  `widgets.cpp`, `style.cpp`, `queries.cpp`, `later.cpp`), and **`gfx.ui.platform`** (target `gfx::ui_platform`, built with
+  the platform library: `UiPlatformInput` turns a window's events into a `UiFrameInput`; `UiWindowServices` implements
+  the services with the platform's clipboard and cursors and the window's text input). Enumerations added (29):
+  StyleColor, StyleVariable, ThemeKind, UiWindowFlag, ChildFlag, ButtonFlag, SelectableFlag, UiCondition, ArrowDirection,
+  HoveredFlag, FocusedFlag, UiFrameProblem, and those of the declared widgets (InputTextFlag, SliderFlag, ColorEditFlag,
+  ComboFlag, TreeNodeFlag, TabBarFlag, TabItemFlag, PopupFlag, TableFlag, TableColumnFlag, TableRowFlag, SortDirection,
+  DragDropFlag, DockNodeFlag, ShortcutFlag, AccessibilityRole, AccessibilityLiveRegion); `UiSubsystem::WIDGETS`; constants
+  MAXIMUM_FRAME_ISSUES, MAXIMUM_ISSUE_NAME_SIZE, UI_FORMAT_BUFFER_CAPACITY, the double-click, drag and repeat defaults,
+  DEFAULT_ITEM_WIDTH_FRACTION, MAXIMUM_COLUMNS.
+- **Implemented**: windows (fit to their content on a first frame that is measured and not drawn; move by the title bar
+  or any empty space; resize by the bottom-right grip, which shows the resize cursor, and fit on its double click;
+  collapse by the arrow or a double click on the title; close button; kept reachable on the display; z-order by click;
+  wheel scrolling of the window under the mouse or its first parent that scrolls; vertical and horizontal scrollbars,
+  dragged or clicked; scrolling by code; `ALWAYS_AUTO_RESIZE`; a window begun twice appends; size constraints, content
+  size, background alpha, conditions ALWAYS / ONCE / FIRST_USE_EVER / APPEARING), child regions (sized, filling, auto
+  sized, bordered or frame style, clipped, scrolling on their own), layout (`same_line`, `new_line`, `spacing`,
+  `dummy`, indentation, groups, legacy columns, cursor positions, `content_region_available`, item widths, wrap
+  positions, `align_text_to_frame_padding`), widgets (text: plain, formatted with `std::format` into a 1 KiB buffer then
+  the frame arena, colored, disabled, wrapped, bulleted, `label`; separators with and without text; `button`,
+  `small_button`, `invisible_button`, `arrow_button`; `checkbox`, `checkbox_flags` over any bitmask enumeration;
+  `radio_button` (bool and grouped); `toggle` (the request's `switch`); `selectable`; `bullet`; `begin_disabled`), the
+  identifier stack, item and window queries, keys and mouse (presses, repeats, releases, double clicks, drags), the
+  style stacks (colors, variables, fonts) and themes, the keyboard focus (Tab, Shift+Tab, Space, Return, Escape), the
+  frame report, the diagnostics window, the published draw data and its leases.
+- **Deviations from the design, for your validation**:
+  1. `UiContext` is constructed directly (`UiContext ui{description};`), like the input system: there is one
+     implementation, so no `create_ui_context()` factory or `ui_factory.cppm` (A17, C2).
+  2. The context owns its `FontLibrary` (`fonts()`, `load_font(atlas, size)`, the first font is the default); a
+     renderer takes `ui.fonts()`. C2 passed `.device` to the context: the context needs no device.
+  3. **UI units are points**: positions and sizes are pixels divided by the window's content scale; `UiDrawData::scale`
+     (pixels per unit) is applied by the renderer and `DrawList::set_pixels_per_unit()` keeps anti-aliased edges a pixel
+     wide — U3's deviation 3 resolved this way, MSDF text staying sharp at any scale.
+  4. **Three sets of draw lists** rotate (A12 said two buffers swapped): `end_frame()` swaps each window's list into a
+     set that is neither the published one nor leased, so a render thread holding the published draw data
+     (`acquire_draw_data()`) never waits for the next frame and the next frame never waits for it, unless two published
+     frames are leased at once. Single-threaded applications read `draw_data()`.
+  5. Themes are values (`set_theme(const Theme&)`, `builtin_theme()` constexpr), not objects behind `ThemeHandle`s
+     (A3); `ThemeHandle` and `StyleHandle` stay declared, unused.
+  6. Names: `UiWindowFlag` (the platform library has a `WindowFlag`), `StyleColor` / `StyleVariable` (ImGuiCol /
+     ImGuiStyleVar), **`StyleColor::TEXT_NORMAL`** (`TEXT` is a `<windows.h>` macro: found by the macro-collision check),
+     `UiCondition`, `toggle()` for `switch` (a keyword), `calculate_text_size()` / `calculate_item_width()` (full words),
+     `label()` for ImGui's LabelText. `selectable(label, bool*)` and `menu_item(label, shortcut, bool*)` take a pointer:
+     with `bool&` an lvalue would make them ambiguous with the `bool selected` overloads.
+  7. The widgets of U5 to U9 are declared (A4's surface, with `slider<ArithmeticValue>`, `combo` over a random-access
+     range of `TextLike` items, `input_text` over `std::string` or a fixed buffer, tables, plots, docking, shortcuts,
+     accessibility); each reports `UiFrameProblem::NOT_IMPLEMENTED` once per frame and returns false (or an empty value).
+     Outside a frame, `dock_builder()`, `save_layout()` and `load_layout()` throw `UiCapabilityError`
+     (`UiSubsystem::WIDGETS`). `UiWindowFlag::MENU_BAR` and `ChildFlag::RESIZE_X/Y` are reported likewise.
+  8. No `item_identifier()`: a core `Identifier` is made from a name only (`from_name()`), not from a stored hash;
+     `identifier(label)` gives the identifier a label gets (FNV-1a of the parent identifier's bytes and the label: what
+     `WidgetIdentifier::from_name()` of those bytes gives, so no core change was needed).
+  9. Keyboard navigation in U4 is Tab, Shift+Tab, Space, Return and Escape; the focus highlight and `wants_keyboard()`
+     follow keyboard navigation only (a click focuses an item without them, as Dear ImGui does). Arrow keys and gamepads
+     arrive with the keymap in U9, as does the high-priority `ui` input context of A11.
+  10. Windows resize by their grip only (no edge resizing yet), and the scrollbar tracks end before the grip — at the
+      bottom of its track a grab under the grip could not be grabbed (found by a test).
+  11. The frame arena (a `std::pmr::monotonic_buffer_resource` over a buffer of `UiContextLimits::frame_arena_bytes`, reset
+      every frame) holds long formatted texts and long composed identifiers; the per-frame stacks are vectors reserved at
+      construction. Growth beyond a limit is counted (`UiFrameStatistics::allocations`) and reported.
+  12. The windowed example's metrics are now a UI window (movable, closable, auto-sized) fed by `gfx.ui.platform`;
+      `DebugOverlay` stays in the library.
+- **Facts found**: an lvalue `bool` is ambiguous between `f(bool)` and `f(bool&)` overloads; the test-discovery step of
+  a GPU test executable failed once in a parallel Release build (rerun: fine); `GlfwEventsTest.KeysCarryThePhysicalKey…`
+  read a key code `~` instead of `w` once under load (a dead-key state of the layout seen by `glfwGetKeyName()`;
+  unrelated to U4, passes alone).
+- **Verified by eye**: a demo window with every U4 widget, rendered on both GPUs at 1 and 1.5 pixels per unit.
+- **Tests**: `gfx_ui_context_tests` (37 under synthetic input — themes and styles, windows: fitting, buttons pressed
+  only when released over them, collapse, close, move, resize with the cursor, z-order, wheel and scrollbar scrolling,
+  child regions, auto-resize and appending; layout: lines, groups, columns, wrapping; widgets; identifiers and
+  conflicts; keyboard focus; keys; item queries; double clicks and drags; style stacks, unbalanced and mismatched;
+  themes; the report: misuse, missing fonts, dropped issues, later widgets, the diagnostics window; draw data scale and
+  order; a render thread leasing draw data during 300 frames — and the demo window drawn on each GPU), the allocation
+  test (two windows with every U4 widget, hovered and clicked, allocate nothing over 100 frames after 30),
+  `gfx_ui_platform_tests` (the adapter on each platform backend, cursors, and a UI in a visible window on SDL3 and GLFW
+  clicked through events pushed to the platform and read back from the swapchain image, validation layers on), and the
+  compile-failure tests `UiSlidersRejectBooleans` and `UiCombosNeedTextItems`.
 
 ---
 

@@ -68,7 +68,10 @@ Rules every library follows:
 - **One enumerations file per library** (`enums.cppm`): every enumeration and named constant, each with
   `EnumerationTraits` (names, bitmask or not) verified at compile time against the compiler's own
   spelling of each enumerator. `to_string`, `from_string`, `std::formatter` and the bitmask operators
-  come from `gfx.core.enums`.
+  come from `gfx.core.enums`, which also holds what several libraries share — among them the keyboard,
+  mouse and cursor enumerations (`Key`, `KeyCode`, `KeyModifier`, `MouseButton`, `MouseButtonMask`,
+  `CursorShape`) of the platform and UI libraries (UI step U4; the platform library names them
+  `gfx::platform::Key` too). The UI library is described in docs/ui-design.md until its overview here (U10).
 - **Typed handles** (`Handle<Tag>`, 32 bits: 24-bit slot, 8-bit generation) name objects in commands
   and events; only backends can create them (`HandleKey`, constructible by `HandleIssuer` only).
 - **RAII**: objects are owned through `std::unique_ptr`; destruction releases (or defers the release

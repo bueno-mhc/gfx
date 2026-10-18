@@ -126,7 +126,7 @@ DrawList::pixel_size() const noexcept -> float
 {
     const Transform2D& transform = m_transforms.back();
     const float determinant = std::abs(transform.xx * transform.yy - transform.xy * transform.yx);
-    return determinant > 0 ? 1.0F / std::sqrt(determinant) : 1.0F;
+    return (determinant > 0 ? 1.0F / std::sqrt(determinant) : 1.0F) / m_pixels_per_unit;
 }
 
 auto

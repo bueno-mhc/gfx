@@ -261,6 +261,10 @@ class hierarchy (rejected: reference counted heap objects per event).
 
 ### A7. Key model: physical `Key` and logical `KeyCode`
 
+As built since UI step U4 (2026-10-18): `Key`, `KeyCode`, `KeyModifier`, `MouseButton`, `MouseButtonMask`
+and `CursorShape` live in `gfx.core.enums` (namespace `gfx`), shared with the UI library; `gfx.platform.enums`
+names them in `gfx::platform` with using-declarations, so platform code is unchanged.
+
 | | `Key` (physical) | `KeyCode` (logical) |
 |---|---|---|
 | Meaning | position on the keyboard, layout independent | symbol the current layout produces |

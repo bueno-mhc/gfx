@@ -4,7 +4,9 @@
 ///        The design, and the phases that build it, are in docs/ui-design.md. Atlases are built by
 ///        gfx.ui.atlas_tools (a build-time library), read with gfx.ui.atlas_format and loaded, with the
 ///        fonts and the text layout engine, by gfx.ui.text; gfx.ui.draw describes what to draw and
-///        gfx.ui.renderer draws it with the graphics abstraction.
+///        gfx.ui.renderer draws it with the graphics abstraction. gfx.ui.context is the immediate-mode UI
+///        (UiContext, UiFrame), with gfx.ui.style (styles, themes) and gfx.ui.input (frame input, platform
+///        services); gfx.ui.platform (a separate library) feeds it from the gfx platform library.
 export module gfx.ui;
 
 export import gfx.core;
@@ -17,3 +19,6 @@ export import gfx.ui.text;
 export import gfx.ui.draw;
 export import gfx.ui.debug_overlay;
 export import gfx.ui.renderer;
+export import gfx.ui.style;
+export import gfx.ui.input;
+export import gfx.ui.context;

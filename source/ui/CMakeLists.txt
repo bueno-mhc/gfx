@@ -31,11 +31,18 @@ target_sources(gfx_ui
             draw/draw.cppm
             draw/debug_overlay.cppm
             render/renderer.cppm
+            style/style.cppm
+            input/frame_input.cppm
+            context/context.cppm
+            context/types.cppm
+            context/frame.cppm
+            context/context_class.cppm
     PRIVATE
         FILE_SET internal_modules TYPE CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES
             text/engine.cppm
+            context/state.cppm
     PRIVATE
         font/atlas/atlas_format.cpp
         text/font_atlas.cpp
@@ -46,7 +53,14 @@ target_sources(gfx_ui
         text/text_layout.cpp
         draw/draw_list.cpp
         draw/debug_overlay.cpp
-        render/renderer.cpp)
+        render/renderer.cpp
+        context/context.cpp
+        context/windows.cpp
+        context/layout.cpp
+        context/widgets.cpp
+        context/style.cpp
+        context/queries.cpp
+        context/later.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)
 target_link_libraries(gfx_ui
@@ -59,6 +73,27 @@ gfx_add_shaders(gfx_ui
     MODULE gfx.ui.shaders
     NAMESPACE gfx::ui::shaders
     SHADERS render/shaders/ui.vert render/shaders/ui.frag)
+
+# ==============================================================================
+# gfx::ui_platform: the UI on the gfx platform library (`import gfx.ui.platform;`): frame input from a
+# window's events, and the platform services (clipboard, cursors, text input). Built with the platform
+# library; gfx::ui does not depend on it.
+# ==============================================================================
+if(TARGET gfx_platform)
+    add_library(gfx_ui_platform)
+    add_library(gfx::ui_platform ALIAS gfx_ui_platform)
+    target_sources(gfx_ui_platform
+        PUBLIC
+            FILE_SET public_modules TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES platform/ui_platform.cppm
+        PRIVATE
+            platform/ui_platform.cpp)
+    target_compile_features(gfx_ui_platform PUBLIC cxx_std_23)
+    target_link_libraries(gfx_ui_platform
+        PUBLIC gfx::ui gfx::platform
+        PRIVATE gfx::project_options)
+endif()
 
 # ==============================================================================
 # gfx::ui_atlas_tools: the build-time font pipeline (`import gfx.ui.atlas_tools;`): font decoders

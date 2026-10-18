@@ -230,6 +230,13 @@ public:
     /// @brief Removes every primitive and resets the clip and transform stacks.
     void clear() noexcept;
 
+    /// @brief Pixels per unit of this list's coordinates (UiDrawData::scale): anti-aliased edges and fringes stay
+    ///        one pixel wide (1 by default; kept by clear()).
+    void set_pixels_per_unit(float pixels_per_unit) noexcept
+    {
+        m_pixels_per_unit = pixels_per_unit > 0 ? pixels_per_unit : 1.0F;
+    }
+
     /// @brief Clips what follows to @p clip (pixels of the target), within the current clip.
     void push_clip_rectangle(const UiRectangle& clip);
 
@@ -335,7 +342,7 @@ private:
     /// @brief The command the next triangles go to: the current one when its clip and texture fit.
     auto command_for(const DrawTexture& texture) -> DrawCommand&;
 
-    /// @brief Pixels of the transformed space per pixel before the transform (for anti-aliasing margins).
+    /// @brief Units before the transform per target pixel (anti-aliasing margins and fringes).
     [[nodiscard]] auto pixel_size() const noexcept -> float;
 
     std::vector<UiVertex> m_vertices{};
@@ -343,6 +350,7 @@ private:
     std::vector<DrawCommand> m_commands{};
     std::vector<UiRectangle> m_clips{};
     std::vector<Transform2D> m_transforms{};
+    float m_pixels_per_unit = 1.0F;
 };
 
 /// @brief What a frame of the UI draws: draw lists in order over a target of width × height pixels.
@@ -351,6 +359,8 @@ struct UiDrawData
     std::span<const DrawList* const> lists{}; ///< Drawn in order.
     float width = 0;                          ///< Pixels of the target area (the viewport).
     float height = 0;                         ///< Pixels of the target area.
+    float scale = 1;                          ///< Pixels per unit of the lists' coordinates (a UI in points on a
+                                              ///< high-density display: its content scale).
 };
 
 } // namespace gfx::ui

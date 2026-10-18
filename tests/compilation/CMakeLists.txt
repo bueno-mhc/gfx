@@ -153,4 +153,14 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_identifiers_of_different_kinds_do_not_mix.cpp
         EXPECTED_DIAGNOSTIC "conversion from .*PopupTag.* to non-scalar type"
         LIBRARIES gfx::ui)
+
+    gfx_add_compilation_failure_test(UiSlidersRejectBooleans
+        SOURCES ui/ui_sliders_reject_booleans.cpp
+        EXPECTED_DIAGNOSTIC "ArithmeticValue"
+        LIBRARIES gfx::ui)
+
+    gfx_add_compilation_failure_test(UiCombosNeedTextItems
+        SOURCES ui/ui_combos_need_text_items.cpp
+        EXPECTED_DIAGNOSTIC "TextLike"
+        LIBRARIES gfx::ui)
 endif()

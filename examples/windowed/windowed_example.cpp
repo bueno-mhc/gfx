@@ -6,7 +6,7 @@
 // blocks gameplay: there "quit" (Return or South) closes the window, "resume" (Escape, Start or East)
 // goes back. "reset_size" (Backspace or Back) gives the window its initial size again. In Debug builds,
 // "toggle_metrics" (F3) shows or hides the frame metrics: frame rate, frame times, GPU time, commands
-// and memory, drawn by the UI library (SDF text) when it is built.
+// and memory, in a window of the UI library (when it is built) that the mouse can move and close.
 //
 // Usage: gfx_windowed_example [--backend sdl3|glfw] [--device <index>] [--frames <count>] [--validation] [--metrics]
 //   --frames N     closes after N presented frames (automated runs; the window then does not take the focus)
@@ -15,8 +15,9 @@
 import std;
 import gfx.platform.graphics; // gfx (graphics), gfx.platform (windows and input), and the bridge between them
 #if GFX_EXAMPLE_WITH_UI
-import gfx.ui;                // the metrics overlay: text laid out and drawn by the UI library
-import windowed.fonts;        // the overlay's font atlas, built by gfx_add_ui_atlas()
+import gfx.ui;                // the metrics window: an immediate-mode UI drawn with SDF text
+import gfx.ui.platform;       // the UI's input and services from the platform window
+import windowed.fonts;        // the UI's font atlas, built by gfx_add_ui_atlas()
 #endif
 
 namespace
@@ -274,17 +275,16 @@ run(const Options& options) -> int
     {
         std::println("the frame metrics (F3) exist in Debug builds only");
     }
+    bool metrics_shown = options.metrics;
 #if GFX_EXAMPLE_WITH_UI
-    // The overlay: its font, the text engine, and the renderer drawing into the swapchain's images.
-    gfx::ui::FontLibrary fonts;
-    const gfx::ui::FontAtlasHandle overlay_atlas = fonts.add_atlas(gfx::ui::FontAtlas::load(overlay_font));
-    const gfx::ui::FontHandle overlay_text_font = fonts.add_font({.atlas = overlay_atlas, .size = 15.0F * window->content_scale()});
-    gfx::ui::TextLayoutEngine text{fonts};
-    gfx::ui::UiRenderer ui_renderer{*device, fonts, {.color_format = presentation.format(), .frames_in_flight = FRAMES_IN_FLIGHT}};
-    gfx::ui::DebugOverlay overlay{{.visible = options.metrics}};
-    gfx::ui::DrawList overlay_list;
-#else
-    bool overlay_visible = options.metrics;
+    // The UI: the window's services and events, a font of 15 UI units (points: the same size at every content
+    // scale), and the renderer drawing into the swapchain's images.
+    gfx::ui::UiWindowServices ui_services{*platform, *window};
+    gfx::ui::UiContext ui{{.services = &ui_services}};
+    ui.load_font(gfx::ui::FontAtlas::load(overlay_font), 15.0F);
+    gfx::ui::UiPlatformInput ui_input{*window};
+    gfx::ui::UiRenderer ui_renderer{*device, ui.fonts(), {.color_format = presentation.format(), .frames_in_flight = FRAMES_IN_FLIGHT}};
+    const auto ui_start = std::chrono::steady_clock::now();
 #endif
 
     // ---------------------------------------------------------------------------------- the loop
@@ -299,6 +299,10 @@ run(const Options& options) -> int
     {
         // Events: a minimized window waits for them instead of spinning.
         const EventSpan events = window->is_minimized() ? platform->wait_events_timeout(50ms) : platform->poll_events();
+#if GFX_EXAMPLE_WITH_UI
+        ui_input.begin_frame();
+        ui_input.add_events(events);
+#endif
         for (const Event& event : events)
         {
             presentation.handle_event(event);
@@ -336,15 +340,11 @@ run(const Options& options) -> int
         }
         if (frame.was_action_just_pressed("toggle_metrics"_action))
         {
-#if GFX_EXAMPLE_WITH_UI
-            overlay.toggle();
-#else
-            overlay_visible = !overlay_visible;
-            if (overlay_visible)
+            metrics_shown = !metrics_shown;
+            if (!GFX_EXAMPLE_WITH_UI && metrics_shown)
             {
-                std::println("the metrics overlay needs the UI library (GFX_BUILD_UI)");
+                std::println("the metrics window needs the UI library (GFX_BUILD_UI)");
             }
-#endif
         }
         if (frame.was_action_just_pressed("quit"_action))
         {
@@ -398,12 +398,22 @@ run(const Options& options) -> int
                                                               static_cast<float>(extent.height - std::min(side, extent.height))));
 
 #if GFX_EXAMPLE_WITH_UI
-        // The overlay's draw list: the previous frame's metrics, when shown.
-        text.new_frame();
-        overlay_list.clear();
-        overlay.draw(overlay_list, text, fonts, overlay_text_font, metrics.text());
-        const std::array overlay_lists{&overlay_list};
-        const gfx::ui::UiDrawData ui{.lists = overlay_lists, .width = static_cast<float>(extent.width), .height = static_cast<float>(extent.height)};
+        // The UI's frame: the metrics window with the previous frame's numbers (its close button hides it).
+        gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(std::chrono::duration<double>(now - ui_start).count()));
+        if (metrics_shown && gfx::FrameMetrics::enabled())
+        {
+            ui_frame.set_next_window_position({.x = 8, .y = 8}, gfx::ui::UiCondition::FIRST_USE_EVER);
+            if (ui_frame.begin_window("Frame metrics", metrics_shown, gfx::ui::UiWindowFlag::ALWAYS_AUTO_RESIZE))
+            {
+                for (const std::string& line : metrics.text())
+                {
+                    ui_frame.text_unformatted(line);
+                }
+            }
+            ui_frame.end_window();
+        }
+        static_cast<void>(ui.end_frame());
+        const gfx::ui::UiDrawData& ui_data = ui.draw_data();
         ui_renderer.begin_frame(frame_number);
 #endif
 
@@ -418,7 +428,7 @@ run(const Options& options) -> int
                     gfx::image_barrier(image->image.image, gfx::ResourceState::UNDEFINED, gfx::ResourceState::COLOR_ATTACHMENT_WRITE)};
                 recorder.barrier({.image_barriers = to_attachment});
 #if GFX_EXAMPLE_WITH_UI
-                ui_renderer.prepare(recorder, ui);
+                ui_renderer.prepare(recorder, ui_data);
 #endif
                 {
                     const std::array<float, 4> background = game.menu ? std::array{0.01F, 0.01F, 0.01F, 1.0F} : std::array{0.02F, 0.03F, 0.08F, 1.0F};
@@ -434,7 +444,7 @@ run(const Options& options) -> int
                     const std::array area{gfx::ClearRectangle{.area = {.x = left, .y = top, .width = side, .height = side}}};
                     scope.clear_attachments(square, area);
 #if GFX_EXAMPLE_WITH_UI
-                    ui_renderer.record(scope, ui);
+                    ui_renderer.record(scope, ui_data);
 #endif
                 }
                 const std::array to_present{

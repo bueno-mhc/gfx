@@ -257,11 +257,12 @@ UiRenderer::record(RenderingCommands& commands,
     statistics.vertices = static_cast<std::uint32_t>(vertex_count);
     statistics.indices = static_cast<std::uint32_t>(index_count);
 
-    // The pipeline, the viewport, the indices.
+    // The pipeline, the viewport, the indices; list coordinates times the data's scale are pixels.
+    const float scale = data.scale > 0 ? data.scale : 1.0F;
     commands.bind_pipeline(state.pipeline->handle());
     commands.set_viewport({.width = data.width, .height = data.height});
     commands.bind_index_buffer(indices.buffer, indices.offset, IndexType::UNSIGNED_INTEGER_32);
-    Push push{.scale = {2.0F / data.width, 2.0F / data.height},
+    Push push{.scale = {2.0F * scale / data.width, 2.0F * scale / data.height},
               .translation = {-1.0F, -1.0F},
               .vertex_buffer = vertices.buffer_index.value(),
               .vertex_word = static_cast<std::uint32_t>(vertices.offset / 4),
@@ -275,10 +276,10 @@ UiRenderer::record(RenderingCommands& commands,
     {
         for (const DrawCommand& command : list->commands())
         {
-            const float left = std::clamp(std::floor(command.clip.left), 0.0F, data.width);
-            const float top = std::clamp(std::floor(command.clip.top), 0.0F, data.height);
-            const float right = std::clamp(std::ceil(command.clip.right), 0.0F, data.width);
-            const float bottom = std::clamp(std::ceil(command.clip.bottom), 0.0F, data.height);
+            const float left = std::clamp(std::floor(command.clip.left * scale), 0.0F, data.width);
+            const float top = std::clamp(std::floor(command.clip.top * scale), 0.0F, data.height);
+            const float right = std::clamp(std::ceil(command.clip.right * scale), 0.0F, data.width);
+            const float bottom = std::clamp(std::ceil(command.clip.bottom * scale), 0.0F, data.height);
             if (command.index_count == 0 || right <= left || bottom <= top)
             {
                 continue;

@@ -243,7 +243,9 @@ layers that can be used separately:
   handle** a graphics backend creates its surface from.
 - **Input**: normalized events (one 64-byte value type, a `std::variant` payload, delivered as a span:
   no allocation while pumping), physical keys (`Key`, USB HID positions) and logical keys (`KeyCode`,
-  the symbol of the keyboard layout), mouse, gamepads, joysticks and touch; and an **action mapping**
+  the symbol of the keyboard layout), mouse, gamepads, joysticks and touch (the keyboard, mouse and cursor
+  enumerations are core's, `gfx::Key`, shared with the UI library and spelled `gfx::platform::Key` as
+  well); and an **action mapping**
   system modeled on Unreal's Enhanced Input and Godot's InputMap: the game asks for actions
   (`"jump"_action`), not keys.
 
@@ -576,8 +578,75 @@ renderer.prepare(recorder, ui);                                   // before the 
 ```
 
 Colors are sRGB-encoded and not premultiplied: on an sRGB target the shader converts them to linear, so
-they read back as given. `statistics()` reports draws, vertices, resident pages, uploaded bytes and the
-commands skipped when a frame's geometry exceeds `UiRendererDescription::geometry_bytes_per_frame`.
+they read back as given. `UiDrawData::scale` is the pixels per unit of the lists' coordinates (a UI laid
+out in points on a high-density display). `statistics()` reports draws, vertices, resident pages, uploaded
+bytes and the commands skipped when a frame's geometry exceeds `UiRendererDescription::geometry_bytes_per_frame`.
+
+## UI: immediate mode
+
+`UiContext` is an immediate-mode UI in the manner of Dear ImGui: every frame, the application describes its
+windows and widgets on the `UiFrame` that `begin_frame()` returns (`if (frame.button("Save")) save();`), and the
+context keeps what must survive between frames (window places and sizes, the active and focused items). There
+are no widget objects and no callbacks. `gfx.ui.platform` feeds a context from a gfx platform window (its
+events, clipboard, cursors and text input); any other windowing fills a `UiFrameInput` and implements
+`UiPlatformServices` itself.
+
+```cpp
+import gfx.ui;
+import gfx.ui.platform;
+import my_application.fonts;
+
+gfx::ui::UiWindowServices services{*platform, *window};
+gfx::ui::UiContext ui{{.services = &services}};
+ui.load_font(gfx::ui::FontAtlas::load(interface_font), 16.0F);    // UI units are points
+gfx::ui::UiPlatformInput input{*window};
+gfx::ui::UiRenderer renderer{*device, ui.fonts(), {.color_format = presentation.format()}};
+
+// Each frame, with the events of this pump:
+input.begin_frame();
+input.add_events(events);
+gfx::ui::UiFrame& frame = ui.begin_frame(input.frame_input(seconds));
+frame.set_next_window_position({.x = 20, .y = 20}, gfx::ui::UiCondition::FIRST_USE_EVER);
+if (frame.begin_window("Inspector"))
+{
+    frame.text("{} objects", object_count);
+    frame.checkbox("Visible", visible);
+    if (frame.button("Reset"))
+    {
+        reset();
+    }
+}
+frame.end_window();
+const gfx::ui::UiFrameReport report = ui.end_frame();             // problems of the frame, if any
+// renderer.prepare(recorder, ui.draw_data()) before the pass, renderer.record(scope, ui.draw_data()) in it
+```
+
+- **Windows** move (by their title bar or any empty space), resize (bottom-right grip), collapse, close,
+  scroll (wheel, scrollbars, by code), fit their content, stack (a click brings one to the front), and hold
+  child regions that scroll on their own. `set_next_window_*()` places, sizes and focuses the next window,
+  with a `UiCondition` (always, once, first use, appearing).
+- **Widgets**: text (formatted with `std::format`, colored, disabled, wrapped, bulleted, labeled), buttons
+  (normal, small, invisible, arrow), checkboxes (also over bitmask flags), radio buttons, switches
+  (`toggle()`), selectables, separators (with text), bullets. **Layout**: `same_line()`, groups, indentation,
+  spacing, columns, the cursor, item widths, wrap positions; `begin_disabled()`.
+- **Identifiers**: a widget's label hashed with the identifier stack (the window, `push_id()`); `"Save##bar"`
+  shows `Save`, `"Saved 3###status"` keeps the identifier of `###status`. Two interactive items with one
+  identifier in a frame are reported.
+- **Keyboard**: Tab and Shift+Tab move the focus through a window's items, Space or Return activates the
+  focused one, Escape drops the focus. `wants_mouse()` and `wants_keyboard()` tell the application what the
+  UI used.
+- **Styles and themes**: `Style` (every size, padding, rounding and alignment) and a color per `StyleColor`
+  make a `Theme`; `builtin_theme()` makes the dark, light, classic and high-contrast themes at compile time;
+  `push_style_color()`, `push_style_variable()` and `push_font()` change them for a part of a frame.
+- **Nothing throws in a frame**: misuse (an end without a begin, a widget outside any window, unbalanced
+  stacks, identifier conflicts, a missing font, an exceeded capacity) is reported in the `UiFrameReport` that
+  `end_frame()` returns; `show_diagnostics_window()` shows the last one. After its first frames, a frame
+  allocates nothing (a test counts `operator new`).
+- **Threads**: frames run on one thread; `acquire_draw_data()` gives any thread the last published draw data,
+  whose lists the context does not reuse while the lease lives (three sets of lists rotate).
+- **Later phases**: the widgets of the next phases (text fields, sliders, color editors, combos, trees, tabs,
+  menus, popups, tooltips, drag and drop, tables, plots, docking, shortcuts, accessibility) are declared; until
+  their phase each reports `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
 
 ## Examples
 
@@ -586,8 +655,8 @@ input schema with three contexts declared at compile time, and Vulkan frames pre
 `WindowSwapchain`. A square moves with W A S D, the arrow keys or a gamepad's left stick; Space or
 the South button makes it hop; Escape or Start opens a pause menu where Return or South quits and
 Escape, Start or East resumes; Backspace restores the initial size; in Debug builds, F3 shows or hides
-the frame metrics (drawn by the UI library when it is built with its atlas tool: the example builds its
-overlay's font atlas with `gfx_add_ui_atlas()`).
+the frame metrics in a window of the UI library that the mouse can move and close (when the UI library is
+built with its atlas tool: the example builds its font atlas with `gfx_add_ui_atlas()`).
 
 ```bash
 build/debug/examples/windowed/gfx_windowed_example.exe --backend glfw
@@ -710,6 +779,11 @@ gfx/
 │   │                       (swapchain_description_for(), WindowSwapchain)
 │   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
 │       │                 errors.cppm
+│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets), the frame report;
+│       │                 internal partition :state, one implementation unit per area
+│       ├── style/        gfx.ui.style: Style, Theme, builtin_theme()
+│       ├── input/        gfx.ui.input: UiFrameInput, UiPlatformServices, UiNullPlatformServices
+│       ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices
 │       ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
 │       │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
 │       ├── draw/         gfx.ui.draw: DrawList, Color, Transform2D, TextStyle, UiDrawData;
@@ -734,7 +808,9 @@ gfx/
     ├── ui/               the UI library, the atlas tools (every format, decoder, generator, packer),
     │                     embedded atlases, text layout (and its allocation count), draw lists, the
     │                     renderer on every GPU (shapes and text read back, text compared with the field
-    │                     evaluated on the CPU), and the font pipeline's libraries (fetched OFL fonts)
+    │                     evaluated on the CPU), the immediate-mode UI under synthetic input (and drawn on
+    │                     every GPU), the platform adapter (and a UI in visible windows), and the font
+    │                     pipeline's libraries (fetched OFL fonts)
     └── compilation/      code that must not compile, and the platform-macro naming check
 ```
 

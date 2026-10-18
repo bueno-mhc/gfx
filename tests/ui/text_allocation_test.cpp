@@ -1,5 +1,6 @@
-// A cached layout allocates nothing, and neither does a draw list refilled every frame: this executable
-// counts every operator new while it lays texts out and fills lists.
+// A cached layout allocates nothing, nor does a draw list refilled every frame, nor an immediate-mode UI after
+// its first frames: this executable counts every operator new while it lays texts out, fills lists and runs
+// frames.
 #include <gtest/gtest.h>
 
 import std;
@@ -143,6 +144,123 @@ TEST(TextAllocationTest, DrawListsRefilledEveryFrameAllocateNothing)
     EXPECT_EQ(g_allocations.load(), 0U);
     EXPECT_EQ(list.vertices().size(), vertices);
     EXPECT_GT(vertices, 100U);
+}
+
+TEST(TextAllocationTest, ImmediateModeFramesAllocateNothingAfterTheFirstOnes)
+{
+    // Two windows with every widget of phase U4, a child region, styles pushed, columns and groups; the mouse
+    // moves over the items and clicks them, so hovered, held and pressed states change from frame to frame.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    bool checked = false;
+    bool switched = true;
+    bool selected = false;
+    int choice = 0;
+    std::uint32_t presses = 0;
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 360, .y = 420}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Everything"))
+        {
+            frame.text("Frame {} of {}", frame_number % 8, 8);
+            frame.text_colored({.red = 1, .alpha = 1}, "{:.2f} ms", 16.67);
+            frame.text_disabled("disabled {}", 1);
+            frame.text_wrapped("A long line of text that wraps at the end of the content region of the window.");
+            frame.bullet_text("bullet {}", 2);
+            frame.label("Speed", "{} m/s", 12);
+            presses += frame.button("Button") ? 1U : 0U;
+            frame.same_line();
+            presses += frame.small_button("Small") ? 1U : 0U;
+            frame.same_line();
+            presses += frame.arrow_button("arrow", ArrowDirection::LEFT) ? 1U : 0U;
+            frame.checkbox("Check", checked);
+            frame.toggle("Switch", switched);
+            frame.radio_button("One", choice, 0);
+            frame.same_line();
+            frame.radio_button("Two", choice, 1);
+            frame.selectable("Selectable", &selected);
+            frame.separator();
+            frame.separator_text("Section");
+            frame.push_style_color(StyleColor::BUTTON, {.green = 1, .alpha = 1});
+            frame.push_style_variable(StyleVariable::FRAME_PADDING, gfx::Vector2{.x = 10, .y = 6});
+            presses += frame.button("Styled") ? 1U : 0U;
+            frame.pop_style_variable();
+            frame.pop_style_color();
+            frame.begin_group();
+            frame.bullet();
+            frame.text_unformatted("in a group");
+            frame.end_group();
+            frame.columns(2, "two");
+            frame.text_unformatted("left");
+            frame.next_column();
+            frame.text_unformatted("right");
+            frame.columns(1);
+            frame.indent();
+            frame.dummy({.x = 10, .y = 10});
+            frame.unindent();
+            for (std::int32_t row = 0; row < 3; ++row)
+            {
+                frame.push_id(row);
+                presses += frame.invisible_button("row", {.x = 100, .y = 8}) ? 1U : 0U;
+                frame.pop_id();
+            }
+            frame.begin_disabled();
+            static_cast<void>(frame.button("Disabled"));
+            frame.end_disabled();
+            if (frame.begin_child("log", {.x = 0, .y = 60}, ChildFlag::BORDERS))
+            {
+                for (std::uint32_t line = 0; line < 10; ++line)
+                {
+                    frame.text("log {}", line);
+                }
+            }
+            frame.end_child();
+        }
+        frame.end_window();
+        frame.set_next_window_position({.x = 400, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.begin_window("Second", UiWindowFlag::ALWAYS_AUTO_RESIZE);
+        frame.text_unformatted("auto-sized");
+        frame.end_window();
+    };
+
+    // The input of frame n: the mouse sweeps the first window, pressing on even frames and releasing on odd ones
+    // at the same place.
+    std::array<UiMouseButtonEvent, 1> click{};
+    const auto input = [&](std::uint32_t frame_number)
+    {
+        const std::uint32_t step = frame_number / 2;
+        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((step * 37) % 300), .y = 40.0F + static_cast<float>((step * 53) % 360)};
+        const bool down = frame_number % 2 == 0;
+        click[0] = {.button = gfx::MouseButton::LEFT, .down = down, .position = mouse};
+        return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0,
+                            .display_size = {.x = 800, .y = 600},
+                            .mouse_present = true,
+                            .mouse_position = mouse,
+                            .mouse_buttons = click,
+                            .mouse_buttons_held = down ? gfx::MouseButtonMask::LEFT : gfx::MouseButtonMask::NONE};
+    };
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 30; ++frame_number)
+    {
+        EXPECT_TRUE(run(frame_number).ok()) << frame_number;
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    for (std::uint32_t frame_number = 30; frame_number < 130; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_GT(presses, 0U) << "the clicks reached widgets";
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
 }
 
 } // namespace

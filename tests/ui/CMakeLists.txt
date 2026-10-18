@@ -5,6 +5,12 @@ gfx_add_test(gfx_ui_tests
     SOURCES ui_foundations_test.cpp
     LIBRARIES gfx::ui)
 
+# Where the Vulkan validation layers are (found by tests/graphics/vulkan), for the tests that draw on the GPUs.
+set(_gfx_ui_layer_directory "")
+if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
+    set(_gfx_ui_layer_directory "${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
+endif()
+
 include(GfxDependencies)
 gfx_require_ui_test_fonts()
 gfx_require_freetype()
@@ -107,6 +113,36 @@ gfx_add_ui_atlas(gfx_ui_text_allocation_tests
     CHARACTERS BASIC_LATIN
     EMBED MODULE gfx.tests.allocation_latin NAMESPACE gfx::tests::text_atlases)
 
+# The immediate-mode UI driven by synthetic input (UiContext, UiFrame), with an atlas built for it.
+gfx_add_test(gfx_ui_context_tests
+    SOURCES context_test.cpp context_render_test.cpp
+    MODULES context_test_support.cppm
+    LIBRARIES gfx::ui)
+gfx_add_ui_atlas(gfx_ui_context_tests
+    NAME context_latin
+    FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
+    CHARACTERS BASIC_LATIN
+    KIND MTSDF SIZE 32 RANGE 4
+    EMBED MODULE gfx.tests.context_latin NAMESPACE gfx::tests::context_atlases)
+target_include_directories(gfx_ui_context_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
+target_compile_definitions(gfx_ui_context_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_ui_layer_directory}")
+
+# The UI on the platform library: frame input from window events, window services, and a UI in a visible
+# window on every platform backend, presented with Vulkan and the validation layers.
+if(TARGET gfx_ui_platform AND TARGET gfx_platform_graphics)
+    gfx_add_test(gfx_ui_platform_tests
+        SOURCES ui_platform_test.cpp
+        LIBRARIES gfx::ui_platform gfx::platform_graphics)
+    gfx_add_ui_atlas(gfx_ui_platform_tests
+        NAME platform_latin
+        FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
+        CHARACTERS BASIC_LATIN LATIN_1_SUPPLEMENT
+        KIND MTSDF SIZE 32 RANGE 4
+        EMBED MODULE gfx.tests.platform_latin NAMESPACE gfx::tests::platform_atlases)
+    target_compile_definitions(gfx_ui_platform_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_ui_layer_directory}")
+    target_include_directories(gfx_ui_platform_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
+endif()
+
 # Drawing: draw lists and the debug overlay (on the CPU), and the renderer on every GPU of the machine with
 # the Vulkan validation layers (found by tests/graphics/vulkan; its fixtures in vulkan_test.hpp).
 gfx_add_test(gfx_ui_draw_tests
@@ -118,9 +154,5 @@ gfx_add_ui_atlas(gfx_ui_draw_tests
     CHARACTERS BASIC_LATIN
     KIND MTSDF SIZE 32 RANGE 4
     EMBED MODULE gfx.tests.draw_latin NAMESPACE gfx::tests::draw_atlases)
-set(_gfx_layer_directory "")
-if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
-    set(_gfx_layer_directory "${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
-endif()
-target_compile_definitions(gfx_ui_draw_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_layer_directory}")
+target_compile_definitions(gfx_ui_draw_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_ui_layer_directory}")
 target_include_directories(gfx_ui_draw_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)

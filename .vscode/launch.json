@@ -118,6 +118,8 @@
                 { "label": "text       - FontAtlasTest.*, FontLibraryTest.*, TextLayoutTest.*, TextLayoutCacheTest.*", "value": "ui/gfx_ui_text_tests.exe" },
                 { "label": "text allocation - TextAllocationTest.* (counts operator new: layouts, draw lists)", "value": "ui/gfx_ui_text_allocation_tests.exe" },
                 { "label": "draw       - ColorTest.*, DrawListTest.*, DebugOverlayTest.*, Gpu/UiRendererTest.* (renderer on every GPU)", "value": "ui/gfx_ui_draw_tests.exe" },
+                { "label": "context    - UiWindowTest.*, UiLayoutTest.*, UiWidgetTest.*, UiKeyboardTest.*, UiReportTest.*, ... (immediate mode, synthetic input)", "value": "ui/gfx_ui_context_tests.exe" },
+                { "label": "ui platform - Backends/UiPlatformInputTest.*, Backends/UiWindowTest.* (platform adapter, visible windows)", "value": "ui/gfx_ui_platform_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
             "default": "graphics/handles/gfx_handles_tests.exe"
