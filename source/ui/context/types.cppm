@@ -146,6 +146,69 @@ struct UiDragDropPayload
 template<class Value>
 concept ArithmeticValue = std::is_arithmetic_v<Value> && !std::same_as<Value, bool>;
 
+/// @brief Numbers a multi-component slider or drag edits in place: a contiguous, sized range of writable arithmetic
+///        values (std::array, std::span, std::vector, a C array).
+template<class Values>
+concept EditableNumbers = std::ranges::contiguous_range<Values> && std::ranges::sized_range<Values>
+                          && ArithmeticValue<std::ranges::range_value_t<Values>>
+                          && !std::is_const_v<std::remove_reference_t<std::ranges::range_reference_t<Values>>>;
+
+/// @brief A number of any arithmetic type with its bounds and its type's limits, as the numeric widgets edit it
+///        (their templates make it): integers as 64-bit integers, floating-point numbers as doubles.
+struct NumberField
+{
+    /// @brief A value of the field.
+    using Value = std::variant<std::int64_t, std::uint64_t, double>;
+
+    Value value{};                    ///< The number.
+    Value minimum{};                  ///< Its smallest value (sliders; drags when below maximum).
+    Value maximum{};                  ///< Its largest value.
+    Value lowest{};                   ///< Its type's lowest value.
+    Value highest{};                  ///< Its type's highest value.
+    std::string_view default_format{}; ///< How it is shown without a format.
+
+    /// @brief @p number as a Value.
+    template<ArithmeticValue Number>
+    [[nodiscard]] static constexpr auto wrap(Number number) noexcept -> Value
+    {
+        if constexpr (std::is_floating_point_v<Number>)
+        {
+            return static_cast<double>(number);
+        }
+        else if constexpr (std::is_signed_v<Number>)
+        {
+            return static_cast<std::int64_t>(number);
+        }
+        else
+        {
+            return static_cast<std::uint64_t>(number);
+        }
+    }
+
+    /// @brief The field of @p value between @p minimum and @p maximum.
+    template<ArithmeticValue Number>
+    [[nodiscard]] static constexpr auto make(Number value,
+                                             Number minimum,
+                                             Number maximum) noexcept -> NumberField
+    {
+        return {.value = wrap(value),
+                .minimum = wrap(minimum),
+                .maximum = wrap(maximum),
+                .lowest = wrap(std::numeric_limits<Number>::lowest()),
+                .highest = wrap(std::numeric_limits<Number>::max()),
+                .default_format = std::is_same_v<Number, float> ? DEFAULT_FLOAT_FORMAT
+                                  : std::is_floating_point_v<Number> ? DEFAULT_DOUBLE_FORMAT
+                                                                     : DEFAULT_INTEGER_FORMAT};
+    }
+
+    /// @brief The value as a @p Number (within its type: the widgets clamp it to the type's limits).
+    template<ArithmeticValue Number>
+    [[nodiscard]] constexpr auto as() const noexcept -> Number
+    {
+        return std::visit([](auto number) { return static_cast<Number>(number); }, value);
+    }
+};
+
 /// @brief Something a list (combo, list box) can show as an item's text.
 template<class Item>
 concept TextLike = std::convertible_to<const Item&, std::string_view>;

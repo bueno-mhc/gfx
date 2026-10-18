@@ -108,6 +108,67 @@ TEST_P(UiPlatformInputTest, TheWindowServicesShowCursors)
     EXPECT_FALSE(services.open_url("https://example.com"));
 }
 
+TEST_P(UiPlatformInputTest, TextFieldsStartTextInputAndReceiveCompositionsAndTypedText)
+{
+    PlatformWindow platform = make_window(GetParam(), false);
+    gfx::platform::Window& window = *platform.window;
+    const gfx::platform::WindowHandle handle = window.handle();
+    gfx::ui::UiWindowServices services{*platform.platform, window};
+    gfx::ui::UiContext ui{{.services = &services}};
+    ui.load_font(gfx::ui::FontAtlas::load(gfx::tests::platform_atlases::platform_latin), 16.0F);
+    gfx::ui::UiPlatformInput input{window};
+    std::string name = "ab";
+    double time = 1.0;
+    gfx::ui::UiFrameReport report{};
+    gfx::ui::UiFrameInput last{};
+    const auto frame = [&](std::span<const Event> events, std::string_view text, bool focus_here)
+    {
+        input.begin_frame();
+        input.add_events({events, text});
+        last = input.frame_input(time += 1.0 / 60.0);
+        gfx::ui::UiFrame& ui_frame = ui.begin_frame(last);
+        ui_frame.set_next_window_position({.x = 10, .y = 10}, gfx::ui::UiCondition::FIRST_USE_EVER);
+        ui_frame.begin_window("Text input");
+        if (focus_here)
+        {
+            ui_frame.set_keyboard_focus_here();
+        }
+        ui_frame.input_text("Name", name);
+        ui_frame.end_window();
+        report = ui.end_frame();
+    };
+
+    // The keyboard focus moves into the field: it edits (everything selected) and the window's text input starts.
+    frame({}, {}, false);
+    frame({}, {}, true);
+    frame({}, {}, false);
+    EXPECT_TRUE(ui.wants_text_input());
+    EXPECT_TRUE(window.is_text_input_active());
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+
+    // A composition is shown, not typed (backends without compositions never send one: the adapter passes what it
+    // receives).
+    const std::string composition = "ni";
+    const std::array composing{Event::make<EventType::TEXT_COMPOSITION>(handle, 0ns, {.text = {.offset = 0, .length = 2}, .cursor = 2})};
+    frame(composing, composition, false);
+    EXPECT_EQ(last.composition, "ni");
+    EXPECT_EQ(last.composition_cursor, 2);
+    EXPECT_EQ(name, "ab");
+
+    // The committed text ends the composition and replaces the selection; Return ends editing and text input.
+    const std::string typed = "nihon";
+    const std::array committed{Event::make<EventType::TEXT_INPUT>(handle, 0ns, {.text = {.offset = 0, .length = 5}})};
+    frame(committed, typed, false);
+    EXPECT_TRUE(last.composition.empty());
+    EXPECT_EQ(name, "nihon");
+    const std::array confirm{Event::make<EventType::KEY_DOWN>(handle, 0ns, {.key = gfx::Key::RETURN, .key_code = gfx::KeyCode::RETURN})};
+    frame(confirm, {}, false);
+    frame({}, {}, false);
+    EXPECT_FALSE(ui.wants_text_input());
+    EXPECT_FALSE(window.is_text_input_active());
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends,
                          UiPlatformInputTest,
                          testing::ValuesIn(backends()),

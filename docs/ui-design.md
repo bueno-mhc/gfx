@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U3
-committed; U4 built, awaiting validation (§B, "U4 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U4
+committed; U5 built, awaiting validation (§B, "U5 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -731,6 +731,117 @@ report, and your validation (you commit).
   `gfx_ui_platform_tests` (the adapter on each platform backend, cursors, and a UI in a visible window on SDL3 and GLFW
   clicked through events pushed to the platform and read back from the swapchain image, validation layers on), and the
   compile-failure tests `UiSlidersRejectBooleans` and `UiCombosNeedTextItems`.
+
+### U5 as built (2026-10-18)
+
+- **Text model** (in `gfx.ui.text`, public, usable without a context): **`TextBoundaries`** (`analyze(text)`; grapheme
+  and word boundaries of UTF-8 text by byte offset from libunibreak's `set_graphemebreaks_utf8` /
+  `set_wordbreaks_utf8`; `next_grapheme`, `previous_grapheme`, `next_word`, `previous_word` (Control+Right skips the
+  current segment then the spaces, Control+Left the spaces then the segment), `word_at`, `grapheme_count`) and
+  **`TextEditor`** (`TextEditorDescription{capacity, undo_levels = DEFAULT_UNDO_LEVELS, single_line}`; text, cursor,
+  anchor, selection, `move(TextMotion, extend)`, `select_all`, `select_word`, `insert` (clean UTF-8: control characters
+  dropped, CR LF one break, line breaks become spaces on one line; capacity cut at a character boundary; overwrite
+  mode), `erase(TextMotion)`, `erase_selection`, `undo`/`redo` (typing merges into one step until a word starts after a
+  blank, consecutive erasing merges), `revision()`). Enumeration `TextMotion`.
+- **Text fields** (`text_input.cpp`; the core `text_field()` is shared with numbers): one field is edited at a time
+  (`TextEditState`, holding a `TextEditor`). Editing starts on a click (the cursor at the click, Shift extends, a double
+  click selects a word, a drag selects; the I-beam cursor over fields), on Tab into the field or Return on it (everything
+  selected); it ends on Return or Tab (committed), Escape (reverted; with ESCAPE_CLEARS_ALL a text is cleared first), a click
+  elsewhere (committed) or when the field is no longer submitted. Keys: arrows by graphemes, Control+arrows by words,
+  Home/End (Control: the whole text), Up/Down/Page Up/Page Down between lines at a kept column; Backspace/Delete
+  (Control: words); Control+A, C, X, V, Z, Y and Shift+Delete, Control+Insert, Shift+Insert. Every `InputTextFlag` works:
+  the character filters, ALLOW_TAB_INPUT, ENTER_RETURNS_TRUE, ESCAPE_CLEARS_ALL, CONTROL_ENTER_FOR_NEW_LINE, READ_ONLY,
+  PASSWORD (`*` per grapheme, never copied), ALWAYS_OVERWRITE, AUTO_SELECT_ALL, NO_HORIZONTAL_SCROLL, NO_UNDO_REDO,
+  ELIDE_LEFT, WORD_WRAP. Single-line fields scroll horizontally to the cursor; `input_text_multiline()` is a framed
+  child region that scrolls to it. A `std::string` grows as needed; a `std::span<char>` holds its size minus one bytes,
+  NUL-terminated. The cursor blinks (TEXT_CURSOR_BLINK_SECONDS, shown TEXT_CURSOR_VISIBLE_SECONDS after a change).
+- **IME**: `UiFrameInput` gained `composition` and `composition_cursor`; while a field is edited, `end_frame()` asks
+  `UiPlatformServices::set_text_input(true, cursor rectangle)` (again when the cursor moves) and stops it afterwards;
+  `UiContext::wants_text_input()` is true. The field draws the composition underlined **in place of the selection** (where
+  committing it puts it), with the cursor inside it. `gfx.ui.platform` turns TEXT_COMPOSITION events into the
+  composition and asks for composition events only where the platform supports `PlatformFeature::TEXT_COMPOSITION`
+  (GLFW throws `BackendCapabilityError` when asked: it reports none, the system shows them).
+- **Numbers** (`numbers.cpp`): `input_number()` (a text field plus - and + buttons repeating while held, Control: the
+  fast step), `slider()` and `drag()` over any `ArithmeticValue`, and the multi-component overloads over any contiguous
+  range of them (`EditableNumbers`: arrays, spans, vectors, C arrays). Sliders: a grab one step wide for small integer
+  ranges, the value follows the mouse, Left/Right step, LOGARITHMIC. Drags: horizontal motion past the drag threshold
+  times the speed (Shift ×DRAG_FAST_FACTOR, Alt ×DRAG_SLOW_FACTOR unless NO_SPEED_TWEAKS), the rounding's remainder kept
+  for the next motion, clamped (or WRAP_AROUND) when the minimum is below the maximum. Control+click, a double click or
+  Return turns a slider or drag into a text field (unless NO_INPUT); its value applies when editing ends by Return,
+  Tab or a click (CLAMP_ON_INPUT clamps it). Values are rounded to the format's precision (unless NO_ROUND_TO_FORMAT).
+- **Colors** (`colors.cpp`): `color_edit()` (four drags or three without alpha, RGB or HSV, integers 0 to 255 or
+  FLOAT_CHANNELS 0 to 1, HDR without an upper bound; or DISPLAY_HEXADECIMAL; the preview opens a picker popup unless
+  NO_PICKER), `color_picker()` (PICKER_HUE_BAR: a saturation/value square and a hue bar; PICKER_HUE_WHEEL: a hue ring
+  around a hue/black/white triangle, Dear ImGui's barycentric formulas; ALPHA_BAR over a checkerboard; a side preview;
+  the inputs under it), `color_button()` (a swatch, translucent ones over a checkerboard, ALPHA_PREVIEW_HALF, a border
+  unless NO_BORDER). The hue and saturation are remembered while the color is gray or black. INPUT_HSV colors hold
+  hue, saturation and value. In `gfx.ui.draw`: `HsvColor`, constexpr `to_hsv()`, `from_hsv()`, `HexadecimalColor`,
+  `to_hexadecimal()`, `from_hexadecimal()`, and `DrawList::add_rectangle_filled_gradient()` / `add_triangle_filled()`
+  (a color per corner, no fringe: the insides of widgets).
+- **Lists** (`combos.cpp`, `popups.cpp`): `begin_combo()`/`end_combo()` and `combo()` (pressed on the mouse going down;
+  the popup is at least as wide as the combo, HEIGHT_SMALL/REGULAR/LARGE/LARGEST show COMBO_SMALL/REGULAR/LARGE_ITEMS or
+  all; NO_ARROW_BUTTON, NO_PREVIEW, WIDTH_FIT_PREVIEW; it scrolls to the selected item when it opens),
+  `begin_list_box()`/`end_list_box()` and `list_box()` (a framed child region about seven items tall, the label on its
+  right). Popups: a stack of windows drawn over every window and hovered first, placed below their opener (above when
+  they do not fit), closed by a click outside them (a click on the opener does not reopen it), by Escape, by a choice
+  (a selectable in a popup closes it unless NO_AUTO_CLOSE_POPUPS) or when no longer submitted; the window that opened
+  the focused popup keeps its title active.
+- **Deviations from the design, for your validation**:
+  1. The popup machinery is internal (`ContextState::open_popup`, `begin_popup`, `end_popup`, `update_popups`) and
+     serves combos and the color picker; the public popup API (`open_popup()`, `begin_popup()`, modals, context menus)
+     stays declared for U6, which will build on it.
+  2. One template per kind instead of A4's `input_int`, `input_float`, `slider_int`, ...: `input_number()`, `slider()`
+     and `drag()` over any arithmetic type. The templates erase the type into a `NumberField`
+     (`std::variant<std::int64_t, std::uint64_t, double>` with the bounds and the type's limits) handled by non-template
+     cores; arithmetic is done in `long double`, exact for 64-bit integers with GCC (MSVC's `long double` is a `double`:
+     integers beyond 2^53 would lose precision there; to revisit in step 6).
+  3. **Formats are `std::format` formats** (`"{:.2f} m/s"`), not printf's: the value is shown with the whole format and
+     edited as its replacement field alone; the precision (`.N`) rounds the value; a format the type cannot use is
+     reported (INVALID_ARGUMENT) and the type's default used (DEFAULT_INTEGER_FORMAT, DEFAULT_FLOAT_FORMAT,
+     DEFAULT_DOUBLE_FORMAT). Typed text is parsed with `std::from_chars` (scientific notation accepted, no expressions)
+     and clamped to the type.
+  4. The multi-component overloads take contiguous ranges (concept `EditableNumbers`), not `std::span<Value>` as
+     declared in U4: a span parameter does not deduce from arrays or fixed-extent spans. New compile-failure test
+     `UiComponentsNeedWritableNumbers`.
+  5. Shortcuts follow the keyboard layout's symbols (`UiKeyEvent::key_code`: Control+Z is the key labeled Z on AZERTY);
+     typed text is ignored while Control alone is held (Control+Alt is AltGr).
+  6. A frame's input has no order between keys and text: a field applies motions and erasing first, then the typed
+     text, then Return, Tab and Escape. Several keys of one frame apply in a fixed order (horizontal motions, then
+     vertical ones): one event per frame is the usual case, and the tests send one key group per frame.
+  7. Text fields keep `FRAME_BACKGROUND` whether hovered or edited (Dear ImGui's choice); the selection and the cursor
+     show the editing.
+  8. Logarithmic sliders use the ratio of logarithms when both ends have one sign and are at least 10^-precision from
+     zero (Dear ImGui's formula: the middle of 1..1000 is 31.6); ranges that touch or span zero use
+     sign(x)·log(1 + |x|/ε) instead of Dear ImGui's zero dead zone.
+  9. Not in U5: input-text callbacks (A4: there is no callback API; filters are flags), `selectable_list` (A4; the
+     list box takes any items), and the flags that need later phases are accepted and ignored: ColorEditFlag::NO_OPTIONS
+     (the options menu needs U6's context menus), NO_TOOLTIP (tooltips, U6), NO_DRAG_DROP (drag and drop, U6).
+  10. Two fixes to U4's code found by U5's tests: an item focused by a click after its `item_add()` lost the focus at
+      the end of the frame (Tab after a click then wrapped to the first item) — `take_focus()` keeps it alive; and
+      while a field is edited, other items stay hoverable and `wants_mouse()` is false unless the field is selecting
+      with the mouse, so a click outside commits the edit and reaches the application or the item under it.
+  11. After `end_combo()` the combo is the last item again (item queries refer to it, not to its popup's items).
+- **Facts found**: a frame's typed text and keys being unordered matters only when one frame carries several (the
+  tests now send one group per frame); a click on the same spot within the double-click time is a double click (tests
+  wait a second between clicks on one field); GLFW refuses composition events; twice in a full build, a transient
+  "Permission denied" (a link, then ninja's log recompaction) did not reproduce on the next build — another process
+  probably held a file.
+- **Verified by eye** (pictures read back from both GPUs): the input widgets with an open combo popup over the window
+  (the picker's square, hue bar and marker, the title active while the popup has the focus), and an edited field with
+  its selection, then a composition underlined in its place.
+- **Tests**: `gfx_ui_text_tests` +9 (`TextEditor`, `TextBoundaries`: graphemes, words, selection, undo merging, capacity,
+  single line, overwrite); `gfx_ui_context_tests` +26 under synthetic input (text fields: typing at the cursor, words,
+  selection, clipboard and undo, double click and drag, Return/Escape/click elsewhere, Tab between fields, filters,
+  passwords, read-only fields and buffers, multi-line fields, IME composition and text input area, hints and overwrite,
+  long texts scrolled, fixed or elided; numbers: parsing and type limits and formats, step buttons, sliders (linear,
+  integer, logarithmic, dragged), typed input (Control+click, double click, CLAMP_ON_INPUT, Escape), drags (speed, Shift,
+  clamp, wrap), keyboard steps, components; colors: conversions (`static_assert`s and round trips), channel drags and
+  the hexadecimal field, the square and hue bar, INPUT_HSV, the wheel and triangle, the picker popup; lists: a combo's
+  choice, closing its popup three ways, list boxes) and +2 × each GPU (the widgets with an open combo popup; an edited
+  field's selection and composition); `gfx_ui_draw_tests` +1 (gradients and triangles); the allocation test +1 (every
+  input widget idle under a moving mouse: no allocation over 100 frames); `gfx_ui_platform_tests` +1 × each backend
+  (text input started and stopped on the window, compositions and typed text through `UiPlatformInput`); compile-failure
+  `UiComponentsNeedWritableNumbers`. The later-phase report test now uses U6's widgets.
 
 ---
 

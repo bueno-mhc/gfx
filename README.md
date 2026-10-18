@@ -644,9 +644,76 @@ const gfx::ui::UiFrameReport report = ui.end_frame();             // problems of
   allocates nothing (a test counts `operator new`).
 - **Threads**: frames run on one thread; `acquire_draw_data()` gives any thread the last published draw data,
   whose lists the context does not reuse while the lease lives (three sets of lists rotate).
-- **Later phases**: the widgets of the next phases (text fields, sliders, color editors, combos, trees, tabs,
-  menus, popups, tooltips, drag and drop, tables, plots, docking, shortcuts, accessibility) are declared; until
-  their phase each reports `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
+- **Later phases**: the widgets of the next phases (trees, tabs, menus, popups, tooltips, drag and drop,
+  tables, plots, docking, shortcuts, accessibility) are declared; until their phase each reports
+  `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
+
+## UI: input widgets
+
+Text fields, numbers, colors and lists edit the application's own values in place and return true when they
+changed them:
+
+```cpp
+struct Settings
+{
+    std::string name = "Ada";
+    std::array<char, 260> path{};
+    float exposure = 1.0F;
+    std::int32_t samples = 16;
+    std::array<float, 3> position{};
+    gfx::ui::Color tint = gfx::ui::Color::from_rgba8(255, 200, 120);
+    std::size_t quality = 1;
+};
+
+void
+edit(gfx::ui::UiFrame& frame,
+     Settings& settings)
+{
+    using namespace gfx::ui;
+    constexpr std::array<std::string_view, 3> QUALITIES{"Low", "Medium", "High"};
+    if (frame.begin_window("Settings"))
+    {
+        frame.input_text("Name", settings.name, {.hint = "your name"});
+        frame.input_text("Path", settings.path, {.flags = InputTextFlag::ELIDE_LEFT});
+        frame.slider("Exposure", settings.exposure, 0.01F, 100.0F, "{:.2f} EV", SliderFlag::LOGARITHMIC);
+        frame.input_number("Samples", settings.samples, 1, 8);
+        frame.drag("Position", settings.position, 0.05F);
+        frame.color_edit("Tint", settings.tint);
+        frame.combo("Quality", settings.quality, QUALITIES);
+    }
+    frame.end_window();
+}
+```
+
+- **Text fields** edit a `std::string` (grown as needed) or a fixed `char` buffer (NUL-terminated), on one line
+  or several. A click places the cursor (Shift extends, a double click selects a word, a drag selects); Tab
+  into a field selects its text. Arrows move by graphemes, Control+arrows by words (libunibreak's rules),
+  Home and End, Up and Down between lines; Backspace and Delete erase (with Control: words);
+  Control+A, C, X, V, Z and Y (and Shift+Delete, Control+Insert, Shift+Insert) follow the keyboard layout's
+  symbols, and undo goes back word by word. Return confirms, Escape reverts, Tab moves on (or types a tab with
+  `ALLOW_TAB_INPUT`). Flags filter characters (decimal, hexadecimal, scientific, uppercase, no blanks) and make
+  fields read-only, passwords (`*` per character, never copied), overwriting, select-all-on-focus or
+  elided on the left; empty fields show a hint. `TextEditor` (the editing model) and `TextBoundaries`
+  (grapheme and word boundaries) are public and usable without a UI.
+- **IME**: while a field is edited the context asks the platform for text input at its cursor
+  (`UiPlatformServices::set_text_input()`, so candidate windows open there), and draws the composition in
+  progress (`UiFrameInput::composition`) underlined in place of the selection until it is committed as typed
+  text. `gfx.ui.platform` passes SDL3's compositions; GLFW reports none (the system shows them).
+- **Numbers**: `input_number()` (with step buttons), `slider()` and `drag()` take any arithmetic type, and
+  arrays, spans or vectors of it (one component each, side by side). Formats are `std::format` formats
+  (`"{:.2f} m/s"`); values are rounded to the format's precision, and typed values are parsed and clamped to
+  the type (an `std::uint8_t` field given 300 holds 255). Control+click, a double click or Return types a
+  value into a slider or a drag; Shift drags ten times faster, Alt ten times slower; sliders may be
+  logarithmic, drags may wrap around their range.
+- **Colors**: `color_edit()` (red, green, blue and alpha drags as 0 to 255 or 0 to 1, or hue, saturation and
+  value, or a hexadecimal field, and a preview that opens a picker), `color_picker()` (a saturation/value
+  square and a hue bar, or a hue wheel around a triangle; an alpha bar; a side preview) and `color_button()`.
+  `to_hsv()`, `from_hsv()`, `to_hexadecimal()` and `from_hexadecimal()` are `constexpr`.
+- **Lists**: `combo()` (a popup lists the items, a choice closes it) and `list_box()` (a framed region that
+  scrolls), over any random-access range of things convertible to `std::string_view`; `begin_combo()` and
+  `begin_list_box()` take any items. Popups float over every window and close on a click outside, Escape or a
+  choice.
+- An idle frame of every input widget still allocates nothing (a test counts `operator new`).
 
 ## Examples
 

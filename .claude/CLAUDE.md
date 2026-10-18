@@ -233,6 +233,28 @@ Original hard requirements (from the user's initial specification):
   ×2 backends, cursors, visible-window smoke test: click through Platform::push_event, swapchain readback),
   compile-failure UiSlidersRejectBooleans, UiCombosNeedTextItems. Windowed example: metrics in a UI window
   ("Frame metrics", closable, ALWAYS_AUTO_RESIZE), example links gfx::ui_platform.
+- **UI input widgets (U5 as built, 2026-10-18)** — docs/ui-design.md §B "U5 as built". Public text model in gfx.ui.text:
+  `TextBoundaries` (libunibreak grapheme/word breaks per byte, `next/previous_grapheme/word`, `word_at`) and `TextEditor`
+  (TextEditorDescription{capacity, undo_levels, single_line}; motions (enum TextMotion), insert (clean UTF-8, capacity,
+  overwrite), erase, undo/redo merged by words; a paste is its own step via `set_cursor(cursor, true)`). Context units
+  added: `text_input.cpp` (`text_field()` core declared in `:state` with TextFieldRequest/Result, shared with numbers;
+  one TextEditState; DisplayMap for password masks and the IME composition shown **in place of the selection**;
+  per frame: motions/erasing, then typed text, then Return/Tab/Escape), `numbers.cpp` (NumberField =
+  variant<int64, uint64, double> + bounds + type limits, `long double` arithmetic; std::format formats, replacement field
+  edited, `.N` precision rounds, from_chars parsing; sliders (log = ratio of logs for one-sign ranges, symlog otherwise),
+  drags (threshold, remainder, Shift/Alt, clamp/wrap), typed input via `temp_input_id`), `colors.cpp` (color_edit /
+  color_picker hue bar or wheel+triangle / color_button; saved hue+saturation for grays; INPUT_HSV via edit_hsv()),
+  `combos.cpp` (combo popup, list box = group + FRAME_STYLE child; label kept in `list_box_labels`), `popups.cpp`
+  (internal popup stack: hovered first, published after windows, closed by click outside / Escape / choice / not
+  submitted; `popups_closed_by_click` stops a re-open; `title_focus_window()`). `UiFrameInput::composition(_cursor)`;
+  `UiWindowServices` asks composition events only if `PlatformFeature::TEXT_COMPOSITION` (GLFW throws otherwise);
+  `ContextState::take_focus()` keeps a click-focused item alive (fixed a U4 bug: Tab after a click wrapped); items stay
+  hoverable and `wants_mouse()` false while a field is edited. Concept `EditableNumbers` (multi-component overloads take
+  contiguous ranges). Draw: HsvColor/to_hsv/from_hsv/to_hexadecimal/from_hexadecimal constexpr,
+  add_rectangle_filled_gradient, add_triangle_filled. Test harness: `UiHarness::shortcut(letter)`, `compose(text, cursor)`;
+  tests must send one key group per frame and wait 1 s between clicks on one spot (double click). Tests:
+  tests/ui/input_widgets_test.cpp (in gfx_ui_context_tests), text_editor_test.cpp, render tests, allocation test, IME
+  platform test, compile-failure UiComponentsNeedWritableNumbers.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -590,7 +612,8 @@ gfx/
 │                  draw/ (U3: draw.cppm + draw_list.cpp = gfx.ui.draw, debug_overlay.cppm/.cpp), render/ (U3:
 │                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag); U4: style/style.cppm,
 │                  input/frame_input.cppm, context/ (context.cppm + types/frame/context_class partitions, state.cppm
-│                  internal, 7 .cpp units), platform/ (gfx_ui_platform: ui_platform.cppm/.cpp)
+│                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos), platform/ (gfx_ui_platform:
+│                  ui_platform.cppm/.cpp); U5: text/boundaries.cppm, text_editor.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
@@ -638,11 +661,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838) committed; **U4 (core immediate mode) done, awaiting validation** (§B "U4 as built"); U5 (input widgets) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a) committed; **U5 (input widgets) done, awaiting validation** (§B "U5 as built", 11 deviations); U6 (structure: trees, tabs, menus, public popups, tooltips, modals, drag and drop) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **638**, all passing in Debug and Release, 2026-10-18 (after U4: + 37 context tests + 2
+Test count at last report: **682**, all passing in Debug and Release, 2026-10-18 (after U5: + 9 text editor tests, + 26
+input widget tests + 2 render × 2 GPUs, + 1 draw list, + 1 allocation, + 1 IME × 2 platform backends, + 1 compile-failure;
+skips Debug 4, Release 19). Before U5: 638 (after U4: + 37 context tests + 2
 render (2 GPUs), + 6 platform tests (2 backends × adapter, cursors, visible window), + 1 allocation test, + 2
 compile-failure tests). Before U4: 590 (after U3: + 52 gfx_ui_draw_tests =
 18 CPU + 17 × 2 GPUs, + 1 allocation test, − 5 DebugOverlay unit tests; presentation overlay test replaced by the UI one;

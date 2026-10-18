@@ -163,4 +163,9 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_combos_need_text_items.cpp
         EXPECTED_DIAGNOSTIC "TextLike"
         LIBRARIES gfx::ui)
+
+    gfx_add_compilation_failure_test(UiComponentsNeedWritableNumbers
+        SOURCES ui/ui_components_need_writable_numbers.cpp
+        EXPECTED_DIAGNOSTIC "EditableNumbers"
+        LIBRARIES gfx::ui)
 endif()

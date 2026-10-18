@@ -799,6 +799,21 @@ enum class AccessibilityLiveRegion : std::uint8_t
     ASSERTIVE, ///< Announced at once, interrupting.
 };
 
+// ----------------------------------------------------------------- immediate mode (U4)
+
+/// @brief Where a TextEditor moves its cursor (or erases to).
+enum class TextMotion : std::uint8_t
+{
+    PREVIOUS_GRAPHEME, ///< To the previous grapheme cluster boundary (a user-perceived character).
+    NEXT_GRAPHEME,     ///< To the next grapheme cluster boundary.
+    PREVIOUS_WORD,     ///< To the start of the word before the cursor (Control+Left).
+    NEXT_WORD,         ///< To the start of the word after the cursor (Control+Right).
+    LINE_START,        ///< To the start of the cursor's line (Home).
+    LINE_END,          ///< To the end of the cursor's line (End).
+    TEXT_START,        ///< To the start of the text (Control+Home).
+    TEXT_END,          ///< To the end of the text (Control+End).
+};
+
 /// @brief How the atlas tool embeds a `.uiatlas` blob into a generated C++ module.
 enum class AtlasEmbedding : std::uint8_t
 {
@@ -837,6 +852,39 @@ inline constexpr char32_t REPLACEMENT_CHARACTER = U'\uFFFD';
 
 /// @brief Largest number of glyphs a ligature of the LIGATURES section replaces.
 inline constexpr std::size_t MAXIMUM_LIGATURE_COMPONENTS = 4;
+
+/// @brief Edits a TextEditor can undo by default.
+inline constexpr std::uint32_t DEFAULT_UNDO_LEVELS = 100;
+
+/// @brief Period of a text field's blinking cursor, in seconds.
+inline constexpr double TEXT_CURSOR_BLINK_SECONDS = 1.2;
+
+/// @brief Part of the blink period the cursor is shown, in seconds (and how long it stays after a change).
+inline constexpr double TEXT_CURSOR_VISIBLE_SECONDS = 0.8;
+
+/// @brief How numeric widgets show integers when no format is given.
+inline constexpr std::string_view DEFAULT_INTEGER_FORMAT = "{}";
+
+/// @brief How numeric widgets show floats when no format is given.
+inline constexpr std::string_view DEFAULT_FLOAT_FORMAT = "{:.3f}";
+
+/// @brief How numeric widgets show doubles when no format is given.
+inline constexpr std::string_view DEFAULT_DOUBLE_FORMAT = "{:.6f}";
+
+/// @brief Factor of a drag's speed while Shift is held (SliderFlag::NO_SPEED_TWEAKS: none).
+inline constexpr float DRAG_FAST_FACTOR = 10.0F;
+
+/// @brief Factor of a drag's speed while Alt is held.
+inline constexpr float DRAG_SLOW_FACTOR = 0.1F;
+
+/// @brief Items a combo's popup shows with ComboFlag::HEIGHT_SMALL.
+inline constexpr std::uint32_t COMBO_SMALL_ITEMS = 4;
+
+/// @brief Items a combo's popup shows by default (ComboFlag::HEIGHT_REGULAR).
+inline constexpr std::uint32_t COMBO_REGULAR_ITEMS = 8;
+
+/// @brief Items a combo's popup shows with ComboFlag::HEIGHT_LARGE.
+inline constexpr std::uint32_t COMBO_LARGE_ITEMS = 20;
 
 /// @brief Issues a UiFrameReport holds; more set UiFrameProblem::ISSUES_DROPPED.
 inline constexpr std::size_t MAXIMUM_FRAME_ISSUES = 64;
@@ -1789,6 +1837,22 @@ struct EnumerationTraits<ui::AccessibilityLiveRegion>
     };
 };
 
+template<>
+struct EnumerationTraits<ui::TextMotion>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TextMotion::PREVIOUS_GRAPHEME, "PREVIOUS_GRAPHEME"},
+        EnumeratorName{ui::TextMotion::NEXT_GRAPHEME, "NEXT_GRAPHEME"},
+        EnumeratorName{ui::TextMotion::PREVIOUS_WORD, "PREVIOUS_WORD"},
+        EnumeratorName{ui::TextMotion::NEXT_WORD, "NEXT_WORD"},
+        EnumeratorName{ui::TextMotion::LINE_START, "LINE_START"},
+        EnumeratorName{ui::TextMotion::LINE_END, "LINE_END"},
+        EnumeratorName{ui::TextMotion::TEXT_START, "TEXT_START"},
+        EnumeratorName{ui::TextMotion::TEXT_END, "TEXT_END"},
+    };
+};
+
 } // namespace gfx
 
 // =================================================================================================
@@ -1849,6 +1913,7 @@ static_assert(verify<ui::DockNodeFlag>(), "EnumerationTraits<ui::DockNodeFlag>::
 static_assert(verify<ui::ShortcutFlag>(), "EnumerationTraits<ui::ShortcutFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AccessibilityRole>(), "EnumerationTraits<ui::AccessibilityRole>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AccessibilityLiveRegion>(), "EnumerationTraits<ui::AccessibilityLiveRegion>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TextMotion>(), "EnumerationTraits<ui::TextMotion>::NAMES is out of sync with the enumeration");
 static_assert(ui::CHARACTER_SET_RANGES.size() == ENUMERATOR_COUNT<ui::CharacterSet>,
               "CHARACTER_SET_RANGES needs one range per CharacterSet");
 static_assert(std::ranges::all_of(ui::CHARACTER_SET_RANGES, [](const ui::CharacterRange& range) { return range.first <= range.last; }),

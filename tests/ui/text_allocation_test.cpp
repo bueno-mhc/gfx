@@ -263,4 +263,80 @@ TEST(TextAllocationTest, ImmediateModeFramesAllocateNothingAfterTheFirstOnes)
     EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
 }
 
+TEST(TextAllocationTest, InputWidgetsAllocateNothingWhileTheMouseMovesOverThem)
+{
+    // Every input widget of phase U5 (text fields of each kind, numbers, sliders, drags, components, colors, a
+    // closed combo, a list box), formatted values changing every frame, the mouse sweeping over them.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    std::string name = "name";
+    std::string secret = "secret";
+    std::string notes = "first line\nsecond line";
+    std::array<char, 16> buffer{'b', 'u', 'f', '\0'};
+    std::int32_t count = 3;
+    float ratio = 0.5F;
+    double precise = 1.25;
+    std::uint64_t large = 1'000'000;
+    std::array<float, 3> position{1, 2, 3};
+    Color color = Color::from_rgba8(200, 100, 50, 128);
+    std::size_t fruit = 1;
+    std::size_t item = 0;
+    const std::array<std::string_view, 3> fruits{"apple", "banana", "cherry"};
+    const std::array<std::string_view, 5> items{"one", "two", "three", "four", "five"};
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 500, .y = 580}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Inputs"))
+        {
+            ratio = static_cast<float>(frame_number % 10) / 10.0F;
+            frame.input_text("Name", name, {.hint = "your name"});
+            frame.input_text("Secret", secret, {.flags = InputTextFlag::PASSWORD});
+            frame.input_text("Buffer", buffer);
+            frame.input_text_multiline("Notes", notes, {.size = {.x = 300, .y = 60}});
+            frame.input_number("Count", count, 1, 10);
+            frame.input_number("Precise", precise, 0.0, 0.0, "{:.3f} s");
+            frame.slider("Ratio", ratio, 0.0F, 1.0F, "{:.2f}");
+            frame.slider("Large", large, std::uint64_t{0}, std::uint64_t{10'000'000}, {}, SliderFlag::LOGARITHMIC);
+            frame.drag("Precise drag", precise, 0.01F);
+            frame.drag("Position", position, 0.1F);
+            frame.color_edit("Color", color);
+            frame.color_edit("Hexadecimal", color, ColorEditFlag::DISPLAY_HEXADECIMAL);
+            frame.set_next_item_width(200);
+            frame.color_picker("Picker", color, ColorEditFlag::ALPHA_BAR | ColorEditFlag::NO_INPUTS);
+            frame.color_button("Swatch", color, ColorEditFlag::ALPHA_PREVIEW_HALF);
+            frame.combo("Fruit", fruit, fruits);
+            frame.list_box("Items", item, items, 3);
+        }
+        frame.end_window();
+    };
+
+    // The mouse moves over the window without pressing (a press would start editing a field or open a popup).
+    const auto input = [&](std::uint32_t frame_number)
+    {
+        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((frame_number * 37) % 460), .y = 40.0F + static_cast<float>((frame_number * 53) % 540)};
+        return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 600}, .mouse_present = true, .mouse_position = mouse};
+    };
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 30; ++frame_number)
+    {
+        EXPECT_TRUE(run(frame_number).ok()) << frame_number;
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    for (std::uint32_t frame_number = 30; frame_number < 130; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+}
+
 } // namespace

@@ -324,7 +324,7 @@ draw_decorations(ContextState& state,
     }
     if (!window.collapsed && window.title_bar_height > 0)
     {
-        const StyleColor title = state.focused_window == index ? StyleColor::TITLE_BACKGROUND_ACTIVE : StyleColor::TITLE_BACKGROUND;
+        const StyleColor title = state.title_focus_window() == index ? StyleColor::TITLE_BACKGROUND_ACTIVE : StyleColor::TITLE_BACKGROUND;
         list.push_clip_rectangle(decorations.title);
         list.add_rectangle_filled({.left = outer.left, .top = outer.top, .right = outer.right, .bottom = decorations.title.bottom + rounding},
                                   state.color(title), rounding);

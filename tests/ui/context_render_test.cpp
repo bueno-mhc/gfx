@@ -174,6 +174,118 @@ TEST_P(UiContextRenderTest, TheDemoWindowIsDrawnAtEveryScale)
     }
 }
 
+TEST_P(UiContextRenderTest, InputWidgetsAndAnOpenComboPopupAreDrawn)
+{
+    // A window of phase U5's widgets: a picker's square at the top, a combo whose popup is opened.
+    UiHarness ui;
+    UiRenderer renderer{*m_device, ui.context().fonts(), {.color_format = gfx::Format::R8G8B8A8_UNORM}};
+    std::string name = "Ada";
+    std::int32_t count = 4;
+    float ratio = 0.25F;
+    std::array<float, 3> position{1, 2, 3};
+    Color color = Color::from_rgba8(40, 160, 220);
+    std::size_t fruit = 0;
+    const std::array<std::string_view, 3> fruits{"apple", "banana", "cherry"};
+    gfx::Vector2 picker{};
+    UiRectangle combo{};
+    float frame_size = 0;
+    float line = 0;
+    const auto body = [&](UiFrame& frame)
+    {
+        frame.set_next_window_position({.x = 16, .y = 16}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 420, .y = 560}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Inputs"))
+        {
+            picker = frame.cursor_screen_position();
+            frame_size = frame.frame_height();
+            line = frame.text_line_height();
+            frame.set_next_item_width(200);
+            frame.color_picker("Picker", color, ColorEditFlag::NO_INPUTS | ColorEditFlag::NO_SIDE_PREVIEW | ColorEditFlag::NO_ALPHA);
+            frame.input_text("Name", name);
+            frame.input_number("Count", count, 1, 10);
+            frame.slider("Ratio", ratio, 0.0F, 1.0F);
+            frame.drag("Position", position, 0.1F);
+            frame.color_edit("Color", color);
+            frame.combo("Fruit", fruit, fruits);
+            if (!frame.is_window_appearing())
+            {
+                combo = frame.item_rectangle();
+            }
+        }
+        frame.end_window();
+    };
+    ui.frames(3, body);
+    ui.click(gfx::tests::center(combo).x, gfx::tests::center(combo).y, body);
+    const UiFrameReport report = ui.frames(2, body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    ASSERT_EQ(ui.context().draw_data().lists.size(), 2U) << "the window and the popup";
+    const Picture picture = render(ui.context(), renderer);
+    const auto channel = [](std::uint32_t pixel, std::uint32_t index) { return static_cast<int>((pixel >> (8U * index)) & 0xFFU); };
+
+    // The square: white at its top left, the hue (sky blue) at its top right, black at its bottom.
+    const float square = std::floor(200 - (frame_size + 4));
+    const std::uint32_t white = picture.at(picker.x + 2, picker.y + 2);
+    const std::uint32_t hue = picture.at(picker.x + square - 3, picker.y + 2);
+    const std::uint32_t black = picture.at(picker.x + 2, picker.y + square - 3);
+    EXPECT_GT(std::min({channel(white, 0), channel(white, 1), channel(white, 2)}), 235);
+    EXPECT_GT(channel(hue, 2), 230);
+    EXPECT_LT(channel(hue, 0), 30);
+    EXPECT_LT(std::max({channel(black, 0), channel(black, 1), channel(black, 2)}), 20);
+
+    // The popup over the window: its selected first item highlighted (the header blue).
+    const std::uint32_t selected = picture.at(combo.left + 12, combo.bottom + 8 + line * 0.5F);
+    EXPECT_GT(channel(selected, 2), channel(selected, 0) + 25);
+}
+
+TEST_P(UiContextRenderTest, AnEditedFieldShowsItsSelectionAndAComposition)
+{
+    // A field whose text is selected (Shift+Home from the end), a multi-line field, and a composition.
+    UiHarness ui;
+    UiRenderer renderer{*m_device, ui.context().fonts(), {.color_format = gfx::Format::R8G8B8A8_UNORM}};
+    std::string name = "Selected text";
+    std::string notes = "First line\nSecond line";
+    UiRectangle field{};
+    const auto body = [&](UiFrame& frame)
+    {
+        frame.set_next_window_position({.x = 16, .y = 16}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 420, .y = 260}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Editing"))
+        {
+            frame.input_text("Name", name);
+            field = frame.item_rectangle();
+            frame.input_text_multiline("Notes", notes, {.size = {.x = 300, .y = 80}});
+        }
+        frame.end_window();
+    };
+    ui.frames(3, body);
+    ui.click(field.right - 2, gfx::tests::center(field).y, body);
+    ui.modifiers(gfx::KeyModifier::SHIFT);
+    ui.tap(gfx::Key::HOME);
+    ui.frame(body);
+    ui.modifiers(gfx::KeyModifier::NONE);
+    UiFrameReport report = ui.frame(body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    const Picture selected = render(ui.context(), renderer);
+    const auto blue = [](std::uint32_t pixel) { return static_cast<int>((pixel >> 16U) & 0xFFU); };
+
+    // The selection's blue behind the text (near the frame's top, between glyphs), not after it.
+    const gfx::Vector2 inside{.x = field.left + 5, .y = field.top + 4};
+    const gfx::Vector2 after{.x = field.right - 6, .y = field.top + 4};
+    EXPECT_GT(blue(selected.at(inside.x, inside.y)), blue(selected.at(after.x, after.y)) + 30);
+
+    // A composition takes the selection's place (as committing it will) and is not typed.
+    ui.compose("abc", 3);
+    report = ui.frames(2, body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    const Picture composing = render(ui.context(), renderer);
+    EXPECT_LT(std::abs(blue(composing.at(inside.x, inside.y)) - blue(composing.at(after.x, after.y))), 10);
+    EXPECT_EQ(name, "Selected text");
+    ui.compose("");
+    ui.type("abc");
+    ui.frame(body);
+    EXPECT_EQ(name, "abc");
+}
+
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          UiContextRenderTest,
                          testing::ValuesIn(physical_devices()),

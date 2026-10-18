@@ -95,6 +95,24 @@ public:
         this->key(key, false);
     }
 
+    /// Presses and releases the key of letter @p letter ('a' to 'z') of a US layout, whose key code is the letter:
+    /// with Control held, a shortcut.
+    void shortcut(char letter)
+    {
+        const auto key = static_cast<gfx::Key>(std::to_underlying(gfx::Key::A) + (letter - 'a'));
+        const auto code = static_cast<gfx::KeyCode>(letter);
+        m_keys.push_back({.key = key, .key_code = code, .down = true});
+        m_keys.push_back({.key = key, .key_code = code, .down = false});
+    }
+
+    /// The IME composition in progress from the next frame (empty: none), its cursor @p cursor code points in.
+    void compose(std::string_view text,
+                 std::int32_t cursor = 0)
+    {
+        m_composition.assign(text);
+        m_composition_cursor = cursor;
+    }
+
     /// The modifiers held from the next frame.
     void modifiers(gfx::KeyModifier modifiers) noexcept
     {
@@ -140,7 +158,9 @@ public:
                                           .mouse_wheel = m_wheel,
                                           .keys = m_keys,
                                           .modifiers = m_modifiers,
-                                          .text = m_text};
+                                          .text = m_text,
+                                          .composition = m_composition,
+                                          .composition_cursor = m_composition_cursor};
         gfx::ui::UiFrame& frame = m_context.begin_frame(input);
         std::forward<Body>(body)(frame);
         const gfx::ui::UiFrameReport report = m_context.end_frame();
@@ -198,6 +218,8 @@ private:
     std::vector<gfx::ui::UiMouseButtonEvent> m_buttons{};
     std::vector<gfx::ui::UiKeyEvent> m_keys{};
     std::string m_text{};
+    std::string m_composition{};
+    std::int32_t m_composition_cursor = 0;
     gfx::Vector2 m_mouse{};
     bool m_present = false;
     gfx::MouseButtonMask m_held = gfx::MouseButtonMask::NONE;

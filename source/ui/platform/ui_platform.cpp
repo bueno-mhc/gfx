@@ -27,6 +27,7 @@ UiPlatformInput::UiPlatformInput(const platform::Window& window)
     m_buttons.reserve(32);
     m_keys.reserve(64);
     m_text.reserve(256);
+    m_composition.reserve(64);
 }
 
 void
@@ -101,7 +102,16 @@ UiPlatformInput::add_events(platform::EventSpan events)
             }
             case EventType::TEXT_INPUT:
                 m_text.append(events.text(event));
+                m_composition.clear();
                 break;
+            case EventType::TEXT_COMPOSITION:
+            {
+                // The composition in progress (empty when it ends) stays until it changes.
+                const auto& composition = event.as<platform::TextCompositionEvent>();
+                m_composition.assign(events.text(event));
+                m_composition_cursor = composition.cursor;
+                break;
+            }
             case EventType::WINDOW_FOCUS_GAINED:
                 m_focused = true;
                 break;
@@ -139,7 +149,9 @@ UiPlatformInput::frame_input(double time) const noexcept -> UiFrameInput
             .mouse_wheel = m_wheel,
             .keys = m_keys,
             .modifiers = m_modifiers,
-            .text = m_text};
+            .text = m_text,
+            .composition = m_composition,
+            .composition_cursor = m_composition_cursor};
 }
 
 UiWindowServices::UiWindowServices(platform::Platform& platform,
@@ -189,7 +201,8 @@ UiWindowServices::set_text_input(bool active,
                               .y = static_cast<std::int32_t>(std::floor(area.top * factor)),
                               .width = static_cast<std::uint32_t>(std::ceil(area.width() * factor)),
                               .height = static_cast<std::uint32_t>(std::ceil(area.height() * factor))};
-    m_window->start_text_input({.area = rectangle});
+    // Compositions drawn by the field where the backend reports them; the system shows them otherwise.
+    m_window->start_text_input({.area = rectangle, .composition_events = m_platform->supports(platform::PlatformFeature::TEXT_COMPOSITION)});
 }
 
 auto

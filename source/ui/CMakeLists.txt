@@ -28,6 +28,8 @@ target_sources(gfx_ui
             text/font_atlas.cppm
             text/font_library.cppm
             text/text_layout.cppm
+            text/boundaries.cppm
+            text/text_editor.cppm
             draw/draw.cppm
             draw/debug_overlay.cppm
             render/renderer.cppm
@@ -51,6 +53,7 @@ target_sources(gfx_ui
         text/line_breaking.cpp
         text/shaping.cpp
         text/text_layout.cpp
+        text/text_editor.cpp
         draw/draw_list.cpp
         draw/debug_overlay.cpp
         render/renderer.cpp
@@ -60,6 +63,11 @@ target_sources(gfx_ui
         context/widgets.cpp
         context/style.cpp
         context/queries.cpp
+        context/popups.cpp
+        context/text_input.cpp
+        context/numbers.cpp
+        context/colors.cpp
+        context/combos.cpp
         context/later.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)

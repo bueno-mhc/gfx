@@ -84,6 +84,9 @@ private:
     std::unique_ptr<State> m_state{};
 };
 
+/// @brief Initializes libunibreak's tables (once): for TextBoundaries.
+void initialize_libunibreak_for_boundaries();
+
 /// @brief Line break status after every code point (UAX #14): 0 a break is required, 1 allowed, 2 not.
 void find_line_breaks(std::span<const std::uint32_t> code_points,
                       const std::string& language,

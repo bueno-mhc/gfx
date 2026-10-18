@@ -1142,24 +1142,18 @@ TEST(UiReportTest, TooManyIssuesAreCountedAsDropped)
 TEST(UiReportTest, WidgetsOfLaterPhasesReportOnceAndDoNothing)
 {
     UiHarness ui;
-    std::string name = "unchanged";
-    float value = 0.5F;
-    std::size_t selected = 0;
-    const std::array<std::string_view, 2> items{"one", "two"};
-    std::array<bool, 4> results{true, true, true, true};
+    std::array<bool, 3> results{true, true, true};
     const UiFrameReport report = ui.frame([&](UiFrame& frame)
     {
         frame.begin_window("Later");
-        results[0] = frame.input_text("Name", name);
-        results[1] = frame.input_text("Name##again", name);
-        results[2] = frame.slider("Value", value, 0.0F, 1.0F);
-        results[3] = frame.combo("Items", selected, items);
+        results[0] = frame.tree_node("Node");
+        results[1] = frame.tree_node("Node##again");
+        results[2] = frame.begin_tab_bar("Tabs");
         static_cast<void>(frame.begin_table("table", 3));
         frame.end_window();
     });
-    EXPECT_EQ(results, (std::array{false, false, false, false}));
-    EXPECT_EQ(name, "unchanged");
-    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "input_text"; }), 1);
+    EXPECT_EQ(results, (std::array{false, false, false}));
+    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "tree_node"; }), 1);
     EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "begin_table"; }));
     EXPECT_THROW(static_cast<void>(ui.context().dock_builder(DockSpaceIdentifier::from_name("editor"))), gfx::BackendCapabilityError);
     EXPECT_THROW(static_cast<void>(ui.context().save_layout()), gfx::BackendCapabilityError);

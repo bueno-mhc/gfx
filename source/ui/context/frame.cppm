@@ -609,127 +609,235 @@ public:
     /// @brief A window showing the previous frame's report and statistics (the close button sets @p open).
     void show_diagnostics_window(bool& open) noexcept;
 
-    // ===================================================================================== U5: input widgets
+    // ===================================================================================== input widgets
 
-    /// @brief A text field editing @p text (grown as needed); true when it changed (or on Return, with
-    ///        InputTextFlag::ENTER_RETURNS_TRUE). Phase U5.
+    /// @brief A text field editing @p text (grown as needed); true when it changed (with
+    ///        InputTextFlag::ENTER_RETURNS_TRUE: when Return confirmed it). Click or Tab into it to edit: arrows,
+    ///        Control+arrows (words), Home and End, Backspace and Delete, Shift to select, Control+A, C, X, V, Z, Y;
+    ///        Return confirms, Escape reverts.
     auto input_text(std::string_view label,
                     std::string& text,
                     const InputTextOptions& options = {}) noexcept -> bool;
 
-    /// @brief A text field editing the NUL-terminated text in @p buffer (fixed capacity). Phase U5.
+    /// @brief A text field editing the NUL-terminated text in @p buffer (its size minus one bytes at most).
     auto input_text(std::string_view label,
                     std::span<char> buffer,
                     const InputTextOptions& options = {}) noexcept -> bool;
 
-    /// @brief A multi-line text field (options.size). Phase U5.
+    /// @brief A multi-line text field, @p options.size big (0: the item width, 8 lines); Return types a line break
+    ///        (Control+Return with InputTextFlag::CONTROL_ENTER_FOR_NEW_LINE), Up and Down move between lines.
     auto input_text_multiline(std::string_view label,
                               std::string& text,
                               const InputTextOptions& options = {}) noexcept -> bool;
 
-    /// @brief A numeric field with step buttons (@p step 0: none); true when @p value changed. Phase U5.
+    /// @brief A numeric text field with step buttons (- and +, Control: @p step_fast; @p step 0: no buttons);
+    ///        true when @p value changed. @p format is a std::format format with one field ("{:.2f} m/s"); empty:
+    ///        DEFAULT_INTEGER_FORMAT, DEFAULT_FLOAT_FORMAT or DEFAULT_DOUBLE_FORMAT.
     template<ArithmeticValue Value>
-    auto input_number(std::string_view /*label*/,
-                      Value& /*value*/,
-                      Value /*step*/ = Value{},
-                      Value /*step_fast*/ = Value{},
-                      std::string_view /*format*/ = {},
-                      InputTextFlag /*flags*/ = InputTextFlag::NONE) noexcept -> bool
+    auto input_number(std::string_view label,
+                      Value& value,
+                      Value step = Value{},
+                      Value step_fast = Value{},
+                      std::string_view format = {},
+                      InputTextFlag flags = InputTextFlag::NONE) noexcept -> bool
     {
-        return not_implemented("input_number", "numeric fields arrive in phase U5");
+        NumberField field = NumberField::make(value, Value{}, Value{});
+        if (!number_input(label, field, NumberField::wrap(step), NumberField::wrap(step_fast), format, flags))
+        {
+            return false;
+        }
+        value = field.as<Value>();
+        return true;
     }
 
-    /// @brief A slider from @p minimum to @p maximum; true when @p value changed. Phase U5.
+    /// @brief A slider from @p minimum to @p maximum (drag it, or Control+click or double-click it to type a
+    ///        value); true when @p value changed. @p format as input_number()'s; the value is rounded to the format's
+    ///        precision unless SliderFlag::NO_ROUND_TO_FORMAT.
     template<ArithmeticValue Value>
-    auto slider(std::string_view /*label*/,
-                Value& /*value*/,
-                Value /*minimum*/,
-                Value /*maximum*/,
-                std::string_view /*format*/ = {},
-                SliderFlag /*flags*/ = SliderFlag::NONE) noexcept -> bool
+    auto slider(std::string_view label,
+                Value& value,
+                Value minimum,
+                Value maximum,
+                std::string_view format = {},
+                SliderFlag flags = SliderFlag::NONE) noexcept -> bool
     {
-        return not_implemented("slider", "sliders arrive in phase U5");
+        NumberField field = NumberField::make(value, minimum, maximum);
+        if (!number_slider(label, field, format, flags))
+        {
+            return false;
+        }
+        value = field.as<Value>();
+        return true;
     }
 
-    /// @brief One slider per element of @p values. Phase U5.
-    template<ArithmeticValue Value>
-    auto slider(std::string_view /*label*/,
-                std::span<Value> /*values*/,
-                Value /*minimum*/,
-                Value /*maximum*/,
-                std::string_view /*format*/ = {},
-                SliderFlag /*flags*/ = SliderFlag::NONE) noexcept -> bool
+    /// @brief One slider per element of @p values (std::array, std::span, std::vector, a C array), side by side in
+    ///        the item width.
+    template<EditableNumbers Values>
+    auto slider(std::string_view label,
+                Values&& values,
+                std::ranges::range_value_t<Values> minimum,
+                std::ranges::range_value_t<Values> maximum,
+                std::string_view format = {},
+                SliderFlag flags = SliderFlag::NONE) noexcept -> bool
     {
-        return not_implemented("slider", "sliders arrive in phase U5");
+        bool changed = false;
+        const auto count = static_cast<std::size_t>(std::ranges::size(values));
+        auto* const numbers = std::ranges::data(values);
+        const float width = begin_components(label, count);
+        for (std::size_t component = 0; component < count; ++component)
+        {
+            next_component(component, width);
+            changed = slider("##component", numbers[component], minimum, maximum, format, flags) || changed;
+        }
+        end_components(label, count);
+        return changed;
     }
 
-    /// @brief A value changed by dragging horizontally (@p speed per UI unit), clamped to @p minimum..@p maximum
-    ///        unless they are equal. Phase U5.
+    /// @brief A value changed by dragging horizontally, @p speed per UI unit (Shift faster, Alt slower), clamped to
+    ///        @p minimum..@p maximum when the minimum is below the maximum; Control+click or a double click types a
+    ///        value. True when @p value changed.
     template<ArithmeticValue Value>
-    auto drag(std::string_view /*label*/,
-              Value& /*value*/,
-              float /*speed*/ = 1.0F,
-              Value /*minimum*/ = Value{},
-              Value /*maximum*/ = Value{},
-              std::string_view /*format*/ = {},
-              SliderFlag /*flags*/ = SliderFlag::NONE) noexcept -> bool
+    auto drag(std::string_view label,
+              Value& value,
+              float speed = 1.0F,
+              Value minimum = Value{},
+              Value maximum = Value{},
+              std::string_view format = {},
+              SliderFlag flags = SliderFlag::NONE) noexcept -> bool
     {
-        return not_implemented("drag", "drags arrive in phase U5");
+        NumberField field = NumberField::make(value, minimum, maximum);
+        if (!number_drag(label, field, speed, format, flags))
+        {
+            return false;
+        }
+        value = field.as<Value>();
+        return true;
     }
 
-    /// @brief A color editor (inputs, a preview, a picker on click); true when @p color changed. Phase U5.
+    /// @brief One drag per element of @p values (std::array, std::span, std::vector, a C array), side by side in the
+    ///        item width.
+    template<EditableNumbers Values>
+    auto drag(std::string_view label,
+              Values&& values,
+              float speed = 1.0F,
+              std::ranges::range_value_t<Values> minimum = {},
+              std::ranges::range_value_t<Values> maximum = {},
+              std::string_view format = {},
+              SliderFlag flags = SliderFlag::NONE) noexcept -> bool
+    {
+        bool changed = false;
+        const auto count = static_cast<std::size_t>(std::ranges::size(values));
+        auto* const numbers = std::ranges::data(values);
+        const float width = begin_components(label, count);
+        for (std::size_t component = 0; component < count; ++component)
+        {
+            next_component(component, width);
+            changed = drag("##component", numbers[component], speed, minimum, maximum, format, flags) || changed;
+        }
+        end_components(label, count);
+        return changed;
+    }
+
+    /// @brief A color editor: one drag per channel (or a hexadecimal field), a preview that opens a picker, the
+    ///        label; true when @p color changed.
     auto color_edit(std::string_view label,
                     Color& color,
                     ColorEditFlag flags = ColorEditFlag::NONE) noexcept -> bool;
 
-    /// @brief A color picker (a saturation/value square and a hue bar or wheel). Phase U5.
+    /// @brief A color picker: a saturation/value square and a hue bar (or a hue wheel and a triangle), an alpha
+    ///        bar with ColorEditFlag::ALPHA_BAR, a preview and the channels' drags; true when @p color changed.
     auto color_picker(std::string_view label,
                       Color& color,
                       ColorEditFlag flags = ColorEditFlag::NONE) noexcept -> bool;
 
-    /// @brief A square of @p color; true when it is clicked. Phase U5.
+    /// @brief A square of @p color (over a checkerboard where it is translucent), @p size big (0: a frame's height);
+    ///        true when it is clicked.
     auto color_button(std::string_view id,
                       Color color,
                       ColorEditFlag flags = ColorEditFlag::NONE,
                       Vector2 size = {}) noexcept -> bool;
 
-    /// @brief A combo box choosing @p selected among @p items; true when it changed. Phase U5.
+    /// @brief A combo box choosing @p selected among @p items (a popup lists them); true when it changed.
     template<std::ranges::random_access_range Items>
         requires TextLike<std::ranges::range_value_t<Items>>
-    auto combo(std::string_view /*label*/,
-               std::size_t& /*selected*/,
-               const Items& /*items*/,
-               ComboFlag /*flags*/ = ComboFlag::NONE) noexcept -> bool
+    auto combo(std::string_view label,
+               std::size_t& selected,
+               const Items& items,
+               ComboFlag flags = ComboFlag::NONE) noexcept -> bool
     {
-        return not_implemented("combo", "combo boxes arrive in phase U5");
+        const auto count = static_cast<std::size_t>(std::ranges::size(items));
+        const auto at = [&items](std::size_t index) { return std::string_view{std::ranges::begin(items)[static_cast<std::ranges::range_difference_t<const Items>>(index)]}; };
+        const std::string_view preview = selected < count ? at(selected) : std::string_view{};
+        if (!begin_combo(label, preview, flags))
+        {
+            return false;
+        }
+        bool changed = false;
+        for (std::size_t item = 0; item < count; ++item)
+        {
+            push_id(static_cast<std::int32_t>(item));
+            if (selectable(at(item), item == selected))
+            {
+                changed = changed || item != selected;
+                selected = item;
+            }
+            if (item == selected && is_window_appearing())
+            {
+                set_scroll_here_y();
+            }
+            pop_id();
+        }
+        end_combo();
+        return changed;
     }
 
-    /// @brief Starts a combo box showing @p preview; its popup's items follow while it returns true, then
-    ///        end_combo(). Phase U5.
+    /// @brief Starts a combo box showing @p preview; while its popup is open (true), its items follow (selectables
+    ///        close it when chosen), then end_combo().
     auto begin_combo(std::string_view label,
                      std::string_view preview,
                      ComboFlag flags = ComboFlag::NONE) noexcept -> bool;
 
-    /// @brief Ends the popup begin_combo() opened. Phase U5.
+    /// @brief Ends the popup begin_combo() opened (only when it returned true).
     void end_combo() noexcept;
 
-    /// @brief A list box choosing @p selected among @p items, @p height_in_items tall; true when it changed.
-    ///        Phase U5.
+    /// @brief A list box choosing @p selected among @p items, @p height_in_items tall (it scrolls); true when it
+    ///        changed.
     template<std::ranges::random_access_range Items>
         requires TextLike<std::ranges::range_value_t<Items>>
-    auto list_box(std::string_view /*label*/,
-                  std::size_t& /*selected*/,
-                  const Items& /*items*/,
-                  std::uint32_t /*height_in_items*/ = 8) noexcept -> bool
+    auto list_box(std::string_view label,
+                  std::size_t& selected,
+                  const Items& items,
+                  std::uint32_t height_in_items = 8) noexcept -> bool
     {
-        return not_implemented("list_box", "list boxes arrive in phase U5");
+        const float height = static_cast<float>(height_in_items) * text_line_height_with_spacing() + style().frame_padding.y * 2;
+        if (!begin_list_box(label, {.x = 0, .y = height}))
+        {
+            end_list_box();
+            return false;
+        }
+        bool changed = false;
+        const auto count = static_cast<std::size_t>(std::ranges::size(items));
+        const auto at = [&items](std::size_t index) { return std::string_view{std::ranges::begin(items)[static_cast<std::ranges::range_difference_t<const Items>>(index)]}; };
+        for (std::size_t item = 0; item < count; ++item)
+        {
+            push_id(static_cast<std::int32_t>(item));
+            if (selectable(at(item), item == selected))
+            {
+                changed = changed || item != selected;
+                selected = item;
+            }
+            pop_id();
+        }
+        end_list_box();
+        return changed;
     }
 
-    /// @brief Starts a list box of @p size; its items follow while it returns true, then end_list_box(). Phase U5.
+    /// @brief Starts a list box (a framed region that scrolls) of @p size (0: the item width, about 7 lines), its
+    ///        label on the right; its items follow, then end_list_box() (always: like begin_child()).
     auto begin_list_box(std::string_view label,
                         Vector2 size = {}) noexcept -> bool;
 
-    /// @brief Ends the list box begin_list_box() started. Phase U5.
+    /// @brief Ends the list box begin_list_box() started.
     void end_list_box() noexcept;
 
     // ===================================================================================== U6: structure
@@ -1062,6 +1170,38 @@ private:
     /// Reports @p operation, a widget of a later phase, and returns false.
     auto not_implemented(std::string_view operation,
                          std::string_view detail) noexcept -> bool;
+
+    /// The numeric widgets on any arithmetic type (the templates' cores).
+    auto number_input(std::string_view label,
+                      NumberField& field,
+                      NumberField::Value step,
+                      NumberField::Value step_fast,
+                      std::string_view format,
+                      InputTextFlag flags) noexcept -> bool;
+
+    auto number_slider(std::string_view label,
+                       NumberField& field,
+                       std::string_view format,
+                       SliderFlag flags) noexcept -> bool;
+
+    auto number_drag(std::string_view label,
+                     NumberField& field,
+                     float speed,
+                     std::string_view format,
+                     SliderFlag flags) noexcept -> bool;
+
+    /// Components side by side (multi-value sliders and drags): a group and the label's identifier; returns each
+    /// component's width.
+    auto begin_components(std::string_view label,
+                          std::size_t count) noexcept -> float;
+
+    /// Moves to component @p component (on the line of the previous one, its identifier pushed).
+    void next_component(std::size_t component,
+                        float width) noexcept;
+
+    /// Ends the @p count components: the label after them.
+    void end_components(std::string_view label,
+                        std::size_t count) noexcept;
 
     ContextState* m_state = nullptr;
     std::array<char, UI_FORMAT_BUFFER_CAPACITY> m_format_buffer{};

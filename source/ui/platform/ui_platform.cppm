@@ -48,6 +48,8 @@ private:
     std::vector<UiMouseButtonEvent> m_buttons{};
     std::vector<UiKeyEvent> m_keys{};
     std::string m_text{};
+    std::string m_composition{};
+    std::int32_t m_composition_cursor = 0;
     Vector2 m_mouse{};
     bool m_mouse_present = false;
     MouseButtonMask m_held = MouseButtonMask::NONE;

@@ -79,7 +79,7 @@ add_test(NAME UiAtlasTool.SameInputsGiveSameBytes
 # Text: fonts, layout (bidi, scripts, fallback, shaping, line breaking, alignment), the cache, carets;
 # atlases built for it at build time and embedded.
 gfx_add_test(gfx_ui_text_tests
-    SOURCES font_atlas_test.cpp text_layout_test.cpp
+    SOURCES font_atlas_test.cpp text_layout_test.cpp text_editor_test.cpp
     MODULES text_test_support.cppm
     LIBRARIES gfx::ui)
 foreach(atlas IN ITEMS
@@ -115,7 +115,7 @@ gfx_add_ui_atlas(gfx_ui_text_allocation_tests
 
 # The immediate-mode UI driven by synthetic input (UiContext, UiFrame), with an atlas built for it.
 gfx_add_test(gfx_ui_context_tests
-    SOURCES context_test.cpp context_render_test.cpp
+    SOURCES context_test.cpp context_render_test.cpp input_widgets_test.cpp
     MODULES context_test_support.cppm
     LIBRARIES gfx::ui)
 gfx_add_ui_atlas(gfx_ui_context_tests

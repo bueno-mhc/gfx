@@ -230,6 +230,14 @@ ContextState::ContextState(const UiContextDescription& context_description)
     disabled_stack.reserve(limits.stack_depth);
     frame_ids.reserve(limits.items_per_frame);
     typed_text.reserve(256);
+    composition.reserve(64);
+    popups.reserve(limits.stack_depth);
+    popups_closed_by_click.reserve(limits.stack_depth);
+    list_box_labels.reserve(limits.stack_depth);
+    text_edit.initial.reserve(256);
+    text_edit.ended_text.reserve(256);
+    text_edit.display.reserve(256);
+    text_edit.filtered.reserve(256);
     for (DrawDataSlot& slot : slots)
     {
         slot.lists.reserve(std::size_t{limits.windows} + 2);
@@ -719,8 +727,9 @@ ContextState::item_hoverable(const WindowState& window,
     {
         return false;
     }
-    if (active_id != 0 && active_id != id)
+    if (active_id != 0 && active_id != id && (active_id != text_edit.id || text_edit.mouse_selecting))
     {
+        // Another item holds the mouse (a text field being edited does not, unless it is selecting).
         return false;
     }
     return contains(rectangle, mouse_position) && contains(window.clip, mouse_position);
@@ -735,6 +744,14 @@ ContextState::set_active(std::uint32_t id,
     active_id_alive = true;
     active_id_edited = false;
     active_by_keyboard = false;
+}
+
+void
+ContextState::take_focus(std::uint32_t id) noexcept
+{
+    focus_id = id;
+    focus_visible = false;
+    focus_alive = true;
 }
 
 void
@@ -793,8 +810,7 @@ ContextState::button_behavior(WindowState& window,
             {
                 set_active(id, window);
                 active_button = button;
-                focus_id = id;
-                focus_visible = false;
+                take_focus(id);
                 state.pressed = has_any(flags, ButtonFlag::PRESS_ON_CLICK);
                 break;
             }
@@ -942,6 +958,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
 
     // Keys: presses, repeats and releases of the frame; a window without focus holds nothing.
     state.keys_pressed.fill(0);
+    state.key_codes_pressed.fill(0);
     state.keys_repeated.fill(0);
     state.keys_released.fill(false);
     if (!input.focused)
@@ -961,6 +978,13 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         }
         if (event.down)
         {
+            // Shortcuts by the layout's symbol: letters lowercase.
+            auto code = static_cast<std::uint32_t>(std::to_underlying(event.key_code));
+            code = code >= 'A' && code <= 'Z' ? code - 'A' + 'a' : code;
+            if (code < state.key_codes_pressed.size())
+            {
+                state.key_codes_pressed[code] = static_cast<std::uint8_t>(std::min(state.key_codes_pressed[code] + 1, 255));
+            }
             state.keys_pressed[key] = static_cast<std::uint8_t>(std::min(state.keys_pressed[key] + 1, 255));
             state.keys_repeated[key] = static_cast<std::uint8_t>(std::min(state.keys_repeated[key] + (event.repeat ? 1 : 0), 255));
             state.keys_down[key] = true;
@@ -973,6 +997,8 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     }
     state.modifiers = input.focused ? input.modifiers : KeyModifier::NONE;
     state.typed_text.assign(input.focused ? input.text : std::string_view{});
+    state.composition.assign(input.focused ? input.composition : std::string_view{});
+    state.composition_cursor = std::clamp(input.composition_cursor, 0, static_cast<std::int32_t>(state.composition.size()));
 
     // The mouse: position, wheel, and per button its presses, releases, double clicks and drags.
     state.mouse_present = input.mouse_present;
@@ -980,6 +1006,11 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     {
         state.mouse_position = input.mouse_position;
     }
+    state.mouse_delta = state.mouse_present && state.previous_mouse_present
+                            ? Vector2{.x = state.mouse_position.x - state.previous_mouse_position.x, .y = state.mouse_position.y - state.previous_mouse_position.y}
+                            : Vector2{};
+    state.previous_mouse_position = state.mouse_position;
+    state.previous_mouse_present = state.mouse_present;
     state.mouse_wheel = input.mouse_wheel;
     for (MouseButtonState& button : state.mouse)
     {
@@ -1037,14 +1068,31 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     state.hovered_window = ContextState::NO_WINDOW;
     if (state.mouse_present)
     {
-        for (const std::uint32_t index : std::views::reverse(state.display_order))
+        // Popups are over every window (the top one first), then the display order.
+        const auto under_mouse = [&state](std::uint32_t index)
         {
             const WindowState& window = state.windows[index];
-            if (window.was_active && !window.hidden && !has_any(window.flags, UiWindowFlag::NO_MOUSE_INPUTS) && contains(window.hit, state.mouse_position))
+            return window.was_active && !window.hidden && !has_any(window.flags, UiWindowFlag::NO_MOUSE_INPUTS) && contains(window.hit, state.mouse_position);
+        };
+        for (const PopupState& popup : std::views::reverse(state.popups))
+        {
+            if (popup.window != ContextState::NO_WINDOW && under_mouse(popup.window))
+            {
+                state.hovered_root = popup.window;
+                state.hovered_window = popup.window;
+                break;
+            }
+        }
+        for (const std::uint32_t index : std::views::reverse(state.display_order))
+        {
+            if (state.hovered_root != ContextState::NO_WINDOW)
+            {
+                break;
+            }
+            if (!state.windows[index].popup && under_mouse(index))
             {
                 state.hovered_root = index;
                 state.hovered_window = index;
-                break;
             }
         }
         for (const std::uint32_t index : state.children_last_frame)
@@ -1106,10 +1154,25 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         }
     }
 
-    // The active item stays active only while it is submitted.
+    // Popups: those no longer submitted close, a click outside closes them, Escape the top one.
+    state.update_popups();
+
+    // The field being edited: a click outside it commits it (the field reads the result this frame).
+    state.text_edit.ended_id = 0;
+    state.text_input_wanted = false;
+    if (state.text_edit.id != 0 && clicked && !contains(state.text_edit.frame, state.mouse_position))
+    {
+        state.end_text_edit(true);
+    }
+
+    // The active item stays active only while it is submitted (a field no longer submitted stops being edited).
     if (state.active_id != 0 && !state.active_id_alive)
     {
         state.clear_active();
+    }
+    if (state.text_edit.id != 0 && state.active_id != state.text_edit.id)
+    {
+        state.end_text_edit(true);
     }
     state.active_id_alive = false;
     state.active_id_previous_frame = state.active_id;
@@ -1215,22 +1278,27 @@ UiContext::end_frame() noexcept -> UiFrameReport
     state.disabled_stack.clear();
     state.disabled = false;
 
-    // The keyboard focus moves for the next frame (wrapping around), or leaves an item no longer submitted.
+    // The keyboard focus moves for the next frame (wrapping around), or leaves an item no longer submitted; the
+    // item it moved to knows it arrived (a text field starts editing).
+    state.focus_arrived_id = 0;
     if (state.focus_here_result != 0)
     {
         state.focus_window(state.focus_here_window);
         state.focus_id = state.focus_here_result;
         state.focus_visible = true;
+        state.focus_arrived_id = state.focus_id;
     }
     else if (state.focus_step > 0 && state.focus_first != 0)
     {
         state.focus_id = state.focus_seen_current && state.focus_after_current != 0 ? state.focus_after_current : state.focus_first;
         state.focus_visible = true;
+        state.focus_arrived_id = state.focus_id;
     }
     else if (state.focus_step < 0 && state.focus_last != 0)
     {
         state.focus_id = state.focus_seen_current && state.focus_before_current != 0 ? state.focus_before_current : state.focus_last;
         state.focus_visible = true;
+        state.focus_arrived_id = state.focus_id;
     }
     else if (state.focus_id != 0 && !state.focus_alive)
     {
@@ -1245,9 +1313,26 @@ UiContext::end_frame() noexcept -> UiFrameReport
     state.default_focus_request = 0;
 
     // What the application should leave to the UI.
-    const bool mouse_held_by_ui = state.active_id != 0 || state.moving_window != ContextState::NO_WINDOW;
+    const bool mouse_held_by_ui = (state.active_id != 0 && (state.active_id != state.text_edit.id || state.text_edit.mouse_selecting))
+                                  || state.moving_window != ContextState::NO_WINDOW;
     state.wants_mouse = state.hovered_root != ContextState::NO_WINDOW || mouse_held_by_ui;
-    state.wants_keyboard = state.focus_id != 0 && state.focus_visible;
+    state.wants_keyboard = (state.focus_id != 0 && state.focus_visible) || state.text_edit.id != 0;
+
+    // Text input (IME, on-screen keyboards) while a field is edited, placed at its cursor.
+    const bool text_input = state.text_edit.id != 0 && state.text_input_wanted;
+    if (text_input != state.applied_text_input || (text_input && state.text_input_area != state.applied_text_input_area))
+    {
+        state.applied_text_input = text_input;
+        state.applied_text_input_area = state.text_input_area;
+        try
+        {
+            state.services->set_text_input(text_input, state.text_input_area);
+        }
+        catch (...)
+        {
+            state.report(UiFrameProblem::PLATFORM_SERVICE, "end_frame", "the platform could not start or stop text input");
+        }
+    }
 
     // The cursor shape, when it changed.
     if (state.cursor != state.applied_cursor)
@@ -1305,9 +1390,21 @@ UiContext::end_frame() noexcept -> UiFrameReport
     {
         WindowState& window = state.windows[index];
         windows_drawn += window.active ? 1U : 0U;
-        if (window.active && !window.hidden)
+        if (window.active && !window.hidden && !window.popup)
         {
             publish(window.draw_list);
+        }
+    }
+    for (const PopupState& popup : state.popups)
+    {
+        // Popups over the windows, in the order they opened.
+        if (popup.window != ContextState::NO_WINDOW)
+        {
+            WindowState& window = state.windows[popup.window];
+            if (window.active && !window.hidden && window.popup)
+            {
+                publish(window.draw_list);
+            }
         }
     }
     publish(state.foreground);
@@ -1398,7 +1495,7 @@ UiContext::wants_keyboard() const noexcept -> bool
 auto
 UiContext::wants_text_input() const noexcept -> bool
 {
-    return false;
+    return m_state->text_edit.id != 0;
 }
 
 auto

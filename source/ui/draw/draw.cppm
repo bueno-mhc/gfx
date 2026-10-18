@@ -54,6 +54,145 @@ struct Color
     [[nodiscard]] constexpr auto operator==(const Color&) const noexcept -> bool = default;
 };
 
+/// @brief A color as hue, saturation and value (each from 0 to 1) and opacity.
+struct HsvColor
+{
+    float hue = 0;        ///< 0 red, 1/3 green, 2/3 blue (1 is red again).
+    float saturation = 0; ///< 0 gray, 1 full color.
+    float value = 0;      ///< 0 black, 1 full brightness.
+    float alpha = 1;      ///< Opacity.
+
+    /// @brief Colors compare channel by channel.
+    [[nodiscard]] constexpr auto operator==(const HsvColor&) const noexcept -> bool = default;
+};
+
+/// @brief @p color as hue, saturation and value (of its sRGB-encoded channels, as color pickers show them).
+[[nodiscard]] constexpr auto
+to_hsv(Color color) noexcept -> HsvColor
+{
+    const float maximum = std::max({color.red, color.green, color.blue});
+    const float minimum = std::min({color.red, color.green, color.blue});
+    const float range = maximum - minimum;
+    float hue = 0;
+    if (range > 0)
+    {
+        if (maximum == color.red)
+        {
+            hue = (color.green - color.blue) / range;
+            hue = hue < 0 ? hue + 6.0F : hue;
+        }
+        else if (maximum == color.green)
+        {
+            hue = (color.blue - color.red) / range + 2.0F;
+        }
+        else
+        {
+            hue = (color.red - color.green) / range + 4.0F;
+        }
+        hue /= 6.0F;
+    }
+    return {.hue = hue, .saturation = maximum > 0 ? range / maximum : 0.0F, .value = maximum, .alpha = color.alpha};
+}
+
+/// @brief The color of @p hsv (hue wraps around).
+[[nodiscard]] constexpr auto
+from_hsv(HsvColor hsv) noexcept -> Color
+{
+    // The hue's sector of six, and where in it.
+    float hue = hsv.hue - static_cast<float>(static_cast<long long>(hsv.hue));
+    hue = hue < 0 ? hue + 1.0F : hue;
+    const float scaled = hue * 6.0F;
+    const auto sector = static_cast<int>(scaled) % 6;
+    const float fraction = scaled - static_cast<float>(static_cast<int>(scaled));
+    const float value = hsv.value;
+    const float low = value * (1.0F - hsv.saturation);
+    const float falling = value * (1.0F - hsv.saturation * fraction);
+    const float rising = value * (1.0F - hsv.saturation * (1.0F - fraction));
+    switch (sector)
+    {
+        case 0:  return {.red = value, .green = rising, .blue = low, .alpha = hsv.alpha};
+        case 1:  return {.red = falling, .green = value, .blue = low, .alpha = hsv.alpha};
+        case 2:  return {.red = low, .green = value, .blue = rising, .alpha = hsv.alpha};
+        case 3:  return {.red = low, .green = falling, .blue = value, .alpha = hsv.alpha};
+        case 4:  return {.red = rising, .green = low, .blue = value, .alpha = hsv.alpha};
+        default: return {.red = value, .green = low, .blue = falling, .alpha = hsv.alpha};
+    }
+}
+
+/// @brief A color written as "#RRGGBB" or "#RRGGBBAA".
+struct HexadecimalColor
+{
+    std::array<char, 9> characters{}; ///< The characters.
+    std::uint8_t size = 0;            ///< How many are used.
+
+    /// @brief The text.
+    [[nodiscard]] constexpr auto view() const noexcept -> std::string_view
+    {
+        return {characters.data(), size};
+    }
+};
+
+/// @brief @p color as "#RRGGBB", or "#RRGGBBAA" with @p alpha.
+[[nodiscard]] constexpr auto
+to_hexadecimal(Color color,
+               bool alpha = true) noexcept -> HexadecimalColor
+{
+    constexpr std::string_view DIGITS = "0123456789ABCDEF";
+    const std::uint32_t packed = color.packed();
+    HexadecimalColor result{.size = static_cast<std::uint8_t>(alpha ? 9 : 7)};
+    result.characters[0] = '#';
+    for (std::uint32_t channel = 0; channel < (alpha ? 4U : 3U); ++channel)
+    {
+        const std::uint32_t byte = (packed >> (8U * channel)) & 0xFFU;
+        result.characters[1 + channel * 2] = DIGITS[byte >> 4U];
+        result.characters[2 + channel * 2] = DIGITS[byte & 0xFU];
+    }
+    return result;
+}
+
+/// @brief The color "#RRGGBB" or "#RRGGBBAA" (the '#' optional, digits in either case) names; nothing for other
+///        text.
+[[nodiscard]] constexpr auto
+from_hexadecimal(std::string_view text) noexcept -> std::optional<Color>
+{
+    if (!text.empty() && text.front() == '#')
+    {
+        text.remove_prefix(1);
+    }
+    if (text.size() != 6 && text.size() != 8)
+    {
+        return std::nullopt;
+    }
+    const auto digit = [](char character) constexpr -> int
+    {
+        if (character >= '0' && character <= '9')
+        {
+            return character - '0';
+        }
+        if (character >= 'a' && character <= 'f')
+        {
+            return character - 'a' + 10;
+        }
+        if (character >= 'A' && character <= 'F')
+        {
+            return character - 'A' + 10;
+        }
+        return -1;
+    };
+    std::array<std::uint8_t, 4> channels{0, 0, 0, 255};
+    for (std::size_t channel = 0; channel < text.size() / 2; ++channel)
+    {
+        const int high = digit(text[channel * 2]);
+        const int low = digit(text[channel * 2 + 1]);
+        if (high < 0 || low < 0)
+        {
+            return std::nullopt;
+        }
+        channels[channel] = static_cast<std::uint8_t>(high * 16 + low);
+    }
+    return Color::from_rgba8(channels[0], channels[1], channels[2], channels[3]);
+}
+
 /// @brief An axis-aligned rectangle in pixels (y down).
 struct UiRectangle
 {
@@ -286,6 +425,18 @@ public:
     /// @brief A filled convex polygon of @p points, with an anti-aliased fringe.
     void add_convex_polygon_filled(std::span<const Vector2> points,
                                    Color color);
+
+    /// @brief A rectangle whose corners have their own colors, blended across it (no anti-aliased edge: the inside
+    ///        of a widget, such as a color picker's square).
+    void add_rectangle_filled_gradient(const UiRectangle& rectangle,
+                                       Color top_left,
+                                       Color top_right,
+                                       Color bottom_right,
+                                       Color bottom_left);
+
+    /// @brief A triangle whose vertices have their own colors, blended across it (no anti-aliased edge).
+    void add_triangle_filled(const std::array<Vector2, 3>& points,
+                             const std::array<Color, 3>& colors);
 
     /// @brief The image of bindless sampled-image index @p image over @p rectangle, its @p texture_coordinates
     ///        (0 to 1) tinted by @p tint.

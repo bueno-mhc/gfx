@@ -154,6 +154,7 @@ struct WindowState
     float indent = 0;                             ///< Indentation from the content start.
     float item_width = 0;                         ///< Default item width this frame.
     bool skip_items = false;                      ///< Items are not laid out (collapsed, clipped child).
+    bool popup = false;                           ///< A popup (combo lists, color pickers): drawn over the other windows.
     ColumnsState columns{};                       ///< Legacy columns.
     std::uint32_t identifier_stack_base = 0;      ///< Identifier stack depth at begin.
     DrawList draw_list{};                         ///< Its drawing (roots; children draw into their root's).
@@ -251,6 +252,52 @@ struct DrawDataSlot
     std::vector<const DrawList*> pointers{};  ///< UiDrawData::lists.
     UiDrawData data{};                        ///< What draw_data() returns.
     std::atomic<std::uint32_t> leases{0};     ///< UiDrawDataLease objects holding it.
+};
+
+/// The text field being edited (one at a time), and the scratch text it lays out.
+struct TextEditState
+{
+    std::uint32_t id = 0;                      ///< The field (0: none).
+    TextEditor editor{};                       ///< Its text, cursor, selection and history.
+    std::string initial{};                     ///< The text when editing started (Escape reverts to it).
+    InputTextFlag flags = InputTextFlag::NONE; ///< The field's flags.
+    bool multiline = false;                    ///< A multi-line field.
+    bool numeric = false;                      ///< A slider's or drag's typed value (applied when editing ends).
+    float scroll_x = 0;                        ///< Single-line fields: how far the text is scrolled.
+    double changed_time = 0;                   ///< Last edit or motion (the cursor shows a while after).
+    UiRectangle frame{};                       ///< The field's rectangle this frame (a click elsewhere ends editing).
+    UiRectangle cursor{};                      ///< The cursor's rectangle (where the IME's window goes).
+    float preferred_x = -1;                    ///< Multi-line fields: the column Up and Down keep (-1: none).
+    bool mouse_selecting = false;              ///< A drag selects.
+    std::uint32_t ended_id = 0;                ///< The field whose editing ended this frame.
+    bool ended_committed = false;              ///< It ended by Return, Tab or a click elsewhere (not Escape).
+    std::string ended_text{};                  ///< Its text then (numeric fields apply it).
+    std::string display{};                     ///< What is laid out (masked, with the composition).
+    std::string filtered{};                    ///< Typed text after the filters.
+    TextBoundaries mask_boundaries{};          ///< Graphemes of a password field not being edited (its mask).
+    std::uint64_t started_frame = 0;           ///< The frame editing started (a slider's typed input keeps everything selected).
+};
+
+/// An open popup (a combo's list, a color editor's picker).
+struct PopupState
+{
+    std::uint32_t id = 0;                  ///< Identifier.
+    std::uint32_t window = 0xFFFFFFFFU;    ///< Its window, once begun.
+    std::uint32_t opener = 0xFFFFFFFFU;    ///< The root window it was opened from.
+    Vector2 position{};                    ///< Its top-left corner.
+    float minimum_width = 0;               ///< At least this wide (a combo's width).
+    float maximum_height = 0;              ///< At most this tall (0: no limit).
+    float flip_bottom = -1;                ///< Where its bottom goes when it does not fit below (-1: it is moved up instead).
+    bool alive = false;                    ///< Begun this frame.
+    std::uint64_t opened_frame = 0;        ///< When it opened.
+};
+
+/// A list box's label, drawn by end_list_box().
+struct ListBoxLabel
+{
+    std::array<char, MAXIMUM_ISSUE_NAME_SIZE> text{}; ///< The label (cut).
+    std::uint8_t size = 0;                            ///< Bytes used.
+    bool begun = false;                               ///< begin_list_box() began a region (and a group).
 };
 
 /// What button_behavior() found.
@@ -384,8 +431,59 @@ struct ContextState
     /// No item active.
     void clear_active() noexcept;
 
+    /// Gives the keyboard focus to item @p id, clicked (no highlight); it stays alive this frame although its
+    /// item_add() already ran.
+    void take_focus(std::uint32_t id) noexcept;
+
     /// Item @p id (the last item) changed its value this frame.
     void mark_edited(std::uint32_t id) noexcept;
+
+    // ----------------------------------------------------------------------------------------- popups
+
+    /// Whether popup @p id is open.
+    [[nodiscard]] auto popup_open(std::uint32_t id) const noexcept -> bool;
+
+    /// Opens popup @p id at @p position (popups opened from inside another popup stay above it; others close).
+    void open_popup(std::uint32_t id,
+                    Vector2 position,
+                    float minimum_width,
+                    float maximum_height,
+                    float flip_bottom = -1) noexcept;
+
+    /// The root window whose title shows active: the focused window, or the window the focused popup (or the popup
+    /// it was opened from) was opened from.
+    [[nodiscard]] auto title_focus_window() const noexcept -> std::uint32_t;
+
+    /// Begins popup @p id's window when it is open and shows something (true: end_popup() then).
+    auto begin_popup(UiFrame& frame,
+                     std::uint32_t id,
+                     UiWindowFlag flags) noexcept -> bool;
+
+    /// Ends the popup begin_popup() began.
+    void end_popup(UiFrame& frame) noexcept;
+
+    /// Closes the popups from stack level @p level up; the focus goes back to the first one's opener.
+    void close_popups_from(std::size_t level) noexcept;
+
+    /// The stack level of the popup whose window is @p window (or of its root), or the stack's size.
+    [[nodiscard]] auto popup_level_of(std::uint32_t window) const noexcept -> std::size_t;
+
+    /// Popups at the start of a frame: those not begun last frame close; a click outside closes those above it;
+    /// Escape closes the top one.
+    void update_popups() noexcept;
+
+    // ----------------------------------------------------------------------------------------- text fields
+
+    /// Starts editing field @p id holding @p value.
+    void start_text_edit(std::uint32_t id,
+                         std::string_view value,
+                         InputTextFlag flags,
+                         bool multiline,
+                         bool numeric,
+                         std::size_t capacity) noexcept;
+
+    /// Ends the edit in progress: committed (Return, Tab, a click elsewhere) or canceled (Escape).
+    void end_text_edit(bool committed) noexcept;
 
     // ----------------------------------------------------------------------------------------- drawing
 
@@ -446,6 +544,7 @@ struct ContextState
     bool mouse_present = false;
     Vector2 mouse_wheel{};
     std::string typed_text{};
+    std::array<std::uint8_t, 128> key_codes_pressed{}; ///< Presses per ASCII key code (letters lowercase): shortcuts.
 
     // Windows.
     std::vector<WindowState> windows{};
@@ -521,6 +620,29 @@ struct ContextState
     bool wants_mouse = false;
     bool wants_keyboard = false;
 
+    // Input widgets.
+    TextEditState text_edit{};
+    std::uint32_t focus_arrived_id = 0;
+    bool text_input_wanted = false;
+    UiRectangle text_input_area{};
+    bool applied_text_input = false;
+    UiRectangle applied_text_input_area{};
+    std::string composition{};
+    std::int32_t composition_cursor = 0;
+    Vector2 mouse_delta{};
+    Vector2 previous_mouse_position{};
+    bool previous_mouse_present = false;
+    std::uint32_t temp_input_id = 0;
+    double drag_remainder = 0;
+    bool drag_started = false;
+    std::vector<PopupState> popups{};
+    std::vector<std::uint32_t> popups_closed_by_click{};
+    float saved_hue = 0;
+    float saved_saturation = 0;
+    std::uint32_t saved_hue_color = 0;
+    std::vector<ListBoxLabel> list_box_labels{};
+    LastItem combo_item{};
+
     // The frame arena and the report.
     std::vector<std::byte> arena_buffer{};
     CountingResource arena_upstream{};
@@ -537,5 +659,44 @@ struct ContextState
 
     UiFrame frame_object;
 };
+
+/// A text field to draw and edit (text_field()).
+struct TextFieldRequest
+{
+    std::uint32_t id = 0;                      ///< Its identifier (registered with item_add() already).
+    UiRectangle frame{};                       ///< The area the mouse uses (the frame, or the visible area).
+    Vector2 origin{};                          ///< Where the text's top-left goes when not scrolled horizontally.
+    UiRectangle clip{};                        ///< Where text is visible.
+    std::string_view text{};                   ///< Its value (when not being edited).
+    std::string_view edit_text{};              ///< Numeric fields: the text editing starts from (the value without the format's other text).
+    std::string_view hint{};                   ///< Shown while it is empty and not edited.
+    InputTextFlag flags = InputTextFlag::NONE; ///< Filters and behavior.
+    std::size_t capacity = 0;                  ///< Largest text, bytes (0: no limit).
+    float wrap_width = 0;                      ///< Multi-line word wrap width (0: none).
+    bool multiline = false;                    ///< Return types line breaks, Up and Down move between lines.
+    bool numeric = false;                      ///< A number's field: editing starts from edit_text.
+    bool framed = true;                        ///< Draws its frame.
+    bool centered = false;                     ///< The text is centered while not edited (sliders, drags).
+    std::string_view label{};                  ///< For reports.
+};
+
+/// What a text field did this frame.
+struct TextFieldResult
+{
+    bool active = false;     ///< Being edited (after this frame's input).
+    bool changed = false;    ///< The text changed (it differs from the request's text).
+    bool entered = false;    ///< Return confirmed it.
+    bool ended = false;      ///< Editing ended this frame.
+    bool committed = false;  ///< ...by Return, Tab or a click elsewhere (not Escape).
+    std::string_view text{}; ///< The text after this frame (the edited one while editing; the final one when it ended).
+    UiRectangle cursor{};    ///< The cursor (screen) while editing.
+    Vector2 size{};          ///< The laid-out text's size.
+};
+
+/// Draws and edits a text field: activation by click, Tab or Return; mouse selection; keys, shortcuts, filters,
+/// the clipboard, undo; the IME composition at the cursor; horizontal scrolling of single-line fields.
+auto text_field(ContextState& state,
+                WindowState& window,
+                const TextFieldRequest& request) noexcept -> TextFieldResult;
 
 } // namespace gfx::ui

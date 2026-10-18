@@ -383,6 +383,33 @@ TEST(DrawListTest, GlyphsOfAnAtlasTheLibraryLacksAreSkipped)
     EXPECT_TRUE(list.vertices().empty());
 }
 
+TEST(DrawListTest, GradientsAndTrianglesHaveAColorPerCornerAndNoFringe)
+{
+    DrawList list;
+    constexpr Color BLUE{.blue = 1, .alpha = 1};
+    constexpr Color CLEAR{.alpha = 0};
+    list.add_rectangle_filled_gradient({.left = 10, .top = 20, .right = 30, .bottom = 60}, RED, GREEN, BLUE, CLEAR);
+    ASSERT_EQ(list.vertices().size(), 4U);
+    ASSERT_EQ(list.indices().size(), 6U);
+    EXPECT_EQ(list.vertices()[0].color, RED.packed());
+    EXPECT_EQ(list.vertices()[1].color, GREEN.packed());
+    EXPECT_EQ(list.vertices()[2].color, BLUE.packed());
+    EXPECT_EQ(list.vertices()[3].color, CLEAR.packed());
+    EXPECT_EQ(bounds_of(list), (UiRectangle{.left = 10, .top = 20, .right = 30, .bottom = 60})) << "no anti-aliased fringe";
+    EXPECT_TRUE(std::ranges::all_of(list.vertices(), [](const UiVertex& vertex) { return mode_of(vertex) == UiShaderMode::SOLID; }));
+
+    // A triangle joins the same command (shapes and solid geometry share it).
+    list.add_triangle_filled({Vector2{.x = 0, .y = 0}, Vector2{.x = 8, .y = 0}, Vector2{.x = 0, .y = 8}}, {RED, GREEN, BLUE});
+    EXPECT_EQ(list.vertices().size(), 7U);
+    EXPECT_EQ(list.commands().size(), 1U);
+    EXPECT_EQ(list.vertices()[5].color, GREEN.packed());
+    EXPECT_TRUE(is_consistent(list));
+
+    // An empty rectangle adds nothing.
+    list.add_rectangle_filled_gradient({.left = 5, .top = 5, .right = 5, .bottom = 9}, RED, RED, RED, RED);
+    EXPECT_EQ(list.vertices().size(), 7U);
+}
+
 TEST(DrawListTest, ClearResetsTheStacks)
 {
     DrawList list;

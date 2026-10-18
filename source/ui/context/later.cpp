@@ -1,5 +1,5 @@
 /// @file later.cpp
-/// @brief UiFrame's frame arena, its reports, the diagnostics window, and the widgets of later phases (U5 to U9):
+/// @brief UiFrame's frame arena, its reports, the diagnostics window, and the widgets of later phases (U6 to U9):
 ///        declared so the whole interface can be reviewed; until their phase each reports
 ///        UiFrameProblem::NOT_IMPLEMENTED (once per frame) and does nothing.
 module gfx.ui.context;
@@ -110,84 +110,6 @@ UiFrame::show_diagnostics_window(bool& open) noexcept
         }
     }
     end_window();
-}
-
-// ===================================================================================================== U5
-
-auto
-UiFrame::input_text(std::string_view /*label*/,
-                    std::string& /*text*/,
-                    const InputTextOptions& /*options*/) noexcept -> bool
-{
-    return not_implemented("input_text", "text fields arrive in phase U5");
-}
-
-auto
-UiFrame::input_text(std::string_view /*label*/,
-                    std::span<char> /*buffer*/,
-                    const InputTextOptions& /*options*/) noexcept -> bool
-{
-    return not_implemented("input_text", "text fields arrive in phase U5");
-}
-
-auto
-UiFrame::input_text_multiline(std::string_view /*label*/,
-                              std::string& /*text*/,
-                              const InputTextOptions& /*options*/) noexcept -> bool
-{
-    return not_implemented("input_text_multiline", "text fields arrive in phase U5");
-}
-
-auto
-UiFrame::color_edit(std::string_view /*label*/,
-                    Color& /*color*/,
-                    ColorEditFlag /*flags*/) noexcept -> bool
-{
-    return not_implemented("color_edit", "color editing arrives in phase U5");
-}
-
-auto
-UiFrame::color_picker(std::string_view /*label*/,
-                      Color& /*color*/,
-                      ColorEditFlag /*flags*/) noexcept -> bool
-{
-    return not_implemented("color_picker", "color editing arrives in phase U5");
-}
-
-auto
-UiFrame::color_button(std::string_view /*id*/,
-                      Color /*color*/,
-                      ColorEditFlag /*flags*/,
-                      Vector2 /*size*/) noexcept -> bool
-{
-    return not_implemented("color_button", "color editing arrives in phase U5");
-}
-
-auto
-UiFrame::begin_combo(std::string_view /*label*/,
-                     std::string_view /*preview*/,
-                     ComboFlag /*flags*/) noexcept -> bool
-{
-    return not_implemented("begin_combo", "combo boxes arrive in phase U5");
-}
-
-void
-UiFrame::end_combo() noexcept
-{
-    static_cast<void>(not_implemented("end_combo", "combo boxes arrive in phase U5"));
-}
-
-auto
-UiFrame::begin_list_box(std::string_view /*label*/,
-                        Vector2 /*size*/) noexcept -> bool
-{
-    return not_implemented("begin_list_box", "list boxes arrive in phase U5");
-}
-
-void
-UiFrame::end_list_box() noexcept
-{
-    static_cast<void>(not_implemented("end_list_box", "list boxes arrive in phase U5"));
 }
 
 // ===================================================================================================== U6

@@ -47,6 +47,8 @@ struct UiFrameInput
     std::span<const UiKeyEvent> keys{};                    ///< Key events of the frame, in order.
     KeyModifier modifiers = KeyModifier::NONE;             ///< Modifiers held after the events.
     std::string_view text{};                               ///< UTF-8 text typed during the frame (after IME composition).
+    std::string_view composition{};                        ///< IME composition in progress (shown at the cursor, not yet typed).
+    std::int32_t composition_cursor = 0;                   ///< Cursor in the composition, code points.
 };
 
 /// @brief What the UI asks of the platform: clipboard, cursor shape, text input (IME placement), opening links.
@@ -70,8 +72,9 @@ public:
     /// @brief Shows the mouse cursor as @p shape (called when the shape the UI wants changes).
     virtual void set_cursor(CursorShape shape) = 0;
 
-    /// @brief Starts text input (IME, on-screen keyboards) for a field covering @p area (UI units), or stops it
-    ///        when @p active is false (called when it changes).
+    /// @brief Starts text input (IME, on-screen keyboards) for a field whose cursor is @p area (UI units), or stops
+    ///        it when @p active is false (called when either changes). The field draws IME compositions itself
+    ///        (UiFrameInput::composition).
     virtual void set_text_input(bool active,
                                 const UiRectangle& area) = 0;
 

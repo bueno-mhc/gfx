@@ -390,6 +390,51 @@ DrawList::add_convex_polygon_filled(std::span<const Vector2> points,
 }
 
 void
+DrawList::add_rectangle_filled_gradient(const UiRectangle& rectangle,
+                                        Color top_left,
+                                        Color top_right,
+                                        Color bottom_right,
+                                        Color bottom_left)
+{
+    if (rectangle.empty())
+    {
+        return;
+    }
+
+    // Four solid vertices, their colors interpolated by the rasterizer.
+    DrawCommand& command = command_for(DrawTexture{});
+    const auto base = static_cast<std::uint32_t>(m_vertices.size());
+    const Transform2D& transform = m_transforms.back();
+    const std::array corners{Vector2{.x = rectangle.left, .y = rectangle.top}, Vector2{.x = rectangle.right, .y = rectangle.top},
+                             Vector2{.x = rectangle.right, .y = rectangle.bottom}, Vector2{.x = rectangle.left, .y = rectangle.bottom}};
+    const std::array colors{top_left, top_right, bottom_right, bottom_left};
+    for (std::size_t corner = 0; corner < 4; ++corner)
+    {
+        m_vertices.push_back({.position = transform.apply(corners[corner]), .color = colors[corner].packed(), .mode = mode_of(UiShaderMode::SOLID)});
+    }
+    for (const std::uint32_t index : {0U, 1U, 2U, 0U, 2U, 3U})
+    {
+        m_indices.push_back(base + index);
+    }
+    command.index_count += 6;
+}
+
+void
+DrawList::add_triangle_filled(const std::array<Vector2, 3>& points,
+                              const std::array<Color, 3>& colors)
+{
+    DrawCommand& command = command_for(DrawTexture{});
+    const auto base = static_cast<std::uint32_t>(m_vertices.size());
+    const Transform2D& transform = m_transforms.back();
+    for (std::size_t point = 0; point < 3; ++point)
+    {
+        m_vertices.push_back({.position = transform.apply(points[point]), .color = colors[point].packed(), .mode = mode_of(UiShaderMode::SOLID)});
+        m_indices.push_back(base + static_cast<std::uint32_t>(point));
+    }
+    command.index_count += 3;
+}
+
+void
 DrawList::add_image(std::uint32_t image,
                     const UiRectangle& rectangle,
                     Color tint,
