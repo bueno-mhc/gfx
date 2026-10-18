@@ -816,6 +816,78 @@ outliner(gfx::ui::UiFrame& frame,
   a closed tree node or a tab opens it. Color buttons carry their color (`COLOR_PAYLOAD_TYPE`) onto color
   editors; a right click on a color editor opens its options.
 
+## UI: tables, lists, splitters, plots
+
+```cpp
+void
+file_browser(gfx::ui::UiFrame& frame,
+             Folder& folder)
+{
+    using namespace gfx::ui;
+    if (frame.begin_window("Files"))
+    {
+        constexpr TableFlag FLAGS = TableFlag::RESIZABLE | TableFlag::REORDERABLE | TableFlag::HIDEABLE | TableFlag::SORTABLE
+                                    | TableFlag::SORT_MULTIPLE | TableFlag::ROW_BACKGROUND | TableFlag::BORDERS | TableFlag::SCROLL_Y;
+        if (frame.begin_table("files", 3, FLAGS, {.x = 0, .y = 300}))
+        {
+            frame.table_setup_column("Name", TableColumnFlag::DEFAULT_SORT);
+            frame.table_setup_column("Size", TableColumnFlag::WIDTH_FIXED, 80.0F);
+            frame.table_setup_column("Kind");
+            frame.table_setup_scroll_freeze(0, 1);
+            frame.table_headers_row();
+            if (const TableSortSpecifications sort = frame.table_sort_specifications(); sort.changed)
+            {
+                folder.sort(sort.columns);
+            }
+
+            // 100000 files: only the rows in view are submitted.
+            UiListClipper clipper;
+            clipper.begin(frame, static_cast<std::uint32_t>(folder.files.size()));
+            while (clipper.step())
+            {
+                for (std::uint32_t row = clipper.display_start(); row < clipper.display_end(); ++row)
+                {
+                    File& file = folder.files[row];
+                    frame.table_next_row();
+                    frame.table_next_column();
+                    frame.push_id(static_cast<std::int32_t>(row));
+                    frame.selectable(file.name, &file.selected, SelectableFlag::SPAN_ALL_COLUMNS);
+                    frame.pop_id();
+                    frame.table_next_column();
+                    frame.text("{} KB", file.size / 1024);
+                    frame.table_next_column();
+                    frame.text_unformatted(file.kind);
+                }
+            }
+            frame.end_table();
+        }
+        frame.plot_lines("Read speed", folder.read_speeds, {.overlay = "MB/s", .size = {.x = 0, .y = 60}});
+        frame.progress_bar(folder.indexing ? -1.0F : 1.0F, {}, folder.indexing ? "Indexing" : "Indexed");
+    }
+    frame.end_window();
+}
+```
+
+- **Tables** (`begin_table()`): columns described every frame (`table_setup_column()`), fixed ones as wide as
+  asked or as their content, stretched ones sharing the rest by weight (the `SIZING_*` policies choose the
+  defaults). The mouse resizes a column by its right border (a double click fits it), moves one by dragging
+  its header, sorts by a click on a header (Shift+click adds a column with `SORT_MULTIPLE`; `SORT_TRISTATE`
+  allows no sort), and a right click on the header row opens the context menu: sizes, order, which columns are
+  shown. `table_sort_specifications()` says how to sort and whether that changed. A scrolling table
+  (`SCROLL_X`, `SCROLL_Y`) keeps its first rows and columns in view (`table_setup_scroll_freeze()`). Widths,
+  order, visibility and sorting are kept between frames, also while the table is not submitted. Rows alternate
+  their background (`ROW_BACKGROUND`), borders are drawn as asked, `table_set_background_color()` colors a row
+  or a cell, selectables can span every column, and tree nodes indent the next rows' first column. Each column
+  draws into its own channel (`DrawListSplitter`), so a table's cells merge into a few draw commands.
+- **List clipper** (`UiListClipper`): of a long list of items of one height (a table's rows), only those in
+  view (and those asked for with `include_item()`) are submitted; the cursor moves past the others, so the
+  window still scrolls over the whole list. A table of 10000 rows scrolled every frame allocates nothing.
+- **Splitters and resizable regions**: `splitter()` moves size between two areas; a child region with
+  `ChildFlag::RESIZE_X` / `RESIZE_Y` is resized by its right or bottom edge (the size is kept).
+- **Plots, progress bars, images**: `plot_lines()` and `plot_histogram()` (sampled to the pixels, the values
+  under the mouse in a tooltip), `progress_bar()` (a negative fraction: indeterminate), `image()`,
+  `image_rounded()` and `image_button()` (bindless sampled-image indices).
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -947,8 +1019,8 @@ gfx/
 │   │                       (swapchain_description_for(), WindowSwapchain)
 │   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
 │       │                 errors.cppm
-│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets), the frame report;
-│       │                 internal partition :state, one implementation unit per area
+│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables), UiListClipper,
+│       │                 the frame report; internal partition :state, one implementation unit per area
 │       ├── style/        gfx.ui.style: Style, Theme, builtin_theme()
 │       ├── input/        gfx.ui.input: UiFrameInput, UiPlatformServices, UiNullPlatformServices
 │       ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices

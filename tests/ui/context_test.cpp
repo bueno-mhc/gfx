@@ -1146,14 +1146,14 @@ TEST(UiReportTest, WidgetsOfLaterPhasesReportOnceAndDoNothing)
     const UiFrameReport report = ui.frame([&](UiFrame& frame)
     {
         frame.begin_window("Later");
-        results[0] = frame.begin_table("table", 3);
-        results[1] = frame.begin_table("table##again", 3);
-        results[2] = frame.table_next_column();
+        results[0] = frame.is_window_docked();
+        results[1] = frame.is_window_docked();
+        results[2] = frame.dock_space(DockSpaceIdentifier::from_name("editor")).is_valid();
         frame.end_window();
     });
     EXPECT_EQ(results, (std::array{false, false, false}));
-    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "begin_table"; }), 1);
-    EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "table_next_column"; }));
+    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "is_window_docked"; }), 1);
+    EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "dock_space"; }));
     EXPECT_THROW(static_cast<void>(ui.context().dock_builder(DockSpaceIdentifier::from_name("editor"))), gfx::BackendCapabilityError);
     EXPECT_THROW(static_cast<void>(ui.context().save_layout()), gfx::BackendCapabilityError);
 }

@@ -72,7 +72,7 @@ UiFrame::is_item_hovered(HoveredFlag flags) const noexcept -> bool
     {
         return false;
     }
-    return contains(item.rectangle.intersection(window.clip), state.mouse_position);
+    return contains(item.rectangle.intersection(item.clip), state.mouse_position);
 }
 
 auto

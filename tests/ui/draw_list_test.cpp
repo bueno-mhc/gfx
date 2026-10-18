@@ -1,6 +1,6 @@
 // The draw list (`gfx::ui::DrawList`): the vertices, indices and commands of shapes, lines, polygons, images
-// and text, under transforms and clips, and when a new command starts; colors, rectangles and transforms;
-// the debug overlay drawn into a list.
+// (rounded too) and text, under transforms and clips, and when a new command starts; channels split and merged
+// (`DrawListSplitter`); colors, rectangles and transforms; the debug overlay drawn into a list.
 #include <gtest/gtest.h>
 
 import std;
@@ -310,6 +310,116 @@ TEST(DrawListTest, ImagesAreQuadsWithTheirTextureCoordinates)
     EXPECT_EQ(list.vertices()[2].local, (Vector2{.x = 0.75F, .y = 1}));
     EXPECT_EQ(list.vertices()[2].position, (Vector2{.x = 42, .y = 26}));
     EXPECT_EQ(list.vertices()[0].color, GREEN.packed()) << "the tint";
+}
+
+TEST(DrawListTest, RoundedImagesAreFansWithAFringeSamplingWhereEachVertexLies)
+{
+    DrawList list;
+    const UiRectangle rectangle{.left = 10, .top = 20, .right = 50, .bottom = 40};
+    list.add_image_rounded(5, rectangle, 6, GREEN, {.left = 0, .top = 0, .right = 0.5F, .bottom = 1});
+    ASSERT_EQ(list.commands().size(), 1U);
+    EXPECT_EQ(list.commands()[0].texture, DrawTexture::from_image(5));
+    EXPECT_TRUE(is_consistent(list));
+
+    // An inner and an outer vertex per outline point: the inner ones tinted, the outer ones transparent, each
+    // sampling the image where it lies (a linear map of the rectangle onto the texture coordinates).
+    ASSERT_GE(list.vertices().size(), 4U * 3U * 2U);
+    for (std::size_t vertex = 0; vertex < list.vertices().size(); ++vertex)
+    {
+        const UiVertex& entry = list.vertices()[vertex];
+        EXPECT_EQ(mode_of(entry), UiShaderMode::IMAGE);
+        EXPECT_EQ(entry.color, vertex % 2 == 0 ? GREEN.packed() : GREEN.with_alpha(0).packed());
+        EXPECT_NEAR(entry.local.x, (entry.position.x - rectangle.left) / rectangle.width() * 0.5F, 1.0e-4F);
+        EXPECT_NEAR(entry.local.y, (entry.position.y - rectangle.top) / rectangle.height(), 1.0e-4F);
+    }
+
+    // Inside the rectangle by its corner radius: no vertex near a corner.
+    const UiRectangle bounds = bounds_of(list);
+    EXPECT_NEAR(bounds.left, rectangle.left - 0.5F, 0.01F);
+    EXPECT_NEAR(bounds.bottom, rectangle.bottom + 0.5F, 0.01F);
+    for (const UiVertex& vertex : list.vertices())
+    {
+        EXPECT_GT(std::hypot(vertex.position.x - rectangle.left, vertex.position.y - rectangle.top), 6.0F * (std::numbers::sqrt2_v<float> - 1.0F));
+    }
+
+    // No radius: a quad, as add_image().
+    DrawList square;
+    square.add_image_rounded(5, rectangle, 0);
+    EXPECT_EQ(square.vertices().size(), 4U);
+}
+
+TEST(DrawListSplitterTest, ChannelsAreDrawnInChannelOrderWhateverTheOrderTheyAreFilledIn)
+{
+    DrawList list;
+    list.add_rectangle_filled({.left = 0, .top = 0, .right = 1, .bottom = 1}, RED);
+    DrawListSplitter splitter;
+    splitter.split(list, 3);
+    EXPECT_EQ(splitter.count(), 3U);
+
+    // Filled 2, 1, 0 (and 2 again): drawn 0, 1, 2; channel 0 continues what the list held before.
+    splitter.set_channel(list, 2);
+    list.push_clip_rectangle({.left = 0, .top = 0, .right = 100, .bottom = 100});
+    list.add_rectangle_filled({.left = 20, .top = 0, .right = 21, .bottom = 1}, RED);
+    list.pop_clip_rectangle();
+    splitter.set_channel(list, 1);
+    list.add_image(4, {.left = 10, .top = 0, .right = 11, .bottom = 1});
+    splitter.set_channel(list, 0);
+    list.add_rectangle_filled({.left = 1, .top = 0, .right = 2, .bottom = 1}, GREEN);
+    splitter.set_channel(list, 2);
+    EXPECT_EQ(splitter.channel(), 2U);
+    list.push_clip_rectangle({.left = 0, .top = 0, .right = 100, .bottom = 100});
+    list.add_rectangle_filled({.left = 22, .top = 0, .right = 23, .bottom = 1}, RED);
+    list.pop_clip_rectangle();
+    splitter.merge(list);
+    EXPECT_EQ(splitter.count(), 0U);
+    EXPECT_TRUE(is_consistent(list));
+
+    // Channel 0's two rectangles and channel 1's image share the list's first command (shapes sample nothing);
+    // channel 2's rectangles have their own clip, one command for both. Rectangles reach a pixel past their edge.
+    ASSERT_EQ(list.commands().size(), 2U);
+    EXPECT_EQ(list.commands()[0].index_count, 18U);
+    EXPECT_EQ(list.commands()[0].texture, DrawTexture::from_image(4));
+    EXPECT_EQ(list.commands()[1].clip, (UiRectangle{.left = 0, .top = 0, .right = 100, .bottom = 100}));
+    EXPECT_EQ(list.commands()[1].index_count, 12U);
+    const auto x_of = [&](std::size_t triangle) { return list.vertices()[list.indices()[triangle * 3]].position.x; };
+    EXPECT_FLOAT_EQ(x_of(0), -1.0F);
+    EXPECT_FLOAT_EQ(x_of(2), 0.0F) << "channel 0's later rectangle second";
+    EXPECT_FLOAT_EQ(x_of(4), 10.0F) << "then the image of channel 1";
+    EXPECT_FLOAT_EQ(x_of(6), 19.0F) << "then channel 2";
+}
+
+TEST(DrawListSplitterTest, CommandsContinuingAcrossChannelsJoinAndSplittersNest)
+{
+    // Same clip and no texture in two channels: one command after the merge.
+    DrawList list;
+    DrawListSplitter outer;
+    outer.split(list, 2);
+    outer.set_channel(list, 1);
+    list.add_rectangle_filled({.left = 0, .top = 0, .right = 1, .bottom = 1}, RED);
+
+    // A splitter inside channel 1: its channels end up in channel 1, in order.
+    DrawListSplitter inner;
+    inner.split(list, 2);
+    inner.set_channel(list, 1);
+    list.add_rectangle_filled({.left = 30, .top = 0, .right = 31, .bottom = 1}, RED);
+    inner.set_channel(list, 0);
+    list.add_rectangle_filled({.left = 20, .top = 0, .right = 21, .bottom = 1}, RED);
+    inner.merge(list);
+    outer.set_channel(list, 0);
+    list.add_rectangle_filled({.left = 10, .top = 0, .right = 11, .bottom = 1}, GREEN);
+    outer.merge(list);
+    EXPECT_TRUE(is_consistent(list));
+    ASSERT_EQ(list.commands().size(), 1U);
+    EXPECT_EQ(list.commands()[0].index_count, 24U);
+    const auto x_of = [&](std::size_t triangle) { return list.vertices()[list.indices()[triangle * 3]].position.x; };
+    EXPECT_FLOAT_EQ(x_of(0), 9.0F) << "channel 0 first";
+    EXPECT_FLOAT_EQ(x_of(2), -1.0F) << "then channel 1: its rectangle";
+    EXPECT_FLOAT_EQ(x_of(4), 19.0F) << "then the inner splitter's channel 0";
+    EXPECT_FLOAT_EQ(x_of(6), 29.0F) << "and its channel 1";
+
+    // Merging again (no split) does nothing; a split list refilled every frame allocates nothing once warm.
+    outer.merge(list);
+    EXPECT_EQ(list.commands().size(), 1U);
 }
 
 TEST(DrawListTest, TextIsAQuadPerVisibleGlyphOnItsAtlasPage)

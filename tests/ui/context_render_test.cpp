@@ -391,6 +391,92 @@ TEST_P(UiContextRenderTest, MenusTreesTabsAndTooltipsAreDrawn)
     EXPECT_GT(brightest(menu_picture, first_row), 200) << "the menu's first item";
 }
 
+TEST_P(UiContextRenderTest, TablesPlotsAndProgressBarsAreDrawn)
+{
+    // A table (a header row, alternating rows, borders), a histogram and a half-filled progress bar.
+    UiHarness ui;
+    UiRenderer renderer{*m_device, ui.context().fonts(), {.color_format = gfx::Format::R8G8B8A8_UNORM}};
+    UiRectangle table{};
+    std::array<float, 4> row_tops{};
+    float column_border = 0;
+    float row_height = 0;
+    UiRectangle histogram{};
+    UiRectangle progress{};
+    const std::array values{0.2F, 0.9F, 0.4F, 1.0F, 0.6F};
+    const float padding = builtin_theme(ThemeKind::DARK).style.cell_padding.y;
+    const float padding_x = builtin_theme(ThemeKind::DARK).style.cell_padding.x;
+    const auto body = [&](UiFrame& frame)
+    {
+        frame.set_next_window_position({.x = 16, .y = 16}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 420, .y = 360}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Tables"))
+        {
+            if (frame.begin_table("files", 3, TableFlag::BORDERS | TableFlag::ROW_BACKGROUND | TableFlag::RESIZABLE))
+            {
+                frame.table_setup_column("Name");
+                frame.table_setup_column("Size");
+                frame.table_setup_column("Kind");
+                frame.table_headers_row();
+                for (std::size_t row = 0; row < 3; ++row)
+                {
+                    frame.table_next_row();
+                    for (int column = 0; column < 3; ++column)
+                    {
+                        frame.table_next_column();
+                        if (column == 0)
+                        {
+                            row_tops[row + 1] = frame.cursor_screen_position().y - padding;
+                        }
+                        if (column == 1 && row == 0)
+                        {
+                            column_border = frame.cursor_screen_position().x - padding_x;
+                        }
+                        frame.text("{}", row * 10 + static_cast<std::size_t>(column));
+                    }
+                }
+                frame.end_table();
+                table = frame.item_rectangle();
+            }
+            row_height = frame.text_line_height() + padding * 2;
+            row_tops[0] = table.top;
+            frame.plot_histogram("Bars", values, {.minimum = 0.0F, .maximum = 1.0F, .size = {.x = 200, .y = 50}});
+            histogram = frame.item_rectangle();
+            frame.progress_bar(0.5F, {.x = 200, .y = 0});
+            progress = frame.item_rectangle();
+        }
+        frame.end_window();
+    };
+    const UiFrameReport report = ui.frames(3, body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    const Picture picture = render(ui.context(), renderer);
+    const auto red = [&](float x, float y) { return static_cast<double>(picture.at(x, y) & 0xFFU); };
+    const auto blue = [&](float x, float y) { return static_cast<double>((picture.at(x, y) >> 16U) & 0xFFU); };
+
+    // What a color gives over the window's background (itself over the clear color 0.2).
+    const Theme theme = builtin_theme(ThemeKind::DARK);
+    const Color window = theme.color(StyleColor::WINDOW_BACKGROUND);
+    const double behind = (0.2 * (1 - window.alpha) + window.red * window.alpha) * 255;
+    const auto over = [behind](Color color) { return color.red * 255 * color.alpha + behind * (1 - color.alpha); };
+
+    // The header row's color; rows alternating (the second body row lighter); the borders between the columns
+    // and around the table.
+    const float empty_x = table.right - 20;
+    EXPECT_NEAR(red(empty_x, row_tops[0] + row_height * 0.5F), over(theme.color(StyleColor::TABLE_HEADER_BACKGROUND)), 3.0);
+    EXPECT_NEAR(red(empty_x, row_tops[1] + row_height * 0.5F), behind, 3.0);
+    EXPECT_NEAR(red(empty_x, row_tops[2] + row_height * 0.5F), over(theme.color(StyleColor::TABLE_ROW_BACKGROUND_ALTERNATE)), 3.0);
+    EXPECT_NEAR(red(std::floor(column_border), row_tops[3] + row_height * 0.5F), over(theme.color(StyleColor::TABLE_BORDER_LIGHT)), 3.0);
+    EXPECT_NEAR(red(table.left, row_tops[2] + row_height * 0.5F), over(theme.color(StyleColor::TABLE_BORDER_STRONG)), 3.0);
+
+    // The histogram's tallest bar (the fourth value) and the progress bar's filled half in the histogram color, its
+    // other half the frame's.
+    const Color bars = theme.color(StyleColor::PLOT_HISTOGRAM);
+    const float bar_x = histogram.left + builtin_theme(ThemeKind::DARK).style.frame_padding.x + (200 - 8) * 3.5F / 5;
+    EXPECT_NEAR(red(bar_x, histogram.top + 10), bars.red * 255, 3.0);
+    EXPECT_NEAR(blue(bar_x, histogram.top + 10), 0.0, 3.0);
+    EXPECT_NEAR(red(progress.left + 40, gfx::tests::center(progress).y), bars.red * 255, 3.0);
+    EXPECT_NEAR(red(progress.right - 30, gfx::tests::center(progress).y), over(theme.color(StyleColor::FRAME_BACKGROUND)), 3.0);
+}
+
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          UiContextRenderTest,
                          testing::ValuesIn(physical_devices()),

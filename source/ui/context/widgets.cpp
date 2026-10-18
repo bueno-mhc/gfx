@@ -308,9 +308,16 @@ UiFrame::separator() noexcept
         return;
     }
 
-    // A one-unit line from the cursor to the end of the content region (of the column, in columns).
-    const float right = window->columns.active ? state.content_right(*window) : window->inner.right - window->scroll.x;
-    const float left = window->columns.active ? window->cursor.x : window->inner.left - window->scroll.x;
+    // A one-unit line from the cursor to the end of the content region (of the column, in columns; across the cell,
+    // in a table).
+    float right = window->columns.active ? state.content_right(*window) : window->inner.right - window->scroll.x;
+    float left = window->columns.active ? window->cursor.x : window->inner.left - window->scroll.x;
+    if (const TableState* table = state.cell_table(*window))
+    {
+        const TableColumnState& column = table->columns[static_cast<std::size_t>(table->column)];
+        left = column.minimum_x;
+        right = column.maximum_x;
+    }
     const UiRectangle rectangle{.left = left, .top = window->cursor.y, .right = right, .bottom = window->cursor.y + 1.0F};
     state.item_size(*window, {.x = 0, .y = 1.0F});
     if (state.item_add(*window, rectangle, 0, false, "separator", {}))
@@ -592,13 +599,26 @@ UiFrame::selectable(std::string_view label,
     const float width = size.x > 0 ? size.x : std::max(label_size.x, state.content_right(*window) - window->cursor.x);
     const float height = size.y > 0 ? size.y : label_size.y;
     const Vector2 position = window->cursor;
-    const UiRectangle hit{.left = position.x,
-                          .top = position.y - std::floor(style.item_spacing.y * 0.5F),
-                          .right = position.x + width,
-                          .bottom = position.y + height + std::floor(style.item_spacing.y * 0.5F)};
+    UiRectangle hit{.left = position.x,
+                    .top = position.y - std::floor(style.item_spacing.y * 0.5F),
+                    .right = position.x + width,
+                    .bottom = position.y + height + std::floor(style.item_spacing.y * 0.5F)};
+
+    // Spanning every column of its table: its highlight covers the row, under the cells.
+    const TableState* table = has_any(flags, SelectableFlag::SPAN_ALL_COLUMNS) ? state.cell_table(*window) : nullptr;
+    if (table != nullptr)
+    {
+        hit.left = table->work.left;
+        hit.right = table->work.right;
+    }
     state.item_size(*window, {.x = size.x > 0 ? size.x : label_size.x, .y = height});
+    const bool spans = table != nullptr && state.push_table_background(*window);
     if (!state.item_add(*window, hit, id, true, "selectable", label))
     {
+        if (spans)
+        {
+            state.pop_table_background(*window);
+        }
         return false;
     }
     const bool was_disabled = state.disabled;
@@ -617,6 +637,10 @@ UiFrame::selectable(std::string_view label,
         list.add_rectangle_filled(hit, state.color(fill));
     }
     state.draw_focus(list, hit, id, 0.0F);
+    if (spans)
+    {
+        state.pop_table_background(*window);
+    }
     const Vector2 text_position{.x = position.x + std::max(0.0F, width - label_size.x) * style.selectable_text_align.x,
                                 .y = position.y + std::max(0.0F, height - label_size.y) * style.selectable_text_align.y};
     state.draw_text(list, text, text_position, state.color(StyleColor::TEXT_NORMAL));

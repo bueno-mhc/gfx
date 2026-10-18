@@ -702,7 +702,7 @@ enum class TableColumnFlag : std::uint32_t
 enum class TableRowFlag : std::uint8_t
 {
     NONE    = 0,       ///< No bit.
-    HEADERS = 1U << 0, ///< A header row (header background, not counted by table_row_index()).
+    HEADERS = 1U << 0, ///< A header row (the header background; alternating row backgrounds skip it).
 };
 
 /// @brief How a column is sorted.
@@ -711,6 +711,24 @@ enum class SortDirection : std::uint8_t
     NONE,       ///< Not sorted.
     ASCENDING,  ///< Smallest first.
     DESCENDING, ///< Largest first.
+};
+
+/// @brief What UiFrame::table_set_background_color() colors.
+enum class TableBackgroundTarget : std::uint8_t
+{
+    ROW,         ///< The current row (instead of TableFlag::ROW_BACKGROUND's alternating colors).
+    ROW_OVERLAY, ///< The current row, over the ROW color.
+    CELL,        ///< One cell of the current row, over both.
+};
+
+/// @brief What a table column is this frame (UiFrame::table_column_status()). Bitmask.
+enum class TableColumnStatus : std::uint8_t
+{
+    NONE    = 0,       ///< No bit.
+    ENABLED = 1U << 0, ///< Shown: neither DISABLED nor hidden by the user.
+    VISIBLE = 1U << 1, ///< Shown and not scrolled out of view.
+    SORTED  = 1U << 2, ///< Part of the sort.
+    HOVERED = 1U << 3, ///< Under the mouse.
 };
 
 /// @brief How drag and drop sources and targets behave. Bitmask.
@@ -906,6 +924,19 @@ inline constexpr std::string_view COLOR_PAYLOAD_TYPE = "gfx.ui.color";
 
 /// @brief Narrowest a tab becomes when the tabs of a bar shrink to fit it, in UI units.
 inline constexpr float MINIMUM_TAB_WIDTH = 40.0F;
+
+/// @brief Columns a table can have.
+inline constexpr std::uint32_t MAXIMUM_TABLE_COLUMNS = 64;
+
+/// @brief Narrowest a table column becomes (its content, without its cell padding), in UI units.
+inline constexpr float MINIMUM_TABLE_COLUMN_WIDTH = 4.0F;
+
+/// @brief Half the width of the area around a border that resizes what it bounds (a table column's right border,
+///        a resizable child region's right or bottom edge), in UI units.
+inline constexpr float RESIZE_HANDLE_HALF_WIDTH = 4.0F;
+
+/// @brief Time an indeterminate progress bar (a negative fraction) takes to sweep across, in seconds.
+inline constexpr double INDETERMINATE_PROGRESS_SECONDS = 1.0;
 
 /// @brief Issues a UiFrameReport holds; more set UiFrameProblem::ISSUES_DROPPED.
 inline constexpr std::size_t MAXIMUM_FRAME_ISSUES = 64;
@@ -1762,6 +1793,29 @@ struct EnumerationTraits<ui::SortDirection>
 };
 
 template<>
+struct EnumerationTraits<ui::TableBackgroundTarget>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TableBackgroundTarget::ROW, "ROW"},
+        EnumeratorName{ui::TableBackgroundTarget::ROW_OVERLAY, "ROW_OVERLAY"},
+        EnumeratorName{ui::TableBackgroundTarget::CELL, "CELL"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::TableColumnStatus>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::TableColumnStatus::ENABLED, "ENABLED"},
+        EnumeratorName{ui::TableColumnStatus::VISIBLE, "VISIBLE"},
+        EnumeratorName{ui::TableColumnStatus::SORTED, "SORTED"},
+        EnumeratorName{ui::TableColumnStatus::HOVERED, "HOVERED"},
+    };
+};
+
+template<>
 struct EnumerationTraits<ui::DragDropFlag>
 {
     static constexpr bool IS_BITMASK = true;
@@ -1929,6 +1983,8 @@ static_assert(verify<ui::TableFlag>(), "EnumerationTraits<ui::TableFlag>::NAMES 
 static_assert(verify<ui::TableColumnFlag>(), "EnumerationTraits<ui::TableColumnFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::TableRowFlag>(), "EnumerationTraits<ui::TableRowFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::SortDirection>(), "EnumerationTraits<ui::SortDirection>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TableBackgroundTarget>(), "EnumerationTraits<ui::TableBackgroundTarget>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::TableColumnStatus>(), "EnumerationTraits<ui::TableColumnStatus>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::DragDropFlag>(), "EnumerationTraits<ui::DragDropFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::DockNodeFlag>(), "EnumerationTraits<ui::DockNodeFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::ShortcutFlag>(), "EnumerationTraits<ui::ShortcutFlag>::NAMES is out of sync with the enumeration");

@@ -447,6 +447,14 @@ public:
                    Color tint = {.red = 1, .green = 1, .blue = 1, .alpha = 1},
                    const UiRectangle& texture_coordinates = {.left = 0, .top = 0, .right = 1, .bottom = 1});
 
+    /// @brief The image of bindless sampled-image index @p image over @p rectangle, its corners rounded by
+    ///        @p corner_radius (an anti-aliased edge), its @p texture_coordinates tinted by @p tint.
+    void add_image_rounded(std::uint32_t image,
+                           const UiRectangle& rectangle,
+                           float corner_radius,
+                           Color tint = {.red = 1, .green = 1, .blue = 1, .alpha = 1},
+                           const UiRectangle& texture_coordinates = {.left = 0, .top = 0, .right = 1, .bottom = 1});
+
     /// @brief The glyphs of @p layout, its top-left corner at @p origin, with @p style; atlases from @p fonts.
     void add_text(const FontLibrary& fonts,
                   const TextLayout& layout,
@@ -472,6 +480,8 @@ public:
     }
 
 private:
+    friend class DrawListSplitter;
+
     /// @brief A rounded box of half size (@p half_width, @p half_height) about @p center, with axes @p axis_x
     ///        and @p axis_y (unit vectors of its frame, before the transform).
     void add_box(Vector2 center,
@@ -504,6 +514,49 @@ private:
     std::vector<UiRectangle> m_clips{};
     std::vector<Transform2D> m_transforms{};
     float m_pixels_per_unit = 1.0F;
+};
+
+/// @brief Splits what a DrawList draws into channels drawn in channel order, whatever order they are filled in (a
+///        table's row backgrounds under its cells, its borders over them), then merges them back into the list.
+///        Channel 0 is what the list held before split(). Vertices are shared; each channel keeps its commands and
+///        indices, whose buffers the splitter keeps between uses (no allocation once they have grown). Splitters
+///        nest: a splitter splits the channel active when split() is called.
+class DrawListSplitter
+{
+public:
+    /// @brief Splits @p list into @p count channels (at least 1), channel 0 active.
+    void split(DrawList& list,
+               std::uint32_t count);
+
+    /// @brief Makes channel @p channel the one @p list draws into.
+    void set_channel(DrawList& list,
+                     std::uint32_t channel) noexcept;
+
+    /// @brief Puts the channels back into @p list, in order (channel 0 first).
+    void merge(DrawList& list);
+
+    /// @brief The active channel.
+    [[nodiscard]] auto channel() const noexcept -> std::uint32_t
+    {
+        return m_current;
+    }
+
+    /// @brief Channels of the split in progress (0: not split).
+    [[nodiscard]] auto count() const noexcept -> std::uint32_t
+    {
+        return m_count;
+    }
+
+private:
+    struct Channel
+    {
+        std::vector<DrawCommand> commands{};
+        std::vector<std::uint32_t> indices{};
+    };
+
+    std::vector<Channel> m_channels{};
+    std::uint32_t m_count = 0;
+    std::uint32_t m_current = 0;
 };
 
 /// @brief What a frame of the UI draws: draw lists in order over a target of width × height pixels.

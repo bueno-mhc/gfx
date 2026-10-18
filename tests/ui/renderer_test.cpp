@@ -590,6 +590,41 @@ TEST_P(UiRendererTest, ImagesAreSampledThroughTheirBindlessIndex)
     EXPECT_GT(picture.at(16, 16, 1), 0U) << "filtered between the texels";
 }
 
+TEST_P(UiRendererTest, RoundedImagesLeaveTheirCornersOutAndHaveAnAntiAliasedEdge)
+{
+    // A white texture over 32 x 32 pixels, its corners rounded by 10: the corners stay black, the straight edges are
+    // sharp on their pixel boundaries, the arcs half cover the pixels they cross.
+    const std::unique_ptr<gfx::Image> texture = m_device->create_image({.format = gfx::Format::R8G8B8A8_UNORM,
+                                                                        .extent = {.width = 2, .height = 2},
+                                                                        .usage = gfx::ImageUsage::SAMPLED | gfx::ImageUsage::TRANSFER_DESTINATION,
+                                                                        .debug_name = "ui rounded texture"});
+    const std::unique_ptr<gfx::ImageView> texture_view = m_device->create_image_view({.image = texture->handle(), .debug_name = "ui rounded texture view"});
+    const std::unique_ptr<gfx::Buffer> staging = m_device->create_buffer(
+        {.size = 16, .usage = gfx::BufferUsage::TRANSFER_SOURCE, .location = gfx::MemoryLocation::HOST_UPLOAD, .debug_name = "ui rounded texture staging"});
+    std::ranges::fill(staging->mapped_elements<std::uint32_t>(), gfx::tests::rgba(255, 255, 255, 255));
+    run([&](gfx::GraphicsRecorder& recorder)
+    {
+        const std::array to_copy{gfx::image_barrier(texture->handle(), gfx::ResourceState::UNDEFINED, gfx::ResourceState::TRANSFER_DESTINATION)};
+        recorder.barrier({.image_barriers = to_copy});
+        const std::array regions{gfx::BufferImageCopyRegion{.image_extent = {.width = 2, .height = 2}}};
+        recorder.copy_buffer_to_image(staging->handle(), texture->handle(), gfx::ImageLayout::TRANSFER_DESTINATION, regions);
+        const std::array to_sampling{
+            gfx::image_barrier(texture->handle(), gfx::ResourceState::TRANSFER_DESTINATION, gfx::ResourceState::SHADER_SAMPLED_READ)};
+        recorder.barrier({.image_barriers = to_sampling});
+    });
+
+    DrawList list;
+    list.add_image_rounded(texture_view->sampled_index().value(), {.left = 8, .top = 8, .right = 40, .bottom = 40}, 10.0F);
+    const Picture picture = render(list);
+    EXPECT_EQ(picture.at(24, 24), 255U) << "inside";
+    EXPECT_EQ(picture.at(8, 8), 0U) << "the corner is cut";
+    EXPECT_EQ(picture.at(39, 39), 0U);
+    EXPECT_GE(picture.at(8, 24), 250U) << "the straight edge covers its pixels";
+    EXPECT_LE(picture.at(7, 24), 5U);
+    EXPECT_GE(picture.at(11, 11), 200U) << "inside the arc";
+    EXPECT_LE(picture.at(10, 10), 128U) << "on the arc";
+}
+
 TEST_P(UiRendererTest, SrgbTargetsReadBackTheColorsAsGiven)
 {
     // Colors are sRGB-encoded: an sRGB target converts them to linear and back, an UNORM one stores them.

@@ -73,6 +73,9 @@ target_sources(gfx_ui
         context/menus.cpp
         context/tooltips.cpp
         context/drag_drop.cpp
+        context/tables.cpp
+        context/clipper.cpp
+        context/visuals.cpp
         context/later.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)

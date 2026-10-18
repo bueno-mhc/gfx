@@ -5,6 +5,7 @@
 ///
 /// The widgets of later phases are declared already (the whole surface can be reviewed): until their phase,
 /// each does nothing, returns false (or an empty value) and reports UiFrameProblem::NOT_IMPLEMENTED.
+/// UiListClipper lays out only the visible items of long lists and tables.
 export module gfx.ui.context:frame;
 
 import std;
@@ -20,6 +21,7 @@ namespace gfx::ui
 {
 
 struct ContextState;
+struct WindowState;
 
 } // namespace gfx::ui
 
@@ -1030,46 +1032,94 @@ public:
     /// @brief Ends the target begin_drag_drop_target() started.
     void end_drag_drop_target() noexcept;
 
-    // ===================================================================================== U7: tables and visualization
+    // ===================================================================================== tables and visualization
 
-    /// @brief Starts a table of @p columns columns; its rows follow while it returns true, then end_table().
-    ///        Phase U7.
+    /// @brief Starts a table of @p columns columns (1 to MAXIMUM_TABLE_COLUMNS) identified by @p id; while it returns
+    ///        true, describe its columns (table_setup_column(), table_setup_scroll_freeze()), then fill its rows
+    ///        (table_next_row(), table_next_column()) and call end_table(). False: it is not visible (skip it; do not
+    ///        call end_table()).
+    ///
+    ///        @p outer_size: 0 on an axis: the space available (width), or as tall as its rows (height; SCROLL_Y: the
+    ///        space available); negative: the space available minus it; positive: that size (a least height unless
+    ///        NO_HOST_EXTEND_Y). SCROLL_X / SCROLL_Y put the rows in a scrolling region. @p inner_width (SCROLL_X): the
+    ///        width the columns share (0: the visible width when a column stretches, else the columns' own widths).
+    ///
+    ///        Without a SIZING_* flag, columns stretch (SIZING_STRETCH_SAME) unless the table scrolls horizontally
+    ///        (SIZING_FIXED_FIT). The state of its columns (widths, order, visibility, sorting) is kept between frames,
+    ///        also while the table is not submitted.
     auto begin_table(std::string_view id,
                      std::uint32_t columns,
                      TableFlag flags = TableFlag::NONE,
                      Vector2 outer_size = {},
                      float inner_width = 0.0F) noexcept -> bool;
 
-    /// @brief Ends the table begin_table() started. Phase U7.
+    /// @brief Ends the table begin_table() started.
     void end_table() noexcept;
 
-    /// @brief Describes the next column (before the first row). Phase U7.
+    /// @brief Describes the next column (call it once per column, before the first row): its header's @p label (its
+    ///        identifier too: "##" and "###" apply), @p flags, and @p width_or_weight: a fixed column's width (0: its
+    ///        content's), a stretched column's weight (0: 1, or its content's width with SIZING_STRETCH_PROPORTIONAL).
     void table_setup_column(std::string_view label,
                             TableColumnFlag flags = TableColumnFlag::NONE,
                             float width_or_weight = 0.0F) noexcept;
 
-    /// @brief Keeps the first @p columns columns and @p rows rows in view while scrolling. Phase U7.
+    /// @brief Keeps the first @p columns columns (in display order; SCROLL_X) and @p rows rows (SCROLL_Y; a header
+    ///        row counts) in view while the table scrolls. Before the first row.
     void table_setup_scroll_freeze(std::uint32_t columns,
                                    std::uint32_t rows) noexcept;
 
-    /// @brief A header row of the columns' labels (sorting, context menu). Phase U7.
+    /// @brief A header row of the columns' labels: a click sorts by a column (SORTABLE; Shift+click adds it with
+    ///        SORT_MULTIPLE), dragging a header reorders the columns (REORDERABLE), a right click opens the context
+    ///        menu (column sizes, order, visibility).
     void table_headers_row() noexcept;
 
-    /// @brief Starts a row at least @p minimum_height tall. Phase U7.
+    /// @brief Starts a row at least @p minimum_height tall (HEADERS: a header row).
     void table_next_row(TableRowFlag flags = TableRowFlag::NONE,
                         float minimum_height = 0.0F) noexcept;
 
-    /// @brief Moves to the next cell; false when its column is hidden. Phase U7.
+    /// @brief Moves to the next cell (the first cell of a new row after the last); false when its column is hidden
+    ///        or scrolled out of view (its content can be skipped).
     auto table_next_column() noexcept -> bool;
 
-    /// @brief Moves to the cell of column @p column; false when it is hidden. Phase U7.
+    /// @brief Moves to the cell of column @p column of the current row (a new row when none is open); false as
+    ///        table_next_column().
     auto table_set_column_index(std::uint32_t column) noexcept -> bool;
 
-    /// @brief How the table is sorted. Phase U7.
+    /// @brief How the table is sorted (SORTABLE; empty otherwise). @c changed is true when the sort changed since it
+    ///        was last read here (sort the data again then); the span stays valid until the next frame.
     [[nodiscard]] auto table_sort_specifications() noexcept -> TableSortSpecifications;
 
-    /// @brief A splitter between two areas of sizes @p first and @p second (changed by dragging), each at least
-    ///        its minimum; true while it is dragged. Phase U7.
+    /// @brief Columns of the current table (0 outside a table).
+    [[nodiscard]] auto table_column_count() const noexcept -> std::uint32_t;
+
+    /// @brief Column of the current cell (-1 outside a cell).
+    [[nodiscard]] auto table_column_index() const noexcept -> std::int32_t;
+
+    /// @brief Index of the current row, header rows included (-1 outside a table or before its first row).
+    [[nodiscard]] auto table_row_index() const noexcept -> std::int32_t;
+
+    /// @brief What column @p column (-1: the current cell's) of the current table is this frame.
+    [[nodiscard]] auto table_column_status(std::int32_t column = -1) const noexcept -> TableColumnStatus;
+
+    /// @brief The column under the mouse in the current table (-1: none).
+    [[nodiscard]] auto table_hovered_column() const noexcept -> std::int32_t;
+
+    /// @brief Shows or hides column @p column (as its context menu does; NO_HIDE columns stay shown), from the next
+    ///        frame.
+    void table_set_column_enabled(std::uint32_t column,
+                                  bool enabled) noexcept;
+
+    /// @brief Colors the current row (ROW, ROW_OVERLAY) or one of its cells (CELL: column @p column, -1: the
+    ///        current one), under the cells' content.
+    void table_set_background_color(TableBackgroundTarget target,
+                                    Color color,
+                                    std::int32_t column = -1) noexcept;
+
+    /// @brief A splitter: a bar @p thickness UI units thick between two areas laid out after it, at @p first from
+    ///        the cursor (vertical: a vertical bar between areas side by side, @p first and @p second their widths;
+    ///        otherwise a horizontal bar between areas one above the other, their heights), as long as the space
+    ///        available. Dragging it moves size between them, each kept at its minimum; true while it is dragged. The
+    ///        cursor does not move.
     auto splitter(std::string_view id,
                   bool vertical,
                   float thickness,
@@ -1078,35 +1128,40 @@ public:
                   float first_minimum = 0.0F,
                   float second_minimum = 0.0F) noexcept -> bool;
 
-    /// @brief A line plot of @p values. Phase U7.
+    /// @brief A line plot of @p values (one value per point, sampled when there are more than pixels), its label after
+    ///        it; hovering shows the values under the mouse.
     void plot_lines(std::string_view label,
                     std::span<const float> values,
                     const PlotOptions& options = {}) noexcept;
 
-    /// @brief A histogram of @p values. Phase U7.
+    /// @brief A histogram of @p values (bars from zero, or from the bottom of the scale), its label after it.
     void plot_histogram(std::string_view label,
                         std::span<const float> values,
                         const PlotOptions& options = {}) noexcept;
 
-    /// @brief A progress bar filled to @p fraction (0 to 1), showing @p overlay (empty: the percentage). Phase U7.
+    /// @brief A progress bar filled to @p fraction (0 to 1; negative: indeterminate, a moving bar), showing
+    ///        @p overlay (empty: the percentage; none when indeterminate). @p size: 0 on an axis: the item width / a
+    ///        frame's height; negative: the space available minus it.
     void progress_bar(float fraction,
                       Vector2 size = {},
                       std::string_view overlay = {}) noexcept;
 
-    /// @brief The image of bindless sampled-image index @p image, @p size UI units. Phase U7.
+    /// @brief The image of bindless sampled-image index @p image, @p size UI units, its @p texture_coordinates tinted
+    ///        by @p tint.
     void image(std::uint32_t image,
                Vector2 size,
                const UiRectangle& texture_coordinates = {.left = 0, .top = 0, .right = 1, .bottom = 1},
                Color tint = {.red = 1, .green = 1, .blue = 1, .alpha = 1}) noexcept;
 
-    /// @brief An image with rounded corners. Phase U7.
+    /// @brief An image with corners rounded by @p rounding UI units (an anti-aliased edge).
     void image_rounded(std::uint32_t image,
                        Vector2 size,
                        float rounding,
                        const UiRectangle& texture_coordinates = {.left = 0, .top = 0, .right = 1, .bottom = 1},
                        Color tint = {.red = 1, .green = 1, .blue = 1, .alpha = 1}) noexcept;
 
-    /// @brief A button showing an image; true when it is clicked. Phase U7.
+    /// @brief A button showing an image of @p size in its frame (the frame padding around it), identified by @p id;
+    ///        true when it is clicked.
     auto image_button(std::string_view id,
                       std::uint32_t image,
                       Vector2 size,
@@ -1154,6 +1209,7 @@ public:
 
 private:
     friend struct ContextState;
+    friend class UiListClipper;
 
     explicit UiFrame(ContextState& state) noexcept;
 
@@ -1229,8 +1285,103 @@ private:
     void end_components(std::string_view label,
                         std::size_t count) noexcept;
 
+    /// The plots' core (lines or bars).
+    void plot(std::string_view label,
+              std::span<const float> values,
+              const PlotOptions& options,
+              bool histogram,
+              std::string_view operation) noexcept;
+
+    /// The header cell of column @p column in the current header row.
+    void table_header(std::uint32_t column) noexcept;
+
     ContextState* m_state = nullptr;
     std::array<char, UI_FORMAT_BUFFER_CAPACITY> m_format_buffer{};
+};
+
+/// @brief Lays out only the visible items of a long list of items of one height: the items before and after the
+///        visible ones are skipped, the cursor moved past them (the window still scrolls over the whole list). In a
+///        table each item is a row. Use it for one list at a time, within a frame.
+///
+/// @code
+/// gfx::ui::UiListClipper clipper;
+/// clipper.begin(frame, static_cast<std::uint32_t>(lines.size()));
+/// while (clipper.step())
+/// {
+///     for (std::uint32_t line = clipper.display_start(); line < clipper.display_end(); ++line)
+///     {
+///         frame.text_unformatted(lines[line]);
+///     }
+/// }
+/// @endcode
+class UiListClipper
+{
+public:
+    UiListClipper() = default;
+    UiListClipper(const UiListClipper&) = delete;
+    auto operator=(const UiListClipper&) -> UiListClipper& = delete;
+
+    /// @brief Ends the list (end()).
+    ~UiListClipper();
+
+    /// @brief Starts a list of @p count items of @p item_height UI units each, the step from one item to the next
+    ///        (negative: measured from the first item, submitted alone in the first step), in the current window (in
+    ///        the current table: its rows).
+    void begin(UiFrame& frame,
+               std::uint32_t count,
+               float item_height = -1.0F) noexcept;
+
+    /// @brief Keeps item @p item submitted although it is not visible (an item being edited, one scrolled to). Before
+    ///        the first step() (or the one that measures); up to 4 items.
+    void include_item(std::uint32_t item) noexcept;
+
+    /// @brief Moves to the next items to submit (display_start() to display_end()); false when every item was
+    ///        handled, the cursor after the last.
+    auto step() noexcept -> bool;
+
+    /// @brief Ends the list early: the cursor moves after the last item (step() does it when it returns false).
+    void end() noexcept;
+
+    /// @brief First item to submit in this step.
+    [[nodiscard]] auto display_start() const noexcept -> std::uint32_t
+    {
+        return m_display_start;
+    }
+
+    /// @brief One past the last item to submit in this step.
+    [[nodiscard]] auto display_end() const noexcept -> std::uint32_t
+    {
+        return m_display_end;
+    }
+
+    /// @brief The height of an item (measured after the first step when begin() was not given it).
+    [[nodiscard]] auto item_height() const noexcept -> float
+    {
+        return m_item_height;
+    }
+
+private:
+    /// The current window, when it is still the list's.
+    [[nodiscard]] auto list_window() const noexcept -> WindowState*;
+
+    /// Moves to item @p item (skipping those between).
+    void seek(std::uint32_t item) noexcept;
+
+    ContextState* m_state = nullptr;
+    std::uint64_t m_frame = 0;
+    std::uint32_t m_window = 0xFFFFFFFFU;
+    std::uint32_t m_count = 0;
+    float m_item_height = 0;
+    float m_start = 0;
+    std::uint32_t m_step = 0;
+    std::uint32_t m_next = 0;
+    std::uint32_t m_display_start = 0;
+    std::uint32_t m_display_end = 0;
+    std::array<std::uint32_t, 4> m_included{};
+    std::uint32_t m_included_count = 0;
+    std::array<std::uint32_t, 12> m_ranges{};
+    std::uint32_t m_range_count = 0;
+    std::uint32_t m_range = 0;
 };
 
 } // namespace gfx::ui

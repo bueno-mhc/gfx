@@ -454,6 +454,167 @@ DrawList::add_image(std::uint32_t image,
 }
 
 void
+DrawList::add_image_rounded(std::uint32_t image,
+                            const UiRectangle& rectangle,
+                            float corner_radius,
+                            Color tint,
+                            const UiRectangle& texture_coordinates)
+{
+    const float radius = std::min({corner_radius, rectangle.width() * 0.5F, rectangle.height() * 0.5F});
+    if (radius <= 0)
+    {
+        add_image(image, rectangle, tint, texture_coordinates);
+        return;
+    }
+    if (rectangle.empty() || tint.alpha <= 0)
+    {
+        return;
+    }
+
+    // The outline: four quarter circles (more segments for larger corners), clockwise on screen.
+    constexpr std::size_t MAXIMUM_SEGMENTS = 16;
+    std::array<Vector2, 4 * (MAXIMUM_SEGMENTS + 1)> points{};
+    const auto segments = static_cast<std::size_t>(std::clamp(std::ceil(radius / pixel_size() / 2.0F), 2.0F, static_cast<float>(MAXIMUM_SEGMENTS)));
+    const std::array centers{Vector2{.x = rectangle.left + radius, .y = rectangle.top + radius}, Vector2{.x = rectangle.right - radius, .y = rectangle.top + radius},
+                             Vector2{.x = rectangle.right - radius, .y = rectangle.bottom - radius}, Vector2{.x = rectangle.left + radius, .y = rectangle.bottom - radius}};
+    std::size_t count = 0;
+    for (std::size_t corner = 0; corner < 4; ++corner)
+    {
+        const float start = std::numbers::pi_v<float> * (1.0F + 0.5F * static_cast<float>(corner));
+        for (std::size_t segment = 0; segment <= segments; ++segment)
+        {
+            const float angle = start + std::numbers::pi_v<float> * 0.5F * static_cast<float>(segment) / static_cast<float>(segments);
+            points[count++] = {.x = centers[corner].x + std::cos(angle) * radius, .y = centers[corner].y + std::sin(angle) * radius};
+        }
+    }
+
+    // As add_convex_polygon_filled(): inner vertices tinted, outer ones transparent, half a pixel each side of the
+    // edge; each samples the image where it lies.
+    const UiRectangle& uv = texture_coordinates;
+    const auto texture_at = [&](Vector2 point)
+    {
+        return Vector2{.x = uv.left + (point.x - rectangle.left) / rectangle.width() * (uv.right - uv.left),
+                       .y = uv.top + (point.y - rectangle.top) / rectangle.height() * (uv.bottom - uv.top)};
+    };
+    const float fringe = pixel_size() / 2;
+    DrawCommand& command = command_for(DrawTexture::from_image(image));
+    const auto base = static_cast<std::uint32_t>(m_vertices.size());
+    const Transform2D& transform = m_transforms.back();
+    const std::uint32_t opaque = tint.packed();
+    const std::uint32_t transparent = tint.with_alpha(0).packed();
+    for (std::size_t point = 0; point < count; ++point)
+    {
+        const Vector2 previous = perpendicular(normalized(minus(points[point], points[(point + count - 1) % count])));
+        const Vector2 next = perpendicular(normalized(minus(points[(point + 1) % count], points[point])));
+        Vector2 normal = normalized(plus(previous, next));
+        normal = times(normal, -1.0F / std::max(dot(normal, next), 1.0F / MITER_LIMIT));
+        const Vector2 inner = minus(points[point], times(normal, fringe));
+        const Vector2 outer = plus(points[point], times(normal, fringe));
+        m_vertices.push_back({.position = transform.apply(inner), .local = texture_at(inner), .color = opaque, .mode = mode_of(UiShaderMode::IMAGE)});
+        m_vertices.push_back({.position = transform.apply(outer), .local = texture_at(outer), .color = transparent, .mode = mode_of(UiShaderMode::IMAGE)});
+    }
+    for (std::uint32_t point = 1; point + 1 < count; ++point)
+    {
+        for (const std::uint32_t index : {base, base + point * 2, base + (point + 1) * 2})
+        {
+            m_indices.push_back(index);
+        }
+        command.index_count += 3;
+    }
+    for (std::uint32_t point = 0; point < count; ++point)
+    {
+        const std::uint32_t inner = base + point * 2;
+        const std::uint32_t next = base + static_cast<std::uint32_t>(((point + 1) % count) * 2);
+        for (const std::uint32_t index : {inner, inner + 1, next + 1, inner, next + 1, next})
+        {
+            m_indices.push_back(index);
+        }
+        command.index_count += 6;
+    }
+}
+
+void
+DrawListSplitter::split(DrawList& list,
+                        std::uint32_t count)
+{
+    // Channel 0 stays in the list; the others start empty (their buffers kept).
+    static_cast<void>(list);
+    m_count = std::max(count, 1U);
+    m_current = 0;
+    if (m_channels.size() < m_count)
+    {
+        m_channels.resize(m_count);
+    }
+    for (std::uint32_t channel = 1; channel < m_count; ++channel)
+    {
+        m_channels[channel].commands.clear();
+        m_channels[channel].indices.clear();
+    }
+}
+
+void
+DrawListSplitter::set_channel(DrawList& list,
+                              std::uint32_t channel) noexcept
+{
+    // The active channel's buffers go back to its slot; the chosen one's come into the list.
+    if (channel == m_current || channel >= m_count)
+    {
+        return;
+    }
+    std::swap(list.m_commands, m_channels[m_current].commands);
+    std::swap(list.m_indices, m_channels[m_current].indices);
+    std::swap(list.m_commands, m_channels[channel].commands);
+    std::swap(list.m_indices, m_channels[channel].indices);
+    m_current = channel;
+}
+
+void
+DrawListSplitter::merge(DrawList& list)
+{
+    // Channel 0 in the list, then the commands of each other channel (their indices moved after the list's); a command
+    // continuing the one before it (same clip, textures that agree) joins it.
+    if (m_count == 0)
+    {
+        return;
+    }
+    set_channel(list, 0);
+    for (std::uint32_t channel = 1; channel < m_count; ++channel)
+    {
+        Channel& source = m_channels[channel];
+        const auto offset = static_cast<std::uint32_t>(list.m_indices.size());
+        for (DrawCommand command : source.commands)
+        {
+            if (command.index_count == 0)
+            {
+                continue;
+            }
+            command.first_index += offset;
+            if (!list.m_commands.empty())
+            {
+                DrawCommand& last = list.m_commands.back();
+                const bool textures_agree = command.texture.kind == DrawTextureKind::NONE || last.texture.kind == DrawTextureKind::NONE
+                                            || last.texture == command.texture;
+                if (last.clip == command.clip && textures_agree && last.first_index + last.index_count == command.first_index)
+                {
+                    last.index_count += command.index_count;
+                    if (last.texture.kind == DrawTextureKind::NONE)
+                    {
+                        last.texture = command.texture;
+                    }
+                    continue;
+                }
+            }
+            list.m_commands.push_back(command);
+        }
+        list.m_indices.insert(list.m_indices.end(), source.indices.begin(), source.indices.end());
+        source.commands.clear();
+        source.indices.clear();
+    }
+    m_count = 0;
+    m_current = 0;
+}
+
+void
 DrawList::add_text(const FontLibrary& fonts,
                    const TextLayout& layout,
                    Vector2 origin,

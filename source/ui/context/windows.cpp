@@ -287,6 +287,89 @@ layout_area(ContextState& state,
     window.item_width = std::floor(std::max(1.0F, (window.inner.width() - window.padding.x * 2) * DEFAULT_ITEM_WIDTH_FRACTION));
 }
 
+/// Which edges of a resizable child region the mouse is over or drags.
+struct ResizeEdges
+{
+    bool right_hovered = false;
+    bool right_held = false;
+    bool bottom_hovered = false;
+    bool bottom_held = false;
+};
+
+/// The right (RESIZE_X) and bottom (RESIZE_Y) edges of child region @p child: dragging one resizes it (the size is
+/// kept for the next frames), a double click fits it to its content. The edge reaches both sides of the border, so
+/// the child and its parent window both let the mouse take it.
+auto
+resize_child_edges(ContextState& state,
+                   WindowState& child,
+                   std::uint32_t index,
+                   std::uint32_t parent,
+                   bool along_x,
+                   bool along_y) noexcept -> ResizeEdges
+{
+    ResizeEdges edges{};
+    const WindowState& owner = state.windows[parent];
+    for (const bool horizontal : {true, false})
+    {
+        if (horizontal ? !along_x : !along_y)
+        {
+            continue;
+        }
+        const float edge = horizontal ? child.outer.right : child.outer.bottom;
+        const UiRectangle hit = horizontal ? UiRectangle{.left = edge - RESIZE_HANDLE_HALF_WIDTH, .top = child.outer.top, .right = edge + RESIZE_HANDLE_HALF_WIDTH,
+                                                         .bottom = child.outer.bottom}
+                                           : UiRectangle{.left = child.outer.left, .top = edge - RESIZE_HANDLE_HALF_WIDTH, .right = child.outer.right,
+                                                         .bottom = edge + RESIZE_HANDLE_HALF_WIDTH};
+        const std::uint32_t id = ContextState::hash(child.id, horizontal ? "#RESIZE_X" : "#RESIZE_Y");
+        const bool over = state.mouse_present && !state.disabled && !child.hidden && state.moving_window == ContextState::NO_WINDOW
+                          && (state.hovered_window == index || state.hovered_window == parent) && contains(hit.intersection(owner.clip), state.mouse_position)
+                          && (state.active_id == 0 || state.active_id == id);
+        bool held = false;
+        if (over)
+        {
+            state.hovered_id = id;
+            if (state.mouse[0].clicked && state.active_id != id)
+            {
+                state.set_active(id, owner);
+                state.active_button = MouseButton::LEFT;
+                state.active_offset = {.x = edge - state.mouse_position.x, .y = edge - state.mouse_position.y};
+            }
+        }
+        if (state.active_id == id)
+        {
+            state.active_id_alive = true;
+            if (state.mouse[0].down)
+            {
+                held = true;
+                const float start = horizontal ? child.outer.left : child.outer.top;
+                const float moved = horizontal ? state.mouse_position.x + state.active_offset.x : state.mouse_position.y + state.active_offset.y;
+                const float padding = horizontal ? child.padding.x : child.padding.y;
+                const float size = std::max(moved - start, padding * 2 + 4.0F);
+                (horizontal ? child.resized_size.x : child.resized_size.y) = size;
+                (horizontal ? child.size.x : child.size.y) = size;
+            }
+            else
+            {
+                state.clear_active();
+            }
+        }
+        if (over && state.mouse[0].double_clicked)
+        {
+            const float fitted = horizontal ? child.content_size.x + child.padding.x * 2 : child.content_size.y + child.padding.y * 2;
+            (horizontal ? child.resized_size.x : child.resized_size.y) = std::max(fitted, 4.0F);
+            (horizontal ? child.size.x : child.size.y) = std::max(fitted, 4.0F);
+        }
+        if (over || held)
+        {
+            state.cursor = horizontal ? CursorShape::RESIZE_EAST_WEST : CursorShape::RESIZE_NORTH_SOUTH;
+        }
+        (horizontal ? edges.right_hovered : edges.bottom_hovered) = over;
+        (horizontal ? edges.right_held : edges.bottom_held) = held;
+    }
+    child.outer = {.left = child.position.x, .top = child.position.y, .right = child.position.x + child.size.x, .bottom = child.position.y + child.size.y};
+    return edges;
+}
+
 /// The color of a part in state @p button (normal, hovered, held).
 auto
 part_color(const ContextState& state,
@@ -681,13 +764,15 @@ UiFrame::end_window() noexcept
         return;
     }
 
-    // A child left open is closed first.
+    // A table or a child left open is closed first.
+    state.close_tables(*this, state.window_stack.back());
     while (state.windows[state.window_stack.back()].child)
     {
         const WindowState& child = state.windows[state.window_stack.back()];
         state.report(UiFrameProblem::UNBALANCED_STACK, "end_window", "begin_child() without end_child()", child.name, child.id);
         end_child();
     }
+    state.close_tables(*this, state.window_stack.back());
     const std::uint32_t index = state.window_stack.back();
     WindowState& window = state.windows[index];
     finish_content(state, *this, window);
@@ -755,10 +840,6 @@ UiFrame::begin_child(std::string_view name,
     child.menu_bar_height = has_any(flags, UiWindowFlag::MENU_BAR) ? std::floor(state.current_font().line_height + state.style.frame_padding.y * 2) : 0.0F;
     child.next_menu_columns = {};
     child.collapsed = false;
-    if (has_any(child_flags, ChildFlag::RESIZE_X | ChildFlag::RESIZE_Y))
-    {
-        state.report(UiFrameProblem::NOT_IMPLEMENTED, "begin_child", "resizable child regions arrive with the splitters of phase U7", name, id);
-    }
     state.children_this_frame.push_back(index);
 
     // A child of a skipped window is skipped too (but end_child() is expected).
@@ -780,8 +861,21 @@ UiFrame::begin_child(std::string_view name,
     const Vector2 fitted{.x = child.content_size.x + child.padding.x * 2, .y = child.content_size.y + child.padding.y * 2};
     child.size = {.x = extent(size.x, available.x, has_any(child_flags, ChildFlag::AUTO_RESIZE_X) ? fitted.x : std::max(4.0F, available.x)),
                   .y = extent(size.y, available.y, has_any(child_flags, ChildFlag::AUTO_RESIZE_Y) ? fitted.y : std::max(4.0F, available.y))};
+
+    // Resized by the user (RESIZE_X, RESIZE_Y): the size dragged to replaces the one asked for.
+    const bool resize_x = has_any(child_flags, ChildFlag::RESIZE_X);
+    const bool resize_y = has_any(child_flags, ChildFlag::RESIZE_Y);
+    if (resize_x && child.resized_size.x > 0)
+    {
+        child.size.x = child.resized_size.x;
+    }
+    if (resize_y && child.resized_size.y > 0)
+    {
+        child.size.y = child.resized_size.y;
+    }
     child.position = owner.cursor;
     child.outer = {.left = child.position.x, .top = child.position.y, .right = child.position.x + child.size.x, .bottom = child.position.y + child.size.y};
+    const ResizeEdges edges = resize_x || resize_y ? resize_child_edges(state, child, index, parent, resize_x, resize_y) : ResizeEdges{};
     child.hit = child.outer.intersection(owner.clip);
     child.clip = child.hit;
 
@@ -795,6 +889,19 @@ UiFrame::begin_child(std::string_view name,
         draw_decorations(state, child, index, decorations, framed ? StyleColor::FRAME_BACKGROUND : StyleColor::CHILD_BACKGROUND,
                          framed ? style.frame_rounding : style.child_rounding,
                          bordered ? (framed ? style.frame_border_size : style.child_border_size) : 0.0F);
+
+        // A resizable edge under the mouse, or dragged, is highlighted.
+        const UiRectangle& outer = child.outer;
+        if (edges.right_hovered || edges.right_held)
+        {
+            list.add_rectangle_filled({.left = outer.right - 2.0F, .top = outer.top, .right = outer.right, .bottom = outer.bottom},
+                                      state.color(edges.right_held ? StyleColor::SEPARATOR_ACTIVE : StyleColor::SEPARATOR_HOVERED));
+        }
+        if (edges.bottom_hovered || edges.bottom_held)
+        {
+            list.add_rectangle_filled({.left = outer.left, .top = outer.bottom - 2.0F, .right = outer.right, .bottom = outer.bottom},
+                                      state.color(edges.bottom_held ? StyleColor::SEPARATOR_ACTIVE : StyleColor::SEPARATOR_HOVERED));
+        }
         list.pop_clip_rectangle();
     }
     child.skip_items = child.clip.empty();
@@ -806,6 +913,11 @@ void
 UiFrame::end_child() noexcept
 {
     ContextState& state = *m_state;
+    if (state.frame_active && !state.window_stack.empty())
+    {
+        // A table left open in the child (or one whose own region it is) is closed first.
+        state.close_tables(*this, state.window_stack.back());
+    }
     if (!state.frame_active || state.window_stack.empty() || !state.windows[state.window_stack.back()].child)
     {
         state.report(state.frame_active ? UiFrameProblem::END_WITHOUT_BEGIN : UiFrameProblem::FRAME_NOT_ACTIVE, "end_child",

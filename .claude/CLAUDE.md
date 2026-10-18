@@ -283,6 +283,19 @@ Original hard requirements (from the user's initial specification):
   no SBAlgorithm/SBParagraph/SBLine (one level-0 run per line; verified identical to SheenBidi on 99 002 paragraphs, check
   removed); SBScriptLocator created once. Remaining allocations only when a text is longer than earlier ones (scratch
   vectors grow by exact size; draw lists of 3 slots). U6 structure test now `"Popup at frame {:03}"`.
+- **UI tables and visualization (U7 as built, 2026-10-18)** — docs/ui-design.md §B "U7 as built". Units tables.cpp
+  (TableState/TableColumnState in `tables` + `table_lookup`, `table_stack`; lazy `layout_table()` at the first row/cell:
+  defaults, widths (fixed: request or last frame's content; stretched: weights; floors + remainder), places, the borders'
+  mouse (before the cells), the draw channels; a cell sets the window's cursor, indent, clip, item width and
+  `WindowState::table` (so `content_right()` is the column's); `end_row()` draws backgrounds + top border in channel 0;
+  end_table() merges the splitter, measures `auto_width`, restores the host (non-scrolling) or ends the child "##table"
+  (scrolling), draws the outer borders and the context menu popup), clipper.cpp (UiListClipper over
+  ContextState::clipper_position/seek/visible), visuals.cpp; child RESIZE_X/Y in windows.cpp (`WindowState::resized_size`);
+  `LastItem::clip` (is_item_hovered() uses the item's clip); `DrawListSplitter` (channel 0 = the list's own buffers; merge
+  joins continuing commands). A table's first frame is measured, not drawn (cell clips empty). API added beyond the design:
+  UiListClipper, table queries, TableBackgroundTarget/TableColumnStatus. Gotchas: GCC -O3 false -Warray-bounds on
+  ranges::sort of a small std::array span; text cache entries recycled for longer texts allocate (follow-up task proposed;
+  the U7 allocation test keeps the mouse off the plots).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -641,7 +654,7 @@ gfx/
 │                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag); U4: style/style.cppm,
 │                  input/frame_input.cppm, context/ (context.cppm + types/frame/context_class partitions, state.cppm
 │                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos; U6: trees, tabs, menus,
-│                  tooltips, drag_drop), platform/ (gfx_ui_platform:
+│                  tooltips, drag_drop; U7: tables, clipper, visuals), platform/ (gfx_ui_platform:
 │                  ui_platform.cppm/.cpp); U5: text/boundaries.cppm, text_editor.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
@@ -651,7 +664,8 @@ gfx/
             atlas_embed_test.cpp + gfx_add_ui_atlas, scripts/GfxCompareAtlasBuilds.cmake; U2: font_atlas_test.cpp,
             text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp; U3: draw_list_test.cpp,
             renderer_test.cpp = gfx_ui_draw_tests with atlas gfx.tests.draw_latin; U4: context_test.cpp,
-            context_render_test.cpp, context_test_support.cppm = gfx_ui_context_tests (atlas context_latin),
+            context_render_test.cpp, context_test_support.cppm = gfx_ui_context_tests (atlas context_latin; U5
+            input_widgets_test.cpp, U6 structure_test.cpp, U7 table_test.cpp),
             ui_platform_test.cpp = gfx_ui_platform_tests (atlas platform_latin)), compilation/ui/,
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
@@ -672,6 +686,8 @@ gfx/
   GTEST_BREAK_ON_FAILURE=1 stops gdb at the failing assertion (select the test frame in the call stack).
   The executable list in launch.json must be updated when a test executable is added.
 - PowerShell splits `-DNAME=a.b` arguments at the dot: quote `-D` arguments.
+- Since 2026-10-18 the linker's error output (ld's stderr) is lost in Claude's Bash shell: the defect detector
+  `CompilationFailure.ImportStdDuplicatesStaticLocals` fails there with an empty diagnostic. Run ctest from PowerShell.
 - Vulkan tests: `build/debug/tests/graphics/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
   GPU, the default selection is NVIDIA; `GFX_TEST_PHYSICAL_DEVICE=0` runs on Intel, `GFX_TEST_VALIDATION=0`
   disables the layers (the harness sets `VK_ADD_LAYER_PATH` itself). CTest `VulkanCapture.RenderDoc`
@@ -690,11 +706,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63) committed; **U6 (structure: trees, tabs, menus, public popups, modals, tooltips, drag and drop) done, awaiting validation** (§B "U6 as built", 9 deviations); **follow-up after U6 (allocation-free cache misses, LRU fix, bidi fast path) done, cache policy accepted 2026-10-18**; U7 (tables and visualization) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted) committed; **U7 (tables, list clipper, splitters, resizable child regions, plots, progress bars, images) done, awaiting validation** (§B "U7 as built", 11 deviations); U8 (docking) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **718**, all passing in Debug and Release, 2026-10-18 (after the follow-up after U6: + 3
+Test count at last report: **748**, all passing in Debug and Release, 2026-10-18 (after U7: + 21 table/visual tests, + 1 render
+× 2 GPUs, + 3 draw list, + 1 rounded image × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19; run from
+PowerShell, see §8). Before U7: 718 (after the follow-up after U6: + 3
 allocation tests, + 2 cache tests; skips Debug 4, Release 19). Before: 713 (after U6: + 27 structure tests, + 1 render
 × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19). Before U6: 682 (after U5: + 9 text editor tests, + 26
 input widget tests + 2 render × 2 GPUs, + 1 draw list, + 1 allocation, + 1 IME × 2 platform backends, + 1 compile-failure;

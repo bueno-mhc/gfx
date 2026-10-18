@@ -242,6 +242,9 @@ ContextState::ContextState(const UiContextDescription& context_description)
     tab_bars.reserve(limits.tab_bars);
     tab_bar_lookup.reserve(limits.tab_bars);
     tab_bar_stack.reserve(limits.stack_depth);
+    tables.reserve(limits.tables);
+    table_lookup.reserve(limits.tables);
+    table_stack.reserve(limits.stack_depth);
     tree_stack.reserve(limits.stack_depth);
     drag_drop.type.reserve(MAXIMUM_PAYLOAD_TYPE_SIZE);
     drag_drop.data.reserve(limits.drag_drop_payload_bytes);
@@ -414,6 +417,12 @@ ContextState::list_of(const WindowState& window) noexcept -> DrawList&
 auto
 ContextState::content_right(const WindowState& window) const noexcept -> float
 {
+    if (window.table < tables.size())
+    {
+        // A table's cell: its column's content.
+        const TableState& table = tables[window.table];
+        return table.columns[static_cast<std::size_t>(table.column)].content_right;
+    }
     if (window.columns.active)
     {
         const ColumnsState& columns = window.columns;
@@ -665,7 +674,8 @@ ContextState::item_add(WindowState& window,
                          .rectangle = rectangle,
                          .window = static_cast<std::uint32_t>(&window - windows.data()),
                          .visible = !visible.empty() && !window.hidden,
-                         .disabled = disabled};
+                         .disabled = disabled,
+                         .clip = window.clip};
     if (id == 0)
     {
         return last_item.visible;
@@ -1272,6 +1282,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     state.next_item_has_open = false;
     state.tree_stack.clear();
     state.tab_bar_stack.clear();
+    state.table_stack.clear();
     state.menu_bar = MenuBarState{};
     state.tooltip_seen = false;
     state.tooltip_depth = 0;
@@ -1323,6 +1334,11 @@ UiContext::end_frame() noexcept -> UiFrameReport
     }
 
     // What was left open is closed, and reported.
+    while (!state.table_stack.empty())
+    {
+        state.report(UiFrameProblem::UNBALANCED_STACK, "end_frame", "begin_table() without end_table()");
+        frame.end_table();
+    }
     if (!state.group_stack.empty())
     {
         state.report(UiFrameProblem::UNBALANCED_STACK, "end_frame", "begin_group() without end_group()");

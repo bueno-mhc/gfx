@@ -173,4 +173,8 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_payloads_are_trivially_copyable.cpp
         EXPECTED_DIAGNOSTIC "is_trivially_copyable"
         LIBRARIES gfx::ui)
+    gfx_add_compilation_failure_test(UiListClippersAreNotCopied
+        SOURCES ui/ui_list_clippers_are_not_copied.cpp
+        EXPECTED_DIAGNOSTIC "use of deleted function"
+        LIBRARIES gfx::ui)
 endif()

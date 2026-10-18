@@ -582,4 +582,115 @@ TEST(TextAllocationTest, ImmediateModeTextsChangingEveryFrameAllocateNothing)
     EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
 }
 
+TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheMouseMovesOverThem)
+{
+    // A scrolling table of 10000 rows through a list clipper (a frozen header row, sortable, resizable, reorderable,
+    // hideable columns, spanning selectables, alternating rows, borders), scrolled every frame; plots, a progress bar,
+    // a splitter and a resizable child region; the mouse sweeping over them.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    std::array<float, 100> values{};
+    for (std::size_t value = 0; value < values.size(); ++value)
+    {
+        values[value] = std::sin(static_cast<float>(value) * 0.3F);
+    }
+    float left = 120;
+    float right = 200;
+    std::uint32_t submitted = 0;
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 560, .y = 580}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Tables"))
+        {
+            constexpr TableFlag FLAGS = TableFlag::SCROLL_Y | TableFlag::ROW_BACKGROUND | TableFlag::BORDERS | TableFlag::RESIZABLE | TableFlag::REORDERABLE
+                                        | TableFlag::HIDEABLE | TableFlag::SORTABLE;
+            if (frame.begin_table("large", 4, FLAGS, {.x = 0, .y = 300}))
+            {
+                frame.table_setup_column("Index", TableColumnFlag::DEFAULT_SORT);
+                frame.table_setup_column("Name");
+                frame.table_setup_column("Value");
+                frame.table_setup_column("Flag", TableColumnFlag::WIDTH_FIXED, 40.0F);
+                frame.table_setup_scroll_freeze(0, 1);
+                frame.table_headers_row();
+                static_cast<void>(frame.table_sort_specifications());
+                frame.set_scroll_y(static_cast<float>((frame_number % 50) * 2977));
+                UiListClipper clipper;
+                clipper.begin(frame, 10000);
+                while (clipper.step())
+                {
+                    for (std::uint32_t row = clipper.display_start(); row < clipper.display_end(); ++row)
+                    {
+                        frame.table_next_row();
+                        frame.table_next_column();
+                        frame.push_id(static_cast<std::int32_t>(row));
+                        static_cast<void>(frame.selectable("##row", row % 7 == 0, SelectableFlag::SPAN_ALL_COLUMNS));
+                        frame.pop_id();
+                        frame.same_line();
+                        frame.text("{}", row);
+                        frame.table_next_column();
+                        frame.text_unformatted("name");
+                        frame.table_next_column();
+                        frame.text("{:.2f}", static_cast<double>(row) * 0.25);
+                        frame.table_next_column();
+                        frame.text_unformatted(row % 2 == 0 ? "yes" : "no");
+                        ++submitted;
+                    }
+                }
+                frame.end_table();
+            }
+            frame.plot_lines("Wave", values, {.size = {.x = 240, .y = 50}});
+            frame.plot_histogram("Bars", std::span{values}.first(20), {.size = {.x = 240, .y = 50}});
+            frame.progress_bar(static_cast<float>(frame_number % 100) / 100.0F);
+            frame.progress_bar(-1.0F);
+            static_cast<void>(frame.splitter("split", true, 8.0F, left, right, 40.0F, 40.0F));
+            if (frame.begin_child("left", {.x = left, .y = 60}, ChildFlag::BORDERS | ChildFlag::RESIZE_Y))
+            {
+                frame.text_unformatted("Left");
+            }
+            frame.end_child();
+            frame.same_line(0, 8.0F);
+            if (frame.begin_child("right", {.x = right, .y = 60}, ChildFlag::BORDERS))
+            {
+                frame.text_unformatted("Right");
+            }
+            frame.end_child();
+        }
+        frame.end_window();
+    };
+
+    // The mouse moves over the table without pressing, the table scrolls: a cycle of 50 frames (the first two warm
+    // up). Not over the plots: their tooltips' texts, longer than the rows', would land in cache entries whose storage
+    // held short texts (a limitation of the text layout cache, not of tables).
+    const auto input = [&](std::uint32_t frame_number)
+    {
+        const std::uint32_t step = frame_number % 50;
+        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((step * 37) % 520), .y = 40.0F + static_cast<float>((step * 53) % 280)};
+        return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 620}, .mouse_present = true, .mouse_position = mouse};
+    };
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 100; ++frame_number)
+    {
+        const UiFrameReport report = run(frame_number);
+        EXPECT_TRUE(report.ok()) << frame_number << ": " << (report.issues.empty() ? std::string_view{} : report.issues.front().detail);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    submitted = 0;
+    for (std::uint32_t frame_number = 100; frame_number < 200; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+    EXPECT_LT(submitted, 100U * 25U) << "about the rows in view each frame";
+}
+
 } // namespace

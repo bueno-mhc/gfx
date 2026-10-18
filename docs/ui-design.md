@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U5
-committed; U6 built, awaiting validation (§B, "U6 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U6
+committed (with the text layout follow-up); U7 built, awaiting validation (§B, "U7 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -963,6 +963,106 @@ report, and your validation (you commit).
 - **Tests**: `gfx_ui_text_allocation_tests` +3 (texts changing every frame, layouts made while the cache is full, a
   window of counters); `gfx_ui_text_tests` +2 (layouts used in one frame only are replaced first; the least recently
   used layout is replaced when the cache is full — both fail with the former `unlink()`).
+
+### U7 as built (2026-10-18)
+
+- **Units** (in `gfx.ui.context`): `tables.cpp` (tables, their queries, the clipper's hooks), `clipper.cpp`
+  (`UiListClipper`), `visuals.cpp` (splitters, plots, progress bars, images); `windows.cpp` gained resizable child regions,
+  `widgets.cpp` selectables spanning a table row and separators spanning a cell. In `gfx.ui.draw`: `DrawListSplitter` and
+  `DrawList::add_image_rounded()`. Enumerations `TableBackgroundTarget` (ROW, ROW_OVERLAY, CELL) and `TableColumnStatus`
+  (ENABLED, VISIBLE, SORTED, HOVERED); constants MAXIMUM_TABLE_COLUMNS (64), MINIMUM_TABLE_COLUMN_WIDTH (4),
+  RESIZE_HANDLE_HALF_WIDTH (4), INDETERMINATE_PROGRESS_SECONDS (1); `UiContextLimits::tables` (32, reserved).
+- **Tables**: state per identifier (`TableState`, columns reset when their count changes), kept between frames and while
+  the table is not submitted: widths and weights, display order, visibility, sort. Flags get Dear ImGui's defaults (fixed
+  columns when SCROLL_X or an auto-resizing window, else stretched; RESIZABLE draws inner vertical borders; a scrolling
+  table never extends its host's height). Widths: fixed columns as asked, or as their content measured last frame
+  (SIZING_FIXED_SAME: the widest), following it until the user resizes them; stretched columns share the rest by weight
+  (SIZING_STRETCH_PROPORTIONAL: weights from their content), floored with the remainder given unit by unit to the last
+  ones (PRECISE_WIDTHS: fractions). Each column is padded by `cell_padding.x` on both sides, the outer edges only with
+  outer padding (BORDERS_OUTER_VERTICAL or PAD_OUTER_X). NO_HOST_EXTEND_X shrinks a table of fixed columns to them;
+  NO_HOST_EXTEND_Y keeps it at its asked height (rows clipped). A table's first frame is laid out and measured, not
+  drawn. Rows: as tall as their cells' content plus `cell_padding.y` above and below (at least the asked height); header
+  rows a line tall. A scrolling table puts its rows in a child region ("##table"); its first `freeze_rows` rows and first
+  `freeze_columns` columns (display order) stay in view, the others clipped beside them. Cells: the cursor at the
+  column's content, its clip, item width (65 % of the column), skip_items for hidden columns, `content_right()` the
+  column's; indentation added in a cell (tree nodes) carries to the next rows' INDENT_ENABLE columns (the first column by
+  default).
+- **Mouse**: a column's right border (±RESIZE_HANDLE_HALF_WIDTH, over the whole table unless NO_BORDERS_IN_BODY; not the
+  last column's when one stretches) resizes it before any cell takes the press — a fixed column alone, else the next
+  column gives or takes the difference (stretched columns' weights follow; Dear ImGui's rules); a double click fits it to
+  its content; NO_KEEP_COLUMNS_VISIBLE / SCROLL_X lift the limit that keeps the next columns in view. A header dragged past
+  its neighbor moves there next frame (not past NO_REORDER columns nor the frozen columns' edge); a click sorts (Shift
+  adds with SORT_MULTIPLE; directions cycle as PREFER_SORT_DESCENDING, NO_SORT_ASCENDING/DESCENDING and SORT_TRISTATE
+  allow; DEFAULT_SORT on first use; one column at least without SORT_TRISTATE); a right click on the header row (or the
+  body with CONTEXT_MENU_IN_BODY) opens the context menu: "Size column to fit", "Size all columns to fit/default",
+  "Reset order", then a check item per column (NO_HIDE ones and the last shown one cannot be hidden). Headers show the sort
+  arrow and, sorted by several columns, their rank; a cut label gets a tooltip; HIGHLIGHT_HOVERED_COLUMN.
+- **Drawing**: a channel for the row and cell backgrounds and the borders (drawn after every row, so under the cells, as
+  Dear ImGui), one for highlights spanning a row, then one per column (twice when rows are frozen): a column's cells share
+  a clip, so a table of any number of rows draws in a few commands (a 4-column table of 30 rows with borders and
+  backgrounds: 16 commands at most for the whole frame, checked). Row backgrounds: TABLE_HEADER_BACKGROUND, the alternating
+  TABLE_ROW_BACKGROUND(_ALTERNATE), `table_set_background_color()` (ROW, ROW_OVERLAY, CELL); borders: inner horizontal
+  (strong under a header), inner vertical (strong at the frozen columns' edge or when the body has none; SEPARATOR_HOVERED
+  / SEPARATOR_ACTIVE while resized), outer.
+- **UiListClipper** (new public class): `begin(frame, count, item_height = -1)`, `include_item()`, `step()`,
+  `display_start()` / `display_end()`, `end()` (also by the destructor). Without a height the first item is submitted
+  alone and measured (every frame, as Dear ImGui). The visible range comes from the window's clip (a table: the rows below
+  the frozen ones); skipped items move the cursor (a table: the next row's place, its row index and alternating color as
+  if the rows were submitted). A 10 000-row table scrolled every frame submits only the rows in view and allocates nothing.
+- **Splitters, child regions**: `splitter()` (a bar after the first area, as long as the space available, drawn only while
+  hovered or dragged as Dear ImGui's; minimums kept; the cursor does not move); `ChildFlag::RESIZE_X` / `RESIZE_Y` (the
+  right or bottom edge, on both sides of the border, drags the size, kept in the child's state; a double click fits the
+  content; the edge highlighted).
+- **Plots, progress bars, images**: `plot_lines()` (a polyline through at most one sample per pixel, Dear ImGui's
+  sampling; the points in the frame arena), `plot_histogram()` (bars from zero or the scale's edge, a pixel apart), the
+  values under the mouse in a tooltip, overlay text, a scale from the values unless given; `progress_bar()` (the filled
+  part clipped out of the rounded bar; the percentage after it; negative: a sweeping fifth of the bar); `image()`,
+  `image_rounded()` (a textured fan with an anti-aliased fringe), `image_button()`.
+- **Deviations from the design, for your validation**:
+  1. **API added**: `UiListClipper` (the "clipping of large tables" needs Dear ImGui's ImGuiListClipper), the table
+     queries `table_column_count()`, `table_column_index()`, `table_row_index()`, `table_column_status()`,
+     `table_hovered_column()`, `table_set_column_enabled()`, `table_set_background_color()` (with two enumerations), and
+     `DrawListSplitter` public with `DrawList::add_image_rounded()` (Dear ImGui's ImDrawListSplitter, AddImageRounded).
+  2. "Table state round trip" is the state kept between frames, while the table is not submitted, and changed by the
+     context menu or code; saving it with a layout is U8's (`save_layout()` still throws), so NO_SAVED_SETTINGS has no
+     effect yet.
+  3. A table's first frame is measured, not drawn: columns fitted to their content never show at their minimum width
+     (Dear ImGui fits them over its first frames instead).
+  4. Indeterminate progress bars move with the context's time (INDETERMINATE_PROGRESS_SECONDS per sweep); Dear ImGui's
+     caller animates a negative fraction.
+  5. No public `table_header(label)` (custom header rows) nor `table_angled_headers_row()` (ANGLED_HEADER is accepted and
+     does nothing); `table_headers_row()` covers the usual header row. Added when asked.
+  6. Dear ImGui's cell spacing with inner borders (CellSpacingX1/X2 vs CellPaddingX) is simplified to `cell_padding.x` on
+     each side of every column.
+  7. Frozen rows and columns apply whenever the table scrolls on that axis (Dear ImGui only while it is scrolled: the
+     same picture).
+  8. `is_item_hovered()` uses the clip the item was added with (`LastItem::clip`) instead of the window's clip at the
+     query: a selectable spanning a row is hovered over every column, and right after begin_window() the title bar
+     reports hovering (as Dear ImGui).
+  9. A splitter's length is the space available (no parameter), and it is invisible until hovered.
+  10. `include_item()` keeps 4 items at most; a clipper used in a table treats each item as a row.
+  11. `DrawListSplitter::merge()` joins a command with the one before it when they continue each other (same clip,
+      textures that agree).
+- **Facts found**: GCC 16 at -O3 reports a false -Warray-bounds in `std::ranges::sort` of a 5-element `std::array` span
+  (the clipper sorts its ranges by insertion); in Claude's Bash shell the linker's error output is lost since today (the
+  defect detector `ImportStdDuplicatesStaticLocals` fails there with an empty diagnostic and passes from PowerShell: the
+  suites were run from PowerShell); a text layout cache entry recycled for a longer text than it held still allocates (a
+  plot's tooltip next to short cells: 18 allocations in 100 frames) — a follow-up task is proposed; the allocation test
+  keeps its mouse off the plots meanwhile.
+- **Verified by eye** (pictures from both GPUs): a table with a header row, alternating rows and borders, a histogram and a
+  half-filled progress bar; a scrolled table with its header row and first column frozen, a spanning selection, two
+  sorted columns (arrows and ranks) and the context menu open.
+- **Tests**: `gfx_ui_context_tests` +21 (table_test.cpp: rows and stretched columns, content-fitted and asked widths and
+  weights, NO_HOST_EXTEND_X and a least height, resizing a fixed column and fitting it by a double click, resizing
+  stretched columns within the minimum, reordering by a header and "Reset order", hiding from the context menu and the
+  state kept while not submitted, single and multiple / tristate sorting, frozen rows and columns while scrolling, the
+  clipper in a 10 000-row table and in a window with an included item, spanning selectables and indentation, few draw
+  commands, cell colors and statuses, misuse; splitters, resizable child regions, plots, progress bars, images) and +1 ×
+  each GPU (a table, a histogram, a progress bar read back); `gfx_ui_draw_tests` +3 (rounded images, channels drawn in
+  order, joined commands and nested splitters) and +1 × each GPU (a rounded image's corners and edges); the allocation
+  test +1 (the large clipped table scrolled every frame, plots, progress bars, a splitter, a resizable child: no
+  allocation over 100 frames); compile-failure `UiListClippersAreNotCopied`. The later-phase report test now uses U8's
+  docking calls.
 
 ---
 

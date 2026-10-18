@@ -159,6 +159,8 @@ struct WindowState
     float menu_bar_height = 0;                    ///< Height of its menu bar this frame (UiWindowFlag::MENU_BAR), or 0.
     std::array<float, 2> menu_columns{};          ///< Menus: widths of the labels and shortcuts of last frame's items.
     std::array<float, 2> next_menu_columns{};     ///< ...measured this frame.
+    Vector2 resized_size{};                       ///< Child regions with RESIZE_X / RESIZE_Y: the size dragged to (0: the one asked for).
+    std::uint32_t table = 0xFFFFFFFFU;            ///< The table whose cell is being filled in it, or none.
     ColumnsState columns{};                       ///< Legacy columns.
     std::uint32_t identifier_stack_base = 0;      ///< Identifier stack depth at begin.
     DrawList draw_list{};                         ///< Its drawing (roots; children draw into their root's).
@@ -214,6 +216,7 @@ struct LastItem
     bool visible = false;                ///< Not clipped.
     bool edited = false;                 ///< Its value changed this frame.
     bool disabled = false;               ///< Submitted disabled.
+    UiRectangle clip{.left = -1.0e9F, .top = -1.0e9F, .right = 1.0e9F, .bottom = 1.0e9F}; ///< Its window's clip when it was added (the mouse hovers it within).
 };
 
 /// A color changed by push_style_color().
@@ -337,6 +340,129 @@ struct TabBarState
     bool content_pushed = false;                ///< Its identifier was pushed.
     std::uint32_t dragged = 0;                  ///< The tab being dragged to another place (REORDERABLE).
     bool appearing = false;                     ///< Not submitted last frame.
+};
+
+/// A column of a table, remembered between frames.
+struct TableColumnState
+{
+    std::string_view label{};                           ///< Its header's label this frame (in the frame arena).
+    TableColumnFlag flags = TableColumnFlag::NONE;      ///< Flags of this frame, one WIDTH_* flag included.
+    float initial_width_or_weight = 0;                  ///< table_setup_column()'s width or weight this frame.
+    bool initialized = false;                           ///< Its defaults were applied.
+    bool user_enabled = true;                           ///< Not hidden by the user (context menu, table_set_column_enabled()).
+    bool enabled = true;                                ///< Shown this frame.
+    float width_request = -1;                           ///< Fixed: its width (-1: its content's).
+    float stretch_weight = -1;                          ///< Stretch: its share of the width (-1: the default).
+    std::uint8_t auto_fit_frames = 0;                   ///< Frames its width (or weight) still follows its content.
+    float auto_width = 0;                               ///< Width of its content, measured last frame.
+    float measured_width = 0;                           ///< ...this frame so far.
+    bool measured = false;                              ///< A cell of it was submitted this frame.
+    float width = 0;                                    ///< Width of its content this frame.
+    float offset = 0;                                   ///< Its left edge from the first column's (content space).
+    float minimum_x = 0;                                ///< Its left edge this frame (screen).
+    float maximum_x = 0;                                ///< Its right edge this frame (screen).
+    float content_left = 0;                             ///< Where its cells' content starts (screen).
+    float content_right = 0;                            ///< Where it ends.
+    float clip_left = 0;                                ///< What its cells are clipped to (screen; empty: out of view).
+    float clip_right = 0;                               ///< ...
+    float item_width = 0;                               ///< Default item width in its cells.
+    std::uint32_t display_order = 0;                    ///< Its position among the columns.
+    std::int32_t sort_order = -1;                       ///< Its rank in the sort (-1: not sorted).
+    SortDirection sort_direction = SortDirection::NONE; ///< How it is sorted.
+    bool frozen = false;                                ///< Kept in view while the table scrolls horizontally.
+};
+
+/// A cell color of the current row (TableBackgroundTarget::CELL, header highlights).
+struct TableCellBackground
+{
+    std::uint32_t column = 0; ///< The cell's column.
+    Color color{};            ///< Its color.
+};
+
+/// A table, remembered between frames.
+struct TableState
+{
+    /// No column, no window.
+    static constexpr std::uint32_t NONE = 0xFFFFFFFFU;
+
+    std::uint32_t id = 0;                              ///< Identifier.
+    TableFlag flags = TableFlag::NONE;                 ///< Flags of this frame (defaults applied).
+    std::vector<TableColumnState> columns{};           ///< Its columns, by index.
+    std::vector<std::uint32_t> display{};              ///< The column at each display position.
+    std::vector<TableColumnSortSpecification> sort{};  ///< The sorted columns, by rank.
+    std::vector<TableCellBackground> cell_backgrounds{}; ///< Cell colors of the current row.
+    bool sort_changed = true;                          ///< The sort changed since table_sort_specifications() last read it.
+    bool sort_initialized = false;                     ///< DEFAULT_SORT columns were sorted.
+    std::uint64_t last_frame = 0;                      ///< Last frame it was submitted.
+    float last_outer_height = 0;                       ///< Height of its rectangle last frame.
+    float last_header_height = 0;                      ///< Height of its first rows up to its last header row, last frame (0: none).
+    std::uint32_t reorder_column = NONE;               ///< A header dragged past its neighbor: the column moved next frame...
+    std::int32_t reorder_direction = 0;                ///< ...one place left (-1) or right (+1).
+    std::uint32_t resized_column = NONE;               ///< The column whose border is dragged.
+    std::uint32_t context_column = NONE;               ///< The column whose header opened the context menu (NONE: none).
+    DrawListSplitter splitter{};                       ///< Channels: backgrounds and borders, span highlights, a column each.
+
+    // This frame.
+    std::uint32_t host_window = NONE;                  ///< The window it was begun in.
+    std::uint32_t window = NONE;                       ///< The window its cells are in (its own child region when it scrolls).
+    bool scrolls = false;                              ///< In its own child region (SCROLL_X, SCROLL_Y).
+    bool measuring = false;                            ///< Its first frame: laid out and measured, not drawn.
+    UiRectangle outer{};                               ///< Its rectangle (screen; its bottom grows with the rows unless it scrolls).
+    UiRectangle work{};                                ///< Where its rows go: its rectangle, or its child region's visible content.
+    UiRectangle region_clip{};                         ///< Where its rows are visible (the window's clip within it).
+    UiRectangle body_clip{};                           ///< ...the rows that are not frozen.
+    float minimum_height = 0;                          ///< Least height when it does not scroll.
+    float inner_width = 0;                             ///< begin_table()'s inner width (SCROLL_X).
+    float origin_x = 0;                                ///< Screen x of content offset 0 (scrolled).
+    float origin_y = 0;                                ///< Screen y of row offset 0 (scrolled).
+    float padding_x = 0;                               ///< Padding left and right of each column's content.
+    float padding_y = 0;                               ///< Padding above and below each row's content.
+    bool pad_outer = false;                            ///< Padding before the first column and after the last.
+    float total_width = 0;                             ///< Width of the shown columns.
+    float frozen_right = 0;                            ///< Right edge of the frozen columns (screen).
+    std::uint32_t freeze_columns = 0;                  ///< Columns kept in view (table_setup_scroll_freeze()).
+    std::uint32_t freeze_rows = 0;                     ///< Rows kept in view.
+    std::uint32_t setup_columns = 0;                   ///< table_setup_column() calls this frame.
+    bool layout_done = false;                          ///< Its columns were laid out this frame.
+    std::int32_t row = -1;                             ///< The current row (header rows included).
+    std::int32_t body_row = -1;                        ///< The current row among the others (row backgrounds alternate by it).
+    bool row_open = false;                             ///< A row was started.
+    TableRowFlag row_flags = TableRowFlag::NONE;       ///< ...with these flags.
+    bool previous_row_header = false;                  ///< The row before it was a header row.
+    float row_top = 0;                                 ///< Its top (row offset).
+    float row_screen_top = 0;                          ///< ...on screen.
+    float row_minimum_height = 0;                      ///< Its least height.
+    float row_content_bottom = 0;                      ///< Bottom of its cells' content so far (screen).
+    float next_row_top = 0;                            ///< Where the next row starts (row offset).
+    float frozen_bottom = -1;                          ///< Bottom of the frozen rows (row offset; -1: not reached).
+    float header_bottom = -1;                          ///< Bottom of the last header row (screen; -1: none).
+    std::array<Color, 2> row_colors{};                 ///< TableBackgroundTarget::ROW and ROW_OVERLAY colors of the row...
+    std::array<bool, 2> row_color_set{};               ///< ...when set.
+    std::int32_t column = -1;                          ///< The current cell's column (-1: none).
+    bool cell_open = false;                            ///< A cell is being filled.
+    float cell_indent_start = 0;                       ///< The window's indentation when the cell (or the gap between cells) started.
+    float indent_offset = 0;                           ///< Indentation added in the table (tree nodes): applies in INDENT_ENABLE columns.
+    std::uint32_t hovered_column = NONE;               ///< The column under the mouse.
+    bool background_pushed = false;                    ///< push_table_background() is in effect...
+    std::uint32_t background_channel = 0;              ///< ...the channel it replaced...
+    UiRectangle background_clip{};                     ///< ...and the window's clip.
+
+    // The window's layout when the table began (restored by end_table()).
+    Vector2 saved_cursor{};
+    Vector2 saved_cursor_maximum{};
+    Vector2 saved_cursor_previous_line{};
+    float saved_line_height = 0;
+    float saved_previous_line_height = 0;
+    float saved_line_text_offset = 0;
+    float saved_indent = 0;
+    float saved_item_width = 0;
+    UiRectangle saved_clip{};
+    std::uint32_t identifier_depth = 0;                ///< The identifier stack's depth when it began.
+
+    // The cells' window between cells (its own values when the table scrolls).
+    float base_indent = 0;
+    float base_item_width = 0;
+    UiRectangle base_clip{};
 };
 
 /// The menu bar being filled (begin_menu_bar()).
@@ -603,6 +729,33 @@ struct ContextState
     void remember_open(std::uint32_t id,
                        bool open) noexcept;
 
+    // ----------------------------------------------------------------------------------------- tables and list clippers
+
+    /// The table whose cell is being filled in @p window, or nullptr.
+    [[nodiscard]] auto cell_table(const WindowState& window) noexcept -> TableState*;
+
+    /// Draws what follows in @p window under the cells of its table's current row, clipped to the whole row (a
+    /// selectable spanning every column); false (nothing changed) outside a cell.
+    auto push_table_background(WindowState& window) noexcept -> bool;
+
+    /// Ends push_table_background().
+    void pop_table_background(WindowState& window) noexcept;
+
+    /// Ends the tables begun in window @p window or filling it, reported as left open.
+    void close_tables(UiFrame& ui_frame,
+                      std::uint32_t window) noexcept;
+
+    /// Where the next item of @p window goes, screen y (in a table: where its next row starts; the open row ends).
+    auto clipper_position(WindowState& window) noexcept -> float;
+
+    /// Moves where the next item of @p window goes to screen y @p y, @p skipped items further.
+    void clipper_seek(WindowState& window,
+                      float y,
+                      std::uint32_t skipped) noexcept;
+
+    /// Top and bottom (screen) of what is visible where @p window's next items go.
+    [[nodiscard]] auto clipper_visible(const WindowState& window) const noexcept -> std::pair<float, float>;
+
     // ----------------------------------------------------------------------------------------- text fields
 
     /// Starts editing field @p id holding @p value.
@@ -792,6 +945,9 @@ struct ContextState
     bool tooltip_seen = false;
     std::uint32_t tooltip_depth = 0;
     DragDropState drag_drop{};
+    std::vector<TableState> tables{};
+    IdentifierMap table_lookup{};
+    std::vector<std::uint32_t> table_stack{};
     ColorEditFlag color_options = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::PICKER_HUE_BAR;
 
     // The frame arena and the report.
