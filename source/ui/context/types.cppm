@@ -24,6 +24,9 @@ struct UiContextLimits
     std::uint32_t items_per_frame = 4096;     ///< Interactive items a frame checks for identifier conflicts.
     std::uint32_t stack_depth = 64;           ///< Depth of the identifier, style, font, group and window stacks.
     std::size_t frame_arena_bytes = 64 * 1024; ///< Per-frame scratch memory (long formatted texts, long identifiers).
+    std::uint32_t open_states = 1024;         ///< Open states of tree nodes and collapsing headers remembered.
+    std::uint32_t tab_bars = 32;              ///< Tab bars remembered (16 tabs each before they grow).
+    std::size_t drag_drop_payload_bytes = 1024; ///< Bytes of a drag and drop payload.
 };
 
 /// @brief How mouse and keyboard input is interpreted.

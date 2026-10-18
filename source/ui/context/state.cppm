@@ -155,6 +155,10 @@ struct WindowState
     float item_width = 0;                         ///< Default item width this frame.
     bool skip_items = false;                      ///< Items are not laid out (collapsed, clipped child).
     bool popup = false;                           ///< A popup (combo lists, color pickers): drawn over the other windows.
+    bool tooltip = false;                         ///< A tooltip: drawn over the popups, never hovered.
+    float menu_bar_height = 0;                    ///< Height of its menu bar this frame (UiWindowFlag::MENU_BAR), or 0.
+    std::array<float, 2> menu_columns{};          ///< Menus: widths of the labels and shortcuts of last frame's items.
+    std::array<float, 2> next_menu_columns{};     ///< ...measured this frame.
     ColumnsState columns{};                       ///< Legacy columns.
     std::uint32_t identifier_stack_base = 0;      ///< Identifier stack depth at begin.
     DrawList draw_list{};                         ///< Its drawing (roots; children draw into their root's).
@@ -288,8 +292,91 @@ struct PopupState
     float minimum_width = 0;               ///< At least this wide (a combo's width).
     float maximum_height = 0;              ///< At most this tall (0: no limit).
     float flip_bottom = -1;                ///< Where its bottom goes when it does not fit below (-1: it is moved up instead).
+    float flip_right = -1;                 ///< Where its right edge goes when it does not fit on the right (-1: it is moved left instead).
     bool alive = false;                    ///< Begun this frame.
     std::uint64_t opened_frame = 0;        ///< When it opened.
+    bool modal = false;                    ///< A modal (begin_modal()): blocks the windows and popups below it.
+    bool menu = false;                     ///< A menu (begin_menu()).
+    bool submenu = false;                  ///< A menu opened from a menu row inside a popup (closing it closes its parent).
+    std::uint32_t bar_window = 0xFFFFFFFFU; ///< The window whose menu bar opened it, or none.
+    std::uint32_t opener_item = 0;         ///< The item that opened it (the keyboard focus returns to it).
+    bool focus_first = false;              ///< Opened from the keyboard: its first item takes the focus.
+};
+
+/// A tab of a tab bar, remembered between frames.
+struct TabState
+{
+    std::uint32_t id = 0;                              ///< Identifier.
+    TabItemFlag flags = TabItemFlag::NONE;             ///< Flags of its last submission.
+    std::uint64_t last_frame = 0;                      ///< Last frame it was submitted.
+    float content_width = 0;                           ///< The width its label (and close button) asks for.
+    float width = 0;                                   ///< Its width after fitting.
+    float offset = 0;                                  ///< From the bar's left edge (leading and trailing tabs) or the scrolled area's.
+    bool button = false;                               ///< A tab_item_button().
+    std::array<char, MAXIMUM_ISSUE_NAME_SIZE> label{}; ///< Its label (cut): the tab list, tooltips.
+    std::uint8_t label_size = 0;                       ///< Bytes of label used.
+};
+
+/// A tab bar, remembered between frames.
+struct TabBarState
+{
+    std::uint32_t id = 0;                       ///< Identifier.
+    TabBarFlag flags = TabBarFlag::NONE;        ///< Flags of this frame.
+    std::vector<TabState> tabs{};               ///< In order: leading tabs, the others, trailing tabs.
+    std::uint32_t selected = 0;                 ///< The selected tab (0: none yet).
+    std::uint32_t next_selected = 0;            ///< Selected from the next frame (a click, SET_SELECTED).
+    std::uint64_t last_frame = 0;               ///< Last frame it was submitted.
+    std::uint64_t previous_frame = 0;           ///< The frame it was submitted before that.
+    std::uint32_t window = 0xFFFFFFFFU;         ///< Its window this frame.
+    UiRectangle bar{};                          ///< Its rectangle this frame.
+    UiRectangle scrolling{};                    ///< Where the tabs that are neither leading nor trailing are drawn.
+    float scroll = 0;                           ///< How far those tabs are scrolled (FITTING_POLICY_SCROLL).
+    float scroll_target = -1;                   ///< Where they scroll to (-1: nowhere).
+    float next_offset = 0;                      ///< Where a tab appearing this frame goes, in the scrolling area.
+    std::uint32_t content_tab = 0;              ///< The tab whose content is being submitted (end_tab_item()).
+    bool content_pushed = false;                ///< Its identifier was pushed.
+    std::uint32_t dragged = 0;                  ///< The tab being dragged to another place (REORDERABLE).
+    bool appearing = false;                     ///< Not submitted last frame.
+};
+
+/// The menu bar being filled (begin_menu_bar()).
+struct MenuBarState
+{
+    bool active = false;                      ///< Between begin_menu_bar() and end_menu_bar().
+    std::uint32_t window = 0xFFFFFFFFU;       ///< Its window.
+    UiRectangle rectangle{};                  ///< Its rectangle.
+    UiRectangle saved_clip{};                 ///< The window's content clip, restored by end_menu_bar().
+    float x = 0;                              ///< Where its next menu goes.
+};
+
+/// A drag and drop in progress.
+struct DragDropState
+{
+    bool active = false;                          ///< A payload is dragged.
+    bool external = false;                        ///< From outside the UI (DragDropFlag::SOURCE_EXTERNAL).
+    std::uint32_t source_id = 0;                  ///< The source item.
+    std::uint32_t source_window = 0xFFFFFFFFU;    ///< Its window.
+    MouseButton button = MouseButton::LEFT;       ///< The button that drags.
+    DragDropFlag source_flags = DragDropFlag::NONE; ///< The source's flags.
+    std::string type{};                           ///< The payload's type.
+    std::vector<std::byte> data{};                ///< The payload's bytes.
+    bool payload_set = false;                     ///< set_drag_drop_payload() was called during this drag.
+    std::uint64_t data_frame = 0;                 ///< Last frame the source set the payload.
+    std::uint64_t accepted_frame = 0;             ///< Last frame a target accepted it.
+    std::uint32_t accept_id = 0;                  ///< The target accepting it this frame (the smallest).
+    float accept_area = 0;                        ///< Its area.
+    std::uint32_t accept_id_previous = 0;         ///< The target that accepted it last frame (it receives the delivery).
+    bool delivered = false;                       ///< A target received it: the drag ends.
+    bool hide_preview = false;                    ///< A target hides the source's preview tooltip this frame.
+    bool hide_preview_next = false;               ///< ...next frame.
+    bool in_source = false;                       ///< Between begin_drag_drop_source() and end_drag_drop_source().
+    bool source_tooltip = false;                  ///< The source began a preview tooltip.
+    bool in_target = false;                       ///< Between begin_drag_drop_target() and end_drag_drop_target().
+    std::uint32_t target_id = 0;                  ///< The target being submitted.
+    UiRectangle target_rectangle{};               ///< Its rectangle.
+    std::uint32_t hold_id = 0;                    ///< The tree node or tab the payload hovers (hold to open).
+    double hold_start = 0;                        ///< Since when.
+    bool hold_seen = false;                       ///< Hovered this frame.
 };
 
 /// A list box's label, drawn by end_list_box().
@@ -435,6 +522,13 @@ struct ContextState
     /// item_add() already ran.
     void take_focus(std::uint32_t id) noexcept;
 
+    /// Whether the keyboard drives item @p id of @p window (it has the visible focus in the focused window).
+    [[nodiscard]] auto keyboard_focused(const WindowState& window,
+                                        std::uint32_t id) const noexcept -> bool;
+
+    /// The presses of @p key this frame.
+    [[nodiscard]] auto presses(Key key) const noexcept -> std::uint32_t;
+
     /// Item @p id (the last item) changed its value this frame.
     void mark_edited(std::uint32_t id) noexcept;
 
@@ -443,12 +537,31 @@ struct ContextState
     /// Whether popup @p id is open.
     [[nodiscard]] auto popup_open(std::uint32_t id) const noexcept -> bool;
 
-    /// Opens popup @p id at @p position (popups opened from inside another popup stay above it; others close).
-    void open_popup(std::uint32_t id,
+    /// Opens popup @p id at @p position at the current level (popups opened from inside a popup stay above it;
+    /// others close; already open there, it stays and the popups above it close). Returns it (nullptr when the
+    /// stack could not grow).
+    auto open_popup(std::uint32_t id,
                     Vector2 position,
                     float minimum_width,
                     float maximum_height,
-                    float flip_bottom = -1) noexcept;
+                    float flip_bottom = -1,
+                    float flip_right = -1) noexcept -> PopupState*;
+
+    /// The stack level a popup opened now goes to: above the popup the current window is in, else 0.
+    [[nodiscard]] auto current_popup_level() const noexcept -> std::size_t;
+
+    /// The level of the top-most modal, or the stack's size.
+    [[nodiscard]] auto top_modal_level() const noexcept -> std::size_t;
+
+    /// Closes the popup window @p window is in, and the menus it was opened from (a submenu closes its parent).
+    void close_current_popup(std::uint32_t window) noexcept;
+
+    /// Begins modal @p id's window, named @p name, when it is open (end_popup() then); @p open: its close button.
+    auto begin_modal_popup(UiFrame& frame,
+                           std::uint32_t id,
+                           std::string_view name,
+                           bool* open,
+                           UiWindowFlag flags) noexcept -> bool;
 
     /// The root window whose title shows active: the focused window, or the window the focused popup (or the popup
     /// it was opened from) was opened from.
@@ -468,9 +581,27 @@ struct ContextState
     /// The stack level of the popup whose window is @p window (or of its root), or the stack's size.
     [[nodiscard]] auto popup_level_of(std::uint32_t window) const noexcept -> std::size_t;
 
-    /// Popups at the start of a frame: those not begun last frame close; a click outside closes those above it;
-    /// Escape closes the top one.
-    void update_popups() noexcept;
+    /// Popups at the start of a frame: those not begun last frame close; a click outside closes those above it
+    /// (never a modal); Escape closes the top one (not a modal) and Left a submenu, the keyboard focus going back to
+    /// their opener. Returns whether Escape closed one.
+    auto update_popups() noexcept -> bool;
+
+    // ----------------------------------------------------------------------------------------- tooltips and drag and drop
+
+    /// Begins a tooltip window at the mouse (appending to the frame's tooltip); @p hidden: laid out, not drawn.
+    void begin_tooltip_window(UiFrame& frame,
+                              bool hidden) noexcept;
+
+    /// Whether a dragged payload has hovered item @p id long enough to open it (tree nodes, tabs); call while it is
+    /// hovered.
+    auto drag_hold_opens(std::uint32_t id) noexcept -> bool;
+
+    /// The open state remembered for tree node @p id (nothing the first time).
+    [[nodiscard]] auto remembered_open(std::uint32_t id) const noexcept -> std::optional<bool>;
+
+    /// Remembers @p open for tree node @p id.
+    void remember_open(std::uint32_t id,
+                       bool open) noexcept;
 
     // ----------------------------------------------------------------------------------------- text fields
 
@@ -642,6 +773,26 @@ struct ContextState
     std::uint32_t saved_hue_color = 0;
     std::vector<ListBoxLabel> list_box_labels{};
     LastItem combo_item{};
+
+    // Structure.
+    IdentifierMap open_states{};
+    bool next_item_has_open = false;
+    bool next_item_open = false;
+    UiCondition next_item_open_condition = UiCondition::ALWAYS;
+    std::vector<std::uint32_t> tree_stack{};
+    std::vector<TabBarState> tab_bars{};
+    IdentifierMap tab_bar_lookup{};
+    std::vector<std::uint32_t> tab_bar_stack{};
+    MenuBarState menu_bar{};
+    DrawList modal_dim{};
+    std::uint64_t tooltip_frame = 0;
+    std::uint32_t tooltip_key = 0;
+    double tooltip_since = 0;
+    bool tooltip_shown = false;
+    bool tooltip_seen = false;
+    std::uint32_t tooltip_depth = 0;
+    DragDropState drag_drop{};
+    ColorEditFlag color_options = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::PICKER_HUE_BAR;
 
     // The frame arena and the report.
     std::vector<std::byte> arena_buffer{};

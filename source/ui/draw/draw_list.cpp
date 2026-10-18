@@ -92,9 +92,10 @@ DrawList::clear() noexcept
 }
 
 void
-DrawList::push_clip_rectangle(const UiRectangle& clip)
+DrawList::push_clip_rectangle(const UiRectangle& clip,
+                              bool within_current)
 {
-    m_clips.push_back(clip.intersection(m_clips.back()));
+    m_clips.push_back(within_current ? clip.intersection(m_clips.back()) : clip);
 }
 
 void

@@ -88,7 +88,7 @@ fit_size(const ContextState& state,
 {
     const Vector2 content = window.explicit_content_size.x > 0 || window.explicit_content_size.y > 0 ? window.explicit_content_size : window.content_size;
     const float scrollbar = window.scrollbar_y ? state.style.scrollbar_size : 0.0F;
-    Vector2 size{.x = content.x + window.padding.x * 2 + scrollbar, .y = content.y + window.padding.y * 2 + window.title_bar_height};
+    Vector2 size{.x = content.x + window.padding.x * 2 + scrollbar, .y = content.y + window.padding.y * 2 + window.title_bar_height + window.menu_bar_height};
     size.x = std::max(size.x, state.style.window_minimum_size.x);
     size.y = std::max(size.y, std::max(state.style.window_minimum_size.y, window.title_bar_height));
     if (!window.child && state.display_size.x > 0)
@@ -181,7 +181,8 @@ layout_area(ContextState& state,
 
     // Scrollbars from last frame's content (a horizontal one leaves less height, which may need a vertical one).
     const bool allowed = !window.collapsed && !has_any(window.flags, UiWindowFlag::NO_SCROLLBAR);
-    const float height = outer.height() - window.title_bar_height - window.padding.y * 2;
+    const float bars = window.title_bar_height + window.menu_bar_height;
+    const float height = outer.height() - bars - window.padding.y * 2;
     const float width = outer.width() - window.padding.x * 2;
     bool vertical = allowed && (has_any(window.flags, UiWindowFlag::ALWAYS_VERTICAL_SCROLLBAR) || content.y > height);
     const bool horizontal = allowed && (has_any(window.flags, UiWindowFlag::ALWAYS_HORIZONTAL_SCROLLBAR)
@@ -192,9 +193,9 @@ layout_area(ContextState& state,
 
     // The content area, and how far it scrolls.
     window.inner = {.left = outer.left,
-                    .top = outer.top + window.title_bar_height,
+                    .top = std::min(outer.top + bars, outer.bottom),
                     .right = std::max(outer.left, outer.right - (vertical ? bar : 0.0F)),
-                    .bottom = std::max(outer.top + window.title_bar_height, outer.bottom - (horizontal ? bar : 0.0F))};
+                    .bottom = std::max(std::min(outer.top + bars, outer.bottom), outer.bottom - (horizontal ? bar : 0.0F))};
     window.scroll_maximum = {.x = std::max(0.0F, content.x + window.padding.x * 2 - window.inner.width()),
                              .y = std::max(0.0F, content.y + window.padding.y * 2 - window.inner.height())};
 
@@ -330,6 +331,17 @@ draw_decorations(ContextState& state,
                                   state.color(title), rounding);
         list.pop_clip_rectangle();
     }
+    if (!window.collapsed && window.menu_bar_height > 0)
+    {
+        // The menu bar under the title bar.
+        const UiRectangle menu_bar{.left = outer.left, .top = outer.top + window.title_bar_height, .right = outer.right,
+                                   .bottom = std::min(outer.bottom, outer.top + window.title_bar_height + window.menu_bar_height)};
+        list.push_clip_rectangle(menu_bar);
+        list.add_rectangle_filled({.left = outer.left, .top = window.title_bar_height > 0 ? menu_bar.top : outer.top, .right = outer.right,
+                                   .bottom = menu_bar.bottom + rounding},
+                                  state.color(StyleColor::MENU_BAR_BACKGROUND), window.title_bar_height > 0 ? 0.0F : rounding);
+        list.pop_clip_rectangle();
+    }
     if (border > 0 && (decorated || window.collapsed))
     {
         list.add_rectangle(window.collapsed ? decorations.title : outer, state.color(StyleColor::BORDER), border, rounding);
@@ -422,6 +434,7 @@ finish_content(ContextState& state,
     {
         window.content_size = {.x = std::max(0.0F, window.cursor_maximum.x - window.cursor_start.x),
                                .y = std::max(0.0F, window.cursor_maximum.y - window.cursor_start.y)};
+        window.menu_columns = window.next_menu_columns;
     }
     if (window.identifier_stack_base == 0 || state.id_stack.size() < window.identifier_stack_base)
     {
@@ -512,16 +525,14 @@ begin_root(ContextState& state,
     {
         state.focus_window(index);
     }
-    if (has_any(flags, UiWindowFlag::MENU_BAR))
-    {
-        state.report(UiFrameProblem::NOT_IMPLEMENTED, "begin_window", "menu bars arrive in phase U6: UiWindowFlag::MENU_BAR is ignored", name, id);
-    }
 
     // Sizes of this frame; a window never sized fits its content, measured on a first frame that is not drawn.
     const Style& style = state.style;
     const FontMetrics& font = state.current_font();
     window.padding = style.window_padding;
     window.title_bar_height = has_any(flags, UiWindowFlag::NO_TITLE_BAR) ? 0.0F : std::floor(font.line_height + style.frame_padding.y * 2);
+    window.menu_bar_height = has_any(flags, UiWindowFlag::MENU_BAR) ? std::floor(font.line_height + style.frame_padding.y * 2) : 0.0F;
+    window.next_menu_columns = {};
     if (window.size.x <= 0 || window.size.y <= 0)
     {
         window.auto_fit = true;
@@ -741,6 +752,8 @@ UiFrame::begin_child(std::string_view name,
     child.flags = flags | UiWindowFlag::NO_TITLE_BAR | UiWindowFlag::NO_RESIZE | UiWindowFlag::NO_MOVE | UiWindowFlag::NO_COLLAPSE
                   | UiWindowFlag::NO_SAVED_SETTINGS | UiWindowFlag::NO_DOCKING;
     child.title_bar_height = 0;
+    child.menu_bar_height = has_any(flags, UiWindowFlag::MENU_BAR) ? std::floor(state.current_font().line_height + state.style.frame_padding.y * 2) : 0.0F;
+    child.next_menu_columns = {};
     child.collapsed = false;
     if (has_any(child_flags, ChildFlag::RESIZE_X | ChildFlag::RESIZE_Y))
     {

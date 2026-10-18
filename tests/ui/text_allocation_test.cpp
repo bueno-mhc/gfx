@@ -263,6 +263,117 @@ TEST(TextAllocationTest, ImmediateModeFramesAllocateNothingAfterTheFirstOnes)
     EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
 }
 
+TEST(TextAllocationTest, StructureWidgetsAllocateNothingWhileTheMouseMovesOverThem)
+{
+    // A menu bar, trees, collapsing headers, a tab bar, an open popup and a tooltip every frame, item tooltips and
+    // drag and drop sources and targets, the mouse sweeping over them.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    bool autosave = true;
+    bool header = true;
+    std::array<bool, 3> tabs{true, true, true};
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 500, .y = 560}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Structure", UiWindowFlag::MENU_BAR))
+        {
+            if (frame.begin_menu_bar())
+            {
+                if (frame.begin_menu("File"))
+                {
+                    frame.menu_item("Save", "Ctrl+S");
+                    frame.menu_item("Autosave", {}, &autosave);
+                    frame.end_menu();
+                }
+                frame.end_menu_bar();
+            }
+            if (frame.begin_tab_bar("Tabs", TabBarFlag::REORDERABLE | TabBarFlag::TAB_LIST_POPUP_BUTTON))
+            {
+                for (std::size_t tab = 0; tab < tabs.size(); ++tab)
+                {
+                    frame.push_id(static_cast<std::int32_t>(tab));
+                    if (frame.begin_tab_item("Tab", tabs[tab]))
+                    {
+                        frame.text("Tab {} content", tab);
+                        frame.end_tab_item();
+                    }
+                    frame.pop_id();
+                }
+                frame.end_tab_bar();
+            }
+            frame.set_next_item_open(true, UiCondition::ONCE);
+            if (frame.tree_node("Root"))
+            {
+                for (std::int32_t node = 0; node < 4; ++node)
+                {
+                    frame.push_id(node);
+                    if (frame.tree_node("Node", TreeNodeFlag::OPEN_ON_ARROW))
+                    {
+                        frame.tree_pop();
+                    }
+                    frame.item_tooltip("A node");
+                    frame.pop_id();
+                }
+                frame.tree_pop();
+            }
+            frame.collapsing_header("Header", header);
+            frame.button("Source");
+            if (frame.begin_drag_drop_source())
+            {
+                frame.set_drag_drop_payload("number", 1);
+                frame.end_drag_drop_source();
+            }
+            frame.button("Target");
+            if (frame.begin_drag_drop_target())
+            {
+                static_cast<void>(frame.accept_drag_drop_payload("number"));
+                frame.end_drag_drop_target();
+            }
+            if (frame_number == 0)
+            {
+                frame.open_popup("popup");
+            }
+            if (frame.begin_popup("popup"))
+            {
+                frame.text("Popup at frame {} of 8", frame_number % 8);
+                frame.end_popup();
+            }
+            frame.tooltip("Always shown");
+        }
+        frame.end_window();
+    };
+
+    // The mouse moves over the window without pressing.
+    const auto input = [&](std::uint32_t frame_number)
+    {
+        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((frame_number * 37) % 460), .y = 60.0F + static_cast<float>((frame_number * 53) % 500)};
+        return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 600}, .mouse_present = true, .mouse_position = mouse};
+    };
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 30; ++frame_number)
+    {
+        const UiFrameReport report = run(frame_number);
+        EXPECT_TRUE(report.ok()) << frame_number << ": " << (report.issues.empty() ? std::string_view{} : report.issues.front().detail);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    for (std::uint32_t frame_number = 30; frame_number < 130; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+    EXPECT_GE(ui.draw_data().lists.size(), 3U) << "the window, the popup and the tooltip";
+}
+
 TEST(TextAllocationTest, InputWidgetsAllocateNothingWhileTheMouseMovesOverThem)
 {
     // Every input widget of phase U5 (text fields of each kind, numbers, sliders, drags, components, colors, a

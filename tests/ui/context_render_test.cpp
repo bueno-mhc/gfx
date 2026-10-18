@@ -286,6 +286,111 @@ TEST_P(UiContextRenderTest, AnEditedFieldShowsItsSelectionAndAComposition)
     EXPECT_EQ(name, "abc");
 }
 
+TEST_P(UiContextRenderTest, MenusTreesTabsAndTooltipsAreDrawn)
+{
+    // A window with a menu bar whose File menu is open, a tree, a collapsing header, a tab bar, and a tooltip.
+    UiHarness ui;
+    UiRenderer renderer{*m_device, ui.context().fonts(), {.color_format = gfx::Format::R8G8B8A8_UNORM}};
+    UiRectangle file{};
+    UiRectangle tab{};
+    UiRectangle bar{};
+    bool checked = true;
+    const auto body = [&](UiFrame& frame)
+    {
+        frame.set_next_window_position({.x = 16, .y = 16}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 420, .y = 360}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Structure", UiWindowFlag::MENU_BAR))
+        {
+            if (frame.begin_menu_bar())
+            {
+                if (frame.begin_menu("File"))
+                {
+                    frame.menu_item("Open", "Ctrl+O");
+                    frame.menu_item("Save", "Ctrl+S");
+                    frame.menu_item("Autosave", {}, &checked);
+                    if (frame.begin_menu("Recent"))
+                    {
+                        frame.menu_item("scene.json");
+                        frame.end_menu();
+                    }
+                    frame.end_menu();
+                }
+                else
+                {
+                    file = frame.item_rectangle();
+                }
+                if (frame.begin_menu("Edit"))
+                {
+                    frame.end_menu();
+                }
+                frame.end_menu_bar();
+            }
+            const gfx::Vector2 start = frame.cursor_screen_position();
+            if (frame.begin_tab_bar("Panels"))
+            {
+                if (frame.begin_tab_item("Scene"))
+                {
+                    tab = frame.item_rectangle();
+                    frame.set_next_item_open(true, UiCondition::ONCE);
+                    if (frame.tree_node("Root"))
+                    {
+                        frame.tree_node("Leaf", TreeNodeFlag::LEAF | TreeNodeFlag::NO_TREE_PUSH_ON_OPEN);
+                        frame.tree_node("Bullet", TreeNodeFlag::BULLET | TreeNodeFlag::LEAF | TreeNodeFlag::NO_TREE_PUSH_ON_OPEN);
+                        frame.tree_pop();
+                    }
+                    frame.collapsing_header("Properties");
+                    frame.end_tab_item();
+                }
+                if (frame.begin_tab_item("Assets"))
+                {
+                    frame.end_tab_item();
+                }
+                frame.end_tab_bar();
+            }
+            bar = {.left = start.x, .top = start.y, .right = start.x + frame.content_region_available().x, .bottom = start.y + frame.frame_height()};
+            frame.button("Hover me");
+            frame.item_tooltip("A tooltip over everything");
+        }
+        frame.end_window();
+    };
+    const UiFrameReport closed = ui.frames(3, body);
+    EXPECT_TRUE(closed.ok()) << (closed.issues.empty() ? "" : closed.issues.front().detail);
+    const Picture bar_picture = render(ui.context(), renderer);
+    const auto channel = [](std::uint32_t pixel, std::uint32_t index) { return static_cast<int>((pixel >> (8U * index)) & 0xFFU); };
+    const auto brightest = [&](const Picture& picture, const UiRectangle& area)
+    {
+        int value = 0;
+        for (float y = area.top; y < area.bottom; y += 1.0F)
+        {
+            for (float x = area.left; x < area.right; x += 1.0F)
+            {
+                value = std::max(value, channel(picture.at(x, y), 0));
+            }
+        }
+        return value;
+    };
+
+    // Closed: the menu bar's labels (white text on the bar's color), the selected tab's blue, the tabs under the bar.
+    const Theme theme = builtin_theme(ThemeKind::DARK);
+    EXPECT_GT(brightest(bar_picture, file), 200) << "the File label is drawn in the menu bar";
+    const std::uint32_t menu_bar = bar_picture.at(file.right + 200, gfx::tests::center(file).y);
+    EXPECT_NEAR(channel(menu_bar, 0), theme.color(StyleColor::MENU_BAR_BACKGROUND).red * 255, 3.0);
+    const std::uint32_t selected = bar_picture.at(tab.left + 3, tab.top + tab.height() * 0.5F);
+    EXPECT_GT(channel(selected, 2), channel(selected, 0) + 40);
+    EXPECT_GT(tab.top + 1, file.bottom);
+    EXPECT_LT(bar.top, tab.top + 1);
+
+    // File open: a second list, its rows under File.
+    ui.click(gfx::tests::center(file).x, gfx::tests::center(file).y, body);
+    ui.frames(2, body);
+    const UiFrameReport report = ui.frame(body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    ASSERT_EQ(ui.context().draw_data().lists.size(), 2U) << "the window and the menu";
+    const Picture menu_picture = render(ui.context(), renderer);
+    const UiRectangle first_row{.left = file.left, .top = file.bottom + 4, .right = file.left + 60, .bottom = file.bottom + 4 + file.height()};
+    EXPECT_GT(brightest(menu_picture, first_row), 200) << "the menu's first item";
+}
+
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          UiContextRenderTest,
                          testing::ValuesIn(physical_devices()),

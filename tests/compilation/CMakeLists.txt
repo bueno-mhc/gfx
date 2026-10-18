@@ -168,4 +168,9 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_components_need_writable_numbers.cpp
         EXPECTED_DIAGNOSTIC "EditableNumbers"
         LIBRARIES gfx::ui)
+
+    gfx_add_compilation_failure_test(UiPayloadsAreTriviallyCopyable
+        SOURCES ui/ui_payloads_are_trivially_copyable.cpp
+        EXPECTED_DIAGNOSTIC "is_trivially_copyable"
+        LIBRARIES gfx::ui)
 endif()

@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U4
-committed; U5 built, awaiting validation (§B, "U5 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U5
+committed; U6 built, awaiting validation (§B, "U6 as built").** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -789,7 +789,7 @@ report, and your validation (you commit).
 - **Deviations from the design, for your validation**:
   1. The popup machinery is internal (`ContextState::open_popup`, `begin_popup`, `end_popup`, `update_popups`) and
      serves combos and the color picker; the public popup API (`open_popup()`, `begin_popup()`, modals, context menus)
-     stays declared for U6, which will build on it.
+     stays declared for U6, which will build on it (done in U6).
   2. One template per kind instead of A4's `input_int`, `input_float`, `slider_int`, ...: `input_number()`, `slider()`
      and `drag()` over any arithmetic type. The templates erase the type into a `NumberField`
      (`std::variant<std::int64_t, std::uint64_t, double>` with the bounds and the type's limits) handled by non-template
@@ -842,6 +842,88 @@ report, and your validation (you commit).
   input widget idle under a moving mouse: no allocation over 100 frames); `gfx_ui_platform_tests` +1 × each backend
   (text input started and stopped on the window, compositions and typed text through `UiPlatformInput`); compile-failure
   `UiComponentsNeedWritableNumbers`. The later-phase report test now uses U6's widgets.
+
+### U6 as built (2026-10-18)
+
+- **Units** (in `gfx.ui.context`): `trees.cpp`, `tabs.cpp`, `menus.cpp`, `tooltips.cpp`, `drag_drop.cpp`; `popups.cpp`
+  now holds the public popup API. Constants: TOOLTIP_DELAY_SECONDS (0.15), TOOLTIP_OFFSET_X/Y, DRAG_DROP_HOLD_TO_OPEN_SECONDS
+  (0.70), MAXIMUM_PAYLOAD_TYPE_SIZE (32), COLOR_PAYLOAD_TYPE ("gfx.ui.color"), MINIMUM_TAB_WIDTH. `UiContextLimits` gained
+  `open_states`, `tab_bars` and `drag_drop_payload_bytes` (reserved at construction: no allocation per frame).
+- **Trees**: `tree_node()` (open states remembered by identifier in an open-addressing map; a click on the body toggles
+  on release, on the arrow at once; OPEN_ON_ARROW, OPEN_ON_DOUBLE_CLICK, LEAF (always open), BULLET, DEFAULT_OPEN,
+  SELECTED, FRAMED, FRAME_PADDING, SPAN_AVAILABLE_WIDTH / SPAN_FULL_WIDTH / SPAN_TEXT_WIDTH, NO_TREE_PUSH_ON_OPEN; Space,
+  Return, Left, Right from the keyboard; a dragged payload held over a closed node opens it), `tree_push()`/`tree_pop()`
+  (indentation and the identifier; unbalanced pops reported), `collapsing_header()` with an optional close button,
+  `set_next_item_open()` (ALWAYS, ONCE/FIRST_USE_EVER: while no state is remembered, APPEARING).
+- **Tab bars**: tabs remembered per bar and laid out from last frame's (LEADING on the left, TRAILING on the right, the
+  others between them, shrunk to a common width no narrower than MINIMUM_TAB_WIDTH, or scrolled with arrow buttons with
+  FITTING_POLICY_SCROLL); selection (the first tab at once, a press from the next frame, SET_SELECTED and
+  AUTO_SELECT_NEW_TABS from the next frame, a closed or vanished selected tab gives the selection to its neighbor);
+  close button and middle button (NO_CLOSE_WITH_MIDDLE_MOUSE_BUTTON), REORDERABLE (NO_REORDER), `tab_item_button()`,
+  TAB_LIST_POPUP_BUTTON, DRAW_SELECTED_OVERLINE, UNSAVED_DOCUMENT, tooltips for cut labels (NO_TOOLTIP), payloads held
+  over a tab select it.
+- **Menus**: `UiWindowFlag::MENU_BAR` (a menu bar under the title bar: windows and child regions), `begin_menu_bar()`,
+  `begin_main_menu_bar()` (a window across the top of the display), `begin_menu()` (in a bar: a press toggles, hover
+  switches while one is open; in a menu: a row opening its submenu on hover beside the menu, flipped to the left when it
+  does not fit; a move toward an open submenu keeps it open — Dear ImGui's triangle), `menu_item()` (columns of labels,
+  shortcuts and check marks measured over the menu's rows), and the keyboard: Tab to a bar menu, Down or Return opens it
+  with its first item focused, Up/Down move in a menu, Right opens a submenu (first item focused), Left closes it, Return
+  chooses, Escape closes and gives the focus back to the item that opened the menu.
+- **Popups** (public API over U5's internal stack): `open_popup()` (at the mouse, at the current level; reopened unless
+  NO_REOPEN; NO_OPEN_OVER_EXISTING_POPUP), `begin_popup()`/`end_popup()`, `begin_popup_context_item()` (right release over
+  the last item; its identifier by default), `begin_popup_context_window()` (NO_OPEN_OVER_ITEMS), `close_current_popup()`
+  (a submenu closes the menus it came from), `is_popup_open()` (current level; ANY_POPUP_LEVEL, ANY_POPUP_IDENTIFIER),
+  **modals** (`begin_modal()`, with or without a close button: titled, centered, the windows and popups below them dimmed
+  with MODAL_WINDOW_DIM_BACKGROUND and unreachable — no hover, no click, no focus — closed only by code or the close button).
+- **Tooltips**: `begin_tooltip()`/`end_tooltip()`/`tooltip()` (one window per frame at the mouse plus the offsets, on the
+  display, drawn after every popup, never hovered), `begin_item_tooltip()`/`item_tooltip()` (once the mouse has stayed still
+  over the item for TOOLTIP_DELAY_SECONDS; disabled items too).
+- **Drag and drop**: sources (an item held and dragged past the threshold; SOURCE_ALLOW_NULL_IDENTIFIER for items without
+  identifier, SOURCE_EXTERNAL, SOURCE_NO_PREVIEW_TOOLTIP, SOURCE_NO_DISABLE_HOVER, SOURCE_NO_HOLD_TO_OPEN_OTHERS,
+  PAYLOAD_AUTO_EXPIRE), `set_drag_drop_payload()` (type and bytes copied; UiCondition::ONCE; any trivially copyable value),
+  targets (the last item under the mouse; the smallest accepting target wins; delivery on release to last frame's winner;
+  ACCEPT_BEFORE_DELIVERY, ACCEPT_NO_DRAW_DEFAULT_RECTANGLE, ACCEPT_NO_PREVIEW_TOOLTIP). The drag ends after the delivery, or
+  once the source stopped setting the payload and the button is up. A button dragged as a source is not pressed on release.
+- **Colors** (U5's flags that needed U6): color buttons are drag sources of COLOR_PAYLOAD_TYPE (NO_DRAG_DROP) and show a
+  tooltip with the color (NO_TOOLTIP); color editors accept dropped colors; a right click on an editor opens its options
+  (RGB/HSV/hexadecimal, 0..255/0.00..1.00, copy as hexadecimal) and on a picker its kind (hue bar or wheel), kept for the
+  context and used where the flags choose nothing (NO_OPTIONS), as Dear ImGui's global color options.
+- **Deviations from the design, for your validation**:
+  1. A press selects a tab **from the next frame** (as Dear ImGui), and a closed selected tab hands the selection to its
+     neighbor once it is no longer submitted (two frames after the close). SET_SELECTED's documentation now says so.
+  2. Tabs are identified like Dear ImGui's: the bar's identifier is pushed between begin_tab_bar() and end_tab_bar(), so
+     `push_id()` inside a bar distinguishes tabs with one label.
+  3. Menus: no Left/Right between the menus of a bar, and no Alt key to reach the bar (the keymap of U9); shortcuts in
+     menu items are text (bound in U9).
+  4. `wants_mouse()` is true while a popup is open or a payload is dragged (as Dear ImGui's WantCaptureMouse).
+  5. A choice in a popup closes it during the frame: begin_popup() already returned true that frame, so the popup goes
+     away from the next frame (the same in Dear ImGui).
+  6. Modals are centered on their first two frames (the second knows the size), then movable; Escape and clicks outside
+     never close them.
+  7. No HoveredFlag delays (Dear ImGui's DelayShort/Stationary/ForTooltip): begin_item_tooltip() applies one delay with the
+     stationary rule.
+  8. `DrawList::push_clip_rectangle(clip, within_current = true)`: a new parameter, so a menu bar draws outside its window's
+     content clip (Dear ImGui's intersect_with_current_clip_rect).
+  9. A payload's data view (UiDragDropPayload::data) stays valid until the next frame.
+- **Facts found**: a frame's input loses the order of key presses and clicks, so tests read popups one frame after an item
+  closed them; ContextState::mouse is indexed by MouseButton (LEFT, MIDDLE, RIGHT) — U6's first draft assumed RIGHT = 1,
+  found by the context-popup and middle-click tests; a new tab bar was not "appearing" on its first frame (found by
+  AUTO_SELECT_NEW_TABS); the menu bar drew nothing until its clip stopped intersecting the content clip (found in the GPU
+  picture). **For a later step**: a text layout cache miss allocates (about 8 allocations for a changed text: bidi
+  analysis objects and per-miss buffers of U2's engine), so a text that changes every frame (a counter) allocates every
+  frame; cached texts do not.
+- **Verified by eye** (pictures read back from both GPUs): a window with a menu bar, tabs, a tree with a leaf and a bullet
+  and a collapsing header; then its File menu open over them, with shortcuts, a check mark and a submenu arrow.
+- **Tests**: `gfx_ui_context_tests` +27 under synthetic input (trees: toggling and indentation, arrow/double-click/leaf/
+  default flags, set_next_item_open conditions, the keyboard, unbalanced pops, headers with close buttons; tabs: selection,
+  closing by button and middle button, SET_SELECTED and AUTO_SELECT_NEW_TABS, shrinking and scrolling, reordering with
+  leading and trailing tabs and a tab button, the tab list; menus: bar menus, items and check marks, hover switching,
+  submenus, keyboard navigation, the main menu bar; popups: at the mouse and closed three ways, stacking and
+  close_current_popup, context popups, modals; tooltips: at the mouse and never hovered, item tooltips after the delay;
+  drag and drop: delivery by type, peeking and dropping elsewhere, holding to open nodes and tabs, colors onto editors,
+  sources without identifiers) and +1 × each GPU (the picture above); the allocation test +1 (a menu bar, tabs, trees, an
+  open popup, tooltips, drag sources and targets under a moving mouse: no allocation over 100 frames); compile-failure
+  `UiPayloadsAreTriviallyCopyable`. The later-phase report test now uses U7's widgets.
 
 ---
 

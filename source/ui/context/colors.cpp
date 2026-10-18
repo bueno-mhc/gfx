@@ -80,6 +80,33 @@ save_hue(ContextState& state,
     state.saved_hue_color = color.with_alpha(1).packed();
 }
 
+/// @p flags with the display, channels and picker the options menu chose where @p flags choose none.
+auto
+with_options(const ContextState& state,
+             ColorEditFlag flags) noexcept -> ColorEditFlag
+{
+    constexpr ColorEditFlag DISPLAY = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::DISPLAY_HSV | ColorEditFlag::DISPLAY_HEXADECIMAL;
+    constexpr ColorEditFlag CHANNELS = ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::FLOAT_CHANNELS;
+    constexpr ColorEditFlag PICKER = ColorEditFlag::PICKER_HUE_BAR | ColorEditFlag::PICKER_HUE_WHEEL;
+    for (const ColorEditFlag group : {DISPLAY, CHANNELS, PICKER})
+    {
+        if (!has_any(flags, group))
+        {
+            flags = flags | (state.color_options & group);
+        }
+    }
+    return flags;
+}
+
+/// Replaces the options' bits of @p group with @p choice.
+void
+choose_option(ContextState& state,
+              ColorEditFlag group,
+              ColorEditFlag choice) noexcept
+{
+    state.color_options = (state.color_options & ~group) | choice;
+}
+
 /// Edits @p color holding hue, saturation and value (ColorEditFlag::INPUT_HSV) with @p edit, which edits red, green
 /// and blue: true when it changed.
 template<class Edit>
@@ -270,6 +297,32 @@ UiFrame::color_button(std::string_view id,
         list.add_rectangle(rectangle, state.color(button.hovered ? StyleColor::TEXT_NORMAL : StyleColor::BORDER), 1, style.frame_rounding);
     }
     state.draw_focus(list, rectangle, identifier, style.frame_rounding);
+
+    // Dragged, it carries its color (COLOR_PAYLOAD_TYPE); hovered a moment, a tooltip shows it. Both leave the
+    // swatch the last item.
+    const LastItem swatch = state.last_item;
+    const ColorEditFlag preview_flags = (flags & (ColorEditFlag::NO_ALPHA | ColorEditFlag::ALPHA_PREVIEW_HALF)) | ColorEditFlag::NO_TOOLTIP | ColorEditFlag::NO_DRAG_DROP;
+    const HexadecimalColor hexadecimal = to_hexadecimal(color, !has_any(flags, ColorEditFlag::NO_ALPHA));
+    if (!has_any(flags, ColorEditFlag::NO_DRAG_DROP) && begin_drag_drop_source())
+    {
+        static_cast<void>(set_drag_drop_payload(COLOR_PAYLOAD_TYPE, color));
+        static_cast<void>(color_button("##dragged", color, preview_flags, {.x = frame * 2, .y = frame * 2}));
+        same_line();
+        text_unformatted(hexadecimal.view());
+        end_drag_drop_source();
+    }
+    else if (!has_any(flags, ColorEditFlag::NO_TOOLTIP) && begin_item_tooltip())
+    {
+        static_cast<void>(color_button("##shown", color, preview_flags, {.x = frame * 3, .y = frame * 3}));
+        same_line();
+        begin_group();
+        text_unformatted(hexadecimal.view());
+        text("R {} G {} B {} A {}", std::lround(color.red * 255.0F), std::lround(color.green * 255.0F), std::lround(color.blue * 255.0F),
+             std::lround(color.alpha * 255.0F));
+        end_group();
+        end_tooltip();
+    }
+    state.last_item = swatch;
     return button.pressed;
 }
 
@@ -288,6 +341,7 @@ UiFrame::color_edit(std::string_view label,
     {
         return edit_hsv(state, color, [&](Color& rgb) { return color_edit(label, rgb, flags & ~ColorEditFlag::INPUT_HSV); });
     }
+    flags = with_options(state, flags);
     const Style& style = state.style;
     const std::uint32_t id = state.widget_id(label);
     const bool alpha = !has_any(flags, ColorEditFlag::NO_ALPHA);
@@ -387,7 +441,10 @@ UiFrame::color_edit(std::string_view label,
         const std::uint32_t popup = ContextState::hash(id, "#picker");
         if (clicked && !has_any(flags, ColorEditFlag::NO_PICKER) && !std::ranges::contains(state.popups_closed_by_click, popup))
         {
-            state.open_popup(popup, {.x = swatch.left, .y = swatch.bottom + style.item_spacing.y}, 0, 0, swatch.top - style.item_spacing.y);
+            if (PopupState* opened = state.open_popup(popup, {.x = swatch.left, .y = swatch.bottom + style.item_spacing.y}, 0, 0, swatch.top - style.item_spacing.y))
+            {
+                opened->opener_item = state.last_item.id;
+            }
             save_hue(state, hsv_of(state, color), color);
         }
         if (state.begin_popup(*this, popup, UiWindowFlag::NONE))
@@ -419,6 +476,63 @@ UiFrame::color_edit(std::string_view label,
     pop_id();
     end_group();
     state.last_item.id = id;
+
+    // A right click on the row opens the options (display, channels, copying); a color dropped on it is taken.
+    const LastItem row = state.last_item;
+    const std::uint32_t options = ContextState::hash(id, "#options");
+    if (!has_any(flags, ColorEditFlag::NO_OPTIONS) && state.mouse[std::to_underlying(MouseButton::RIGHT)].released && is_item_hovered())
+    {
+        if (PopupState* opened = state.open_popup(options, state.mouse_position, 0, 0))
+        {
+            opened->opener_item = id;
+        }
+    }
+    if (state.begin_popup(*this, options, UiWindowFlag::NONE))
+    {
+        constexpr ColorEditFlag DISPLAY = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::DISPLAY_HSV | ColorEditFlag::DISPLAY_HEXADECIMAL;
+        constexpr ColorEditFlag CHANNELS = ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::FLOAT_CHANNELS;
+        for (const auto& [name, choice, group] : {std::tuple{std::string_view{"RGB"}, ColorEditFlag::DISPLAY_RGB, DISPLAY},
+                                                  std::tuple{std::string_view{"HSV"}, ColorEditFlag::DISPLAY_HSV, DISPLAY},
+                                                  std::tuple{std::string_view{"Hexadecimal"}, ColorEditFlag::DISPLAY_HEXADECIMAL, DISPLAY},
+                                                  std::tuple{std::string_view{"0..255"}, ColorEditFlag::INTEGER_CHANNELS, CHANNELS},
+                                                  std::tuple{std::string_view{"0.00..1.00"}, ColorEditFlag::FLOAT_CHANNELS, CHANNELS}})
+        {
+            if (choice == ColorEditFlag::INTEGER_CHANNELS)
+            {
+                separator();
+            }
+            if (selectable(name, has_any(state.color_options, choice)))
+            {
+                choose_option(state, group, choice);
+            }
+        }
+        separator();
+        if (selectable("Copy as hexadecimal"))
+        {
+            try
+            {
+                state.services->set_clipboard_text(to_hexadecimal(color, alpha).view());
+            }
+            catch (...)
+            {
+                state.report(UiFrameProblem::PLATFORM_SERVICE, "color_edit", "the clipboard could not be written", label);
+            }
+        }
+        state.end_popup(*this);
+    }
+    state.last_item = row;
+    if (!has_any(flags, ColorEditFlag::NO_DRAG_DROP) && begin_drag_drop_target())
+    {
+        if (const std::optional<UiDragDropPayload> payload = accept_drag_drop_payload(COLOR_PAYLOAD_TYPE); payload && payload->data.size() == sizeof(Color))
+        {
+            Color dropped{};
+            std::memcpy(&dropped, payload->data.data(), sizeof(Color));
+            color = alpha ? dropped : dropped.with_alpha(color.alpha);
+            changed = true;
+        }
+        end_drag_drop_target();
+    }
+    state.last_item = row;
     if (changed)
     {
         state.mark_edited(id);
@@ -441,6 +555,7 @@ UiFrame::color_picker(std::string_view label,
     {
         return edit_hsv(state, color, [&](Color& rgb) { return color_picker(label, rgb, flags & ~ColorEditFlag::INPUT_HSV); });
     }
+    flags = with_options(state, flags);
 
     // Sizes: bars a frame's height wide; the square (or wheel) takes the rest of the item width.
     const Style& style = state.style;
@@ -580,6 +695,32 @@ UiFrame::color_picker(std::string_view label,
         const Color opaque = state.faded(color.with_alpha(1));
         list.add_rectangle_filled_gradient(alpha_area, opaque, opaque, opaque.with_alpha(0), opaque.with_alpha(0));
         draw_bar_marker(list, alpha_area, alpha_area.top + (1.0F - color.alpha) * alpha_area.height());
+    }
+
+    // A right click on the square (or the wheel) chooses the picker, unless NO_OPTIONS.
+    const std::uint32_t picker_options = ContextState::hash(id, "#picker_options");
+    const UiRectangle picker_area = wheel ? area : UiRectangle{.left = area.left, .top = area.top, .right = hue_bar.right, .bottom = area.bottom};
+    const bool over_picker = mouse.x >= picker_area.left && mouse.x < picker_area.right && mouse.y >= picker_area.top && mouse.y < picker_area.bottom;
+    if (!has_any(flags, ColorEditFlag::NO_OPTIONS) && state.mouse[std::to_underlying(MouseButton::RIGHT)].released && over_picker
+        && state.hovered_window == static_cast<std::uint32_t>(window - state.windows.data()))
+    {
+        if (PopupState* opened = state.open_popup(picker_options, mouse, 0, 0))
+        {
+            opened->opener_item = id;
+        }
+    }
+    if (state.begin_popup(*this, picker_options, UiWindowFlag::NONE))
+    {
+        constexpr ColorEditFlag PICKER = ColorEditFlag::PICKER_HUE_BAR | ColorEditFlag::PICKER_HUE_WHEEL;
+        if (selectable("Hue bar", !wheel))
+        {
+            choose_option(state, PICKER, ColorEditFlag::PICKER_HUE_BAR);
+        }
+        if (selectable("Hue wheel", wheel))
+        {
+            choose_option(state, PICKER, ColorEditFlag::PICKER_HUE_WHEEL);
+        }
+        state.end_popup(*this);
     }
 
     // The color from its new HSV (the hue and saturation remembered for grays and black).

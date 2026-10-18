@@ -238,6 +238,13 @@ ContextState::ContextState(const UiContextDescription& context_description)
     text_edit.ended_text.reserve(256);
     text_edit.display.reserve(256);
     text_edit.filtered.reserve(256);
+    open_states.reserve(limits.open_states);
+    tab_bars.reserve(limits.tab_bars);
+    tab_bar_lookup.reserve(limits.tab_bars);
+    tab_bar_stack.reserve(limits.stack_depth);
+    tree_stack.reserve(limits.stack_depth);
+    drag_drop.type.reserve(MAXIMUM_PAYLOAD_TYPE_SIZE);
+    drag_drop.data.reserve(limits.drag_drop_payload_bytes);
     for (DrawDataSlot& slot : slots)
     {
         slot.lists.reserve(std::size_t{limits.windows} + 2);
@@ -754,6 +761,44 @@ ContextState::take_focus(std::uint32_t id) noexcept
     focus_alive = true;
 }
 
+auto
+ContextState::keyboard_focused(const WindowState& window,
+                               std::uint32_t id) const noexcept -> bool
+{
+    return focus_id == id && focus_visible && !disabled && focused_window != NO_WINDOW && window.root == focused_window;
+}
+
+auto
+ContextState::presses(Key key) const noexcept -> std::uint32_t
+{
+    return keys_pressed[std::to_underlying(key)];
+}
+
+auto
+ContextState::remembered_open(std::uint32_t id) const noexcept -> std::optional<bool>
+{
+    const std::optional<std::uint32_t> value = open_states.find(id);
+    return value.has_value() ? std::optional<bool>{*value != 0} : std::nullopt;
+}
+
+void
+ContextState::remember_open(std::uint32_t id,
+                            bool open) noexcept
+{
+    try
+    {
+        if (open_states.insert(id, open ? 1U : 0U))
+        {
+            ++allocations;
+            report(UiFrameProblem::CAPACITY_EXCEEDED, "tree_node", "more open states than UiContextLimits::open_states: the table grew");
+        }
+    }
+    catch (...)
+    {
+        report(UiFrameProblem::CAPACITY_EXCEEDED, "tree_node", "the open states could not grow");
+    }
+}
+
 void
 ContextState::mark_edited(std::uint32_t id) noexcept
 {
@@ -836,8 +881,10 @@ ContextState::button_behavior(WindowState& window,
         }
         else
         {
+            // Not pressed after it was dragged as a drag and drop source.
             const bool over = contains(rectangle, mouse_position) && mouse_present;
-            state.pressed = state.pressed || (!has_any(flags, ButtonFlag::PRESS_ON_CLICK) && over);
+            const bool dragged = drag_drop.active && drag_drop.source_id == id;
+            state.pressed = state.pressed || (!has_any(flags, ButtonFlag::PRESS_ON_CLICK) && over && !dragged);
             clear_active();
         }
     }
@@ -1074,8 +1121,11 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
             const WindowState& window = state.windows[index];
             return window.was_active && !window.hidden && !has_any(window.flags, UiWindowFlag::NO_MOUSE_INPUTS) && contains(window.hit, state.mouse_position);
         };
-        for (const PopupState& popup : std::views::reverse(state.popups))
+        const std::size_t modal = state.top_modal_level();
+        const std::size_t lowest = modal < state.popups.size() ? modal : 0;
+        for (std::size_t level = state.popups.size(); level > lowest; --level)
         {
+            const PopupState& popup = state.popups[level - 1];
             if (popup.window != ContextState::NO_WINDOW && under_mouse(popup.window))
             {
                 state.hovered_root = popup.window;
@@ -1085,11 +1135,11 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         }
         for (const std::uint32_t index : std::views::reverse(state.display_order))
         {
-            if (state.hovered_root != ContextState::NO_WINDOW)
+            if (state.hovered_root != ContextState::NO_WINDOW || modal < state.popups.size())
             {
                 break;
             }
-            if (!state.windows[index].popup && under_mouse(index))
+            if (!state.windows[index].popup && !state.windows[index].tooltip && under_mouse(index))
             {
                 state.hovered_root = index;
                 state.hovered_window = index;
@@ -1129,7 +1179,8 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
 
     // A click focuses the window under it (or nothing).
     const bool clicked = state.mouse[0].clicked || state.mouse[1].clicked || state.mouse[2].clicked;
-    if (clicked && state.moving_window == ContextState::NO_WINDOW)
+    const bool blocked_by_modal = state.top_modal_level() < state.popups.size() && state.hovered_root == ContextState::NO_WINDOW;
+    if (clicked && state.moving_window == ContextState::NO_WINDOW && !blocked_by_modal)
     {
         state.focus_window(state.hovered_root);
         if (state.hovered_root == ContextState::NO_WINDOW)
@@ -1155,7 +1206,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     }
 
     // Popups: those no longer submitted close, a click outside closes them, Escape the top one.
-    state.update_popups();
+    const bool escape_closed_popup = state.update_popups();
 
     // The field being edited: a click outside it commits it (the field reads the result this frame).
     state.text_edit.ended_id = 0;
@@ -1182,14 +1233,20 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     state.hovered_id_previous = state.hovered_id;
     state.hovered_id = 0;
 
-    // The keyboard focus: Tab and Shift+Tab move it, Escape drops it.
+    // The keyboard focus: Tab and Shift+Tab move it (Down and Up too in a popup that is not a modal), Escape drops
+    // it (unless it closed a popup).
     const auto pressed = [&state](Key key) { return state.keys_pressed[std::to_underlying(key)] > 0; };
     state.focus_step = 0;
     if (state.focused_window != ContextState::NO_WINDOW && pressed(Key::TAB))
     {
         state.focus_step = has_any(state.modifiers, KeyModifier::SHIFT) ? -1 : 1;
     }
-    if (pressed(Key::ESCAPE))
+    const std::size_t focused_level = state.popup_level_of(state.focused_window);
+    if (focused_level < state.popups.size() && !state.popups[focused_level].modal && state.text_edit.id == 0)
+    {
+        state.focus_step = pressed(Key::DOWN) ? 1 : pressed(Key::UP) ? -1 : state.focus_step;
+    }
+    if (pressed(Key::ESCAPE) && !escape_closed_popup)
     {
         state.focus_id = 0;
         state.focus_visible = false;
@@ -1212,6 +1269,39 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     state.next_window = NextWindowSettings{};
     state.next_item_has_width = false;
     state.last_item = LastItem{};
+    state.next_item_has_open = false;
+    state.tree_stack.clear();
+    state.tab_bar_stack.clear();
+    state.menu_bar = MenuBarState{};
+    state.tooltip_seen = false;
+    state.tooltip_depth = 0;
+
+    // A drag and drop ends after its delivery, or once its source stopped setting the payload and its button is up
+    // (at once with DragDropFlag::PAYLOAD_AUTO_EXPIRE).
+    DragDropState& drag = state.drag_drop;
+    if (drag.active)
+    {
+        const bool elapsed = drag.data_frame + 1 < state.frame
+                             && (has_any(drag.source_flags, DragDropFlag::PAYLOAD_AUTO_EXPIRE) || !state.mouse[button_index(drag.button)].down);
+        if (drag.delivered || elapsed)
+        {
+            drag.active = false;
+            drag.type.clear();
+            drag.data.clear();
+            if (state.active_id == drag.source_id && !state.mouse[button_index(drag.button)].down)
+            {
+                state.clear_active();
+            }
+        }
+    }
+    drag.accept_id_previous = drag.accept_id;
+    drag.accept_id = 0;
+    drag.accept_area = std::numeric_limits<float>::max();
+    drag.hide_preview = drag.hide_preview_next;
+    drag.hide_preview_next = false;
+    drag.in_source = false;
+    drag.in_target = false;
+    drag.hold_seen = false;
     for (DrawList* list : {&state.background, &state.foreground})
     {
         list->clear();
@@ -1269,6 +1359,19 @@ UiContext::end_frame() noexcept -> UiFrameReport
     unbalanced(!state.item_width_stack.empty(), "push_item_width() without pop_item_width()");
     unbalanced(!state.text_wrap_stack.empty(), "push_text_wrap_position() without pop_text_wrap_position()");
     unbalanced(!state.disabled_stack.empty(), "begin_disabled() without end_disabled()");
+    unbalanced(!state.tree_stack.empty(), "tree_node() or tree_push() without tree_pop()");
+    unbalanced(!state.tab_bar_stack.empty(), "begin_tab_bar() without end_tab_bar()");
+    unbalanced(state.menu_bar.active, "begin_menu_bar() without end_menu_bar()");
+    unbalanced(state.drag_drop.in_source, "begin_drag_drop_source() without end_drag_drop_source()");
+    unbalanced(state.drag_drop.in_target, "begin_drag_drop_target() without end_drag_drop_target()");
+    if (!state.tooltip_seen)
+    {
+        state.tooltip_key = 0;
+    }
+    if (!state.drag_drop.hold_seen)
+    {
+        state.drag_drop.hold_id = 0;
+    }
     state.id_stack.clear();
     state.color_stack.clear();
     state.variable_stack.clear();
@@ -1315,7 +1418,7 @@ UiContext::end_frame() noexcept -> UiFrameReport
     // What the application should leave to the UI.
     const bool mouse_held_by_ui = (state.active_id != 0 && (state.active_id != state.text_edit.id || state.text_edit.mouse_selecting))
                                   || state.moving_window != ContextState::NO_WINDOW;
-    state.wants_mouse = state.hovered_root != ContextState::NO_WINDOW || mouse_held_by_ui;
+    state.wants_mouse = state.hovered_root != ContextState::NO_WINDOW || mouse_held_by_ui || !state.popups.empty() || state.drag_drop.active;
     state.wants_keyboard = (state.focus_id != 0 && state.focus_visible) || state.text_edit.id != 0;
 
     // Text input (IME, on-screen keyboards) while a field is edited, placed at its cursor.
@@ -1390,21 +1493,47 @@ UiContext::end_frame() noexcept -> UiFrameReport
     {
         WindowState& window = state.windows[index];
         windows_drawn += window.active ? 1U : 0U;
-        if (window.active && !window.hidden && !window.popup)
+        if (window.active && !window.hidden && !window.popup && !window.tooltip)
         {
             publish(window.draw_list);
         }
     }
-    for (const PopupState& popup : state.popups)
+    const std::size_t modal = state.top_modal_level();
+    for (std::size_t level = 0; level < state.popups.size(); ++level)
     {
-        // Popups over the windows, in the order they opened.
+        // Popups over the windows, in the order they opened; what is under the top-most modal is dimmed.
+        const PopupState& popup = state.popups[level];
         if (popup.window != ContextState::NO_WINDOW)
         {
             WindowState& window = state.windows[popup.window];
             if (window.active && !window.hidden && window.popup)
             {
+                if (level == modal)
+                {
+                    state.modal_dim.clear();
+                    state.modal_dim.set_pixels_per_unit(state.pixels_per_unit);
+                    try
+                    {
+                        state.modal_dim.add_rectangle_filled({.right = state.display_size.x, .bottom = state.display_size.y},
+                                                             state.color(StyleColor::MODAL_WINDOW_DIM_BACKGROUND));
+                    }
+                    catch (...)
+                    {
+                        state.report(UiFrameProblem::CAPACITY_EXCEEDED, "end_frame", "the modal's dimming could not be drawn");
+                    }
+                    publish(state.modal_dim);
+                }
                 publish(window.draw_list);
             }
+        }
+    }
+    for (const std::uint32_t index : state.display_order)
+    {
+        // Tooltips over everything.
+        WindowState& window = state.windows[index];
+        if (window.active && !window.hidden && window.tooltip)
+        {
+            publish(window.draw_list);
         }
     }
     publish(state.foreground);

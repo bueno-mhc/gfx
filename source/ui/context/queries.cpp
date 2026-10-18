@@ -60,7 +60,15 @@ UiFrame::is_item_hovered(HoveredFlag flags) const noexcept -> bool
     {
         return false;
     }
-    if (state.active_id != 0 && state.active_id != item.id && !has_any(flags, HoveredFlag::ALLOW_WHEN_BLOCKED_BY_ACTIVE_ITEM))
+    const bool field_edited = state.active_id == state.text_edit.id && !state.text_edit.mouse_selecting;
+    if (state.active_id != 0 && state.active_id != item.id && !field_edited && !has_any(flags, HoveredFlag::ALLOW_WHEN_BLOCKED_BY_ACTIVE_ITEM))
+    {
+        return false;
+    }
+
+    // A drag and drop source does not report hovering while dragged (unless SOURCE_NO_DISABLE_HOVER).
+    const DragDropState& drag = state.drag_drop;
+    if (drag.active && item.id != 0 && item.id == drag.source_id && !has_any(drag.source_flags, DragDropFlag::SOURCE_NO_DISABLE_HOVER))
     {
         return false;
     }

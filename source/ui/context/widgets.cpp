@@ -622,14 +622,10 @@ UiFrame::selectable(std::string_view label,
     state.draw_text(list, text, text_position, state.color(StyleColor::TEXT_NORMAL));
     state.disabled = was_disabled;
 
-    // Chosen in a popup (a combo's list): the popup closes.
+    // Chosen in a popup (a combo's list, a menu): the popup closes (a submenu's with the menus it came from).
     if (pressed && !has_any(flags, SelectableFlag::NO_AUTO_CLOSE_POPUPS))
     {
-        const std::size_t level = state.popup_level_of(static_cast<std::uint32_t>(window - state.windows.data()));
-        if (level < state.popups.size())
-        {
-            state.close_popups_from(level);
-        }
+        state.close_current_popup(static_cast<std::uint32_t>(window - state.windows.data()));
     }
     return pressed;
 }

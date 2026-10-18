@@ -840,147 +840,171 @@ public:
     /// @brief Ends the list box begin_list_box() started.
     void end_list_box() noexcept;
 
-    // ===================================================================================== U6: structure
+    // ===================================================================================== structure
 
-    /// @brief A tree node; true while it is open: its children follow, then tree_pop(). Phase U6.
+    /// @brief A tree node; true while it is open: its children follow (indented, under its identifier), then
+    ///        tree_pop(). Its open state is remembered; a click toggles it (with OPEN_ON_ARROW, on the arrow only; with
+    ///        OPEN_ON_DOUBLE_CLICK, a double click), as do Space and Return, Left closes it and Right opens it when it
+    ///        has the keyboard focus, and a dragged payload held over it opens it. A LEAF is always open.
     auto tree_node(std::string_view label,
                    TreeNodeFlag flags = TreeNodeFlag::NONE) noexcept -> bool;
 
-    /// @brief Indents and pushes @p id, as an open tree node does. Phase U6.
+    /// @brief Indents and pushes @p id, as an open tree node does (tree_pop() then).
     void tree_push(std::string_view id) noexcept;
 
-    /// @brief Ends an open tree node. Phase U6.
+    /// @brief Ends an open tree node or a tree_push().
     void tree_pop() noexcept;
 
-    /// @brief A collapsing header; true while it is open (no tree_pop()). Phase U6.
+    /// @brief A collapsing header: a framed tree node spanning the width; true while it is open (no tree_pop()).
     auto collapsing_header(std::string_view label,
                            TreeNodeFlag flags = TreeNodeFlag::NONE) noexcept -> bool;
 
-    /// @brief A collapsing header with a close button that sets @p visible (the request's
-    ///        `collapsing_header_ex`). Phase U6.
+    /// @brief A collapsing header with a close button that sets @p visible to false (the request's
+    ///        `collapsing_header_ex`); nothing is shown while @p visible is false.
     auto collapsing_header(std::string_view label,
                            bool& visible,
                            TreeNodeFlag flags = TreeNodeFlag::NONE) noexcept -> bool;
 
-    /// @brief Opens or closes the next tree node or collapsing header. Phase U6.
+    /// @brief Opens or closes the next tree node or collapsing header (ONCE and FIRST_USE_EVER: unless its state is
+    ///        remembered; APPEARING: when its window appears).
     void set_next_item_open(bool open,
                             UiCondition condition = UiCondition::ALWAYS) noexcept;
 
-    /// @brief Starts a tab bar; its tabs follow while it returns true, then end_tab_bar(). Phase U6.
+    /// @brief Starts a tab bar; its tabs follow while it returns true, then end_tab_bar(). Tabs are laid out from
+    ///        last frame's: LEADING ones on the left, TRAILING ones on the right, the others between them, shrunk to
+    ///        fit (or scrolled with FITTING_POLICY_SCROLL); REORDERABLE tabs move by dragging.
     auto begin_tab_bar(std::string_view id,
                        TabBarFlag flags = TabBarFlag::NONE) noexcept -> bool;
 
-    /// @brief Ends the tab bar begin_tab_bar() started. Phase U6.
+    /// @brief Ends the tab bar begin_tab_bar() started.
     void end_tab_bar() noexcept;
 
-    /// @brief A tab; true while it is selected: its content follows, then end_tab_item(). Phase U6.
+    /// @brief A tab; true while it is selected: its content follows (under its identifier), then end_tab_item().
+    ///        A press selects it from the next frame; the first tab of a bar without a selection is selected at
+    ///        once.
     auto begin_tab_item(std::string_view label,
                         TabItemFlag flags = TabItemFlag::NONE) noexcept -> bool;
 
-    /// @brief A tab with a close button that sets @p open. Phase U6.
+    /// @brief A tab with a close button (or the middle button) that sets @p open to false; nothing is shown while
+    ///        @p open is false.
     auto begin_tab_item(std::string_view label,
                         bool& open,
                         TabItemFlag flags = TabItemFlag::NONE) noexcept -> bool;
 
-    /// @brief Ends the tab begin_tab_item() started. Phase U6.
+    /// @brief Ends the content of the tab begin_tab_item() selected.
     void end_tab_item() noexcept;
 
-    /// @brief A tab that behaves as a button; true when it is clicked. Phase U6.
+    /// @brief A tab that behaves as a button (never selected); true when it is clicked.
     auto tab_item_button(std::string_view label,
                          TabItemFlag flags = TabItemFlag::NONE) noexcept -> bool;
 
-    /// @brief Starts the current window's menu bar (UiWindowFlag::MENU_BAR); menus follow while it returns
-    ///        true, then end_menu_bar(). Phase U6.
+    /// @brief Starts the current window's menu bar (UiWindowFlag::MENU_BAR); its menus and items follow side by
+    ///        side while it returns true, then end_menu_bar().
     auto begin_menu_bar() noexcept -> bool;
 
-    /// @brief Ends the menu bar begin_menu_bar() started. Phase U6.
+    /// @brief Ends the menu bar begin_menu_bar() started.
     void end_menu_bar() noexcept;
 
-    /// @brief Starts a menu bar across the top of the display. Phase U6.
+    /// @brief Starts a menu bar across the top of the display (a window that is only a menu bar); true: its menus
+    ///        follow, then end_main_menu_bar().
     auto begin_main_menu_bar() noexcept -> bool;
 
-    /// @brief Ends the menu bar begin_main_menu_bar() started. Phase U6.
+    /// @brief Ends the menu bar begin_main_menu_bar() started.
     void end_main_menu_bar() noexcept;
 
-    /// @brief A menu; true while it is open: its items follow, then end_menu(). Phase U6.
+    /// @brief A menu; true while it is open: its items follow, then end_menu(). In a menu bar, a press opens it
+    ///        and hovering it opens it while another menu of the bar is open; in a menu, hovering its row opens it
+    ///        as a submenu on the side. With the keyboard focus, Down (in a bar) or Right (in a menu) or Return opens it
+    ///        with its first item focused; Up and Down move through a menu, Left closes a submenu, Escape the menu.
     auto begin_menu(std::string_view label,
                     bool enabled = true) noexcept -> bool;
 
-    /// @brief Ends the menu begin_menu() opened. Phase U6.
+    /// @brief Ends the menu begin_menu() opened.
     void end_menu() noexcept;
 
-    /// @brief A menu item showing @p shortcut; true when it is chosen. Phase U6.
+    /// @brief A menu item showing @p shortcut (text only: shortcuts are bound in U9) and a check mark when
+    ///        @p selected; true when it is chosen, which closes its menus.
     auto menu_item(std::string_view label,
                    std::string_view shortcut = {},
                    bool selected = false,
                    bool enabled = true) noexcept -> bool;
 
-    /// @brief A menu item toggling @p *selected when it is chosen. Phase U6.
+    /// @brief A menu item toggling @p *selected when it is chosen.
     auto menu_item(std::string_view label,
                    std::string_view shortcut,
                    bool* selected,
                    bool enabled = true) noexcept -> bool;
 
-    /// @brief Opens the popup @p id (begin_popup() shows it). Phase U6.
+    /// @brief Opens the popup @p id at the mouse (begin_popup() with the same identifier stack shows it), above the
+    ///        popup this is called from (others close). Open already, it opens again at the mouse unless NO_REOPEN.
     void open_popup(std::string_view id,
                     PopupFlag flags = PopupFlag::NONE) noexcept;
 
-    /// @brief The popup @p id; true while it is open: its content follows, then end_popup(). Phase U6.
+    /// @brief The popup @p id; true while it is open: its content follows, then end_popup(). A click outside it,
+    ///        Escape, a selectable or menu item in it, or not calling this for a frame closes it.
     auto begin_popup(std::string_view id,
                      UiWindowFlag flags = UiWindowFlag::NONE) noexcept -> bool;
 
-    /// @brief A modal popup (blocks the windows behind it). Phase U6.
+    /// @brief A modal popup opened with open_popup(@p name): a titled window centered when it appears, which blocks
+    ///        the windows and popups behind it (they are dimmed and receive no mouse input) and closes only by code
+    ///        (close_current_popup()).
     auto begin_modal(std::string_view name,
                      UiWindowFlag flags = UiWindowFlag::NONE) noexcept -> bool;
 
-    /// @brief A modal popup with a close button that sets @p open. Phase U6.
+    /// @brief A modal popup with a close button, which closes it and sets @p open to false.
     auto begin_modal(std::string_view name,
                      bool& open,
                      UiWindowFlag flags = UiWindowFlag::NONE) noexcept -> bool;
 
-    /// @brief Ends the popup or modal begin_popup() or begin_modal() showed. Phase U6.
+    /// @brief Ends the popup or modal begin_popup() or begin_modal() showed.
     void end_popup() noexcept;
 
-    /// @brief A popup opened by clicking the last item (the right button by default). Phase U6.
+    /// @brief A popup opened when the button (the right one by default) is released over the last item; its
+    ///        identifier is the item's unless @p id is given.
     auto begin_popup_context_item(std::string_view id = {},
                                   PopupFlag flags = PopupFlag::MOUSE_BUTTON_RIGHT) noexcept -> bool;
 
-    /// @brief A popup opened by clicking the current window. Phase U6.
+    /// @brief A popup opened when the button is released over the current window (with NO_OPEN_OVER_ITEMS, over
+    ///        no item).
     auto begin_popup_context_window(std::string_view id = {},
                                     PopupFlag flags = PopupFlag::MOUSE_BUTTON_RIGHT) noexcept -> bool;
 
-    /// @brief Closes the popup the current content is in. Phase U6.
+    /// @brief Closes the popup the current content is in (a submenu closes the menus it came from).
     void close_current_popup() noexcept;
 
-    /// @brief Whether the popup @p id is open. Phase U6.
+    /// @brief Whether the popup @p id is open at the current level (ANY_POPUP_LEVEL: at any; ANY_POPUP_IDENTIFIER:
+    ///        any popup).
     [[nodiscard]] auto is_popup_open(std::string_view id,
                                      PopupFlag flags = PopupFlag::NONE) noexcept -> bool;
 
-    /// @brief Starts a tooltip window at the mouse; its content follows, then end_tooltip(). Phase U6.
+    /// @brief Starts a tooltip window at the mouse, over everything (never hovered); its content follows, then
+    ///        end_tooltip(). Tooltips of one frame share a window.
     auto begin_tooltip() noexcept -> bool;
 
-    /// @brief Ends the tooltip begin_tooltip() started. Phase U6.
+    /// @brief Ends the tooltip begin_tooltip() started.
     void end_tooltip() noexcept;
 
-    /// @brief A tooltip showing @p text. Phase U6.
+    /// @brief A tooltip showing @p text.
     void tooltip(std::string_view text) noexcept;
 
-    /// @brief A tooltip shown while the last item is hovered (after the hover delay). Phase U6.
+    /// @brief A tooltip shown while the last item is hovered, once the mouse has stayed still over it for
+    ///        TOOLTIP_DELAY_SECONDS; true: its content follows, then end_tooltip().
     auto begin_item_tooltip() noexcept -> bool;
 
-    /// @brief A tooltip showing @p text while the last item is hovered. Phase U6.
+    /// @brief A tooltip showing @p text while the last item is hovered (as begin_item_tooltip()).
     void item_tooltip(std::string_view text) noexcept;
 
-    /// @brief Makes the last item a drag and drop source; true while it is dragged: set_drag_drop_payload(),
-    ///        then end_drag_drop_source(). Phase U6.
+    /// @brief Makes the last item a drag and drop source; true while it is dragged (held past the drag threshold):
+    ///        set_drag_drop_payload(), the preview's content (a tooltip at the mouse), then end_drag_drop_source().
     auto begin_drag_drop_source(DragDropFlag flags = DragDropFlag::NONE) noexcept -> bool;
 
-    /// @brief The dragged data (copied), named by @p type; true when a target accepted it last frame. Phase U6.
+    /// @brief The dragged data (copied), named by @p type (1 to MAXIMUM_PAYLOAD_TYPE_SIZE bytes); true when a target
+    ///        accepted it last frame. With UiCondition::ONCE, only the first call of the drag copies.
     auto set_drag_drop_payload(std::string_view type,
                                std::span<const std::byte> data,
                                UiCondition condition = UiCondition::ALWAYS) noexcept -> bool;
 
-    /// @brief The dragged data: a trivially copyable value. Phase U6.
+    /// @brief The dragged data: a trivially copyable value.
     template<class Value>
         requires std::is_trivially_copyable_v<Value>
     auto set_drag_drop_payload(std::string_view type,
@@ -990,18 +1014,20 @@ public:
         return set_drag_drop_payload(type, std::as_bytes(std::span{&value, 1}), condition);
     }
 
-    /// @brief Ends the source begin_drag_drop_source() started. Phase U6.
+    /// @brief Ends the source begin_drag_drop_source() started.
     void end_drag_drop_source() noexcept;
 
-    /// @brief Makes the last item a drop target; true while something is dragged over it:
-    ///        accept_drag_drop_payload(), then end_drag_drop_target(). Phase U6.
+    /// @brief Makes the last item a drop target; true while a payload is dragged over it:
+    ///        accept_drag_drop_payload(), then end_drag_drop_target().
     auto begin_drag_drop_target() noexcept -> bool;
 
-    /// @brief The payload of @p type dragged over the target (nothing for another type). Phase U6.
+    /// @brief The payload of @p type dropped on the target when the button is released (with ACCEPT_BEFORE_DELIVERY,
+    ///        while it is over it too); nothing for another type. Nested targets: the smallest accepts it. The view
+    ///        stays valid until the next frame.
     [[nodiscard]] auto accept_drag_drop_payload(std::string_view type,
                                                 DragDropFlag flags = DragDropFlag::NONE) noexcept -> std::optional<UiDragDropPayload>;
 
-    /// @brief Ends the target begin_drag_drop_target() started. Phase U6.
+    /// @brief Ends the target begin_drag_drop_target() started.
     void end_drag_drop_target() noexcept;
 
     // ===================================================================================== U7: tables and visualization

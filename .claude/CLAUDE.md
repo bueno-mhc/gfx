@@ -255,6 +255,25 @@ Original hard requirements (from the user's initial specification):
   tests must send one key group per frame and wait 1 s between clicks on one spot (double click). Tests:
   tests/ui/input_widgets_test.cpp (in gfx_ui_context_tests), text_editor_test.cpp, render tests, allocation test, IME
   platform test, compile-failure UiComponentsNeedWritableNumbers.
+- **UI structure widgets (U6 as built, 2026-10-18)** — docs/ui-design.md §B "U6 as built". Units trees.cpp (open states in
+  `IdentifierMap open_states`, remember_open/remembered_open; tree_stack of window indices; body toggles on release, arrow
+  on press; drag_hold_opens()), tabs.cpp (TabBarState/TabState in `tab_bars` + `tab_bar_lookup`; layout from last frame's
+  widths, leading/trailing sections, shrink by bisection to a common cap ≥ MINIMUM_TAB_WIDTH or scroll with arrows; press
+  → next_selected (applied next frame); bar id pushed on the id stack between begin/end_tab_bar so tab ids = widget_id(label);
+  pruning by `last_frame < previous_frame`; `appearing` true on a new bar's first frame), menus.cpp (MenuBarState: bar items
+  laid out horizontally with item_add only; window clip swapped to the bar and drawn with `push_clip_rectangle(clip, false)`;
+  WindowState menu_bar_height + menu_columns/next_menu_columns; main menu bar = window "##main_menu_bar" found by id;
+  submenu hover with Dear ImGui's moving-toward triangle; PopupState menu/submenu/bar_window/opener_item/focus_first),
+  popups.cpp (public API; current_popup_level(), top_modal_level(), close_current_popup() chain, begin_modal_popup()
+  centered on its first two frames; update_popups() returns whether Escape closed one, never closes the top modal or below,
+  Left closes a focused submenu, focus back to opener_item), tooltips.cpp (window "##tooltip", `WindowState::tooltip`,
+  published after popups; item tooltips keyed by id or rectangle), drag_drop.cpp (DragDropState; smallest target wins;
+  delivery to last frame's winner on release; drag cleared in begin_frame after delivery or elapsed). Frame loop: hover
+  ignores everything under the top modal; clicks outside a modal keep focus; Up/Down = focus steps in non-modal popups;
+  modal dim list published before the top modal; wants_mouse while popups/drags. Colors: swatches drag COLOR_PAYLOAD_TYPE
+  and show tooltips; editors accept drops; right-click options (`ContextState::color_options`). **MouseButton order is LEFT,
+  MIDDLE, RIGHT** (ContextState::mouse index = to_underlying). Gotcha: a frame's text that changes every frame misses the
+  layout cache and allocates (U2 follow-up).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -612,7 +631,8 @@ gfx/
 │                  draw/ (U3: draw.cppm + draw_list.cpp = gfx.ui.draw, debug_overlay.cppm/.cpp), render/ (U3:
 │                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag); U4: style/style.cppm,
 │                  input/frame_input.cppm, context/ (context.cppm + types/frame/context_class partitions, state.cppm
-│                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos), platform/ (gfx_ui_platform:
+│                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos; U6: trees, tabs, menus,
+│                  tooltips, drag_drop), platform/ (gfx_ui_platform:
 │                  ui_platform.cppm/.cpp); U5: text/boundaries.cppm, text_editor.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
@@ -661,11 +681,12 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a) committed; **U5 (input widgets) done, awaiting validation** (§B "U5 as built", 11 deviations); U6 (structure: trees, tabs, menus, public popups, tooltips, modals, drag and drop) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63) committed; **U6 (structure: trees, tabs, menus, public popups, modals, tooltips, drag and drop) done, awaiting validation** (§B "U6 as built", 9 deviations); U7 (tables and visualization) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **682**, all passing in Debug and Release, 2026-10-18 (after U5: + 9 text editor tests, + 26
+Test count at last report: **713**, all passing in Debug and Release, 2026-10-18 (after U6: + 27 structure tests, + 1 render
+× 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19). Before U6: 682 (after U5: + 9 text editor tests, + 26
 input widget tests + 2 render × 2 GPUs, + 1 draw list, + 1 allocation, + 1 IME × 2 platform backends, + 1 compile-failure;
 skips Debug 4, Release 19). Before U5: 638 (after U4: + 37 context tests + 2
 render (2 GPUs), + 6 platform tests (2 backends × adapter, cursors, visible window), + 1 allocation test, + 2

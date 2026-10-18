@@ -376,8 +376,10 @@ public:
         m_pixels_per_unit = pixels_per_unit > 0 ? pixels_per_unit : 1.0F;
     }
 
-    /// @brief Clips what follows to @p clip (pixels of the target), within the current clip.
-    void push_clip_rectangle(const UiRectangle& clip);
+    /// @brief Clips what follows to @p clip (pixels of the target), within the current clip unless
+    ///        @p within_current is false (then @p clip alone: a window's menu bar, outside its content's clip).
+    void push_clip_rectangle(const UiRectangle& clip,
+                             bool within_current = true);
 
     /// @brief Restores the clip of before the last push_clip_rectangle().
     void pop_clip_rectangle() noexcept;

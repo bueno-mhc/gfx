@@ -61,7 +61,10 @@ UiFrame::begin_combo(std::string_view label,
                                     : has_any(flags, ComboFlag::HEIGHT_LARGEST) ? 0U
                                                                                 : COMBO_REGULAR_ITEMS;
         const float maximum = items == 0 ? 0.0F : static_cast<float>(items) * (line + style.item_spacing.y) - style.item_spacing.y + style.window_padding.y * 2;
-        state.open_popup(popup, {.x = frame.left, .y = frame.bottom}, frame.width(), maximum, frame.top);
+        if (PopupState* opened = state.open_popup(popup, {.x = frame.left, .y = frame.bottom}, frame.width(), maximum, frame.top))
+        {
+            opened->opener_item = id;
+        }
     }
     else if (button.pressed && open)
     {

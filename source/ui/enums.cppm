@@ -609,7 +609,7 @@ enum class TabItemFlag : std::uint16_t
 {
     NONE                              = 0,       ///< No bit.
     UNSAVED_DOCUMENT                  = 1U << 0, ///< A dot in its label: unsaved changes.
-    SET_SELECTED                      = 1U << 1, ///< Selected by code this frame.
+    SET_SELECTED                      = 1U << 1, ///< Selected by code (from the next frame, as a click selects it).
     NO_CLOSE_WITH_MIDDLE_MOUSE_BUTTON = 1U << 2, ///< The middle button does not close it.
     NO_PUSH_IDENTIFIER                = 1U << 3, ///< Its content does not push its identifier.
     NO_TOOLTIP                        = 1U << 4, ///< No tooltip when its label is cut.
@@ -885,6 +885,27 @@ inline constexpr std::uint32_t COMBO_REGULAR_ITEMS = 8;
 
 /// @brief Items a combo's popup shows with ComboFlag::HEIGHT_LARGE.
 inline constexpr std::uint32_t COMBO_LARGE_ITEMS = 20;
+
+/// @brief Time the mouse stays still over an item before its tooltip shows (begin_item_tooltip()), in seconds.
+inline constexpr double TOOLTIP_DELAY_SECONDS = 0.15;
+
+/// @brief Distance from the mouse to a tooltip's top-left corner, rightwards, in UI units.
+inline constexpr float TOOLTIP_OFFSET_X = 16.0F;
+
+/// @brief Distance from the mouse to a tooltip's top-left corner, downwards, in UI units.
+inline constexpr float TOOLTIP_OFFSET_Y = 10.0F;
+
+/// @brief Time a dragged payload hovers a closed tree node or a tab before it opens it, in seconds.
+inline constexpr double DRAG_DROP_HOLD_TO_OPEN_SECONDS = 0.70;
+
+/// @brief Bytes of a drag and drop payload's type name.
+inline constexpr std::size_t MAXIMUM_PAYLOAD_TYPE_SIZE = 32;
+
+/// @brief The payload type of colors dragged from color buttons (a gfx::ui::Color).
+inline constexpr std::string_view COLOR_PAYLOAD_TYPE = "gfx.ui.color";
+
+/// @brief Narrowest a tab becomes when the tabs of a bar shrink to fit it, in UI units.
+inline constexpr float MINIMUM_TAB_WIDTH = 40.0F;
 
 /// @brief Issues a UiFrameReport holds; more set UiFrameProblem::ISSUES_DROPPED.
 inline constexpr std::size_t MAXIMUM_FRAME_ISSUES = 64;

@@ -68,6 +68,11 @@ target_sources(gfx_ui
         context/numbers.cpp
         context/colors.cpp
         context/combos.cpp
+        context/trees.cpp
+        context/tabs.cpp
+        context/menus.cpp
+        context/tooltips.cpp
+        context/drag_drop.cpp
         context/later.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)

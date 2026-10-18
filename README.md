@@ -644,9 +644,8 @@ const gfx::ui::UiFrameReport report = ui.end_frame();             // problems of
   allocates nothing (a test counts `operator new`).
 - **Threads**: frames run on one thread; `acquire_draw_data()` gives any thread the last published draw data,
   whose lists the context does not reuse while the lease lives (three sets of lists rotate).
-- **Later phases**: the widgets of the next phases (trees, tabs, menus, popups, tooltips, drag and drop,
-  tables, plots, docking, shortcuts, accessibility) are declared; until their phase each reports
-  `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
+- **Later phases**: the widgets of the next phases (tables, plots, docking, shortcuts, accessibility) are
+  declared; until their phase each reports `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
 
 ## UI: input widgets
 
@@ -714,6 +713,108 @@ edit(gfx::ui::UiFrame& frame,
   `begin_list_box()` take any items. Popups float over every window and close on a click outside, Escape or a
   choice.
 - An idle frame of every input widget still allocates nothing (a test counts `operator new`).
+
+## UI: menus, trees, tabs, popups, tooltips, drag and drop
+
+```cpp
+void
+outliner(gfx::ui::UiFrame& frame,
+         Scene& scene)
+{
+    using namespace gfx::ui;
+    if (frame.begin_window("Outliner", UiWindowFlag::MENU_BAR))
+    {
+        if (frame.begin_menu_bar())
+        {
+            if (frame.begin_menu("File"))
+            {
+                if (frame.menu_item("Save", "Ctrl+S"))
+                {
+                    scene.save();
+                }
+                frame.menu_item("Autosave", {}, &scene.autosave);
+                frame.end_menu();
+            }
+            frame.end_menu_bar();
+        }
+        if (frame.begin_tab_bar("Views", TabBarFlag::REORDERABLE))
+        {
+            if (frame.begin_tab_item("Objects"))
+            {
+                for (Object& object : scene.objects)
+                {
+                    frame.push_id(object.id);
+                    const bool open = frame.tree_node(object.name, object.children.empty() ? TreeNodeFlag::LEAF : TreeNodeFlag::NONE);
+                    frame.item_tooltip("Drag it onto another object to parent it");
+                    if (frame.begin_drag_drop_source())
+                    {
+                        frame.set_drag_drop_payload("object", object.id);
+                        frame.text_unformatted(object.name);
+                        frame.end_drag_drop_source();
+                    }
+                    if (frame.begin_drag_drop_target())
+                    {
+                        if (const auto payload = frame.accept_drag_drop_payload("object"))
+                        {
+                            scene.parent(payload->data, object);
+                        }
+                        frame.end_drag_drop_target();
+                    }
+                    if (frame.begin_popup_context_item("object menu"))
+                    {
+                        if (frame.menu_item("Delete"))
+                        {
+                            frame.open_popup("Delete?");
+                        }
+                        frame.end_popup();
+                    }
+                    if (open)
+                    {
+                        frame.tree_pop();
+                    }
+                    frame.pop_id();
+                }
+                frame.end_tab_item();
+            }
+            frame.end_tab_bar();
+        }
+        if (frame.begin_modal("Delete?", UiWindowFlag::ALWAYS_AUTO_RESIZE))
+        {
+            frame.text_unformatted("Delete the object and its children?");
+            if (frame.button("Delete"))
+            {
+                frame.close_current_popup();
+            }
+            frame.end_popup();
+        }
+    }
+    frame.end_window();
+}
+```
+
+- **Menus**: a window's menu bar (`UiWindowFlag::MENU_BAR`) or the display's (`begin_main_menu_bar()`); a press
+  opens a menu, hovering another menu of the bar switches to it; rows of a menu open their submenus on hover
+  (a move toward an open submenu keeps it open); `menu_item()` shows a shortcut's text and a check mark. From
+  the keyboard: Tab to a bar menu, Down or Return opens it with its first item focused, Up and Down move,
+  Right opens a submenu, Left closes it, Return chooses, Escape closes (the focus goes back to the menu).
+- **Trees and headers**: `tree_node()` remembers its open state by identifier; flags open it on the arrow
+  only or on a double click, make it a leaf or a bullet, span the width; Left and Right close and open it
+  from the keyboard. `collapsing_header()` is a framed node, optionally with a close button;
+  `set_next_item_open()` opens or closes the next one (always, once, when its window appears).
+- **Tab bars**: the first tab is selected at once, a press selects another from the next frame; closable tabs
+  (their close button or the middle button), reordering by dragging, leading and trailing tabs, tab buttons,
+  a list of the tabs, tabs that shrink or scroll when they do not fit, tooltips for cut labels.
+- **Popups**: `open_popup()` + `begin_popup()` at the mouse, stacked when opened from a popup, closed by a
+  click outside, Escape, a choice or `close_current_popup()`; context popups on a right release over an item
+  or a window; **modals** (`begin_modal()`): centered, the rest of the UI dimmed and unreachable until code
+  (or their close button) closes them.
+- **Tooltips**: `tooltip()` / `begin_tooltip()` at the mouse over everything; `item_tooltip()` once the mouse
+  has stayed still over the item for `TOOLTIP_DELAY_SECONDS`.
+- **Drag and drop**: an item held and moved past the drag threshold carries a typed payload (copied; any
+  trivially copyable value) and a preview tooltip; targets accept payloads of their type, the smallest one
+  under the mouse winning, and receive them when the button is released (or peek before). A payload held over
+  a closed tree node or a tab opens it. Color buttons carry their color (`COLOR_PAYLOAD_TYPE`) onto color
+  editors; a right click on a color editor opens its options.
 
 ## Examples
 
