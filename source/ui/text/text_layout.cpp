@@ -1,7 +1,8 @@
 /// @file text_layout.cpp
 /// @brief TextLayoutEngine: paragraphs → bidi and scripts → atlas per character → runs → shaping → line
-///        breaking → visual reordering → alignment; the layout cache (fixed capacity, least recently used
-///        first, nothing allocated on a hit); caret positions and hit testing.
+///        breaking → visual reordering → alignment; the layout cache (fixed capacity; layouts used in one frame
+///        only replaced first, then the least recently used; nothing allocated on a hit, nor on a miss that reuses
+///        the storage of a layout as long); caret positions and hit testing.
 module gfx.ui.text;
 
 import std;
@@ -22,6 +23,10 @@ constexpr std::uint32_t NO_ENTRY = std::numeric_limits<std::uint32_t>::max();
 
 /// Marks a character no atlas of the chain has (drawn as the first atlas's `.notdef`).
 constexpr std::uint8_t NO_ATLAS = std::numeric_limits<std::uint8_t>::max();
+
+/// Frames after which a layout used in one frame only is replaced before a free entry is taken: a text used in two
+/// consecutive frames is always found again, and texts that change every frame reuse each other's entries.
+constexpr std::uint64_t PROBATION_FRAMES = 2;
 
 /// Whether @p code_point ends a paragraph (bidi class B, and the line separator).
 constexpr auto
@@ -54,6 +59,7 @@ struct Entry
     TextLayoutProblem problems = TextLayoutProblem::NONE;
     float font_size = 0;
     std::uint64_t frame = 0;
+    bool retained = false; // Used in more than one frame: in the retained list, else in the probation list.
     std::uint32_t newer = NO_ENTRY;
     std::uint32_t older = NO_ENTRY;
     std::uint32_t next_in_bucket = NO_ENTRY;
@@ -63,6 +69,13 @@ struct Entry
         return {.glyphs = glyphs, .lines = lines, .width = width, .height = height, .missing_glyph_count = missing_glyph_count,
                 .problems = problems, .font_size = font_size};
     }
+};
+
+/// Entries linked from the most to the least recently used.
+struct EntryList
+{
+    std::uint32_t newest = NO_ENTRY;
+    std::uint32_t oldest = NO_ENTRY;
 };
 
 /// The key of a layout, hashed.
@@ -124,9 +137,10 @@ struct TextLayoutEngine::State
     std::vector<Entry> entries;
     std::uint32_t used = 0;
     std::vector<std::uint32_t> buckets;
-    std::uint32_t newest = NO_ENTRY;
-    std::uint32_t oldest = NO_ENTRY;
-    std::deque<Entry> overflow{};
+    EntryList probation{}; // Layouts used in one frame only.
+    EntryList retained{};  // Layouts used in several frames.
+    std::deque<Entry> overflow{};  // Layouts made while every entry was in use this frame; their storage is kept.
+    std::size_t overflow_used = 0; // Overflow entries holding a layout of this frame.
     std::uint64_t frame = 1;
     TextLayoutStatistics statistics{};
 
@@ -172,11 +186,17 @@ struct TextLayoutEngine::State
         return NO_ENTRY;
     }
 
+    [[nodiscard]] auto list_of(const Entry& entry) noexcept -> EntryList&
+    {
+        return entry.retained ? retained : probation;
+    }
+
     void unlink(std::uint32_t index) noexcept
     {
         Entry& entry = entries[index];
-        (entry.newer != NO_ENTRY ? entries[entry.newer].older : oldest) = entry.older;
-        (entry.older != NO_ENTRY ? entries[entry.older].newer : newest) = entry.newer;
+        EntryList& list = list_of(entry);
+        (entry.newer != NO_ENTRY ? entries[entry.newer].older : list.newest) = entry.older;
+        (entry.older != NO_ENTRY ? entries[entry.older].newer : list.oldest) = entry.newer;
         entry.newer = NO_ENTRY;
         entry.older = NO_ENTRY;
     }
@@ -184,11 +204,20 @@ struct TextLayoutEngine::State
     void make_newest(std::uint32_t index) noexcept
     {
         Entry& entry = entries[index];
-        entry.older = newest;
+        EntryList& list = list_of(entry);
+        entry.older = list.newest;
         entry.newer = NO_ENTRY;
-        (newest != NO_ENTRY ? entries[newest].newer : oldest) = index;
-        newest = index;
+        (list.newest != NO_ENTRY ? entries[list.newest].newer : list.oldest) = index;
+        list.newest = index;
         entry.frame = frame;
+    }
+
+    /// Marks the entry @p index used this frame; a layout used again in a later frame than before is retained.
+    void use(std::uint32_t index) noexcept
+    {
+        unlink(index);
+        entries[index].retained = entries[index].retained || entries[index].frame != frame;
+        make_newest(index);
     }
 
     void remove_from_bucket(std::uint32_t index) noexcept
@@ -202,20 +231,38 @@ struct TextLayoutEngine::State
         entries[index].next_in_bucket = NO_ENTRY;
     }
 
-    /// An entry for a new layout: a free one, the oldest one not used this frame, or none (NO_ENTRY).
+    /// An entry for a new layout: one whose layout was used in one frame only, PROBATION_FRAMES frames ago or more
+    /// (its storage is reused), a free one, the least recently used one not used this frame, or none (NO_ENTRY).
     [[nodiscard]] auto acquire() noexcept -> std::uint32_t
     {
+        if (probation.oldest != NO_ENTRY && entries[probation.oldest].frame + PROBATION_FRAMES <= frame)
+        {
+            return evict(probation.oldest);
+        }
         if (used < entries.size())
         {
             return used++;
         }
-        if (entries[oldest].frame == frame)
+
+        // Every entry holds a layout: the least recently used of both lists (the probation one on a tie).
+        std::uint32_t index = probation.oldest;
+        if (index == NO_ENTRY || (retained.oldest != NO_ENTRY && entries[retained.oldest].frame < entries[index].frame))
+        {
+            index = retained.oldest;
+        }
+        if (entries[index].frame == frame)
         {
             return NO_ENTRY;
         }
-        const std::uint32_t index = oldest;
+        return evict(index);
+    }
+
+    /// Removes the layout of the entry @p index from the cache, for a new one.
+    [[nodiscard]] auto evict(std::uint32_t index) noexcept -> std::uint32_t
+    {
         remove_from_bucket(index);
         unlink(index);
+        entries[index].retained = false;
         ++statistics.evictions;
         return index;
     }
@@ -634,18 +681,22 @@ TextLayoutEngine::layout(std::string_view text,
     if (const std::uint32_t index = state.find(hash, text, font, description); index != NO_ENTRY)
     {
         ++state.statistics.hits;
-        state.unlink(index);
-        state.make_newest(index);
+        state.use(index);
         return state.entries[index].view();
     }
 
-    // A miss: made in a free or replaced entry, or, when every entry is in use this frame, until the next frame.
+    // A miss: made in a free or replaced entry, or, when every entry is in use this frame, until the next frame (in
+    // an overflow entry, whose storage the next frames reuse).
     ++state.statistics.misses;
     const std::uint32_t index = state.acquire();
     if (index == NO_ENTRY)
     {
         ++state.statistics.overflows;
-        Entry& overflow = state.overflow.emplace_back();
+        if (state.overflow_used == state.overflow.size())
+        {
+            state.overflow.emplace_back();
+        }
+        Entry& overflow = state.overflow[state.overflow_used++];
         state.make(overflow, text, *font_description, description);
         overflow.problems |= TextLayoutProblem::CACHE_FULL;
         return overflow.view();
@@ -666,24 +717,26 @@ void
 TextLayoutEngine::new_frame() noexcept
 {
     ++m_state->frame;
-    m_state->overflow.clear();
+    m_state->overflow_used = 0;
 }
 
 void
 TextLayoutEngine::clear() noexcept
 {
+    // Every entry is forgotten; their storage is kept for the next layouts.
     State& state = *m_state;
     std::ranges::fill(state.buckets, NO_ENTRY);
     for (Entry& entry : state.entries)
     {
+        entry.retained = false;
         entry.newer = NO_ENTRY;
         entry.older = NO_ENTRY;
         entry.next_in_bucket = NO_ENTRY;
     }
     state.used = 0;
-    state.newest = NO_ENTRY;
-    state.oldest = NO_ENTRY;
-    state.overflow.clear();
+    state.probation = {};
+    state.retained = {};
+    state.overflow_used = 0;
 }
 
 auto

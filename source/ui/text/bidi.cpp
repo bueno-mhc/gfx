@@ -12,10 +12,28 @@ import :engine;
 namespace gfx::ui::text_engine
 {
 
+namespace
+{
+
+/// Whether every character of @p code_points has level 0 in a left-to-right paragraph: none is strong right to left,
+/// an Arabic number or a directional formatting character (embeddings, overrides, isolates and their ends).
+auto
+is_left_to_right_only(std::span<const std::uint32_t> code_points) noexcept -> bool
+{
+    return std::ranges::none_of(code_points, [](std::uint32_t code_point)
+    {
+        const SBBidiType type = SBCodepointGetBidiType(static_cast<SBCodepoint>(code_point));
+        return type == SBBidiTypeR || type == SBBidiTypeAL || type == SBBidiTypeAN || SBBidiTypeIsFormat(type);
+    });
+}
+
+} // namespace
+
 struct BidiParagraph::State
 {
-    SBAlgorithmRef algorithm = nullptr;
-    SBParagraphRef paragraph = nullptr;
+    SBAlgorithmRef algorithm = nullptr; // Null for a paragraph with level 0 everywhere (left to right only).
+    SBParagraphRef paragraph = nullptr; // Null for a paragraph with level 0 everywhere (left to right only).
+    SBScriptLocatorRef locator = SBScriptLocatorCreate(); // Reused: loading code points resets it.
     std::vector<std::uint8_t> levels{};
     std::vector<std::uint32_t> scripts{};
     std::uint8_t base_level = 0;
@@ -27,6 +45,7 @@ struct BidiParagraph::State
     ~State()
     {
         release();
+        SBScriptLocatorRelease(locator);
     }
 
     void release() noexcept
@@ -71,32 +90,40 @@ BidiParagraph::analyze(std::span<const std::uint32_t> code_points,
     State& state = *m_state;
     state.release();
 
-    // Levels: the paragraph is one (the engine splits at paragraph separators first).
+    // Levels: the paragraph is one (the engine splits at paragraph separators first). Without right-to-left
+    // characters, a paragraph that is not right to left has level 0 everywhere: SheenBidi's algorithm, which
+    // allocates its paragraph, is not needed.
     const SBCodepointSequence sequence{.stringEncoding = SBStringEncodingUTF32,
                                        .stringBuffer = code_points.data(),
                                        .stringLength = code_points.size()};
-    const SBLevel base = direction == ParagraphDirection::AUTOMATIC       ? SBLevelDefaultLTR
-                         : direction == ParagraphDirection::LEFT_TO_RIGHT ? SBLevel{0}
-                                                                          : SBLevel{1};
-    state.algorithm = SBAlgorithmCreate(&sequence);
-    state.paragraph = SBAlgorithmCreateParagraph(state.algorithm, 0, code_points.size(), base);
-    state.base_level = SBParagraphGetBaseLevel(state.paragraph);
-    const std::size_t length = SBParagraphGetLength(state.paragraph);
-    const SBLevel* levels = SBParagraphGetLevelsPtr(state.paragraph);
-    state.levels.assign(levels, levels + length);
-    state.levels.resize(code_points.size(), state.base_level);
+    if (direction != ParagraphDirection::RIGHT_TO_LEFT && is_left_to_right_only(code_points))
+    {
+        state.base_level = 0;
+        state.levels.assign(code_points.size(), 0);
+    }
+    else
+    {
+        const SBLevel base = direction == ParagraphDirection::AUTOMATIC       ? SBLevelDefaultLTR
+                             : direction == ParagraphDirection::LEFT_TO_RIGHT ? SBLevel{0}
+                                                                              : SBLevel{1};
+        state.algorithm = SBAlgorithmCreate(&sequence);
+        state.paragraph = SBAlgorithmCreateParagraph(state.algorithm, 0, code_points.size(), base);
+        state.base_level = SBParagraphGetBaseLevel(state.paragraph);
+        const std::size_t length = SBParagraphGetLength(state.paragraph);
+        const SBLevel* levels = SBParagraphGetLevelsPtr(state.paragraph);
+        state.levels.assign(levels, levels + length);
+        state.levels.resize(code_points.size(), state.base_level);
+    }
 
     // Scripts: common and inherited characters take their neighbors' script.
     state.scripts.assign(code_points.size(), SBScriptGetUnicodeTag(SBScriptZYYY));
-    SBScriptLocatorRef locator = SBScriptLocatorCreate();
-    SBScriptLocatorLoadCodepoints(locator, &sequence);
-    while (SBScriptLocatorMoveNext(locator) != 0)
+    SBScriptLocatorLoadCodepoints(state.locator, &sequence);
+    while (SBScriptLocatorMoveNext(state.locator) != 0)
     {
-        const SBScriptAgent* agent = SBScriptLocatorGetAgent(locator);
+        const SBScriptAgent* agent = SBScriptLocatorGetAgent(state.locator);
         const std::uint32_t tag = SBScriptGetUnicodeTag(agent->script);
         std::fill_n(state.scripts.begin() + static_cast<std::ptrdiff_t>(agent->offset), agent->length, tag);
     }
-    SBScriptLocatorRelease(locator);
 }
 
 auto
@@ -122,6 +149,13 @@ BidiParagraph::line_runs(std::uint32_t begin,
                          std::uint32_t end,
                          std::vector<VisualRun>& runs) const
 {
+    // Level 0 everywhere: one run.
+    if (m_state->paragraph == nullptr)
+    {
+        runs.push_back({.begin = begin, .end = end, .level = 0});
+        return;
+    }
+
     // SheenBidi applies rules L1 (trailing whitespace) and L2 (reordering): its runs are in visual order.
     SBLineRef line = SBParagraphCreateLine(m_state->paragraph, begin, end - begin);
     const SBUInteger count = SBLineGetRunCount(line);

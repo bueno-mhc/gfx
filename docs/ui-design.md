@@ -524,6 +524,8 @@ report, and your validation (you commit).
   line) → line metrics of the font's first atlas.
 - **Cache**: fixed capacity (`TextLayoutEngineDescription::cache_capacity`, 1024), hashed (xxHash64 of the text, the
   font, the description) with chained buckets and an intrusive least-recently-used list; entries reuse their storage.
+  (Since the follow-up after U6: layouts used in one frame only are replaced first, see "Text layout cache misses
+  without allocations".)
   `new_frame()` starts a frame; layouts returned before stay valid until then; an entry used this frame is never
   replaced — when all are, the layout lives in a per-frame overflow (`CACHE_FULL`). A hit allocates nothing (counted
   by a test that replaces `operator new`). `statistics()`: hits, misses, evictions, overflows, cached.
@@ -911,7 +913,7 @@ report, and your validation (you commit).
   AUTO_SELECT_NEW_TABS); the menu bar drew nothing until its clip stopped intersecting the content clip (found in the GPU
   picture). **For a later step**: a text layout cache miss allocates (about 8 allocations for a changed text: bidi
   analysis objects and per-miss buffers of U2's engine), so a text that changes every frame (a counter) allocates every
-  frame; cached texts do not.
+  frame; cached texts do not. (Done in the follow-up below; the allocations were the new cache entry's own storage.)
 - **Verified by eye** (pictures read back from both GPUs): a window with a menu bar, tabs, a tree with a leaf and a bullet
   and a collapsing header; then its File menu open over them, with shortcuts, a check mark and a submenu arrow.
 - **Tests**: `gfx_ui_context_tests` +27 under synthetic input (trees: toggling and indentation, arrow/double-click/leaf/
@@ -924,6 +926,43 @@ report, and your validation (you commit).
   sources without identifiers) and +1 × each GPU (the picture above); the allocation test +1 (a menu bar, tabs, trees, an
   open popup, tooltips, drag sources and targets under a moving mouse: no allocation over 100 frames); compile-failure
   `UiPayloadsAreTriviallyCopyable`. The later-phase report test now uses U7's widgets.
+
+### Follow-up after U6: text layout cache misses without allocations (2026-10-18)
+
+- **Cause, measured** (a breakpoint in the tests' counting `operator new` under gdb): every allocation of a miss came
+  from the cache entry it filled. A free entry starts empty: the copy of the text (when longer than the string's inline
+  buffer), the growth of its glyph vector (7 reallocations for 48 glyphs) and of its line vector. With 1024 entries, a text
+  that changes every frame took a new entry every frame, for 1024 frames, before any storage was reused. The engine's
+  scratch vectors, the bidi analysis and HarfBuzz allocated nothing through `operator new` (SheenBidi uses `malloc`).
+- **Cache policy (accepted by the user, 2026-10-18)**: two intrusive lists, *probation* (layouts used in one frame only) and *retained*
+  (used in two frames or more). A miss replaces the oldest probationary layout when it was last used two frames ago or
+  more (`PROBATION_FRAMES`), else takes a free entry, else replaces the least recently used layout of both lists not used
+  this frame (else `CACHE_FULL`, as before). A text that changes every frame cycles through two entries and their storage;
+  a text used in two consecutive frames is never replaced by such texts (a scan-resistant policy, like segmented LRU or
+  2Q). Cost: a text used in one frame only and again more than two frames later is laid out again (no allocation when it
+  is no longer than the texts before it). Alternatives: strict LRU (the warm-up is then 1024 distinct texts), or storage
+  allocated up front.
+- **Bug fixed**: `unlink()` updated the wrong end of the LRU list (removing the newest entry changed `oldest`, removing the
+  oldest changed `newest`). A hit on the newest entry made it point to itself and dropped other entries from the list, so
+  the replaced layout was not the least recently used one, and a full cache overflowed (`CACHE_FULL`) while entries not
+  used this frame existed (388 overflows instead of 260 in the new overflow test, which found it).
+- **Storage kept**: overflow entries are reused from frame to frame (a count of those in use instead of `deque::clear()`);
+  `clear()` keeps every entry's storage.
+- **Bidi fast path**: a paragraph that is not forced right to left and has no character of bidi class R, AL or AN nor a
+  directional formatting character (LRE … PDI) has level 0 everywhere, so SheenBidi's algorithm, paragraph and lines are
+  not created (`malloc`s avoided) and each line is one level-0 run. A temporary check compared it with SheenBidi on every
+  paragraph of the test suites and on 20 000 random strings of tricky characters (marks, joiners, LRM, digits and their
+  separators, segment separators, CJK, emoji; right-to-left ones for the other path): 99 002 paragraphs and 400 262
+  lines identical; the check was removed. The script locator is created once (loading code points resets it).
+- **Measurements** (`operator new` calls over 100 frames after 30 frames of warm-up, Debug): a 48-character counter laid
+  out four ways per frame (basic, wrapped, HarfBuzz, right-to-left paragraph) 3800 → 0; four new texts per frame in a
+  cache of two entries 2200 → 0; U6's structure test with its popup text changing every frame 808 → 0; a window of
+  counters 2400 → 0. U6's structure test now writes `"Popup at frame {:03}"` (no longer cycling through 8 values); with an
+  unpadded counter, 8 allocations remain once, at frame 100, when the text grows: five scratch vectors of the engine and
+  the popup's vertex vector in each of the three draw data slots.
+- **Tests**: `gfx_ui_text_allocation_tests` +3 (texts changing every frame, layouts made while the cache is full, a
+  window of counters); `gfx_ui_text_tests` +2 (layouts used in one frame only are replaced first; the least recently
+  used layout is replaced when the cache is full — both fail with the former `unlink()`).
 
 ---
 

@@ -296,6 +296,75 @@ TEST(TextLayoutCacheTest, CachedLayoutsAreReused)
     EXPECT_EQ(engine.statistics().hits, 2U);
 }
 
+TEST(TextLayoutCacheTest, LayoutsUsedInOneFrameOnlyAreReplacedFirst)
+{
+    gfx::tests::TextFonts fonts;
+    TextLayoutEngine engine{fonts.library, {.cache_capacity = 8}};
+
+    // "kept" every frame, "counter N" in frame N only: from the third frame, each counter replaces the one of two
+    // frames before instead of taking a free entry.
+    std::string counter = "counter 0";
+    for (char digit = '0'; digit <= '9'; ++digit)
+    {
+        engine.new_frame();
+        counter.back() = digit;
+        static_cast<void>(engine.layout("kept", fonts.latin));
+        static_cast<void>(engine.layout(counter, fonts.latin));
+    }
+    EXPECT_EQ(engine.statistics().cached, 3U) << "kept and the last two counters";
+    EXPECT_EQ(engine.statistics().evictions, 8U);
+    EXPECT_EQ(engine.statistics().hits, 9U);
+
+    // A text used in two consecutive frames stays while the counters go on; the last counters are still there.
+    engine.new_frame();
+    static_cast<void>(engine.layout("shown twice", fonts.latin));
+    engine.new_frame();
+    static_cast<void>(engine.layout("shown twice", fonts.latin));
+    for (char digit = 'a'; digit <= 'j'; ++digit)
+    {
+        engine.new_frame();
+        counter.back() = digit;
+        static_cast<void>(engine.layout(counter, fonts.latin));
+    }
+    const std::uint64_t hits = engine.statistics().hits;
+    static_cast<void>(engine.layout("shown twice", fonts.latin));
+    static_cast<void>(engine.layout("kept", fonts.latin));
+    static_cast<void>(engine.layout("counter j", fonts.latin));
+    EXPECT_EQ(engine.statistics().hits, hits + 3);
+
+    // A counter of an earlier frame is laid out again.
+    const std::uint64_t misses = engine.statistics().misses;
+    static_cast<void>(engine.layout("counter 5", fonts.latin));
+    EXPECT_EQ(engine.statistics().misses, misses + 1);
+    EXPECT_LE(engine.statistics().cached, 6U);
+}
+
+TEST(TextLayoutCacheTest, TheLeastRecentlyUsedLayoutIsReplacedWhenTheCacheIsFull)
+{
+    gfx::tests::TextFonts fonts;
+    TextLayoutEngine engine{fonts.library, {.cache_capacity = 2}};
+
+    // "a" and "b" used in two frames, then "b" before "a": "b" is the least recently used.
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        engine.new_frame();
+        static_cast<void>(engine.layout("a", fonts.latin));
+        static_cast<void>(engine.layout("b", fonts.latin));
+    }
+    engine.new_frame();
+    static_cast<void>(engine.layout("b", fonts.latin));
+    static_cast<void>(engine.layout("a", fonts.latin));
+
+    // A new text replaces "b".
+    engine.new_frame();
+    static_cast<void>(engine.layout("c", fonts.latin));
+    EXPECT_EQ(engine.statistics().evictions, 1U);
+    const std::uint64_t hits = engine.statistics().hits;
+    static_cast<void>(engine.layout("a", fonts.latin));
+    EXPECT_EQ(engine.statistics().hits, hits + 1);
+    EXPECT_TRUE(has_all(engine.layout("b", fonts.latin).problems, TextLayoutProblem::CACHE_FULL)) << "a and c are used this frame";
+}
+
 TEST_F(TextLayoutTest, CaretsAndHitTestsFollowClusters)
 {
     const TextLayout layout = engine.layout("Hello", fonts.latin);

@@ -1,6 +1,6 @@
-// A cached layout allocates nothing, nor does a draw list refilled every frame, nor an immediate-mode UI after
-// its first frames: this executable counts every operator new while it lays texts out, fills lists and runs
-// frames.
+// A cached layout allocates nothing, nor does the layout of a text that changes every frame (it reuses the storage
+// of an earlier one), nor a draw list refilled every frame, nor an immediate-mode UI after its first frames: this
+// executable counts every operator new while it lays texts out, fills lists and runs frames.
 #include <gtest/gtest.h>
 
 import std;
@@ -98,6 +98,101 @@ TEST(TextAllocationTest, CachedLayoutsAllocateNothing)
     EXPECT_EQ(g_allocations.load(), 0U);
     EXPECT_GT(glyphs, 0U);
     EXPECT_EQ(engine.statistics().misses, 6U);
+}
+
+/// Writes @p number as the last four characters of @p text.
+void
+write_counter(std::string& text,
+              std::uint32_t number)
+{
+    for (std::size_t digit = 0; digit < 4; ++digit)
+    {
+        text[text.size() - 1 - digit] = static_cast<char>('0' + number % 10);
+        number /= 10;
+    }
+}
+
+TEST(TextAllocationTest, TextsChangingEveryFrameAllocateNothingAfterTheFirstFrames)
+{
+    // A text of the same length that differs every frame (a counter), laid out by the basic shaper, wrapped, by
+    // HarfBuzz and in a right-to-left paragraph, next to a text that stays: every layout is a miss, made in the
+    // storage of layouts made earlier.
+    FontLibrary library;
+    const FontAtlasHandle atlas = library.add_atlas(FontAtlas::load(gfx::tests::text_atlases::allocation_latin));
+    const FontHandle font = library.add_font({.atlas = atlas});
+    const FontHandle harfbuzz = library.add_font({.atlas = atlas, .shaping = TextShaping::HARFBUZZ});
+    TextLayoutEngine engine{library};
+    const TextLayoutDescription wrapped{.wrap_width = 120, .alignment = TextAlignment::CENTER};
+    const TextLayoutDescription right_to_left{.direction = ParagraphDirection::RIGHT_TO_LEFT};
+    std::string text = "The quick brown fox jumps over the lazy dog 0000";
+    std::size_t glyphs = 0;
+    std::size_t lines = 0;
+    TextLayoutProblem problems = TextLayoutProblem::NONE;
+    const auto lay_out = [&](std::uint32_t frame)
+    {
+        engine.new_frame();
+        write_counter(text, frame);
+        glyphs += engine.layout("File", font).glyphs.size();
+        for (const TextLayout layout : {engine.layout(text, font), engine.layout(text, font, wrapped), engine.layout(text, harfbuzz),
+                                        engine.layout(text, font, right_to_left)})
+        {
+            glyphs += layout.glyphs.size();
+            lines += layout.lines.size();
+            problems |= layout.problems;
+        }
+    };
+    for (std::uint32_t frame = 0; frame < 30; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    for (std::uint32_t frame = 30; frame < 130; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, TextLayoutProblem::NONE);
+    EXPECT_EQ(glyphs, 130U * (4U + 4U * 48U)) << "a glyph for each of the 48 characters in every layout of the counter";
+    EXPECT_GT(lines, 130U * 5U) << "the wrapped layout has several lines";
+    EXPECT_EQ(engine.statistics().misses, 1U + 4U * 130U);
+}
+
+TEST(TextAllocationTest, LayoutsMadeWhileTheCacheIsFullAllocateNothingAfterTheFirstFrames)
+{
+    // Four new texts every frame in a cache of two entries: two replace the layouts of the frame before, two live
+    // until the next frame (CACHE_FULL), in storage kept from frame to frame.
+    FontLibrary library;
+    const FontAtlasHandle atlas = library.add_atlas(FontAtlas::load(gfx::tests::text_atlases::allocation_latin));
+    const FontHandle font = library.add_font({.atlas = atlas});
+    TextLayoutEngine engine{library, {.cache_capacity = 2}};
+    std::array<std::string, 4> texts{"The first text of frame 0000", "The second text of frame 0000", "The third text of frame 0000",
+                                     "The fourth text of frame 0000"};
+    std::size_t full = 0;
+    const auto lay_out = [&](std::uint32_t frame)
+    {
+        engine.new_frame();
+        for (std::string& text : texts)
+        {
+            write_counter(text, frame);
+            full += has_any(engine.layout(text, font).problems, TextLayoutProblem::CACHE_FULL) ? 1U : 0U;
+        }
+    };
+    for (std::uint32_t frame = 0; frame < 30; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    for (std::uint32_t frame = 30; frame < 130; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(full, 2U * 130U);
+    EXPECT_EQ(engine.statistics().overflows, 2U * 130U);
 }
 
 TEST(TextAllocationTest, DrawListsRefilledEveryFrameAllocateNothing)
@@ -336,7 +431,7 @@ TEST(TextAllocationTest, StructureWidgetsAllocateNothingWhileTheMouseMovesOverTh
             }
             if (frame.begin_popup("popup"))
             {
-                frame.text("Popup at frame {} of 8", frame_number % 8);
+                frame.text("Popup at frame {:03}", frame_number);
                 frame.end_popup();
             }
             frame.tooltip("Always shown");
@@ -431,6 +526,43 @@ TEST(TextAllocationTest, InputWidgetsAllocateNothingWhileTheMouseMovesOverThem)
     const auto run = [&](std::uint32_t frame_number)
     {
         build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 30; ++frame_number)
+    {
+        EXPECT_TRUE(run(frame_number).ok()) << frame_number;
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    for (std::uint32_t frame_number = 30; frame_number < 130; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+}
+
+TEST(TextAllocationTest, ImmediateModeTextsChangingEveryFrameAllocateNothing)
+{
+    // Texts formatted from the frame number, all of the same length, change every frame: none is found in the text
+    // layout cache, each is laid out in the storage of a text of an earlier frame.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        UiFrame& frame = ui.begin_frame({.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 600}});
+        frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 300, .y = 200}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Counters"))
+        {
+            frame.text("Frame {:04}", frame_number);
+            frame.label("Time", "{:07.3f} s", static_cast<double>(frame_number) / 60.0);
+            frame.text_wrapped("Frame {:04} of a text long enough to wrap at the end of the content region of the window.", frame_number);
+        }
+        frame.end_window();
         return ui.end_frame();
     };
     for (std::uint32_t frame_number = 0; frame_number < 30; ++frame_number)

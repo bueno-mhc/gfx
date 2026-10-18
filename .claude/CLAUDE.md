@@ -177,8 +177,8 @@ Original hard requirements (from the user's initial specification):
   call_once init), HarfBuzzShaper (one hb_font per atlas keeps the atlas alive; reused buffer; monotone graphemes),
   shape_basic (cmap, longest ligature, pair kerning). Engine works on uint32 code points + byte offset table. Atlas per
   char: first in chain; Common/Inherited stick to the previous atlas. AUTOMATIC shaping: basic for LTR
-  Latin/Greek/Cyrillic/Common runs without marks. Cache: hash buckets + intrusive LRU, entries used this frame never
-  evicted (overflow deque → CACHE_FULL). HarfBuzz is now configured before FreeType (no hb-ft in apps). Tests use atlases
+  Latin/Greek/Cyrillic/Common runs without marks. Cache: hash buckets + intrusive probation/retained lists (follow-up
+  after U6), entries used this frame never evicted (overflow deque, storage kept → CACHE_FULL). HarfBuzz is now configured before FreeType (no hb-ft in apps). Tests use atlases
   from gfx_add_ui_atlas (text_latin, text_latin_basic NO_SHAPING_FONT, text_hebrew, text_arabic; module
   gfx.tests.text_support); allocation test replaces operator new. Visual check: CPU MTSDF render of a layout (temporary
   test, PGM → PNG with a stdlib script in the scratchpad).
@@ -272,8 +272,17 @@ Original hard requirements (from the user's initial specification):
   ignores everything under the top modal; clicks outside a modal keep focus; Up/Down = focus steps in non-modal popups;
   modal dim list published before the top modal; wants_mouse while popups/drags. Colors: swatches drag COLOR_PAYLOAD_TYPE
   and show tooltips; editors accept drops; right-click options (`ContextState::color_options`). **MouseButton order is LEFT,
-  MIDDLE, RIGHT** (ContextState::mouse index = to_underlying). Gotcha: a frame's text that changes every frame misses the
-  layout cache and allocates (U2 follow-up).
+  MIDDLE, RIGHT** (ContextState::mouse index = to_underlying). (A text changing every frame no longer allocates: next item.)
+- **Follow-up after U6: cache misses without allocations (2026-10-18; probation/retained policy accepted by the user)** — docs/ui-design.md §B
+  "Follow-up after U6". Cause measured with gdb: a miss filled a **free** cache entry (empty text/glyph/line storage);
+  1024 entries → a counter text took a new entry each frame. text_layout.cpp: lists `probation` (used in one frame only)
+  and `retained` (used again in a later frame, `Entry::retained`); acquire() = oldest probation entry last used
+  ≥ `PROBATION_FRAMES` (2) frames ago, else a free entry, else LRU of both lists not used this frame, else overflow
+  (`overflow_used`, storage kept; clear() keeps storage). **Bug fixed**: unlink() swapped the list heads (hit on the newest
+  → self-loop, wrong evictions, spurious CACHE_FULL). bidi.cpp: no R/AL/AN/format character and not forced RTL → levels 0,
+  no SBAlgorithm/SBParagraph/SBLine (one level-0 run per line; verified identical to SheenBidi on 99 002 paragraphs, check
+  removed); SBScriptLocator created once. Remaining allocations only when a text is longer than earlier ones (scratch
+  vectors grow by exact size; draw lists of 3 slots). U6 structure test now `"Popup at frame {:03}"`.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -681,11 +690,12 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63) committed; **U6 (structure: trees, tabs, menus, public popups, modals, tooltips, drag and drop) done, awaiting validation** (§B "U6 as built", 9 deviations); U7 (tables and visualization) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63) committed; **U6 (structure: trees, tabs, menus, public popups, modals, tooltips, drag and drop) done, awaiting validation** (§B "U6 as built", 9 deviations); **follow-up after U6 (allocation-free cache misses, LRU fix, bidi fast path) done, cache policy accepted 2026-10-18**; U7 (tables and visualization) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **713**, all passing in Debug and Release, 2026-10-18 (after U6: + 27 structure tests, + 1 render
+Test count at last report: **718**, all passing in Debug and Release, 2026-10-18 (after the follow-up after U6: + 3
+allocation tests, + 2 cache tests; skips Debug 4, Release 19). Before: 713 (after U6: + 27 structure tests, + 1 render
 × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19). Before U6: 682 (after U5: + 9 text editor tests, + 26
 input widget tests + 2 render × 2 GPUs, + 1 draw list, + 1 allocation, + 1 IME × 2 platform backends, + 1 compile-failure;
 skips Debug 4, Release 19). Before U5: 638 (after U4: + 37 context tests + 2

@@ -52,7 +52,9 @@ is_basic_script(std::uint32_t tag) noexcept -> bool
 ///        marks): such characters stay in the atlas of the character before them when it has them.
 [[nodiscard]] auto is_common_or_inherited(char32_t code_point) noexcept -> bool;
 
-/// @brief The bidi levels and scripts of a paragraph, and the visual runs of its lines (SheenBidi).
+/// @brief The bidi levels and scripts of a paragraph, and the visual runs of its lines (SheenBidi; a paragraph that is
+///        not right to left and has no right-to-left character, Arabic number or directional formatting character has
+///        level 0 everywhere without SheenBidi's algorithm, which allocates).
 class BidiParagraph
 {
 public:
