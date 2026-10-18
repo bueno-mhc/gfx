@@ -1,8 +1,9 @@
 /// @file text_layout.cpp
 /// @brief TextLayoutEngine: paragraphs → bidi and scripts → atlas per character → runs → shaping → line
 ///        breaking → visual reordering → alignment; the layout cache (fixed capacity; layouts used in one frame
-///        only replaced first, then the least recently used; nothing allocated on a hit, nor on a miss that reuses
-///        the storage of a layout as long); caret positions and hit testing.
+///        only replaced first, the one whose storage fits the new layout best, then the least recently used;
+///        nothing allocated on a hit, nor on a miss once storage of its size circulates); caret positions and hit
+///        testing.
 module gfx.ui.text;
 
 import std;
@@ -28,6 +29,11 @@ constexpr std::uint8_t NO_ATLAS = std::numeric_limits<std::uint8_t>::max();
 /// consecutive frames is always found again, and texts that change every frame reuse each other's entries.
 constexpr std::uint64_t PROBATION_FRAMES = 2;
 
+/// Replaceable layouts (used in one frame only) a miss compares, from the oldest: the one whose storage holds the new
+/// layout with the least to spare is replaced, so that a long text takes the storage of a long text of an earlier frame
+/// rather than growing a short one's.
+constexpr std::uint32_t FIT_CANDIDATES = 16;
+
 /// Whether @p code_point ends a paragraph (bidi class B, and the line separator).
 constexpr auto
 is_paragraph_separator(std::uint32_t code_point) noexcept -> bool
@@ -42,6 +48,27 @@ is_whitespace(std::uint32_t code_point) noexcept -> bool
 {
     return code_point == U' ' || code_point == U'\t' || code_point == 0x1680 || (code_point >= 0x2000 && code_point <= 0x200A)
            || code_point == 0x205F || code_point == 0x3000;
+}
+
+/// What a layout needs, or what storage holds: bytes of text, glyphs and lines.
+struct StorageSize
+{
+    std::size_t text = 0;
+    std::size_t glyphs = 0;
+    std::size_t lines = 0;
+};
+
+/// Makes room for @p count elements in @p storage. Storage that grows is rounded up to a power of two (a size class),
+/// so that the layouts of texts of similar lengths fit in each other's storage.
+template<class Storage>
+void
+reserve_size_class(Storage& storage,
+                   std::size_t count)
+{
+    if (storage.capacity() < count)
+    {
+        storage.reserve(std::bit_ceil(count));
+    }
 }
 
 /// A cached layout and its key.
@@ -68,6 +95,32 @@ struct Entry
     {
         return {.glyphs = glyphs, .lines = lines, .width = width, .height = height, .missing_glyph_count = missing_glyph_count,
                 .problems = problems, .font_size = font_size};
+    }
+
+    /// Whether the storage of this entry holds a layout of @p size without growing.
+    [[nodiscard]] auto holds(const StorageSize& size) const noexcept -> bool
+    {
+        return text.capacity() >= size.text && glyphs.capacity() >= size.glyphs && lines.capacity() >= size.lines;
+    }
+
+    /// The bytes of storage this entry holds.
+    [[nodiscard]] auto storage_bytes() const noexcept -> std::size_t
+    {
+        return text.capacity() + glyphs.capacity() * sizeof(LaidOutGlyph) + lines.capacity() * sizeof(LaidOutLine);
+    }
+
+    /// Copies the layout of @p other (not its key) into this entry's storage, which grows to a size class if it is too small.
+    void copy_layout(const Entry& other)
+    {
+        reserve_size_class(glyphs, other.glyphs.size());
+        reserve_size_class(lines, other.lines.size());
+        glyphs.assign(other.glyphs.begin(), other.glyphs.end());
+        lines.assign(other.lines.begin(), other.lines.end());
+        width = other.width;
+        height = other.height;
+        missing_glyph_count = other.missing_glyph_count;
+        problems = other.problems;
+        font_size = other.font_size;
     }
 };
 
@@ -141,6 +194,7 @@ struct TextLayoutEngine::State
     EntryList retained{};  // Layouts used in several frames.
     std::deque<Entry> overflow{};  // Layouts made while every entry was in use this frame; their storage is kept.
     std::size_t overflow_used = 0; // Overflow entries holding a layout of this frame.
+    Entry scratch{};               // Where a miss is laid out before it is copied into its entry (its storage only grows).
     std::uint64_t frame = 1;
     TextLayoutStatistics statistics{};
 
@@ -231,10 +285,29 @@ struct TextLayoutEngine::State
         entries[index].next_in_bucket = NO_ENTRY;
     }
 
-    /// An entry for a new layout: one whose layout was used in one frame only, PROBATION_FRAMES frames ago or more
-    /// (its storage is reused), a free one, the least recently used one not used this frame, or none (NO_ENTRY).
-    [[nodiscard]] auto acquire() noexcept -> std::uint32_t
+    /// An entry for a new layout of @p size: one whose layout was used in one frame only, PROBATION_FRAMES frames ago or
+    /// more (its storage is reused: of the oldest FIT_CANDIDATES, the one that holds the new layout with the least to
+    /// spare, else the oldest, whose storage grows), a free one, the least recently used one not used this frame, or
+    /// none (NO_ENTRY).
+    [[nodiscard]] auto acquire(const StorageSize& size) noexcept -> std::uint32_t
     {
+        // The replaceable layouts, from the oldest: the one whose storage holds the new layout with the least to spare.
+        std::uint32_t best = NO_ENTRY;
+        std::uint32_t candidate = probation.oldest;
+        for (std::uint32_t compared = 0; compared < FIT_CANDIDATES && candidate != NO_ENTRY && entries[candidate].frame + PROBATION_FRAMES <= frame;
+             ++compared)
+        {
+            const Entry& entry = entries[candidate];
+            if (entry.holds(size) && (best == NO_ENTRY || entry.storage_bytes() < entries[best].storage_bytes()))
+            {
+                best = candidate;
+            }
+            candidate = entry.newer;
+        }
+        if (best != NO_ENTRY)
+        {
+            return evict(best);
+        }
         if (probation.oldest != NO_ENTRY && entries[probation.oldest].frame + PROBATION_FRAMES <= frame)
         {
             return evict(probation.oldest);
@@ -685,10 +758,12 @@ TextLayoutEngine::layout(std::string_view text,
         return state.entries[index].view();
     }
 
-    // A miss: made in a free or replaced entry, or, when every entry is in use this frame, until the next frame (in
-    // an overflow entry, whose storage the next frames reuse).
+    // A miss: made in the scratch entry, whose size then chooses the replaced or free entry it is copied into, or, when
+    // every entry is in use this frame, copied into an overflow entry until the next frame (whose storage the next
+    // frames reuse).
     ++state.statistics.misses;
-    const std::uint32_t index = state.acquire();
+    state.make(state.scratch, text, *font_description, description);
+    const std::uint32_t index = state.acquire({.text = text.size(), .glyphs = state.scratch.glyphs.size(), .lines = state.scratch.lines.size()});
     if (index == NO_ENTRY)
     {
         ++state.statistics.overflows;
@@ -697,16 +772,17 @@ TextLayoutEngine::layout(std::string_view text,
             state.overflow.emplace_back();
         }
         Entry& overflow = state.overflow[state.overflow_used++];
-        state.make(overflow, text, *font_description, description);
+        overflow.copy_layout(state.scratch);
         overflow.problems |= TextLayoutProblem::CACHE_FULL;
         return overflow.view();
     }
     Entry& entry = state.entries[index];
+    reserve_size_class(entry.text, text.size());
     entry.text.assign(text);
     entry.font = font;
     entry.description = description;
     entry.hash = hash;
-    state.make(entry, text, *font_description, description);
+    entry.copy_layout(state.scratch);
     entry.next_in_bucket = state.buckets[hash & state.mask()];
     state.buckets[hash & state.mask()] = index;
     state.make_newest(index);

@@ -1,7 +1,8 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U6
-committed (with the text layout follow-up); U7 built, awaiting validation (§B, "U7 as built").** This document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U7
+committed (with the text layout follow-up after U6); the follow-up after U7 (cache misses of mixed lengths) accepted
+(§B, "Follow-up after U7"); U8 (docking) next.** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -1048,7 +1049,7 @@ report, and your validation (you commit).
   defect detector `ImportStdDuplicatesStaticLocals` fails there with an empty diagnostic and passes from PowerShell: the
   suites were run from PowerShell); a text layout cache entry recycled for a longer text than it held still allocates (a
   plot's tooltip next to short cells: 18 allocations in 100 frames) — a follow-up task is proposed; the allocation test
-  keeps its mouse off the plots meanwhile.
+  keeps its mouse off the plots meanwhile (done: "Follow-up after U7").
 - **Verified by eye** (pictures from both GPUs): a table with a header row, alternating rows and borders, a histogram and a
   half-filled progress bar; a scrolled table with its header row and first column frozen, a spanning selection, two
   sorted columns (arrows and ranks) and the context menu open.
@@ -1063,6 +1064,43 @@ report, and your validation (you commit).
   test +1 (the large clipped table scrolled every frame, plots, progress bars, a splitter, a resizable child: no
   allocation over 100 frames); compile-failure `UiListClippersAreNotCopied`. The later-phase report test now uses U8's
   docking calls.
+
+### Follow-up after U7: text layout cache misses of mixed lengths without allocations (2026-10-18)
+
+- **Cause**: a miss replaced the oldest replaceable layout (used in one frame only, two frames ago or more) whatever its
+  size. A plot's tooltip (two lines, 23 bytes, 22 glyphs) shown among short cells landed in an entry that had held a
+  cell's text and grew its text, glyph and line storage (three allocations), and the long storage then went to a cell's
+  text. Allocations stopped only once every entry in the rotation held storage for the longest text: slowly (U7's table
+  test, with the mouse over the plots, still allocated 18 times in its frames 100 to 199) and at the cost of memory (every
+  recycled entry as large as the longest text).
+- **Policy (accepted by the user, 2026-10-18)**: replacement by size. A miss is laid out in a scratch entry of the engine first (its storage
+  only grows), so its exact size (text bytes, glyphs, lines) is known. Of the replaceable layouts, the `FIT_CANDIDATES`
+  (16) oldest are compared, and the one whose storage holds the new layout with the least to spare (fewest bytes) is
+  replaced; when none holds it, the oldest one, as before, whose storage grows to a power of two (`reserve_size_class()`:
+  size classes, so that texts of similar lengths fit in each other's storage, "98: …" and "100: …"). The layout is then
+  copied into the entry (a copy of its glyphs and lines per miss, a small cost next to shaping it). The rest of the order
+  is unchanged: a free entry, the least recently used one not used this frame, an overflow entry.
+- **Why this option** (the closest to commercial practice): pools of variable-size objects reuse a free object whose size
+  fits and allocate only when none does. Unreal's render-target pool looks for a free pooled target whose description
+  fits; memcached evicts within the slab class of the new item's size, so the freed memory fits it; general allocators
+  (jemalloc, mimalloc, Unreal's binned allocator) keep free lists per size class. The alternatives: (b) spare storage
+  swapped in from a pool is the same matching with an extra pool of entries, whose spares get their size only by an
+  allocation and get the small storage back after each swap; (c) a minimum capacity for every entry (32 bytes, 32
+  glyphs, 2 lines: about 1 KiB per entry, 1 MiB for 1024 entries) is a small-buffer optimization (Unreal's
+  `TInlineAllocator`, LLVM's `SmallVector`): it covers texts under the threshold only (a tooltip of 40 glyphs still
+  allocates) and costs memory in every entry.
+- **Measurements** (Debug, `operator new` calls over 100 frames after the warm-up): U7's table test with the mouse over
+  the whole window 18 → 0; the new test of mixed lengths 6 → 0. Storage of the used entries at the end: the table test
+  26.4 → 17.9 KiB (entries holding 20 glyphs or more: 8 → 1), the mixed-length test 22.0 → 12.2 KiB (17 → 1).
+- **Remaining**: a text longer than every earlier one grows the engine's scratch vectors to its exact size, once (5
+  allocations when the tooltip's index reached three digits, so the test's indices have three digits from its first
+  frame). A cache too small for the texts in use (replacing a layout of the frame before or a retained one, or
+  overflowing with `CACHE_FULL`) takes its entries in least-recently-used order, whatever their size: its storage settles
+  only once those entries hold the longest texts (choosing them by size would replace layouts used more recently).
+- **Tests**: `gfx_ui_text_allocation_tests` +1 (`TextsOfMixedLengthsChangingEveryFrameAllocateNothingAfterTheFirstFrames`:
+  16 counters of four lengths and, every other frame, a tooltip of two lines at a place that moves; 6 allocations with
+  the former policy); `LargeClippedTablesAllocateNothingWhileTheyScrollAndTheMouseMovesOverThem`: the mouse sweeps the
+  whole window again (a y range of 540 units instead of 280) and the test checks that it hovered the plots.
 
 ---
 

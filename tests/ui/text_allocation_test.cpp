@@ -1,6 +1,6 @@
 // A cached layout allocates nothing, nor does the layout of a text that changes every frame (it reuses the storage
-// of an earlier one), nor a draw list refilled every frame, nor an immediate-mode UI after its first frames: this
-// executable counts every operator new while it lays texts out, fills lists and runs frames.
+// of an earlier one that holds it), nor a draw list refilled every frame, nor an immediate-mode UI after its first
+// frames: this executable counts every operator new while it lays texts out, fills lists and runs frames.
 #include <gtest/gtest.h>
 
 import std;
@@ -157,6 +157,87 @@ TEST(TextAllocationTest, TextsChangingEveryFrameAllocateNothingAfterTheFirstFram
     EXPECT_EQ(glyphs, 130U * (4U + 4U * 48U)) << "a glyph for each of the 48 characters in every layout of the counter";
     EXPECT_GT(lines, 130U * 5U) << "the wrapped layout has several lines";
     EXPECT_EQ(engine.statistics().misses, 1U + 4U * 130U);
+}
+
+/// Formats into @p buffer without allocating: the text written (cut at the buffer's end).
+template<class... Arguments>
+auto
+format_into(std::span<char> buffer,
+            std::format_string<Arguments...> format,
+            Arguments&&... arguments) -> std::string_view
+{
+    const auto result = std::format_to_n(buffer.data(), static_cast<std::ptrdiff_t>(buffer.size()), format, std::forward<Arguments>(arguments)...);
+    return {buffer.data(), result.out};
+}
+
+TEST(TextAllocationTest, TextsOfMixedLengthsChangingEveryFrameAllocateNothingAfterTheFirstFrames)
+{
+    // Sixteen short counters of four lengths change every frame (a table's cells) and, every other frame, a text of two
+    // lines and about 24 bytes (a plot's tooltip) comes among them at a place that moves: every layout is a miss, made
+    // in the storage of a layout of an earlier frame that holds it (the tooltip in a former tooltip's storage, not in a
+    // counter's that would have to grow). The tooltip's indices have three digits from the first frame on: a text longer
+    // than every earlier one still grows the engine's scratch storage, once.
+    FontLibrary library;
+    const FontAtlasHandle atlas = library.add_atlas(FontAtlas::load(gfx::tests::text_atlases::allocation_latin));
+    const FontHandle font = library.add_font({.atlas = atlas});
+    TextLayoutEngine engine{library};
+    std::array<char, 64> buffer{};
+    std::size_t layouts = 0;
+    std::size_t tooltips = 0;
+    std::size_t lines = 0;
+    TextLayoutProblem problems = TextLayoutProblem::NONE;
+    const auto add = [&](std::string_view text)
+    {
+        const TextLayout layout = engine.layout(text, font);
+        ++layouts;
+        lines += layout.lines.size();
+        problems |= layout.problems;
+    };
+    const auto lay_out = [&](std::uint32_t frame)
+    {
+        engine.new_frame();
+        constexpr std::uint32_t COUNTERS = 16;
+        const std::uint32_t tooltip_place = frame % 2 == 0 ? (frame / 2 * 7) % (COUNTERS + 1) : COUNTERS + 1;
+        for (std::uint32_t place = 0; place <= COUNTERS; ++place)
+        {
+            if (place == tooltip_place)
+            {
+                const std::uint32_t index = 100 + frame;
+                const double angle = static_cast<double>(index) * 0.3;
+                add(format_into(buffer, "{}: {:.4f}\n{}: {:.4f}", index, std::sin(angle), index + 1, std::sin(angle + 0.3)));
+                ++tooltips;
+            }
+            if (place == COUNTERS)
+            {
+                break;
+            }
+            const std::uint32_t number = frame * COUNTERS + place;
+            switch (place % 4)
+            {
+                case 0:  add(format_into(buffer, "{}", number)); break;
+                case 1:  add(format_into(buffer, "{:.2f}", static_cast<double>(number) * 0.25)); break;
+                case 2:  add(format_into(buffer, "Row {:05}", number)); break;
+                default: add(format_into(buffer, "{} ms", number)); break;
+            }
+        }
+    };
+    for (std::uint32_t frame = 0; frame < 30; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    for (std::uint32_t frame = 30; frame < 130; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, TextLayoutProblem::NONE);
+    EXPECT_EQ(tooltips, 65U);
+    EXPECT_EQ(layouts, 130U * 16U + tooltips);
+    EXPECT_EQ(lines, layouts + tooltips) << "a line for each counter, two for each tooltip";
+    EXPECT_EQ(engine.statistics().misses, layouts) << "every text is new";
 }
 
 TEST(TextAllocationTest, LayoutsMadeWhileTheCacheIsFullAllocateNothingAfterTheFirstFrames)
@@ -597,6 +678,7 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
     float left = 120;
     float right = 200;
     std::uint32_t submitted = 0;
+    std::uint32_t plot_hovers = 0;
     const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
     {
         frame.set_next_window_position({.x = 10, .y = 10}, UiCondition::FIRST_USE_EVER);
@@ -640,7 +722,9 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
                 frame.end_table();
             }
             frame.plot_lines("Wave", values, {.size = {.x = 240, .y = 50}});
+            plot_hovers += frame.is_item_hovered() ? 1U : 0U;
             frame.plot_histogram("Bars", std::span{values}.first(20), {.size = {.x = 240, .y = 50}});
+            plot_hovers += frame.is_item_hovered() ? 1U : 0U;
             frame.progress_bar(static_cast<float>(frame_number % 100) / 100.0F);
             frame.progress_bar(-1.0F);
             static_cast<void>(frame.splitter("split", true, 8.0F, left, right, 40.0F, 40.0F));
@@ -659,13 +743,13 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
         frame.end_window();
     };
 
-    // The mouse moves over the table without pressing, the table scrolls: a cycle of 50 frames (the first two warm
-    // up). Not over the plots: their tooltips' texts, longer than the rows', would land in cache entries whose storage
-    // held short texts (a limitation of the text layout cache, not of tables).
+    // The mouse moves over the whole window without pressing, the table scrolls: a cycle of 50 frames (the first two
+    // warm up). Over the plots, their tooltips (texts of two lines, longer than the rows') come and go among the rows'
+    // texts.
     const auto input = [&](std::uint32_t frame_number)
     {
         const std::uint32_t step = frame_number % 50;
-        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((step * 37) % 520), .y = 40.0F + static_cast<float>((step * 53) % 280)};
+        const gfx::Vector2 mouse{.x = 30.0F + static_cast<float>((step * 37) % 520), .y = 40.0F + static_cast<float>((step * 53) % 540)};
         return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 620}, .mouse_present = true, .mouse_position = mouse};
     };
     const auto run = [&](std::uint32_t frame_number)
@@ -682,6 +766,7 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
     g_counting = true;
     std::uint32_t problems = 0;
     submitted = 0;
+    plot_hovers = 0;
     for (std::uint32_t frame_number = 100; frame_number < 200; ++frame_number)
     {
         problems += run(frame_number).ok() ? 0U : 1U;
@@ -691,6 +776,7 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
     EXPECT_EQ(problems, 0U);
     EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
     EXPECT_LT(submitted, 100U * 25U) << "about the rows in view each frame";
+    EXPECT_GT(plot_hovers, 0U) << "the mouse passed over the plots";
 }
 
 } // namespace
