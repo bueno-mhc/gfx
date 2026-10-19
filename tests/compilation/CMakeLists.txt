@@ -177,4 +177,8 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_list_clippers_are_not_copied.cpp
         EXPECTED_DIAGNOSTIC "use of deleted function"
         LIBRARIES gfx::ui)
+    gfx_add_compilation_failure_test(UiDockBuildersComeFromTheirContext
+        SOURCES ui/ui_dock_builders_come_from_their_context.cpp
+        EXPECTED_DIAGNOSTIC "private within this context|no matching function"
+        LIBRARIES gfx::ui)
 endif()

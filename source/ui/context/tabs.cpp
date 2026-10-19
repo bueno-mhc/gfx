@@ -405,18 +405,15 @@ tab_item(ContextState& state,
 } // namespace
 
 auto
-UiFrame::begin_tab_bar(std::string_view id,
-                       TabBarFlag flags) noexcept -> bool
+begin_tab_bar_at(ContextState& state,
+                 WindowState& window,
+                 std::uint32_t bar_id,
+                 const UiRectangle& rectangle,
+                 TabBarFlag flags,
+                 std::string_view operation,
+                 std::string_view id) noexcept -> TabBarState*
 {
-    ContextState& state = *m_state;
-    WindowState* window = state.current_window("begin_tab_bar");
-    if (window == nullptr || window->skip_items)
-    {
-        return false;
-    }
-
     // The bar of this identifier (made the first time).
-    const std::uint32_t bar_id = state.widget_id(id);
     std::uint32_t index = state.tab_bar_lookup.find(bar_id).value_or(ContextState::NO_WINDOW);
     if (index == ContextState::NO_WINDOW)
     {
@@ -430,20 +427,20 @@ UiFrame::begin_tab_bar(std::string_view id,
         }
         catch (...)
         {
-            state.report(UiFrameProblem::CAPACITY_EXCEEDED, "begin_tab_bar", "the tab bar could not be remembered", id);
-            return false;
+            state.report(UiFrameProblem::CAPACITY_EXCEEDED, operation, "the tab bar could not be remembered", id, bar_id);
+            return nullptr;
         }
     }
     TabBarState& bar = state.tab_bars[index];
     if (bar.last_frame == state.frame)
     {
-        state.report(UiFrameProblem::IDENTIFIER_CONFLICT, "begin_tab_bar", "a tab bar was begun twice in a frame: give each its own identifier", id, bar_id);
+        state.report(UiFrameProblem::IDENTIFIER_CONFLICT, operation, "a tab bar was begun twice in a frame: give each its own identifier", id, bar_id);
     }
     bar.appearing = bar.last_frame == 0 || bar.last_frame + 1 < state.frame;
     bar.previous_frame = bar.last_frame;
     bar.last_frame = state.frame;
     bar.flags = flags;
-    bar.window = static_cast<std::uint32_t>(window - state.windows.data());
+    bar.window = static_cast<std::uint32_t>(&window - state.windows.data());
     bar.content_tab = 0;
     bar.content_pushed = false;
     bar.dragged = 0;
@@ -480,13 +477,9 @@ UiFrame::begin_tab_bar(std::string_view id,
         bar.selected = first == bar.tabs.end() ? 0 : first->id;
     }
 
-    // The bar: a frame's height across the content width; the tabs laid out from last frame's.
-    const Style& style = state.style;
-    const float height = state.current_font().line_height + style.frame_padding.y * 2;
-    bar.bar = {.left = window->cursor.x, .top = window->cursor.y, .right = state.content_right(*window), .bottom = window->cursor.y + height};
-    state.item_size(*window, {.x = bar.bar.width(), .y = height}, style.frame_padding.y);
-    static_cast<void>(state.item_add(*window, bar.bar, 0, false, "begin_tab_bar", {}));
-    layout_tabs(state, bar, height);
+    // The tabs laid out from last frame's.
+    bar.bar = rectangle;
+    layout_tabs(state, bar, rectangle.height());
     if (TabState* selected = find_tab(bar, bar.selected); selected != nullptr && has_any(flags, TabBarFlag::FITTING_POLICY_SCROLL) && bar.previous_frame + 1 == state.frame)
     {
         scroll_to(bar, *selected);
@@ -497,13 +490,33 @@ UiFrame::begin_tab_bar(std::string_view id,
     }
     catch (...)
     {
-        state.report(UiFrameProblem::CAPACITY_EXCEEDED, "begin_tab_bar", "the tab bar stack could not grow", id);
-        return false;
+        state.report(UiFrameProblem::CAPACITY_EXCEEDED, operation, "the tab bar stack could not grow", id, bar_id);
+        return nullptr;
     }
 
     // The tabs are identified under the bar (and whatever push_id() adds inside it).
     state.id_stack.push_back(bar_id);
-    return true;
+    return &state.tab_bars[index];
+}
+
+auto
+UiFrame::begin_tab_bar(std::string_view id,
+                       TabBarFlag flags) noexcept -> bool
+{
+    ContextState& state = *m_state;
+    WindowState* window = state.current_window("begin_tab_bar");
+    if (window == nullptr || window->skip_items)
+    {
+        return false;
+    }
+
+    // The bar: a frame's height across the content width.
+    const Style& style = state.style;
+    const float height = state.current_font().line_height + style.frame_padding.y * 2;
+    const UiRectangle rectangle{.left = window->cursor.x, .top = window->cursor.y, .right = state.content_right(*window), .bottom = window->cursor.y + height};
+    state.item_size(*window, {.x = rectangle.width(), .y = height}, style.frame_padding.y);
+    static_cast<void>(state.item_add(*window, rectangle, 0, false, "begin_tab_bar", {}));
+    return begin_tab_bar_at(state, *window, state.widget_id(id), rectangle, flags, "begin_tab_bar", id) != nullptr;
 }
 
 void

@@ -477,6 +477,72 @@ TEST_P(UiContextRenderTest, TablesPlotsAndProgressBarsAreDrawn)
     EXPECT_NEAR(red(progress.right - 30, gfx::tests::center(progress).y), over(theme.color(StyleColor::FRAME_BACKGROUND)), 3.0);
 }
 
+TEST_P(UiContextRenderTest, DockedWindowsTabsAndTheDockingTargetsAreDrawn)
+{
+    // A docked editor (a left node, a middle node of two tabs) and a floating window dragged over the middle node: its
+    // preview over the node's right half, the squares at its center.
+    UiHarness ui;
+    UiRenderer renderer{*m_device, ui.context().fonts(), {.color_format = gfx::Format::R8G8B8A8_UNORM}};
+    UiDockBuilder builder = ui.context().dock_builder(DockSpaceIdentifier{"editor"});
+    const auto [left, middle] = builder.split(builder.root(), ArrowDirection::LEFT, 0.3F);
+    builder.dock_window("Outliner", left);
+    builder.dock_window("Scene", middle);
+    builder.dock_window("Assets", middle);
+    builder.finish();
+    UiRectangle node{};
+    UiRectangle floating{};
+    const auto body = [&](UiFrame& frame)
+    {
+        static_cast<void>(frame.dock_space(DockSpaceIdentifier{"editor"}));
+        for (const std::string_view name : {std::string_view{"Outliner"}, std::string_view{"Scene"}, std::string_view{"Assets"}, std::string_view{"Floating"}})
+        {
+            frame.set_next_window_position({.x = 60, .y = 380}, UiCondition::FIRST_USE_EVER);
+            frame.set_next_window_size({.x = 200, .y = 120}, UiCondition::FIRST_USE_EVER);
+            if (frame.begin_window(name))
+            {
+                frame.text("{} content", name);
+                const Vector2 position = frame.window_position();
+                const Vector2 size = frame.window_size();
+                const UiRectangle rectangle{.left = position.x, .top = position.y, .right = position.x + size.x, .bottom = position.y + size.y};
+                if (name == "Assets")
+                {
+                    node = rectangle;
+                }
+                else if (name == "Floating")
+                {
+                    floating = rectangle;
+                }
+            }
+            frame.end_window();
+        }
+    };
+    ui.frames(3, body);
+    const float size = std::min({DOCKING_TARGET_SIZE, node.width() / 3.5F, node.height() / 3.5F});
+    const gfx::Vector2 right_square{.x = (node.left + node.right) * 0.5F + size * 1.25F, .y = (node.top + node.bottom) * 0.5F};
+    ui.move(floating.left + 30, floating.top + 8);
+    ui.frame(body);
+    ui.press();
+    ui.frame(body);
+    for (int step = 1; step <= 6; ++step)
+    {
+        const float t = static_cast<float>(step) / 6.0F;
+        ui.move(floating.left + 30 + (right_square.x - floating.left - 30) * t, floating.top + 8 + (right_square.y - floating.top - 8) * t);
+        ui.frame(body);
+    }
+    const UiFrameReport report = ui.frame(body);
+    EXPECT_TRUE(report.ok()) << (report.issues.empty() ? "" : report.issues.front().detail);
+    const Picture picture = render(ui.context(), renderer);
+    const auto channel = [](std::uint32_t pixel, std::uint32_t index) { return static_cast<int>((pixel >> (8U * index)) & 0xFFU); };
+
+    // The preview (DOCKING_PREVIEW, blue) over the node's right half, away from the squares and the dragged window;
+    // the left half without it.
+    const UiRectangle& area = node;
+    const std::uint32_t previewed = picture.at(area.right - 12, area.bottom - 12);
+    const std::uint32_t plain = picture.at(area.left + 12, area.bottom - 12);
+    EXPECT_GT(channel(previewed, 2), channel(plain, 2) + 20) << "the preview tints the right half blue";
+    EXPECT_GT(channel(previewed, 2), channel(previewed, 0) + 20);
+}
+
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          UiContextRenderTest,
                          testing::ValuesIn(physical_devices()),

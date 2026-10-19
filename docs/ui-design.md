@@ -1,8 +1,8 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
 Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U7
-committed (with the text layout follow-up after U6); the follow-up after U7 (cache misses of mixed lengths) accepted
-(§B, "Follow-up after U7"); U8 (docking) next.** This document answers the
+committed (with the text layout follow-ups after U6 and U7); U8 built, awaiting validation (§B, "U8 as built").** This
+document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -1101,6 +1101,84 @@ report, and your validation (you commit).
   16 counters of four lengths and, every other frame, a tooltip of two lines at a place that moves; 6 allocations with
   the former policy); `LargeClippedTablesAllocateNothingWhileTheyScrollAndTheMouseMovesOverThem`: the mouse sweeps the
   whole window again (a y range of 540 units instead of 280) and the test checks that it hovered the plots.
+
+### U8 as built (2026-10-18)
+
+- **Units** (in `gfx.ui.context`): `docking.cpp` (dock trees, dock spaces, floating trees, where docked windows go, tab
+  bars of leaves, separators, tearing tabs off, docking by dragging, the display order of docked windows, UiDockBuilder,
+  UiFrame's docking calls), `persistence.cpp` (save_layout() / load_layout()) and `json_reader.cpp` (a plain translation
+  unit: nlohmann/json's SAX parser, as the input bindings' — `gfx_ui` now links `gfx::nlohmann_json` privately);
+  `windows.cpp` places docked windows; `tabs.cpp` gained `begin_tab_bar_at()` (a tab bar over a given rectangle, for the
+  nodes). Constants MINIMUM_DOCK_NODE_SIZE (32), DOCKING_TARGET_SIZE (32), LAYOUT_FORMAT ("gfx.ui.layout"),
+  LAYOUT_FORMAT_VERSION (1); `UiContextLimits::dock_nodes` (64, reserved).
+- **Dock trees**: `DockNodeState` slots (a handle = slot and generation; freed slots reused, their handles stale): split
+  nodes (side by side or one above the other, the first child's ratio) and leaves (docked windows by identifier in tab
+  order, the selected one, the central role of a dock space). A dock space's root is found by its identifier
+  (`dock_space_roots`); a floating tree has a host window ("##dock_host_<id>": no title bar, moved and resized as a
+  window). An empty leaf that is not central goes away (its parent takes its sibling's place); a floating tree left with
+  one window dissolves (the window floats where the tree was), an empty one goes away.
+- **Dock spaces** (`dock_space(id, size, flags)`): in the current window (an item of it), or, outside any window, over the
+  display under the main menu bar (a host window behind every other, without background). Laid out every frame: the
+  separators (dragged, they move the ratio, each side kept at MINIMUM_DOCK_NODE_SIZE; not with NO_RESIZE), each leaf's tab
+  bar (a tab per window submitted this frame or the last; reordered by dragging, the selection from the next frame, close
+  buttons for windows begun with a close flag, UNSAVED_DOCUMENT's dot; none for a lone window with AUTO_HIDE_TAB_BAR) or an
+  empty leaf's DOCKING_EMPTY_BACKGROUND (an empty central node with PASS_THROUGH_CENTRAL_NODE is not drawn and lets the
+  mouse through: `WindowState::hole`). KEEP_ALIVE_ONLY keeps the tree and its windows docked, hidden.
+- **Docked windows**: `begin_window()` of a docked window (its first of the frame) begins its floating tree's host first,
+  then places it under its node's tab bar, without title bar, unmovable and unresizable by itself, square and borderless;
+  only its node's selected window is shown (the others' `begin_window()` returns false); a window docked in a dock space not
+  submitted (this frame or the last) is hidden. Its own position and size are kept for when it floats again (a torn-off
+  window takes its node's size). Clicking its empty space moves its floating tree (nothing in a dock space). Focusing it
+  brings its tree's host to the front: `arrange_docked_windows()` puts docked windows right after their host in the
+  display order (and a floating host's border and grip, in its `front_list`, after them), so a dock space's windows stay
+  under floating windows.
+- **Undocking and docking with the mouse**: a tab dragged 1.5 tab-bar heights away from its bar undocks its window, which
+  follows the mouse (being moved). While a window (or a floating tree's host) is moved, `update_dock_drop()` finds what is
+  under the mouse behind it — a docked window's node, a dock space's leaf, or a plain floating window — and offers five
+  squares at its center (center: a tab; left, right, top, bottom: beside it, the node split in halves), drawn with a
+  DOCKING_PREVIEW preview of where the window would go into `dock_overlay` (over the windows, under popups). Releasing over
+  a square (or a node's tab bar: a tab) docks it; onto a floating window, both form a floating tree; a moved floating tree
+  docks all its windows. NO_DOCKING_OVER_CENTRAL_NODE, NO_DOCKING_SPLIT and NO_UNDOCKING remove squares or tearing;
+  windows with NO_DOCKING neither dock nor receive.
+- **By code**: `UiContext::dock_builder(id)` empties the dock space's tree and returns a `UiDockBuilder`: `root()`,
+  `split(node, direction, ratio)` → (new leaf, rest), `dock_window(name, node)` (a window never submitted is made, its title
+  set when it is), `finish()`; misuse throws InvalidUsageError. `set_next_window_dock(node, condition)` (a split node: its
+  central, else first, leaf; already there: nothing changes); `is_window_docked()`, `window_dock_node()`.
+- **Layouts** (format documented at the top of persistence.cpp): `save_layout()` writes JSON — the windows (identifier in
+  hexadecimal, name, position, size, collapsed; not NO_SAVED_SETTINGS ones, child regions, popups, tooltips, hosts), the
+  dock trees (a dock space's by its identifier, a floating one by its host's place; nodes nested: split, ratio, children,
+  or windows, selected, central), the tables (each column's width, weight, order, visibility, sort order and direction;
+  not NO_SAVED_SETTINGS ones). `load_layout()` (outside a frame) parses it, checks every field (each problem with its JSON
+  path, unknown fields included), then applies all of it or nothing: windows' places (made when they do not exist yet),
+  the dock trees (replacing every tree), the tables' columns (applied when the table is submitted with that many columns).
+- **Deviations from the design, for your validation**:
+  1. **API added**: `UiDockBuilder::root()` (the declared builder had no way to name the dock space's node), the builder made
+     by its context only (a private constructor), the four constants, `UiContextLimits::dock_nodes`.
+  2. `dock_space()` outside any window is a dock space over the display (Dear ImGui's DockSpaceOverViewport), as the
+     example of §C2 calls it.
+  3. **No multiple viewports**: windows dragged out of the display do not become platform windows (not in the plan; Dear
+     ImGui's viewports branch feature).
+  4. A floating tree left with one window dissolves (the window floats again); Dear ImGui keeps a one-tab floating node.
+  5. Docking needs releasing over a square or a node's tab bar (Dear ImGui also docks over a window's title bar, and has
+     io.ConfigDockingWithShift).
+  6. No node menu (Dear ImGui's arrow listing a node's windows) and no button to show a hidden tab bar.
+  7. The application stores the layout text (save_layout() returns it, load_layout() reads it); nothing is written to a
+     file by the UI (Dear ImGui writes imgui.ini itself).
+  8. `window_position()` of a docked window is its node's place.
+  9. A dropped window docks in half of the node it is dropped beside (Dear ImGui sizes the split from the window).
+- **Facts found**: a test frame without a scene's windows makes their tabs vanish the next frame (they were not submitted);
+  the tests measure fonts in contexts of their own. A table whose body rows have no content is as short as its header and
+  its padding (a test aimed its drag below it).
+- **Verified by eye** (pictures from both GPUs): a docked editor (a left node, a middle node of two tabs) with a window
+  dragged over the middle node, its five squares and the preview over the node's right half.
+- **Tests**: `gfx_ui_context_tests` +14 (docking_test.cpp: a builder's layout, builder misuse, tab selection and closing,
+  tearing a tab off (not with NO_UNDOCKING), docking into and beside a node, a floating tree made by dropping a window onto
+  another and dissolved by tearing one off, separators (not with NO_RESIZE), NO_DOCKING_SPLIT, KEEP_ALIVE_ONLY and a dock
+  space not submitted, a pass-through central node, set_next_window_dock() conditions and stale handles, floating windows
+  over focused docked ones; layouts: windows and dock trees round trip, tables' columns round trip, refused documents with
+  their paths and nothing changed, loading during a frame throws) and +1 × each GPU (the picture above); the allocation
+  test +1 (a docked editor, a floating window, the mouse sweeping the display: no allocation over 100 frames);
+  compile-failure `UiDockBuildersComeFromTheirContext`. The later-phase report test now uses U9's calls.
 
 ---
 

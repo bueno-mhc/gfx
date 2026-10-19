@@ -76,15 +76,6 @@ throw_context_error(std::string_view operation,
                              .suggestion = std::move(suggestion)});
 }
 
-/// Throws the UiCapabilityError of an operation of a later phase.
-[[noreturn]] void
-throw_later_phase(std::string_view operation,
-                  std::string_view phase)
-{
-    throw_unsupported(UiSubsystem::WIDGETS, operation, "docking and saved layouts", std::format("arrives in phase {} of the UI plan", phase),
-                      "see docs/ui-design.md, section B");
-}
-
 } // namespace
 
 // ===================================================================================================== containers
@@ -116,6 +107,13 @@ IdentifierMap::reserve(std::size_t entries)
     }
     m_keys = std::move(keys);
     m_values = std::move(values);
+}
+
+void
+IdentifierMap::clear() noexcept
+{
+    std::ranges::fill(m_keys, 0U);
+    m_count = 0;
 }
 
 auto
@@ -245,6 +243,13 @@ ContextState::ContextState(const UiContextDescription& context_description)
     tables.reserve(limits.tables);
     table_lookup.reserve(limits.tables);
     table_stack.reserve(limits.stack_depth);
+    dock_nodes.reserve(limits.dock_nodes);
+    free_dock_nodes.reserve(limits.dock_nodes);
+    dock_space_roots.reserve(16);
+    dock_order.reserve(limits.windows);
+    publish_order.reserve(std::size_t{limits.windows} * 2);
+    dock_placed.reserve(limits.windows);
+    dock_scratch.reserve(limits.windows);
     tree_stack.reserve(limits.stack_depth);
     drag_drop.type.reserve(MAXIMUM_PAYLOAD_TYPE_SIZE);
     drag_drop.data.reserve(limits.drag_drop_payload_bytes);
@@ -395,12 +400,21 @@ ContextState::focus_window(std::uint32_t index) noexcept
         focus_visible = false;
     }
     focused_window = index;
-    if (index == NO_WINDOW || has_any(windows[index].flags, UiWindowFlag::NO_BRING_TO_FRONT_ON_FOCUS))
+    if (index == NO_WINDOW)
     {
         return;
     }
 
-    // In front of the others: last of the display order.
+    // In front of the others: last of the display order (a docked window: its tree's host, which it follows).
+    if (windows[index].dock_node != DockNodeState::NONE)
+    {
+        const std::uint32_t host = dock_host_of(index);
+        index = host != NO_WINDOW ? host : index;
+    }
+    if (has_any(windows[index].flags, UiWindowFlag::NO_BRING_TO_FRONT_ON_FOCUS))
+    {
+        return;
+    }
     const auto found = std::ranges::find(display_order, index);
     if (found != display_order.end())
     {
@@ -1128,8 +1142,22 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         // Popups are over every window (the top one first), then the display order.
         const auto under_mouse = [&state](std::uint32_t index)
         {
+            // Not through a dock space's pass-through hole, nor over a floating tree's grip (its host's).
             const WindowState& window = state.windows[index];
-            return window.was_active && !window.hidden && !has_any(window.flags, UiWindowFlag::NO_MOUSE_INPUTS) && contains(window.hit, state.mouse_position);
+            if (!window.was_active || window.hidden || has_any(window.flags, UiWindowFlag::NO_MOUSE_INPUTS) || !contains(window.hit, state.mouse_position)
+                || contains(window.hole, state.mouse_position))
+            {
+                return false;
+            }
+            if (window.docked && window.dock_node < state.dock_nodes.size())
+            {
+                const DockNodeState& root = state.dock_nodes[state.dock_root(window.dock_node)];
+                if (root.dock_space == 0 && root.host_window < state.windows.size() && contains(state.windows[root.host_window].grip, state.mouse_position))
+                {
+                    return false;
+                }
+            }
+            return true;
         };
         const std::size_t modal = state.top_modal_level();
         const std::size_t lowest = modal < state.popups.size() ? modal : 0;
@@ -1210,6 +1238,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         }
         else
         {
+            state.apply_dock_drop();
             state.moving_window = ContextState::NO_WINDOW;
             state.clear_active();
         }
@@ -1487,6 +1516,8 @@ UiContext::end_frame() noexcept -> UiFrameReport
             state.slots[waited].leases.wait(state.slots[waited].leases.load());
         }
     }
+    state.update_dock_drop();
+    state.arrange_docked_windows();
     DrawDataSlot& slot = state.slots[target];
     std::size_t count = 0;
     const auto publish = [&](DrawList& list)
@@ -1505,15 +1536,26 @@ UiContext::end_frame() noexcept -> UiFrameReport
     };
     publish(state.background);
     std::uint32_t windows_drawn = 0;
-    for (const std::uint32_t index : state.display_order)
+    for (const std::uint32_t entry : state.publish_order)
     {
+        // Windows in display order (docked ones after their host, then the host's front list).
+        const std::uint32_t index = entry & 0x7FFFFFFFU;
         WindowState& window = state.windows[index];
+        if ((entry & 0x80000000U) != 0)
+        {
+            if (window.active && !window.hidden)
+            {
+                publish(window.front_list);
+            }
+            continue;
+        }
         windows_drawn += window.active ? 1U : 0U;
         if (window.active && !window.hidden && !window.popup && !window.tooltip)
         {
             publish(window.draw_list);
         }
     }
+    publish(state.dock_overlay);
     const std::size_t modal = state.top_modal_level();
     for (std::size_t level = 0; level < state.popups.size(); ++level)
     {
@@ -1653,45 +1695,6 @@ auto
 UiContext::frame_count() const noexcept -> std::uint64_t
 {
     return m_state->frame;
-}
-
-auto
-UiContext::dock_builder(DockSpaceIdentifier /*dock_space*/) -> UiDockBuilder
-{
-    throw_later_phase("UiContext::dock_builder", "U8");
-}
-
-auto
-UiContext::save_layout() const -> std::string
-{
-    throw_later_phase("UiContext::save_layout", "U8");
-}
-
-auto
-UiContext::load_layout(std::string_view /*json*/) -> std::expected<void, std::string>
-{
-    throw_later_phase("UiContext::load_layout", "U8");
-}
-
-auto
-UiDockBuilder::split(DockNodeHandle /*node*/,
-                     ArrowDirection /*direction*/,
-                     float /*ratio*/) -> std::pair<DockNodeHandle, DockNodeHandle>
-{
-    throw_later_phase("UiDockBuilder::split", "U8");
-}
-
-void
-UiDockBuilder::dock_window(std::string_view /*window*/,
-                           DockNodeHandle /*node*/)
-{
-    throw_later_phase("UiDockBuilder::dock_window", "U8");
-}
-
-void
-UiDockBuilder::finish()
-{
-    throw_later_phase("UiDockBuilder::finish", "U8");
 }
 
 // ===================================================================================================== leases

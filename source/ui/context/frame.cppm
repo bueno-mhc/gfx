@@ -3,8 +3,9 @@
 ///        window, layout call and widget of the frame is one of its member functions, until
 ///        UiContext::end_frame(). Every member is noexcept: misuse is reported in the frame's UiFrameReport.
 ///
-/// The widgets of later phases are declared already (the whole surface can be reviewed): until their phase,
-/// each does nothing, returns false (or an empty value) and reports UiFrameProblem::NOT_IMPLEMENTED.
+/// The widgets of later phases (shortcuts, accessibility) are declared already (the whole surface can be reviewed):
+/// until their phase, each does nothing, returns false (or an empty value) and reports
+/// UiFrameProblem::NOT_IMPLEMENTED.
 /// UiListClipper lays out only the visible items of long lists and tables.
 export module gfx.ui.context:frame;
 
@@ -1167,21 +1168,27 @@ public:
                       Vector2 size,
                       const UiRectangle& texture_coordinates = {.left = 0, .top = 0, .right = 1, .bottom = 1}) noexcept -> bool;
 
-    // ===================================================================================== U8: docking
+    // ===================================================================================== docking
 
-    /// @brief A dock space filling @p size (0: the space available): windows dock into it. Phase U8.
+    /// @brief A dock space filling @p size (0: the space available; negative: the space available minus it) in the
+    ///        current window, or the whole display (under the main menu bar) when called outside any window:
+    ///        windows dock into it. Its layout is kept between frames (UiContext::dock_builder() builds one, the user
+    ///        rearranges it: dragging a window over a node offers to dock it as a tab or beside the node; dragging a
+    ///        tab out undocks it; dragging a separator resizes the nodes). Submit it every frame, before the windows
+    ///        docked into it when possible (they use last frame's places otherwise). Returns its root node.
     auto dock_space(DockSpaceIdentifier id,
                     Vector2 size = {},
                     DockNodeFlag flags = DockNodeFlag::NONE) noexcept -> DockNodeHandle;
 
-    /// @brief Docks the next window into @p node. Phase U8.
+    /// @brief Docks the next window into @p node (a split node: its central, else first, leaf) when @p condition
+    ///        applies.
     void set_next_window_dock(DockNodeHandle node,
                               UiCondition condition = UiCondition::ALWAYS) noexcept;
 
-    /// @brief Whether the current window is docked. Phase U8.
+    /// @brief Whether the current window is docked (laid out in a dock node this frame).
     [[nodiscard]] auto is_window_docked() noexcept -> bool;
 
-    /// @brief The node the current window is docked in (null when floating). Phase U8.
+    /// @brief The node the current window is docked in (null when floating).
     [[nodiscard]] auto window_dock_node() noexcept -> DockNodeHandle;
 
     // ===================================================================================== U9: mapping and accessibility

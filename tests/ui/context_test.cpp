@@ -1146,16 +1146,14 @@ TEST(UiReportTest, WidgetsOfLaterPhasesReportOnceAndDoNothing)
     const UiFrameReport report = ui.frame([&](UiFrame& frame)
     {
         frame.begin_window("Later");
-        results[0] = frame.is_window_docked();
-        results[1] = frame.is_window_docked();
-        results[2] = frame.dock_space(DockSpaceIdentifier::from_name("editor")).is_valid();
+        results[0] = frame.shortcut({.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL});
+        results[1] = frame.shortcut({.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL});
+        frame.announce("Saved");
         frame.end_window();
     });
-    EXPECT_EQ(results, (std::array{false, false, false}));
-    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "is_window_docked"; }), 1);
-    EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "dock_space"; }));
-    EXPECT_THROW(static_cast<void>(ui.context().dock_builder(DockSpaceIdentifier::from_name("editor"))), gfx::BackendCapabilityError);
-    EXPECT_THROW(static_cast<void>(ui.context().save_layout()), gfx::BackendCapabilityError);
+    EXPECT_EQ(results, (std::array{false, false, true}));
+    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "shortcut"; }), 1);
+    EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "announce"; }));
 }
 
 TEST(UiReportTest, TheDiagnosticsWindowShowsThePreviousReport)

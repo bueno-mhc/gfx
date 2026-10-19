@@ -24,6 +24,10 @@ namespace
 constexpr std::uint8_t ONCE_POSITION = 1U << 0;
 constexpr std::uint8_t ONCE_SIZE = 1U << 1;
 constexpr std::uint8_t ONCE_COLLAPSED = 1U << 2;
+constexpr std::uint8_t ONCE_DOCK = 1U << 3;
+
+/// What a docked window cannot do itself (its node places it, its tab shows its title).
+constexpr UiWindowFlag DOCKED_WINDOW_FLAGS = UiWindowFlag::NO_TITLE_BAR | UiWindowFlag::NO_RESIZE | UiWindowFlag::NO_MOVE | UiWindowFlag::NO_COLLAPSE;
 
 /// Whether @p rectangle contains @p point.
 constexpr auto
@@ -389,9 +393,11 @@ draw_decorations(ContextState& state,
                  const Decorations& decorations,
                  StyleColor background,
                  float rounding,
-                 float border) noexcept
+                 float border,
+                 DrawList* front = nullptr) noexcept
 {
     DrawList& list = state.list_of(window);
+    DrawList& over = front != nullptr ? *front : list;
     const Style& style = state.style;
     const UiRectangle& outer = window.outer;
     const bool decorated = !has_any(window.flags, UiWindowFlag::NO_BACKGROUND);
@@ -427,7 +433,7 @@ draw_decorations(ContextState& state,
     }
     if (border > 0 && (decorated || window.collapsed))
     {
-        list.add_rectangle(window.collapsed ? decorations.title : outer, state.color(StyleColor::BORDER), border, rounding);
+        over.add_rectangle(window.collapsed ? decorations.title : outer, state.color(StyleColor::BORDER), border, rounding);
     }
 
     // Scrollbars: their tracks and grabs.
@@ -450,7 +456,7 @@ draw_decorations(ContextState& state,
         const float inset = std::max(border, 1.0F);
         const std::array points{Vector2{.x = grip.right - inset, .y = grip.top}, Vector2{.x = grip.right - inset, .y = grip.bottom - inset},
                                 Vector2{.x = grip.left, .y = grip.bottom - inset}};
-        list.add_convex_polygon_filled(points, part_color(state, decorations.grip_state, StyleColor::RESIZE_GRIP, StyleColor::RESIZE_GRIP_HOVERED,
+        over.add_convex_polygon_filled(points, part_color(state, decorations.grip_state, StyleColor::RESIZE_GRIP, StyleColor::RESIZE_GRIP_HOVERED,
                                                           StyleColor::RESIZE_GRIP_ACTIVE));
     }
 
@@ -532,10 +538,50 @@ finish_content(ContextState& state,
         state.id_stack.resize(window.identifier_stack_base - 1);
     }
     state.list_of(window).pop_clip_rectangle();
-    if (window.auto_fit || has_any(window.flags, UiWindowFlag::ALWAYS_AUTO_RESIZE))
+    if ((window.auto_fit || has_any(window.flags, UiWindowFlag::ALWAYS_AUTO_RESIZE)) && !window.docked)
     {
         window.size = window.child ? window.size : constrained(state, window, fit_size(state, window));
         window.auto_fit = false;
+    }
+}
+
+/// Docks window @p index as set_next_window_dock() asked, when its condition applies (once docked there, nothing
+/// changes: its node's selection stays the user's).
+void
+apply_next_dock(ContextState& state,
+                std::uint32_t index,
+                UiWindowFlag flags) noexcept
+{
+    NextWindowSettings& next = state.next_window;
+    if (!next.has_dock)
+    {
+        return;
+    }
+    next.has_dock = false;
+    WindowState& window = state.windows[index];
+    window.appearing = !window.was_active;
+    if (has_any(flags, UiWindowFlag::NO_DOCKING) || !applies(next.dock_condition, window, ONCE_DOCK))
+    {
+        return;
+    }
+    const std::uint32_t node = state.dock_node_of(next.dock);
+    if (node == DockNodeState::NONE)
+    {
+        state.report(UiFrameProblem::INVALID_ARGUMENT, "set_next_window_dock", "the dock node does not exist (a stale handle)", window.name, window.id);
+        return;
+    }
+    const std::uint32_t leaf = state.dock_leaf(node);
+    if (window.dock_node == leaf)
+    {
+        return;
+    }
+    try
+    {
+        state.dock_window(index, leaf);
+    }
+    catch (...)
+    {
+        state.report(UiFrameProblem::CAPACITY_EXCEEDED, "set_next_window_dock", "the window could not be docked", window.name, window.id);
     }
 }
 
@@ -572,6 +618,36 @@ begin_root(ContextState& state,
         state.report(UiFrameProblem::CAPACITY_EXCEEDED, "begin_window", "the window could not be made", name, id);
         return false;
     }
+
+    // A window made by a loaded layout or a dock builder before it was submitted gets its title now.
+    if (state.windows[index].name.empty())
+    {
+        try
+        {
+            state.windows[index].name.assign(ContextState::display_text(name));
+        }
+        catch (...)
+        {
+            state.report(UiFrameProblem::CAPACITY_EXCEEDED, "begin_window", "the window's title could not be kept", name, id);
+        }
+    }
+
+    // Docking (the first begin of the frame): as set_next_window_dock() asks; a floating tree's host is begun first;
+    // a docked window goes where its node is, without its title bar, unmovable and unresizable by itself.
+    DockPlacement placement{};
+    if (state.windows[index].begin_count == 0)
+    {
+        apply_next_dock(state, index, flags);
+        if (has_any(flags, UiWindowFlag::NO_DOCKING) && state.windows[index].dock_node != DockNodeState::NONE)
+        {
+            state.undock_window(index);
+        }
+        placement = state.prepare_docked_window(state.frame_object, index);
+    }
+    if (placement.docked)
+    {
+        flags = flags | DOCKED_WINDOW_FLAGS;
+    }
     WindowState& window = state.windows[index];
     state.window_stack.push_back(index);
     state.id_stack.push_back(window.id);
@@ -585,7 +661,19 @@ begin_root(ContextState& state,
     }
     window.identifier_stack_base = static_cast<std::uint32_t>(state.id_stack.size());
 
+    // Its tab's close button closes a docked window.
+    window.closable = open != nullptr;
+    if (open != nullptr && window.close_requested)
+    {
+        *open = false;
+    }
+    window.close_requested = false;
+
     // Closed (its close button was clicked): nothing drawn or laid out, but end_window() is expected.
+    window.docked = false;
+    window.front_list.clear();
+    window.front_list.set_pixels_per_unit(state.pixels_per_unit);
+    window.grip = {};
     if (open != nullptr && !*open)
     {
         window.skip_items = true;
@@ -616,31 +704,49 @@ begin_root(ContextState& state,
     window.title_bar_height = has_any(flags, UiWindowFlag::NO_TITLE_BAR) ? 0.0F : std::floor(font.line_height + style.frame_padding.y * 2);
     window.menu_bar_height = has_any(flags, UiWindowFlag::MENU_BAR) ? std::floor(font.line_height + style.frame_padding.y * 2) : 0.0F;
     window.next_menu_columns = {};
-    if (window.size.x <= 0 || window.size.y <= 0)
+    window.docked = placement.docked;
+    if (placement.docked)
     {
-        window.auto_fit = true;
-        window.hidden = first_use;
-        window.size = fit_size(state, window);
+        // Its node's place (its own position and size are kept for when it floats again); shown when selected.
+        window.collapsed = false;
+        window.auto_fit = false;
+        window.hidden = !placement.visible;
     }
-    else if (has_any(flags, UiWindowFlag::ALWAYS_AUTO_RESIZE))
+    else
     {
-        window.size = fit_size(state, window);
-    }
-    window.size = constrained(state, window, window.size);
-    window.first_use = false;
+        if (window.size.x <= 0 || window.size.y <= 0)
+        {
+            window.auto_fit = true;
+            window.hidden = first_use;
+            window.size = fit_size(state, window);
+        }
+        else if (has_any(flags, UiWindowFlag::ALWAYS_AUTO_RESIZE))
+        {
+            window.size = fit_size(state, window);
+        }
+        window.size = constrained(state, window, window.size);
 
-    // Kept on the display: at least a title bar's height of it stays reachable.
-    const float margin = std::max(window.title_bar_height, 16.0F);
-    if (state.display_size.x > 0 && state.display_size.y > 0)
-    {
-        window.position.x = std::clamp(window.position.x, margin - window.size.x, std::max(state.display_size.x - margin, 0.0F));
-        window.position.y = std::clamp(window.position.y, 0.0F, std::max(state.display_size.y - margin, 0.0F));
+        // Kept on the display: at least a title bar's height of it stays reachable.
+        const float margin = std::max(window.title_bar_height, 16.0F);
+        if (state.display_size.x > 0 && state.display_size.y > 0)
+        {
+            window.position.x = std::clamp(window.position.x, margin - window.size.x, std::max(state.display_size.x - margin, 0.0F));
+            window.position.y = std::clamp(window.position.y, 0.0F, std::max(state.display_size.y - margin, 0.0F));
+        }
     }
+    window.first_use = false;
 
     // The title bar's buttons: collapse, close, a double click on the title.
     Decorations decorations{};
     const auto rectangles = [&]
     {
+        if (placement.docked)
+        {
+            window.outer = placement.area;
+            window.hit = placement.area.intersection(placement.clip);
+            decorations.title = {.left = window.outer.left, .top = window.outer.top, .right = window.outer.right, .bottom = window.outer.top};
+            return;
+        }
         const Vector2 size{.x = window.size.x, .y = window.collapsed ? window.title_bar_height : window.size.y};
         window.outer = {.left = window.position.x, .top = window.position.y, .right = window.position.x + size.x, .bottom = window.position.y + size.y};
         window.hit = window.outer;
@@ -719,13 +825,17 @@ begin_root(ContextState& state,
         }
     }
 
-    // Scrollbars, content area and clip; then the drawing; then the content's clip.
-    layout_area(state, window, index, decorations, {.left = -1.0e9F, .top = -1.0e9F, .right = 1.0e9F, .bottom = 1.0e9F});
+    // Scrollbars, content area and clip; then the drawing (a docked window: square, borderless; a floating tree's
+    // host: its border and grip over its docked windows); then the content's clip.
+    window.grip = decorations.grip;
+    const UiRectangle unclipped{.left = -1.0e9F, .top = -1.0e9F, .right = 1.0e9F, .bottom = 1.0e9F};
+    layout_area(state, window, index, decorations, placement.docked ? placement.clip : unclipped);
     if (!window.hidden)
     {
-        draw_decorations(state, window, index, decorations, StyleColor::WINDOW_BACKGROUND, style.window_rounding, style.window_border_size);
+        draw_decorations(state, window, index, decorations, StyleColor::WINDOW_BACKGROUND, placement.docked ? 0.0F : style.window_rounding,
+                         placement.docked ? 0.0F : style.window_border_size, window.dock_tree != DockNodeState::NONE ? &window.front_list : nullptr);
     }
-    window.skip_items = window.collapsed;
+    window.skip_items = window.collapsed || (placement.docked && !placement.visible);
     list.push_clip_rectangle(window.clip);
     state.last_item = LastItem{.rectangle = decorations.title, .window = index};
     return !window.skip_items;
@@ -782,16 +892,25 @@ UiFrame::end_window() noexcept
         return;
     }
 
-    // A click on the window's empty space (or its title bar) starts moving it.
+    // A click on the window's empty space (or its title bar) starts moving it (a window docked in a floating tree: the
+    // tree's host).
     const UiRectangle title{.left = window.outer.left, .top = window.outer.top, .right = window.outer.right, .bottom = window.outer.top + window.title_bar_height};
     const bool on_window = state.hovered_root == index && state.mouse[0].clicked && state.active_id == 0 && state.hovered_id == 0;
-    const bool allowed = !has_any(window.flags, UiWindowFlag::NO_MOVE)
-                         && (!state.description.input.move_windows_from_title_bar_only || contains(title, state.mouse_position));
+    std::uint32_t mover = index;
+    if (window.docked)
+    {
+        const std::uint32_t root = state.dock_root(window.dock_node);
+        const bool floating = root < state.dock_nodes.size() && state.dock_nodes[root].dock_space == 0;
+        mover = floating && state.dock_nodes[root].host_window < state.windows.size() ? state.dock_nodes[root].host_window : ContextState::NO_WINDOW;
+    }
+    const bool allowed = mover != ContextState::NO_WINDOW && !has_any(state.windows[mover].flags, UiWindowFlag::NO_MOVE)
+                         && (window.docked || !state.description.input.move_windows_from_title_bar_only || contains(title, state.mouse_position));
     if (on_window && allowed && state.moving_window == ContextState::NO_WINDOW)
     {
-        state.moving_window = index;
-        state.moving_offset = {.x = state.mouse_position.x - window.position.x, .y = state.mouse_position.y - window.position.y};
-        state.set_active(ContextState::hash(window.id, "#MOVE"), window);
+        WindowState& moved = state.windows[mover];
+        state.moving_window = mover;
+        state.moving_offset = {.x = state.mouse_position.x - moved.position.x, .y = state.mouse_position.y - moved.position.y};
+        state.set_active(ContextState::hash(moved.id, "#MOVE"), moved);
     }
 }
 
@@ -1057,7 +1176,7 @@ auto
 UiFrame::window_position() const noexcept -> Vector2
 {
     const WindowState* window = m_state->current_window_quiet();
-    return window != nullptr ? window->position : Vector2{};
+    return window == nullptr ? Vector2{} : window->docked ? Vector2{.x = window->outer.left, .y = window->outer.top} : window->position;
 }
 
 auto

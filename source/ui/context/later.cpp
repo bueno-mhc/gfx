@@ -1,5 +1,5 @@
 /// @file later.cpp
-/// @brief UiFrame's frame arena, its reports, the diagnostics window, and the widgets of later phases (U8, U9):
+/// @brief UiFrame's frame arena, its reports, the diagnostics window, and the widgets of a later phase (U9):
 ///        declared so the whole interface can be reviewed; until their phase each reports
 ///        UiFrameProblem::NOT_IMPLEMENTED (once per frame) and does nothing.
 module gfx.ui.context;
@@ -110,37 +110,6 @@ UiFrame::show_diagnostics_window(bool& open) noexcept
         }
     }
     end_window();
-}
-
-// ===================================================================================================== U8
-
-auto
-UiFrame::dock_space(DockSpaceIdentifier /*id*/,
-                    Vector2 /*size*/,
-                    DockNodeFlag /*flags*/) noexcept -> DockNodeHandle
-{
-    static_cast<void>(not_implemented("dock_space", "docking arrives in phase U8"));
-    return {};
-}
-
-void
-UiFrame::set_next_window_dock(DockNodeHandle /*node*/,
-                              UiCondition /*condition*/) noexcept
-{
-    static_cast<void>(not_implemented("set_next_window_dock", "docking arrives in phase U8"));
-}
-
-auto
-UiFrame::is_window_docked() noexcept -> bool
-{
-    return not_implemented("is_window_docked", "docking arrives in phase U8");
-}
-
-auto
-UiFrame::window_dock_node() noexcept -> DockNodeHandle
-{
-    static_cast<void>(not_implemented("window_dock_node", "docking arrives in phase U8"));
-    return {};
 }
 
 // ===================================================================================================== U9

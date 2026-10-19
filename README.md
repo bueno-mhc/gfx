@@ -888,6 +888,80 @@ file_browser(gfx::ui::UiFrame& frame,
   under the mouse in a tooltip), `progress_bar()` (a negative fraction: indeterminate), `image()`,
   `image_rounded()` and `image_button()` (bindless sampled-image indices).
 
+## UI: docking and layouts
+
+```cpp
+using namespace gfx::ui::literals;
+
+// The editor's layout the first time (no saved layout): Outliner on the left, Console under the Scene.
+void
+default_layout(gfx::ui::UiContext& ui)
+{
+    gfx::ui::UiDockBuilder builder = ui.dock_builder("editor"_dock_space);
+    const auto [left, rest] = builder.split(builder.root(), gfx::ui::ArrowDirection::LEFT, 0.2F);
+    const auto [bottom, center] = builder.split(rest, gfx::ui::ArrowDirection::DOWN, 0.25F);
+    builder.dock_window("Outliner", left);
+    builder.dock_window("Console", bottom);
+    builder.dock_window("Scene", center);
+    builder.finish();
+}
+
+// Each frame: a dock space over the display (its empty center shows the 3D view behind), then the windows,
+// docked or floating as the user arranged them.
+void
+editor_frame(gfx::ui::UiFrame& frame,
+             Editor& editor)
+{
+    frame.dock_space("editor"_dock_space, {}, gfx::ui::DockNodeFlag::PASS_THROUGH_CENTRAL_NODE);
+    if (frame.begin_window("Outliner"))
+    {
+        frame.text("{} objects", editor.objects.size());
+    }
+    frame.end_window();
+    if (frame.begin_window("Console", editor.console_open))
+    {
+        frame.text_unformatted(editor.log);
+    }
+    frame.end_window();
+    if (frame.begin_window("Scene"))
+    {
+        frame.text("{} draw calls", editor.draw_calls);
+    }
+    frame.end_window();
+}
+
+// At start and at exit: the layout as JSON (windows, dock trees, tables' columns).
+void
+restore_layout(gfx::ui::UiContext& ui,
+               const std::optional<std::string>& saved)
+{
+    if (!saved || !ui.load_layout(*saved))
+    {
+        default_layout(ui);
+    }
+}
+
+auto
+layout_to_save(const gfx::ui::UiContext& ui) -> std::string
+{
+    return ui.save_layout();
+}
+```
+
+- **Dock spaces** (`dock_space()`): in a window, or over the whole display when called outside any window. A dock
+  space's layout is a tree of nodes split side by side or one above the other; each leaf holds docked windows as the
+  tabs of its tab bar (the selected one is shown: the others' `begin_window()` returns false). The user drags a
+  window over a node or another window: five squares offer to dock it as a tab or beside the node (a preview shows
+  where); dragging a tab out of its bar undocks its window, dragging a separator resizes the nodes. Windows docked
+  together outside a dock space form a floating tree with a host window that moves and resizes them.
+- **By code**: `UiContext::dock_builder()` splits a dock space's root and docks windows by name;
+  `set_next_window_dock()` docks the next window (by condition: always, once, the first time, when it appears);
+  `is_window_docked()` and `window_dock_node()` tell where the current window is. `DockNodeFlag` keeps the central
+  node free of docking or lets the mouse through it, forbids splits, undocking or resizing, hides a lone tab bar.
+- **Layouts**: `save_layout()` writes the windows' places, every dock tree and the tables' columns (widths, order,
+  visibility, sort) as JSON; `load_layout()` restores them, all or nothing, reporting each problem of a document with
+  its JSON path. Windows and tables with `NO_SAVED_SETTINGS` are left out.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an

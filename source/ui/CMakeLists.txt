@@ -6,12 +6,14 @@ add_library(gfx_ui)
 add_library(gfx::ui ALIAS gfx_ui)
 
 # Text at run time: HarfBuzz (shaping), SheenBidi (bidi, scripts), libunibreak (line breaking) and zstd
-# (atlas pages); their headers stay in the implementation units.
+# (atlas pages); nlohmann/json reads saved layouts (in context/json_reader.cpp only). Their headers stay in the
+# implementation units.
 include(GfxDependencies)
 gfx_require_harfbuzz()
 gfx_require_zstd()
 gfx_require_sheenbidi()
 gfx_require_libunibreak()
+gfx_require_nlohmann_json()
 
 target_sources(gfx_ui
     PUBLIC
@@ -76,12 +78,15 @@ target_sources(gfx_ui
         context/tables.cpp
         context/clipper.cpp
         context/visuals.cpp
+        context/docking.cpp
+        context/persistence.cpp
+        context/json_reader.cpp
         context/later.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)
 target_link_libraries(gfx_ui
     PUBLIC gfx::core gfx::gfx
-    PRIVATE gfx::project_options gfx::harfbuzz gfx::zstd gfx::sheenbidi gfx::libunibreak)
+    PRIVATE gfx::project_options gfx::harfbuzz gfx::zstd gfx::sheenbidi gfx::libunibreak gfx::nlohmann_json)
 
 # The renderer's shaders, compiled at build time into the private module gfx.ui.shaders.
 include(GfxShaders)

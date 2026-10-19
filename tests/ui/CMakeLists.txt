@@ -115,7 +115,7 @@ gfx_add_ui_atlas(gfx_ui_text_allocation_tests
 
 # The immediate-mode UI driven by synthetic input (UiContext, UiFrame), with an atlas built for it.
 gfx_add_test(gfx_ui_context_tests
-    SOURCES context_test.cpp context_render_test.cpp input_widgets_test.cpp structure_test.cpp table_test.cpp
+    SOURCES context_test.cpp context_render_test.cpp input_widgets_test.cpp structure_test.cpp table_test.cpp docking_test.cpp
     MODULES context_test_support.cppm
     LIBRARIES gfx::ui)
 gfx_add_ui_atlas(gfx_ui_context_tests

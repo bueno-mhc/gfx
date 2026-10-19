@@ -34,6 +34,9 @@ public:
     auto insert(std::uint32_t key,
                 std::uint32_t value) -> bool;
 
+    /// Removes every entry (the table keeps its size).
+    void clear() noexcept;
+
 private:
     std::vector<std::uint32_t> m_keys{};
     std::vector<std::uint32_t> m_values{};
@@ -161,6 +164,14 @@ struct WindowState
     std::array<float, 2> next_menu_columns{};     ///< ...measured this frame.
     Vector2 resized_size{};                       ///< Child regions with RESIZE_X / RESIZE_Y: the size dragged to (0: the one asked for).
     std::uint32_t table = 0xFFFFFFFFU;            ///< The table whose cell is being filled in it, or none.
+    std::uint32_t dock_node = 0xFFFFFFFFU;        ///< The leaf dock node it is docked in, or none.
+    bool docked = false;                          ///< Laid out in its dock node this frame.
+    std::uint32_t dock_tree = 0xFFFFFFFFU;        ///< An internal window hosting a floating dock tree: its root node; or none.
+    bool closable = false;                        ///< Begun with a close button (docked: its tab shows one).
+    bool close_requested = false;                 ///< Its tab's close button was pressed: its next begin_window() clears its open flag.
+    UiRectangle hole{};                           ///< Where the mouse passes through it (a dock space's empty central node).
+    UiRectangle grip{};                           ///< Its resize grip this frame (empty: none).
+    DrawList front_list{};                        ///< A floating dock tree's host: its border and grip, drawn over its docked windows.
     ColumnsState columns{};                       ///< Legacy columns.
     std::uint32_t identifier_stack_base = 0;      ///< Identifier stack depth at begin.
     DrawList draw_list{};                         ///< Its drawing (roots; children draw into their root's).
@@ -204,6 +215,9 @@ struct NextWindowSettings
     Vector2 scroll{};                                  ///< Its scroll.
     bool has_background_alpha = false;                 ///< set_next_window_background_alpha() was called.
     float background_alpha = 1;                        ///< Its opacity.
+    bool has_dock = false;                             ///< set_next_window_dock() was called.
+    DockNodeHandle dock{};                             ///< Its node.
+    UiCondition dock_condition = UiCondition::ALWAYS;  ///< Its condition.
 };
 
 /// What the last item reported.
@@ -513,6 +527,62 @@ struct ListBoxLabel
     bool begun = false;                               ///< begin_list_box() began a region (and a group).
 };
 
+/// A node of a dock tree: split in two (side by side or one above the other), or a leaf holding docked windows as
+/// the tabs of its tab bar. The root of a dock space's tree is its node; a floating tree has a host window.
+struct DockNodeState
+{
+    /// No node, no window.
+    static constexpr std::uint32_t NONE = 0xFFFFFFFFU;
+
+    std::uint32_t generation = 1;                    ///< Its slot's generation (its handles').
+    bool alive = false;                              ///< In use.
+    std::uint32_t id = 0;                            ///< Identifier (its tab bar's and splitter's).
+    std::uint32_t dock_space = 0;                    ///< Its tree's dock space (0: a floating tree).
+    std::uint32_t parent = NONE;                     ///< Its parent, or none (a root).
+    std::array<std::uint32_t, 2> children{NONE, NONE}; ///< A split node's children (left or top first).
+    bool side_by_side = true;                        ///< A split node's children: side by side (else one above the other).
+    float ratio = 0.5F;                              ///< A split node's first child's share of its size.
+    bool central = false;                            ///< A dock space's central node (kept when empty).
+    std::vector<std::uint32_t> windows{};            ///< A leaf's docked windows (identifiers), in tab order.
+    std::uint32_t selected = 0;                      ///< A leaf's visible window (identifier; 0: none).
+    bool selection_changed = false;                  ///< selected was set by docking (its tab bar follows it).
+    DockNodeFlag flags = DockNodeFlag::NONE;         ///< Its dock space's flags.
+    std::uint32_t host_window = NONE;                ///< The window its tree was laid out in (a floating tree's host).
+
+    // This frame.
+    UiRectangle rectangle{};                         ///< Its area (screen).
+    UiRectangle content{};                           ///< A leaf's area under its tab bar.
+    UiRectangle clip{};                              ///< Its host's clip.
+    std::uint64_t last_frame = 0;                    ///< Last frame it was laid out.
+    bool tab_bar = false;                            ///< A leaf shows a tab bar.
+
+    [[nodiscard]] auto split() const noexcept -> bool
+    {
+        return children[0] != NONE;
+    }
+};
+
+/// Where a window being moved would dock (UiContext computes it at end_frame(); the release applies it).
+struct DockDropState
+{
+    std::uint32_t moving = DockNodeState::NONE;      ///< The window being moved (a floating tree's host: the whole tree).
+    std::uint32_t node = DockNodeState::NONE;        ///< The leaf under the mouse, or none.
+    std::uint32_t window = DockNodeState::NONE;      ///< The floating window under the mouse (docking makes a tree), or none.
+    UiRectangle area{};                              ///< The node's or window's rectangle.
+    std::array<UiRectangle, 5> targets{};            ///< The squares offered: center, left, right, top, bottom (empty: not offered).
+    std::uint32_t target = 5;                        ///< The square under the mouse (5: none).
+    UiRectangle preview{};                           ///< Where the window would go.
+};
+
+/// Where a docked window goes this frame (prepare_docked_window()).
+struct DockPlacement
+{
+    bool docked = false;     ///< Docked in a node.
+    bool visible = false;    ///< Its node's selected window, laid out.
+    UiRectangle area{};      ///< Its node's area under the tab bar.
+    UiRectangle clip{};      ///< Its node's host's clip.
+};
+
 /// What button_behavior() found.
 struct ButtonState
 {
@@ -756,6 +826,71 @@ struct ContextState
     /// Top and bottom (screen) of what is visible where @p window's next items go.
     [[nodiscard]] auto clipper_visible(const WindowState& window) const noexcept -> std::pair<float, float>;
 
+    // ----------------------------------------------------------------------------------------- docking
+
+    /// The handle of dock node @p node.
+    [[nodiscard]] auto dock_handle(std::uint32_t node) const noexcept -> DockNodeHandle;
+
+    /// The node @p handle names, or DockNodeState::NONE (a stale handle).
+    [[nodiscard]] auto dock_node_of(DockNodeHandle handle) const noexcept -> std::uint32_t;
+
+    /// A new node of @p dock_space's tree (0: a floating tree) under @p parent.
+    auto create_dock_node(std::uint32_t dock_space,
+                          std::uint32_t parent) -> std::uint32_t;
+
+    /// The root of @p node's tree.
+    [[nodiscard]] auto dock_root(std::uint32_t node) const noexcept -> std::uint32_t;
+
+    /// The leaf a window docked into @p node goes to: itself, or its central (else first) leaf.
+    [[nodiscard]] auto dock_leaf(std::uint32_t node) const noexcept -> std::uint32_t;
+
+    /// The root node of dock space @p dock_space (made the first time: an empty central leaf).
+    auto dock_space_root(std::uint32_t dock_space) -> std::uint32_t;
+
+    /// Docks window @p window into leaf @p node as its selected tab (undocked first from where it was).
+    void dock_window(std::uint32_t window,
+                     std::uint32_t node);
+
+    /// Undocks window @p window; its node goes away when it is left empty (and is not a central node).
+    void undock_window(std::uint32_t window) noexcept;
+
+    /// Splits leaf @p node: a new empty leaf on @p direction's side, @p ratio of its size, and the rest (the leaf's
+    /// windows and central role). Returns (new leaf, rest).
+    auto split_dock_node(std::uint32_t node,
+                         ArrowDirection direction,
+                         float ratio) -> std::pair<std::uint32_t, std::uint32_t>;
+
+    /// Empties the tree of @p root: its windows undocked, its nodes freed but the root, an empty leaf (central when a
+    /// dock space's).
+    void clear_dock_tree(std::uint32_t root) noexcept;
+
+    /// Frees every node of every tree (their windows undocked).
+    void clear_docking() noexcept;
+
+    /// The window whose display order docked window @p window follows (its tree's host's root), or NO_WINDOW.
+    [[nodiscard]] auto dock_host_of(std::uint32_t window) const noexcept -> std::uint32_t;
+
+    /// Places docked window @p window for begin_window() (a floating tree's host is begun first).
+    auto prepare_docked_window(UiFrame& frame,
+                               std::uint32_t window) noexcept -> DockPlacement;
+
+    /// Lays out @p root's tree over @p area of @p host (the current window): splitters, empty leaves, tab bars.
+    void layout_dock_tree(UiFrame& frame,
+                          std::uint32_t root,
+                          const UiRectangle& area,
+                          std::uint32_t host,
+                          DockNodeFlag flags) noexcept;
+
+    /// The display order with docked windows right after their host (and the publication order, with hosts' front
+    /// lists after their docked windows).
+    void arrange_docked_windows() noexcept;
+
+    /// Where the window being moved would dock, and the targets drawn into dock_overlay.
+    void update_dock_drop() noexcept;
+
+    /// Docks the window whose move ends where update_dock_drop() found.
+    void apply_dock_drop() noexcept;
+
     // ----------------------------------------------------------------------------------------- text fields
 
     /// Starts editing field @p id holding @p value.
@@ -948,6 +1083,18 @@ struct ContextState
     std::vector<TableState> tables{};
     IdentifierMap table_lookup{};
     std::vector<std::uint32_t> table_stack{};
+
+    // Docking.
+    std::vector<DockNodeState> dock_nodes{};
+    std::vector<std::uint32_t> free_dock_nodes{};
+    IdentifierMap dock_space_roots{};
+    std::uint32_t dock_node_counter = 0;
+    DockDropState dock_drop{};
+    DrawList dock_overlay{};
+    std::vector<std::uint32_t> dock_order{};
+    std::vector<std::uint32_t> publish_order{};
+    std::vector<std::uint8_t> dock_placed{};
+    std::vector<std::uint32_t> dock_scratch{};
     ColorEditFlag color_options = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::PICKER_HUE_BAR;
 
     // The frame arena and the report.
@@ -999,6 +1146,17 @@ struct TextFieldResult
     UiRectangle cursor{};    ///< The cursor (screen) while editing.
     Vector2 size{};          ///< The laid-out text's size.
 };
+
+/// Starts tab bar @p id of @p window over @p rectangle (begin_tab_bar() without its place in the window's layout):
+/// the bar, on the tab bar stack with its identifier pushed (end_tab_bar() ends it), or nullptr when it could not be
+/// made (reported for @p operation, naming @p name).
+auto begin_tab_bar_at(ContextState& state,
+                      WindowState& window,
+                      std::uint32_t id,
+                      const UiRectangle& rectangle,
+                      TabBarFlag flags,
+                      std::string_view operation,
+                      std::string_view name) noexcept -> TabBarState*;
 
 /// Draws and edits a text field: activation by click, Tab or Return; mouse selection; keys, shortcuts, filters,
 /// the clipboard, undo; the IME composition at the cursor; horizontal scrolling of single-line fields.

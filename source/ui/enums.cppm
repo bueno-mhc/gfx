@@ -938,6 +938,18 @@ inline constexpr float RESIZE_HANDLE_HALF_WIDTH = 4.0F;
 /// @brief Time an indeterminate progress bar (a negative fraction) takes to sweep across, in seconds.
 inline constexpr double INDETERMINATE_PROGRESS_SECONDS = 1.0;
 
+/// @brief Narrowest (and lowest) a dock node becomes when the separator next to it is dragged, in UI units.
+inline constexpr float MINIMUM_DOCK_NODE_SIZE = 32.0F;
+
+/// @brief Side of the squares a window dragged over a dock node or a window offers to dock it, in UI units.
+inline constexpr float DOCKING_TARGET_SIZE = 32.0F;
+
+/// @brief The "format" member of a saved layout (UiContext::save_layout()).
+inline constexpr std::string_view LAYOUT_FORMAT = "gfx.ui.layout";
+
+/// @brief The "version" member of a saved layout; load_layout() reads this version.
+inline constexpr std::uint32_t LAYOUT_FORMAT_VERSION = 1;
+
 /// @brief Issues a UiFrameReport holds; more set UiFrameProblem::ISSUES_DROPPED.
 inline constexpr std::size_t MAXIMUM_FRAME_ISSUES = 64;
 

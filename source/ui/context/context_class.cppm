@@ -55,27 +55,60 @@ private:
     std::atomic<std::uint32_t>* m_leases = nullptr;
 };
 
-/// @brief Builds a dock layout by code (UiContext::dock_builder()). Phase U8.
+/// @brief Builds the dock layout of a dock space by code (UiContext::dock_builder()): its tree starts as one empty
+///        node (root()), split into more, windows docked into its leaves. Each call changes the layout at once; the
+///        windows appear docked the next time they are submitted.
+///
+/// @code
+/// gfx::ui::UiDockBuilder builder = ui.dock_builder("editor"_dock_space);
+/// const auto [left, rest] = builder.split(builder.root(), gfx::ui::ArrowDirection::LEFT, 0.25F);
+/// const auto [bottom, center] = builder.split(rest, gfx::ui::ArrowDirection::DOWN, 0.3F);
+/// builder.dock_window("Outliner", left);
+/// builder.dock_window("Console", bottom);
+/// builder.dock_window("Scene", center);
+/// builder.finish();
+/// @endcode
 class UiDockBuilder
 {
 public:
-    /// @brief Splits @p node: a new node on @p direction's side, @p ratio of its size; returns it and the rest.
-    ///        Phase U8.
+    /// @brief The dock space's root node (the whole dock space before it is split).
+    [[nodiscard]] auto root() const noexcept -> DockNodeHandle
+    {
+        return m_root;
+    }
+
+    /// @brief Splits leaf @p node: a new empty leaf on @p direction's side, @p ratio (between 0 and 1) of its size;
+    ///        returns it and the rest (which keeps the leaf's windows and, in a dock space, its central role).
+    /// @throws InvalidUsageError when @p node is not a leaf of this dock space, @p ratio is out of range, or after
+    ///         finish().
     auto split(DockNodeHandle node,
                ArrowDirection direction,
                float ratio) -> std::pair<DockNodeHandle, DockNodeHandle>;
 
-    /// @brief Docks the window named @p window into @p node. Phase U8.
+    /// @brief Docks the window named @p window (begin_window()'s name) into @p node as its selected tab (a split
+    ///        node: into its central, else first, leaf).
+    /// @throws InvalidUsageError when @p node is not a node of this dock space, @p window is empty, or after finish().
     void dock_window(std::string_view window,
                      DockNodeHandle node);
 
-    /// @brief Applies the layout. Phase U8.
-    void finish();
+    /// @brief Ends the building (later calls throw).
+    void finish() noexcept;
 
 private:
     friend class UiContext;
 
-    UiDockBuilder() noexcept = default;
+    UiDockBuilder(ContextState& state,
+                  std::uint32_t dock_space,
+                  DockNodeHandle root) noexcept;
+
+    /// The node of @p handle in this dock space's tree (thrown otherwise, for @p operation).
+    [[nodiscard]] auto node_of(DockNodeHandle handle,
+                               std::string_view operation) const -> std::uint32_t;
+
+    ContextState* m_state = nullptr;
+    std::uint32_t m_dock_space = 0;
+    DockNodeHandle m_root{};
+    bool m_finished = false;
 };
 
 /// @brief An immediate-mode UI: begin_frame() → windows and widgets on the UiFrame → end_frame() → draw_data()
@@ -160,16 +193,20 @@ public:
     /// @brief Frames begun since the context was made.
     [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t;
 
-    /// @brief Builds a dock layout of @p dock_space by code. Phase U8.
-    /// @throws UiCapabilityError until docking is implemented.
+    /// @brief Builds the layout of @p dock_space by code: its tree is emptied (its windows undocked) and the builder
+    ///        starts from its root. Call it outside a frame, or in a frame before the dock space is submitted.
+    /// @throws InvalidUsageError for a null identifier.
     [[nodiscard]] auto dock_builder(DockSpaceIdentifier dock_space) -> UiDockBuilder;
 
-    /// @brief The window places, dock layout and table settings as JSON. Phase U8.
-    /// @throws UiCapabilityError until layouts are implemented.
+    /// @brief The layout as JSON (format LAYOUT_FORMAT, version LAYOUT_FORMAT_VERSION): the windows' places, sizes
+    ///        and collapsed states, every dock tree (dock spaces' and floating ones, with their splits, ratios, tabs
+    ///        and selected tabs) and the tables' columns (widths, weights, order, visibility, sort). Windows and
+    ///        tables with NO_SAVED_SETTINGS, child regions, popups and tooltips are left out.
     [[nodiscard]] auto save_layout() const -> std::string;
 
-    /// @brief Restores what save_layout() saved; an error message when @p json is not a layout. Phase U8.
-    /// @throws UiCapabilityError until layouts are implemented.
+    /// @brief Restores what save_layout() saved (call it outside a frame): every part or nothing; an error message
+    ///        (with the JSON path of the problem) when @p json is not such a layout.
+    /// @throws InvalidUsageError during a frame.
     auto load_layout(std::string_view json) -> std::expected<void, std::string>;
 
 private:

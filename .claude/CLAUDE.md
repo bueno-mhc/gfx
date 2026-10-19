@@ -305,6 +305,22 @@ Original hard requirements (from the user's initial specification):
   Still allocating: a text longer than every earlier one (engine scratch vectors grow by exact size, once); a cache too
   small (LRU/overflow paths take entries regardless of size). Measured: U7 table test with the mouse over the plots
   18 → 0, new mixed-length test 6 → 0, entry storage 26.4 → 17.9 KiB.
+- **UI docking and layouts (U8 as built, 2026-10-18)** — docs/ui-design.md §B "U8 as built". docking.cpp: `DockNodeState`
+  slots in `dock_nodes` (+ `free_dock_nodes`; handle = slot + generation via a local `DockHandles : HandleIssuer`), split
+  (side_by_side, ratio of the first child) or leaf (window ids in tab order, selected + `selection_changed`, central);
+  `dock_space_roots` (IdentifierMap, now with clear()); floating trees have a host window "##dock_host_<node id hex>"
+  (`WindowState::dock_tree`, padding 0, border + grip in `front_list` drawn after its docked windows). dock_space() in a
+  window or over the display ("##dock_space_<id hex>", NO_BRING_TO_FRONT, rotated to the back each frame);
+  layout_dock_tree(): separators (button_behavior on the host, last_item kept), leaf tab bars through `begin_tab_bar_at()`
+  (tabs "title###<window id hex>" so the tab id = hash(bar id, "###hex"); selection/order copied back to the node), empty
+  leaves DOCKING_EMPTY_BACKGROUND or a pass-through `hole`. begin_root(): apply_next_dock() + prepare_docked_window()
+  (begins a floating host first; saves/restores next_window around internal begins) before the stacks; docked windows get
+  DOCKED_WINDOW_FLAGS, outer = node content, hidden unless selected; `closable`/`close_requested` from tab close buttons;
+  empty names filled at begin (windows made by builders/layouts). focus_window() rotates the dock host; end_frame():
+  update_dock_drop() (targets + preview in `dock_overlay`), arrange_docked_windows() (display_order + publish_order with
+  front-list markers 0x80000000); begin_frame: hover skips holes and floating hosts' grips, apply_dock_drop() on move
+  release. Tearing: tab active + 1.5 bar heights away → undock + moving_window. persistence.cpp + json_reader.cpp (plain TU,
+  nlohmann SAX, gfx::nlohmann_json private): format in the file header, all or nothing, paths in errors.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -663,7 +679,8 @@ gfx/
 │                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag); U4: style/style.cppm,
 │                  input/frame_input.cppm, context/ (context.cppm + types/frame/context_class partitions, state.cppm
 │                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos; U6: trees, tabs, menus,
-│                  tooltips, drag_drop; U7: tables, clipper, visuals), platform/ (gfx_ui_platform:
+│                  tooltips, drag_drop; U7: tables, clipper, visuals; U8: docking, persistence, json_reader),
+│                  platform/ (gfx_ui_platform:
 │                  ui_platform.cppm/.cpp); U5: text/boundaries.cppm, text_editor.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
@@ -674,7 +691,7 @@ gfx/
             text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp; U3: draw_list_test.cpp,
             renderer_test.cpp = gfx_ui_draw_tests with atlas gfx.tests.draw_latin; U4: context_test.cpp,
             context_render_test.cpp, context_test_support.cppm = gfx_ui_context_tests (atlas context_latin; U5
-            input_widgets_test.cpp, U6 structure_test.cpp, U7 table_test.cpp),
+            input_widgets_test.cpp, U6 structure_test.cpp, U7 table_test.cpp, U8 docking_test.cpp),
             ui_platform_test.cpp = gfx_ui_platform_tests (atlas platform_latin)), compilation/ui/,
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
@@ -715,12 +732,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images) committed; **follow-up after U7 (cache misses of mixed lengths: replacement by size) done, policy accepted 2026-10-18, being committed by the user** (§B "Follow-up after U7"); U8 (docking) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size) committed; **U8 (docking: dock spaces, dock trees, tabs, tearing, drag-to-dock, floating trees, dock builder, JSON layouts with tables) done, awaiting validation** (§B "U8 as built", 9 deviations); U9 (shortcuts, accessibility) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **749**, all passing in Debug and Release, 2026-10-18 (after the follow-up after U7: + 1
-allocation test; skips Debug 4, Release 19; run from PowerShell). Before: 748 (after U7: + 21 table/visual tests, + 1 render
+Test count at last report: **767**, all passing in Debug and Release, 2026-10-18 (after U8: + 14 docking/layout tests, + 1
+render × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19; run from PowerShell). Before U8: 749 (after the
+follow-up after U7: + 1 allocation test). Before: 748 (after U7: + 21 table/visual tests, + 1 render
 × 2 GPUs, + 3 draw list, + 1 rounded image × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19; run from
 PowerShell, see §8). Before U7: 718 (after the follow-up after U6: + 3
 allocation tests, + 2 cache tests; skips Debug 4, Release 19). Before: 713 (after U6: + 27 structure tests, + 1 render

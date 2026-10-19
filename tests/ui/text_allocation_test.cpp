@@ -779,4 +779,67 @@ TEST(TextAllocationTest, LargeClippedTablesAllocateNothingWhileTheyScrollAndTheM
     EXPECT_GT(plot_hovers, 0U) << "the mouse passed over the plots";
 }
 
+TEST(TextAllocationTest, DockedWindowsAllocateNothingWhileTheMouseMovesOverThem)
+{
+    // A dock space over the display: a left node, a bottom node and a middle node of two tabs, a floating tree of two
+    // windows, a plain floating window; the mouse sweeping over the tabs, separators and windows without pressing.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    UiDockBuilder builder = ui.dock_builder(DockSpaceIdentifier{"editor"});
+    const auto [left, rest] = builder.split(builder.root(), ArrowDirection::LEFT, 0.25F);
+    const auto [bottom, middle] = builder.split(rest, ArrowDirection::DOWN, 0.3F);
+    builder.dock_window("Outliner", left);
+    builder.dock_window("Console", bottom);
+    builder.dock_window("Scene", middle);
+    builder.dock_window("Assets", middle);
+    builder.finish();
+    constexpr std::array NAMES{std::string_view{"Outliner"}, std::string_view{"Scene"}, std::string_view{"Assets"}, std::string_view{"Console"},
+                               std::string_view{"Floating"}};
+    bool open = true;
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        static_cast<void>(frame.dock_space(DockSpaceIdentifier{"editor"}));
+        for (const std::string_view name : NAMES)
+        {
+            frame.set_next_window_position({.x = 300, .y = 200}, UiCondition::FIRST_USE_EVER);
+            frame.set_next_window_size({.x = 240, .y = 160}, UiCondition::FIRST_USE_EVER);
+            if (frame.begin_window(name, open))
+            {
+                frame.text("{} at frame {:03}", name, frame_number % 100);
+                frame.button("Action");
+            }
+            frame.end_window();
+        }
+    };
+
+    // The mouse moves over the display without pressing: a cycle of 50 frames (the first two warm up).
+    const auto input = [&](std::uint32_t frame_number)
+    {
+        const std::uint32_t step = frame_number % 50;
+        const gfx::Vector2 mouse{.x = 5.0F + static_cast<float>((step * 37) % 790), .y = 5.0F + static_cast<float>((step * 53) % 590)};
+        return UiFrameInput{.time = static_cast<double>(frame_number) / 60.0, .display_size = {.x = 800, .y = 600}, .mouse_present = true, .mouse_position = mouse};
+    };
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        build(ui.begin_frame(input(frame_number)), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 100; ++frame_number)
+    {
+        const UiFrameReport report = run(frame_number);
+        EXPECT_TRUE(report.ok()) << frame_number << ": " << (report.issues.empty() ? std::string_view{} : report.issues.front().detail);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    for (std::uint32_t frame_number = 100; frame_number < 200; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+}
+
 } // namespace

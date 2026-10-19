@@ -27,6 +27,7 @@ struct UiContextLimits
     std::uint32_t open_states = 1024;         ///< Open states of tree nodes and collapsing headers remembered.
     std::uint32_t tab_bars = 32;              ///< Tab bars remembered (16 tabs each before they grow).
     std::uint32_t tables = 32;                ///< Tables remembered (their columns are allocated when a table first appears).
+    std::uint32_t dock_nodes = 64;            ///< Nodes of the dock trees.
     std::size_t drag_drop_payload_bytes = 1024; ///< Bytes of a drag and drop payload.
 };
 
