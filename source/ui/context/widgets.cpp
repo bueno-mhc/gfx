@@ -45,7 +45,9 @@ text_item(ContextState& state,
     const Vector2 size{.x = layout.width, .y = std::max(layout.height, state.current_font().line_height)};
     const UiRectangle rectangle{.left = position.x, .top = position.y, .right = position.x + size.x, .bottom = position.y + size.y};
     state.item_size(window, size);
-    if (state.item_add(window, rectangle, 0, false, operation, {}))
+    const bool visible = state.item_add(window, rectangle, 0, false, operation, {});
+    state.describe_text(window, rectangle, value);
+    if (visible)
     {
         state.draw_text(state.list_of(window), layout, position, color);
     }
@@ -95,6 +97,7 @@ button_item(ContextState& state,
         return false;
     }
     const ButtonState button = state.button_behavior(window, rectangle, id, flags);
+    static_cast<void>(state.describe_item(AccessibilityRole::BUTTON, AccessibilityState::NONE, AccessibilityAction::CLICK));
 
     // The frame, the focus highlight, the label (clipped to the frame when it does not fit).
     DrawList& list = state.list_of(window);
@@ -223,7 +226,9 @@ UiFrame::bullet_text_unformatted(std::string_view text) noexcept
     const Vector2 position{.x = window->cursor.x, .y = window->cursor.y + window->line_text_offset};
     const UiRectangle rectangle{.left = position.x, .top = position.y, .right = position.x + size.x, .bottom = position.y + size.y};
     state.item_size(*window, size);
-    if (state.item_add(*window, rectangle, 0, false, "bullet_text", {}))
+    const bool visible = state.item_add(*window, rectangle, 0, false, "bullet_text", {});
+    state.describe_text(*window, rectangle, text);
+    if (visible)
     {
         DrawList& list = state.list_of(*window);
         list.add_circle_filled({.x = position.x + square * 0.5F, .y = position.y + square * 0.5F}, font.size * 0.20F, state.color(StyleColor::TEXT_NORMAL));
@@ -252,7 +257,9 @@ UiFrame::label_unformatted(std::string_view label,
     const Vector2 position = window->cursor;
     const UiRectangle rectangle{.left = position.x, .top = position.y, .right = position.x + size.x, .bottom = position.y + size.y};
     state.item_size(*window, size, style.frame_padding.y);
-    if (!state.item_add(*window, rectangle, 0, false, "label", label))
+    const bool visible = state.item_add(*window, rectangle, 0, false, "label", label);
+    static_cast<void>(state.describe_item(AccessibilityRole::STATIC_TEXT, AccessibilityState::NONE, AccessibilityAction::NONE, value));
+    if (!visible)
     {
         return;
     }
@@ -346,7 +353,9 @@ UiFrame::separator_text(std::string_view label) noexcept
     const float height = std::max(label_size.y + padding.y * 2, style.separator_text_border_size);
     const UiRectangle rectangle{.left = left, .top = window->cursor.y, .right = right, .bottom = window->cursor.y + height};
     state.item_size(*window, {.x = 0, .y = height}, padding.y);
-    if (!state.item_add(*window, rectangle, 0, false, "separator_text", label))
+    const bool visible = state.item_add(*window, rectangle, 0, false, "separator_text", label);
+    static_cast<void>(state.describe_item(AccessibilityRole::STATIC_TEXT));
+    if (!visible)
     {
         return;
     }
@@ -415,6 +424,7 @@ UiFrame::invisible_button(std::string_view id,
         return false;
     }
     const ButtonState button = state.button_behavior(*window, rectangle, identifier, flags);
+    static_cast<void>(state.describe_item(AccessibilityRole::BUTTON, AccessibilityState::NONE, AccessibilityAction::CLICK));
     state.draw_focus(state.list_of(*window), rectangle, identifier, state.style.frame_rounding);
     return button.pressed;
 }
@@ -442,6 +452,7 @@ UiFrame::arrow_button(std::string_view id,
         return false;
     }
     const ButtonState button = state.button_behavior(*window, rectangle, identifier);
+    static_cast<void>(state.describe_item(AccessibilityRole::BUTTON, AccessibilityState::NONE, AccessibilityAction::CLICK));
     DrawList& list = state.list_of(*window);
     const StyleColor fill = button.held && button.hovered ? StyleColor::BUTTON_ACTIVE : button.hovered ? StyleColor::BUTTON_HOVERED : StyleColor::BUTTON;
     state.draw_frame(list, rectangle, state.color(fill), style.frame_rounding);
@@ -476,6 +487,8 @@ UiFrame::checkbox(std::string_view label,
         value = !value;
         state.mark_edited(item.id);
     }
+    static_cast<void>(state.describe_item(AccessibilityRole::CHECK_BOX, AccessibilityState::CHECKABLE | (value ? AccessibilityState::CHECKED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK));
 
     // The box, the check mark, the focus highlight, the label.
     DrawList& list = state.list_of(*window);
@@ -517,6 +530,8 @@ UiFrame::radio_button(std::string_view label,
     {
         state.mark_edited(item.id);
     }
+    static_cast<void>(state.describe_item(AccessibilityRole::RADIO_BUTTON, AccessibilityState::CHECKABLE | (active ? AccessibilityState::CHECKED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK));
 
     // A circle, a dot when active, the focus highlight, the label.
     DrawList& list = state.list_of(*window);
@@ -560,6 +575,8 @@ UiFrame::toggle(std::string_view label,
         value = !value;
         state.mark_edited(item.id);
     }
+    static_cast<void>(state.describe_item(AccessibilityRole::SWITCH, AccessibilityState::CHECKABLE | (value ? AccessibilityState::CHECKED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK));
 
     // A rounded track (the check mark color when on), a knob at its left (off) or right (on) end.
     DrawList& list = state.list_of(*window);
@@ -625,6 +642,8 @@ UiFrame::selectable(std::string_view label,
     state.disabled = state.disabled || has_any(flags, SelectableFlag::DISABLED);
     const ButtonState button = state.button_behavior(*window, hit, id);
     const bool pressed = button.pressed || (has_any(flags, SelectableFlag::ALLOW_DOUBLE_CLICK) && button.hovered && state.mouse[0].double_clicked);
+    static_cast<void>(state.describe_item(AccessibilityRole::LIST_ITEM, AccessibilityState::SELECTABLE | (selected ? AccessibilityState::SELECTED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK));
 
     // The highlight (selected, hovered, held), the focus highlight, the label.
     DrawList& list = state.list_of(*window);

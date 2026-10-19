@@ -246,6 +246,9 @@ ContextState::ContextState(const UiContextDescription& context_description)
     dock_nodes.reserve(limits.dock_nodes);
     free_dock_nodes.reserve(limits.dock_nodes);
     dock_space_roots.reserve(16);
+    shortcut_routes.resize(limits.shortcut_routes);
+    next_item.label.reserve(64);
+    next_item.description.reserve(256);
     dock_order.reserve(limits.windows);
     publish_order.reserve(std::size_t{limits.windows} * 2);
     dock_placed.reserve(limits.windows);
@@ -690,8 +693,20 @@ ContextState::item_add(WindowState& window,
                          .visible = !visible.empty() && !window.hidden,
                          .disabled = disabled,
                          .clip = window.clip};
+    const auto window_index = static_cast<std::uint32_t>(&window - windows.data());
+    accessibility.last_item = id;
+    accessibility.last_label = label;
+    accessibility.last_window = window_index;
+    accessibility.last_rectangle = rectangle;
+    accessibility.last_focusable = focusable && !disabled;
+    accessibility.pending_label = std::exchange(next_item.has_label, false);
+    accessibility.pending_description = std::exchange(next_item.has_description, false);
+    accessibility.pending_role = std::exchange(next_item.has_role, false);
+    accessibility.last_record = AccessibilityBuildState::NONE;
+    item_shortcut = {};
     if (id == 0)
     {
+        next_item.has_shortcut = false;
         return last_item.visible;
     }
 
@@ -716,20 +731,38 @@ ContextState::item_add(WindowState& window,
     }
 
     // set_keyboard_focus_here(): this item, in any window.
-    if (focusable && !disabled && focus_here_requested)
+    const bool navigable = focusable && !disabled;
+    if (navigable && focus_here_requested)
     {
         focus_here_result = id;
         focus_here_window = window.root;
         focus_here_requested = false;
+        navigation.here_window = window_index;
+        navigation.here_rectangle = rectangle;
     }
 
-    // The keyboard focus order of the focused window: first, last, around the focused item.
-    if (focusable && !disabled && focused_window != NO_WINDOW && window.root == focused_window)
+    // The keyboard focus order of the focused window: first, last, around the focused item; the directional move's
+    // candidates; where the focused item is (the next moves start from it).
+    if (id == focus_id)
     {
-        focus_first = focus_first == 0 ? id : focus_first;
+        navigation.next_focus_id = id;
+        navigation.next_focus_rectangle = rectangle;
+        navigation.next_focus_root = window.root;
+        navigation.next_focus_window = window_index;
+    }
+    if (navigable && focused_window != NO_WINDOW && window.root == focused_window)
+    {
+        if (focus_first == 0)
+        {
+            focus_first = id;
+            navigation.first_window = window_index;
+            navigation.first_rectangle = rectangle;
+        }
         if (focus_seen_current && focus_after_current == 0)
         {
             focus_after_current = id;
+            navigation.after_window = window_index;
+            navigation.after_rectangle = rectangle;
         }
         if (id == focus_id)
         {
@@ -738,8 +771,37 @@ ContextState::item_add(WindowState& window,
         else if (!focus_seen_current)
         {
             focus_before_current = id;
+            navigation.before_window = window_index;
+            navigation.before_rectangle = rectangle;
         }
         focus_last = id;
+        navigation.last_window = window_index;
+        navigation.last_rectangle = rectangle;
+        score_navigation(id, window, rectangle);
+    }
+
+    // MENU: the first item of the menu bar the focus goes to.
+    if (navigable && navigation.menu_bar_window != NO_WINDOW && navigation.menu_bar_first == 0 && menu_bar.active && menu_bar.window == window_index
+        && window.root == navigation.menu_bar_window)
+    {
+        navigation.menu_bar_first = id;
+    }
+
+    // Its shortcut (set_next_item_shortcut()), routed for it from its window: it activates it.
+    if (next_item.has_shortcut)
+    {
+        next_item.has_shortcut = false;
+        item_shortcut = next_item.shortcut;
+        if (!disabled && route_shortcut(next_item.shortcut, next_item.shortcut_flags, id, &window, active_id == id))
+        {
+            shortcut_activated_id = id;
+        }
+    }
+
+    // An assistive technology asked to show it (its widget answers its other requests).
+    if (item_request(AccessibilityAction::SCROLL_INTO_VIEW) != nullptr)
+    {
+        scroll_into_view(window_index, rectangle);
     }
     return last_item.visible;
 }
@@ -783,6 +845,15 @@ ContextState::take_focus(std::uint32_t id) noexcept
     focus_id = id;
     focus_visible = false;
     focus_alive = true;
+
+    // Its place (the last item's, as it is the item focused) is where the next directional move starts.
+    if (last_item.id == id && last_item.window < windows.size())
+    {
+        navigation.next_focus_id = id;
+        navigation.next_focus_rectangle = last_item.rectangle;
+        navigation.next_focus_root = windows[last_item.window].root;
+        navigation.next_focus_window = last_item.window;
+    }
 }
 
 auto
@@ -913,17 +984,14 @@ ContextState::button_behavior(WindowState& window,
         }
     }
 
-    // The keyboard: Space or Return activates the item the keyboard focused.
-    if (focus_id == id && focus_visible && !disabled && focused_window != NO_WINDOW && window.root == focused_window)
+    // The keyboard and gamepad: ACTIVATE presses the item the keyboard focused (held while it is held); its shortcut
+    // or an assistive technology's CLICK activates it too.
+    if (keyboard_focused(window, id))
     {
-        const auto pressed = [this](Key key) { return keys_pressed[std::to_underlying(key)] > keys_repeated[std::to_underlying(key)]; };
-        const auto held = [this](Key key) { return keys_down[std::to_underlying(key)]; };
-        if (pressed(Key::SPACE) || pressed(Key::RETURN) || pressed(Key::KEYPAD_ENTER))
-        {
-            state.pressed = true;
-        }
-        state.held = state.held || held(Key::SPACE) || held(Key::RETURN);
+        state.pressed = state.pressed || navigation_pressed(UiNavigationCommand::ACTIVATE);
+        state.held = state.held || navigation_held(UiNavigationCommand::ACTIVATE);
     }
+    state.pressed = state.pressed || (!disabled && item_activated(id));
     return state;
 }
 
@@ -1030,6 +1098,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     // Keys: presses, repeats and releases of the frame; a window without focus holds nothing.
     state.keys_pressed.fill(0);
     state.key_codes_pressed.fill(0);
+    state.key_codes_repeated.fill(0);
     state.keys_repeated.fill(0);
     state.keys_released.fill(false);
     if (!input.focused)
@@ -1055,6 +1124,7 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
             if (code < state.key_codes_pressed.size())
             {
                 state.key_codes_pressed[code] = static_cast<std::uint8_t>(std::min(state.key_codes_pressed[code] + 1, 255));
+                state.key_codes_repeated[code] = static_cast<std::uint8_t>(std::min(state.key_codes_repeated[code] + (event.repeat ? 1 : 0), 255));
             }
             state.keys_pressed[key] = static_cast<std::uint8_t>(std::min(state.keys_pressed[key] + 1, 255));
             state.keys_repeated[key] = static_cast<std::uint8_t>(std::min(state.keys_repeated[key] + (event.repeat ? 1 : 0), 255));
@@ -1244,8 +1314,11 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
         }
     }
 
-    // Popups: those no longer submitted close, a click outside closes them, Escape the top one.
-    const bool escape_closed_popup = state.update_popups();
+    // Navigation commands (the keymap, a gamepad), the requests of assistive technologies; popups: those no longer
+    // submitted close, a click outside closes them, CANCEL the top one.
+    state.update_navigation(input);
+    state.begin_accessibility(input);
+    static_cast<void>(state.update_popups());
 
     // The field being edited: a click outside it commits it (the field reads the result this frame).
     state.text_edit.ended_id = 0;
@@ -1272,24 +1345,9 @@ UiContext::begin_frame(const UiFrameInput& input) noexcept -> UiFrame&
     state.hovered_id_previous = state.hovered_id;
     state.hovered_id = 0;
 
-    // The keyboard focus: Tab and Shift+Tab move it (Down and Up too in a popup that is not a modal), Escape drops
-    // it (unless it closed a popup).
-    const auto pressed = [&state](Key key) { return state.keys_pressed[std::to_underlying(key)] > 0; };
-    state.focus_step = 0;
-    if (state.focused_window != ContextState::NO_WINDOW && pressed(Key::TAB))
-    {
-        state.focus_step = has_any(state.modifiers, KeyModifier::SHIFT) ? -1 : 1;
-    }
-    const std::size_t focused_level = state.popup_level_of(state.focused_window);
-    if (focused_level < state.popups.size() && !state.popups[focused_level].modal && state.text_edit.id == 0)
-    {
-        state.focus_step = pressed(Key::DOWN) ? 1 : pressed(Key::UP) ? -1 : state.focus_step;
-    }
-    if (pressed(Key::ESCAPE) && !escape_closed_popup)
-    {
-        state.focus_id = 0;
-        state.focus_visible = false;
-    }
+    // The keyboard focus: Tab and Shift+Tab step, MENU goes to the menu bar, CANCEL drops it (unless it closed a
+    // popup); the directional moves are scored item by item and resolved at end_frame().
+    state.begin_navigation();
     state.focus_alive = false;
     state.focus_seen_current = false;
     state.focus_first = 0;
@@ -1426,39 +1484,16 @@ UiContext::end_frame() noexcept -> UiFrameReport
     state.disabled_stack.clear();
     state.disabled = false;
 
-    // The keyboard focus moves for the next frame (wrapping around), or leaves an item no longer submitted; the
-    // item it moved to knows it arrived (a text field starts editing).
-    state.focus_arrived_id = 0;
-    if (state.focus_here_result != 0)
-    {
-        state.focus_window(state.focus_here_window);
-        state.focus_id = state.focus_here_result;
-        state.focus_visible = true;
-        state.focus_arrived_id = state.focus_id;
-    }
-    else if (state.focus_step > 0 && state.focus_first != 0)
-    {
-        state.focus_id = state.focus_seen_current && state.focus_after_current != 0 ? state.focus_after_current : state.focus_first;
-        state.focus_visible = true;
-        state.focus_arrived_id = state.focus_id;
-    }
-    else if (state.focus_step < 0 && state.focus_last != 0)
-    {
-        state.focus_id = state.focus_seen_current && state.focus_before_current != 0 ? state.focus_before_current : state.focus_last;
-        state.focus_visible = true;
-        state.focus_arrived_id = state.focus_id;
-    }
-    else if (state.focus_id != 0 && !state.focus_alive)
-    {
-        state.focus_id = 0;
-        state.focus_visible = false;
-    }
-    if (state.default_focus_request != 0 && state.focus_id == 0)
-    {
-        state.focus_id = state.default_focus_request;
-        state.focus_visible = true;
-    }
-    state.default_focus_request = 0;
+    // The keyboard focus moves for the next frame (Tab, a direction, MENU, a window cycle), or leaves an item no
+    // longer submitted; shortcut routes are decided for the next frame; the accessibility tree is finished.
+    state.resolve_navigation();
+    state.update_shortcut_routes();
+    state.finish_accessibility();
+    state.shortcut_activated_id = 0;
+    state.next_item.has_shortcut = false;
+    state.next_item.has_label = false;
+    state.next_item.has_description = false;
+    state.next_item.has_role = false;
 
     // What the application should leave to the UI.
     const bool mouse_held_by_ui = (state.active_id != 0 && (state.active_id != state.text_edit.id || state.text_edit.mouse_selecting))

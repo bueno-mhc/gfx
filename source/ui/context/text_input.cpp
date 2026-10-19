@@ -167,7 +167,7 @@ ContextState::start_text_edit(std::uint32_t id,
     TextEditState& edit = text_edit;
     try
     {
-        edit.editor = TextEditor{{.capacity = capacity, .single_line = !multiline}};
+        edit.editor.reset({.capacity = capacity, .single_line = !multiline});
         edit.editor.set_text(value);
         edit.initial.assign(edit.editor.text());
     }
@@ -277,16 +277,46 @@ text_field(ContextState& state,
         started = true;
     }
 
-    // The keyboard: Tab into the field, or Return on it while it has the focus, starts editing (all selected).
+    // The keyboard: Tab into the field, or INPUT (Return) or a gamepad's ACTIVATE on it while it has the focus, starts
+    // editing (all selected); so does an assistive technology's CLICK.
     const bool return_pressed = presses(state, Key::RETURN) > 0 || presses(state, Key::KEYPAD_ENTER) > 0;
-    if (edit.id != request.id && state.focus_id == request.id && state.focus_visible && !state.disabled
-        && (state.focus_arrived_id == request.id || return_pressed))
+    const bool external_activate = has_any(state.navigation.external, UiNavigationCommand::ACTIVATE) && state.navigation_pressed(UiNavigationCommand::ACTIVATE);
+    const bool external_cancel = has_any(state.navigation.external, UiNavigationCommand::CANCEL);
+    const bool input_command = state.navigation_pressed(UiNavigationCommand::INPUT) || external_activate;
+    const bool requested = state.item_activated(request.id);
+    if (edit.id != request.id && !state.disabled
+        && ((state.focus_id == request.id && state.focus_visible && (state.focus_arrived_id == request.id || input_command)) || requested))
     {
         state.start_text_edit(request.id, start_text, flags, request.multiline, request.numeric, request.capacity);
         state.set_active(request.id, window);
+        state.take_focus(request.id);
+        state.focus_visible = !requested || state.focus_visible;
         edit.editor.select_all();
         state.focus_arrived_id = 0;
-        started = return_pressed;
+        started = input_command || requested;
+    }
+
+    // An assistive technology sets its text (not a number's: its widget does).
+    std::string_view set_text{};
+    bool text_set = false;
+    if (const UiAccessibilityRequest* set = state.item_request(AccessibilityAction::SET_VALUE); set != nullptr && editable && !request.numeric)
+    {
+        if (edit.id == request.id)
+        {
+            try
+            {
+                edit.editor.set_text(set->text);
+            }
+            catch (...)
+            {
+                state.report(UiFrameProblem::CAPACITY_EXCEEDED, "input_text", "the text could not be set");
+            }
+        }
+        else
+        {
+            set_text = set->text;
+            text_set = true;
+        }
     }
     const bool editing = edit.id == request.id;
     if (editing)
@@ -294,6 +324,9 @@ text_field(ContextState& state,
         state.active_id_alive = true;
         edit.frame = request.frame;
     }
+
+    // Editing that INPUT started this frame (a slider's typed input) does not take that key as a confirmation.
+    started = started || (editing && edit.started_frame == state.frame && input_command);
 
     // The text shown: the edited text (with the IME composition at the cursor), masked for passwords.
     const std::string_view source = editing ? edit.editor.text() : request.text;
@@ -544,8 +577,14 @@ text_field(ContextState& state,
             }
         }
 
-        // Return confirms (multi-line: types a line break, with Control or without as the flags say); Tab types a
-        // tab or leaves; Escape reverts (or clears) and leaves.
+        // Return confirms (multi-line: types a line break, with Control or without as the flags say), as a gamepad's
+        // ACTIVATE does; Tab types a tab or leaves; Escape (a gamepad's CANCEL) reverts (or clears) and leaves.
+        if (external_activate)
+        {
+            end = true;
+            commit = true;
+            result.entered = true;
+        }
         if (return_pressed)
         {
             const bool control_breaks = has_any(flags, InputTextFlag::CONTROL_ENTER_FOR_NEW_LINE);
@@ -576,7 +615,7 @@ text_field(ContextState& state,
                 commit = true;
             }
         }
-        if (presses(state, Key::ESCAPE) > 0)
+        if (presses(state, Key::ESCAPE) > 0 || external_cancel)
         {
             if (has_any(flags, InputTextFlag::ESCAPE_CLEARS_ALL) && !editor.text().empty())
             {
@@ -716,8 +755,8 @@ text_field(ContextState& state,
         return result;
     }
     result.active = editing;
-    result.text = editing ? edit.editor.text() : result.ended ? std::string_view{edit.ended_text} : request.text;
-    result.changed = (result.changed || result.ended) && result.text != request.text;
+    result.text = editing ? edit.editor.text() : result.ended ? std::string_view{edit.ended_text} : text_set ? set_text : request.text;
+    result.changed = (result.changed || result.ended || text_set) && result.text != request.text;
     return result;
 }
 
@@ -757,6 +796,13 @@ single_line_field(ContextState& state,
                                                               .flags = options.flags,
                                                               .capacity = capacity,
                                                               .label = label});
+    const bool password = has_any(options.flags, InputTextFlag::PASSWORD);
+    const bool read_only = has_any(options.flags, InputTextFlag::READ_ONLY);
+    static_cast<void>(state.describe_item(AccessibilityRole::TEXT_FIELD,
+                                          (password ? AccessibilityState::PROTECTED : AccessibilityState::NONE)
+                                              | (read_only ? AccessibilityState::READ_ONLY : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK | (read_only ? AccessibilityAction::NONE : AccessibilityAction::SET_VALUE),
+                                          password ? std::string_view{} : result.text));
     state.draw_text(state.list_of(window), label_layout, {.x = frame.right + style.item_inner_spacing.x, .y = frame.top + style.frame_padding.y},
                     state.color(StyleColor::TEXT_NORMAL));
     if (result.changed)
@@ -868,6 +914,11 @@ UiFrame::input_text_multiline(std::string_view label,
                                                                      .multiline = true,
                                                                      .framed = false,
                                                                      .label = label});
+            const bool read_only = has_any(options.flags, InputTextFlag::READ_ONLY);
+            static_cast<void>(state.describe_item(AccessibilityRole::TEXT_FIELD,
+                                                  AccessibilityState::MULTILINE | (read_only ? AccessibilityState::READ_ONLY : AccessibilityState::NONE),
+                                                  AccessibilityAction::CLICK | (read_only ? AccessibilityAction::NONE : AccessibilityAction::SET_VALUE),
+                                                  result.text));
             dummy(result.size);
             if (result.changed)
             {

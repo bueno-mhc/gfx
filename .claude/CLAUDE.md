@@ -321,6 +321,37 @@ Original hard requirements (from the user's initial specification):
   front-list markers 0x80000000); begin_frame: hover skips holes and floating hosts' grips, apply_dock_drop() on move
   release. Tearing: tab active + 1.5 bar heights away → undock + moving_window. persistence.cpp + json_reader.cpp (plain TU,
   nlohmann SAX, gfx::nlohmann_json private): format in the file header, all or nothing, paths in errors.
+- **UI navigation, shortcuts, accessibility (U9 as built, 2026-10-19)** — docs/ui-design.md §B "U9 as built" (12 deviations
+  for validation). Provider decided after a trial: **AccessKit** (user, 2026-10-18; §D answer 11). navigation.cpp:
+  `UiNavigationCommand` bitmask (13), built-in keyboard keymap (`UiInputSettings::keyboard_navigation`, default on; while a
+  field is edited only Tab/Escape) + `UiFrameInput::navigation` {down, pressed, scroll} (a command that becomes held is
+  pressed; moves/steps repeat); `NavigationState` (presses/repeats per command, consumed mask: widgets call
+  `consume_navigation()` — sliders/drags Left/Right, trees, bar menus Down, submenu rows Right, popups CANCEL/Left);
+  `begin_navigation()` after update_popups (Tab steps, MENU = Alt alone → menu bar first item / back, CANCEL back or drop);
+  `score_navigation()` in item_add (Dear ImGui NavScoreItem); `resolve_navigation()` at end_frame (here/Tab/moves; popups
+  wrap; no focus → first/last; MENU; NEXT/PREVIOUS_WINDOW by creation order with `WindowState::navigation_last_id`; stick
+  scroll; `scroll_into_view()`; focus rectangle = moved-to item's, else this frame's (`next_focus_id`), take_focus records
+  the clicked item's). Bar menus: Left/Right unused by the open menu → `menu_bar_switch_*` decided in end_menu, applied in
+  end_menu_bar (`MenuBarState::items`), opened next frame (`menu_bar_open_id`). shortcuts.cpp: `ShortcutRoute` table
+  (open addressing, `UiContextLimits::shortcut_routes`), scores ROUTE_ACTIVE 1 / focused chain 2+distance / GLOBAL 1000,
+  winner next frame; text field being edited owns typing chords; `set_next_item_shortcut()` → `shortcut_activated_id` →
+  `item_activated()` (also an AT's CLICK); `key_chord_text()` constexpr in :types. accessibility.cpp + partition
+  `:accessibility_tree` (UiAccessibilityNode/Tree public): `AccessibilityBuildState` records under a container stack
+  (windows via accessible_begin/end_window; menu bar, open tree nodes, tab bars + TAB_PANEL, tables, list boxes/combos LIST
+  via `next_window_role`), widgets call `describe_item()`/`describe_text()`/`describe_number()`; finish: dedupe ids,
+  children per node, two alternating `AccessibilityTreeData` with id index, changed/removed diff, focus; announcements =
+  new live node ids 2+counter; requests copied at begin_frame (FOCUS at once), `item_request(action)` scans all.
+  AccessibilityNodeId = window id << 32 | item id (root 1). Enabled by `UiContext::set_accessibility_enabled()` (reserves
+  then). `later.cpp` → `reports.cpp` (not_implemented removed). gfx.ui.platform: `with_ui_navigation_actions()`,
+  `ui_navigation_context()` (keyboard + gamepad), `ui_gamepad_navigation_context()`, `navigation_input(frame)` (left stick =
+  2D UI_MOVE_ACTION past 0.5: BUTTON actions read axes by magnitude), `UiAccessibilityAdapter` (window thread; plain TU
+  `accesskit_bridge.cpp` behind std-free `accesskit_bridge.hpp`: SetWindowSubclass, WM_GETOBJECT → placeholder root then
+  full tree next update, WM_SET/KILLFOCUS, requests via mutex queue → `take_requests()`; non-Windows throws).
+  `gfx_require_accesskit()` (accesskit-c 0.23.1 zip 67 MB, SHA-256 35b7ca8a...043f; `-DFETCHCONTENT_SOURCE_DIR_GFX_ACCESSKIT_C`
+  reuses an extracted copy). Fixed: `TextEditor::reset()` keeps storage (edit starts allocated); platform
+  make_input_schema unused-lambda warning with no contexts. Gotchas: a new window takes the focus (tests focus the first on
+  frame 2); AccessKit Invoke = FOCUS then CLICK in one frame; `native_handle().get_if<>()` dangles (copy the handle first);
+  bash heredocs break on apostrophes in this shell (write scripts with the Write tool).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -641,6 +672,11 @@ Original hard requirements (from the user's initial specification):
    define `STBI_NO_STDIO` before including it there. FreeType's headers include `<stdio.h>` too (no option to
    avoid it): FreeType is reached through a plain TU behind a std-free header (freetype_library.hpp). HarfBuzz,
    zstd and stb_truetype headers are fine in a GMF next to `import std`; msdfgen/msdf-atlas-gen (C++ headers) are not.
+12. **A block-scope using-declaration of another module's enumeration in a consteval function of a module interface**
+   (`using platform::GamepadButton;`) crashes GCC 16 while it writes the module file ("internal compiler error: in
+   import_entity_module, at cp/module.cc:4361"). Inline (not consteval), or a using-declaration of a function, is fine.
+   Workaround: name the enumeration in full (gfx.ui.platform's navigation_bindings::gamepad()). Detector:
+   `CompilationFailure.UsingDeclarationOfImportedEnumerationCrashesCompiler` (tests/toolchain/defects/using_declaration_*).
 
 ## 7. Repository layout (current)
 
@@ -679,9 +715,10 @@ gfx/
 │                  renderer.cppm/.cpp = gfx.ui.renderer, shaders/ui.vert, ui.frag); U4: style/style.cppm,
 │                  input/frame_input.cppm, context/ (context.cppm + types/frame/context_class partitions, state.cppm
 │                  internal, .cpp units; U5: popups, text_input, numbers, colors, combos; U6: trees, tabs, menus,
-│                  tooltips, drag_drop; U7: tables, clipper, visuals; U8: docking, persistence, json_reader),
-│                  platform/ (gfx_ui_platform:
-│                  ui_platform.cppm/.cpp); U5: text/boundaries.cppm, text_editor.cppm/.cpp
+│                  tooltips, drag_drop; U7: tables, clipper, visuals; U8: docking, persistence, json_reader;
+│                  U9: navigation, shortcuts, accessibility + accessibility_tree.cppm, later.cpp → reports.cpp),
+│                  platform/ (gfx_ui_platform: ui_platform.cppm/.cpp, U9 accesskit_bridge.hpp/.cpp);
+│                  U5: text/boundaries.cppm, text_editor.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests + slot_table/), platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
@@ -691,7 +728,9 @@ gfx/
             text_layout_test.cpp, text_test_support.cppm, text_allocation_test.cpp; U3: draw_list_test.cpp,
             renderer_test.cpp = gfx_ui_draw_tests with atlas gfx.tests.draw_latin; U4: context_test.cpp,
             context_render_test.cpp, context_test_support.cppm = gfx_ui_context_tests (atlas context_latin; U5
-            input_widgets_test.cpp, U6 structure_test.cpp, U7 table_test.cpp, U8 docking_test.cpp),
+            input_widgets_test.cpp, U6 structure_test.cpp, U7 table_test.cpp, U8 docking_test.cpp, U9 navigation_test.cpp,
+            shortcut_test.cpp, accessibility_test.cpp; gfx_ui_platform_tests + U9 navigation_input_test.cpp,
+            accessibility_platform_test.cpp = UI Automation client),
             ui_platform_test.cpp = gfx_ui_platform_tests (atlas platform_latin)), compilation/ui/,
             graphics/{backend_factory,
             enums,errors,handles,interface,shader_layout,shader_tools,windows_headers,vulkan}/
@@ -732,12 +771,14 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size) committed; **U8 (docking: dock spaces, dock trees, tabs, tearing, drag-to-dock, floating trees, dock builder, JSON layouts with tables) done, awaiting validation** (§B "U8 as built", 9 deviations); U9 (shortcuts, accessibility) next. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts) committed; **U9 (navigation: keymap, gamepad, directional moves, menu bar, window cycling; shortcuts with routing; accessibility tree with diffs; AccessKit provider; the input system's navigation context) done, awaiting validation** (§B "U9 as built", 12 deviations); U10 (sample `examples/ui_editor`, THIRD_PARTY_LICENSES.md, architecture overview) next. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **767**, all passing in Debug and Release, 2026-10-18 (after U8: + 14 docking/layout tests, + 1
-render × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19; run from PowerShell). Before U8: 749 (after the
+Test count at last report: **801**, all passing in Debug and Release, 2026-10-19 (after U9: + 27 context tests (10 navigation,
+8 shortcut, 9 accessibility; − 1 later-phase test), + 1 allocation, + 3 navigation input, + 1 UI Automation client × 2 platform
+backends, + 1 compile-failure, + 1 defect detector; skips Debug 4, Release 19; run from PowerShell). Before U9: 767 (after U8:
++ 14 docking/layout tests, + 1 render × 2 GPUs, + 1 allocation, + 1 compile-failure). Before U8: 749 (after the
 follow-up after U7: + 1 allocation test). Before: 748 (after U7: + 21 table/visual tests, + 1 render
 × 2 GPUs, + 3 draw list, + 1 rounded image × 2 GPUs, + 1 allocation, + 1 compile-failure; skips Debug 4, Release 19; run from
 PowerShell, see §8). Before U7: 718 (after the follow-up after U6: + 3

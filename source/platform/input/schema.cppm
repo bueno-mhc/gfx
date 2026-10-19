@@ -505,7 +505,7 @@ make_input_schema(const std::array<ActionDefinition, ACTION_COUNT>& actions,
     schema.actions = actions;
     std::size_t context_index = 0;
     std::size_t binding_index = 0;
-    const auto gather = [&]<std::size_t COUNT>(const ContextBlock<COUNT>& block)
+    [[maybe_unused]] const auto gather = [&]<std::size_t COUNT>(const ContextBlock<COUNT>& block)
     {
         schema.contexts[context_index++] = block.definition;
         for (const ContextBinding& binding : block.bindings)

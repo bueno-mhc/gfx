@@ -80,6 +80,7 @@ UiFrame::splitter(std::string_view id,
         return false;
     }
     const ButtonState button = state.button_behavior(*window, bar, identifier);
+    static_cast<void>(state.describe_item(AccessibilityRole::SEPARATOR));
     if (state.active_id == identifier && state.mouse[0].clicked)
     {
         state.active_offset = {.x = state.mouse_position.x - bar.left, .y = state.mouse_position.y - bar.top};
@@ -139,6 +140,7 @@ UiFrame::plot(std::string_view label,
     {
         return;
     }
+    static_cast<void>(state.describe_item(AccessibilityRole::IMAGE));
     const bool hovered = state.item_hoverable(*window, frame, id) && contains(inner, state.mouse_position);
     DrawList& list = state.list_of(*window);
     state.draw_frame(list, frame, state.color(StyleColor::FRAME_BACKGROUND), style.frame_rounding);
@@ -307,6 +309,12 @@ UiFrame::progress_bar(float fraction,
     {
         return;
     }
+    const std::uint32_t record = state.describe_item(AccessibilityRole::PROGRESS_BAR, fraction < 0 ? AccessibilityState::BUSY : AccessibilityState::NONE,
+                                                     AccessibilityAction::NONE, overlay);
+    if (fraction >= 0)
+    {
+        state.describe_number(record, std::min(static_cast<double>(fraction), 1.0), 0.0, 1.0, 0.0);
+    }
     DrawList& list = state.list_of(*window);
     state.draw_frame(list, frame, state.color(StyleColor::FRAME_BACKGROUND), style.frame_rounding);
     const float border = style.frame_border_size;
@@ -376,6 +384,7 @@ UiFrame::image_rounded(std::uint32_t image,
     {
         return;
     }
+    static_cast<void>(state.describe_item(AccessibilityRole::IMAGE));
     DrawList& list = state.list_of(*window);
     if (rounding > 0)
     {
@@ -415,6 +424,7 @@ UiFrame::image_button(std::string_view id,
         return false;
     }
     const ButtonState button = state.button_behavior(*window, rectangle, identifier);
+    static_cast<void>(state.describe_item(AccessibilityRole::BUTTON, AccessibilityState::NONE, AccessibilityAction::CLICK));
     DrawList& list = state.list_of(*window);
     const StyleColor fill = button.held && button.hovered ? StyleColor::BUTTON_ACTIVE : button.hovered ? StyleColor::BUTTON_HOVERED : StyleColor::BUTTON;
     state.draw_frame(list, rectangle, state.color(fill), style.frame_rounding);

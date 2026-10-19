@@ -74,6 +74,8 @@ UiFrame::begin_combo(std::string_view label,
     // The frame and arrow, the preview (clipped before the arrow), the label.
     DrawList& list = state.list_of(*window);
     const bool popup_now = state.popup_open(popup);
+    static_cast<void>(state.describe_item(AccessibilityRole::COMBO_BOX, AccessibilityState::EXPANDABLE | (popup_now ? AccessibilityState::EXPANDED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK, preview));
     const Color frame_color = state.color(button.hovered || popup_now ? StyleColor::FRAME_BACKGROUND_HOVERED : StyleColor::FRAME_BACKGROUND);
     const UiRectangle arrow_box{.left = frame.right - arrow_size, .top = frame.top, .right = frame.right, .bottom = frame.bottom};
     if (show_preview)
@@ -96,9 +98,13 @@ UiFrame::begin_combo(std::string_view label,
     }
     state.draw_text(list, label_layout, {.x = frame.right + style.item_inner_spacing.x, .y = frame.top + style.frame_padding.y}, state.color(StyleColor::TEXT_NORMAL));
 
-    // While open, its items go into the popup (end_combo() makes the combo the last item again).
+    // While open, its items go into the popup (a list for assistive technologies; end_combo() makes the combo the last
+    // item again).
     state.combo_item = state.last_item;
-    return state.begin_popup(*this, popup, UiWindowFlag::NONE);
+    state.accessibility.next_window_role = AccessibilityRole::LIST;
+    const bool begun = state.begin_popup(*this, popup, UiWindowFlag::NONE);
+    state.accessibility.next_window_role = AccessibilityRole::GENERIC;
+    return begun;
 }
 
 void
@@ -154,7 +160,10 @@ UiFrame::begin_list_box(std::string_view label,
         state.report(UiFrameProblem::CAPACITY_EXCEEDED, "begin_list_box", "the list box stack could not grow");
     }
     begin_group();
-    return begin_child(label, extent, ChildFlag::FRAME_STYLE);
+    state.accessibility.next_window_role = AccessibilityRole::LIST;
+    const bool begun = begin_child(label, extent, ChildFlag::FRAME_STYLE);
+    state.accessibility.next_window_role = AccessibilityRole::GENERIC;
+    return begun;
 }
 
 void

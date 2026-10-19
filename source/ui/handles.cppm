@@ -155,6 +155,11 @@ using TooltipIdentifier = Identifier<TooltipTag>;     ///< Names a tooltip.
 using SplitterIdentifier = Identifier<SplitterTag>;   ///< Names a splitter.
 using TableIdentifier = Identifier<TableTag>;         ///< Names a table ("objects"_table).
 
+/// @brief Names a node of the accessibility tree, the same from frame to frame: ACCESSIBILITY_ROOT_NODE for the
+///        whole UI, a window's identifier in the high 32 bits for its window, and with an item's identifier in the
+///        low 32 bits for the item (assistive technologies send it back in UiAccessibilityRequest::target).
+using AccessibilityNodeId = std::uint64_t;
+
 /// @brief A glyph of a font: its index in the font's glyph table (what shaping produces and atlases
 ///        are keyed by), not a code point.
 class GlyphIndex

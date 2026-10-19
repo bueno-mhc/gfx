@@ -657,6 +657,7 @@ begin_root(ContextState& state,
     {
         window.identifier_stack_base = static_cast<std::uint32_t>(state.id_stack.size());
         state.list_of(window).push_clip_rectangle(window.clip);
+        state.accessible_begin_window(window);
         return !window.skip_items;
     }
     window.identifier_stack_base = static_cast<std::uint32_t>(state.id_stack.size());
@@ -838,6 +839,7 @@ begin_root(ContextState& state,
     window.skip_items = window.collapsed || (placement.docked && !placement.visible);
     list.push_clip_rectangle(window.clip);
     state.last_item = LastItem{.rectangle = decorations.title, .window = index};
+    state.accessible_begin_window(window);
     return !window.skip_items;
 }
 
@@ -886,6 +888,7 @@ UiFrame::end_window() noexcept
     const std::uint32_t index = state.window_stack.back();
     WindowState& window = state.windows[index];
     finish_content(state, *this, window);
+    state.accessible_end_window(window);
     state.window_stack.pop_back();
     if (!window.active)
     {
@@ -967,6 +970,7 @@ UiFrame::begin_child(std::string_view name,
         child.skip_items = true;
         child.clip = {};
         state.list_of(child).push_clip_rectangle({});
+        state.accessible_begin_window(child);
         return false;
     }
 
@@ -1025,6 +1029,7 @@ UiFrame::begin_child(std::string_view name,
     }
     child.skip_items = child.clip.empty();
     list.push_clip_rectangle(child.clip);
+    state.accessible_begin_window(child);
     return !child.skip_items;
 }
 
@@ -1046,6 +1051,7 @@ UiFrame::end_child() noexcept
     const std::uint32_t index = state.window_stack.back();
     WindowState& child = state.windows[index];
     finish_content(state, *this, child);
+    state.accessible_end_window(child);
     state.window_stack.pop_back();
 
     // The child is an item of its parent window.

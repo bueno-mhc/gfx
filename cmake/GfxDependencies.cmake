@@ -342,6 +342,27 @@ function(gfx_require_nlohmann_json)
     target_include_directories(gfx_nlohmann_json SYSTEM INTERFACE ${CMAKE_BINARY_DIR}/_deps/nlohmann_json_header)
 endfunction()
 
+# gfx_require_accesskit()
+#   Provides gfx::accesskit: AccessKit's C bindings 0.23.1 (static libraries built by the AccessKit project for each
+#   platform, in one archive of 67 MB fetched by URL and SHA-256; no package manager has them), which the UI's
+#   UiAccessibilityAdapter gives accessibility trees to. Their header is reached by accesskit_bridge.cpp only.
+function(gfx_require_accesskit)
+    if(TARGET gfx::accesskit)
+        return()
+    endif()
+    include(FetchContent)
+    FetchContent_Declare(gfx_accesskit_c
+        URL https://github.com/AccessKit/accesskit-c/releases/download/0.23.1/accesskit-c-0.23.1.zip
+        URL_HASH SHA256=35b7ca8a6f1e038b5da35e1e9e5a0adaed9bfcf21e1496d29598fbbadcc7043f
+        SOURCE_SUBDIR no-cmake-project)
+    FetchContent_MakeAvailable(gfx_accesskit_c)
+    find_package(accesskit CONFIG REQUIRED PATHS "${gfx_accesskit_c_SOURCE_DIR}" NO_DEFAULT_PATH)
+    add_library(gfx_accesskit INTERFACE)
+    add_library(gfx::accesskit ALIAS gfx_accesskit)
+    target_link_libraries(gfx_accesskit INTERFACE accesskit-static)
+    message(STATUS "gfx: AccessKit C bindings 0.23.1 fetched")
+endfunction()
+
 # gfx_require_spirv_cross()
 #   Provides gfx::spirv_cross: the SPIRV-Cross C API, which reflects shader layouts from SPIR-V.
 function(gfx_require_spirv_cross)

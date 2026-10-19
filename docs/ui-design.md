@@ -1,7 +1,7 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U7
-committed (with the text layout follow-ups after U6 and U7); U8 built, awaiting validation (§B, "U8 as built").** This
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U8
+committed (with the text layout follow-ups after U6 and U7); U9 built, awaiting validation (§B, "U9 as built").** This
 document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
@@ -1182,6 +1182,157 @@ report, and your validation (you commit).
 
 ---
 
+### U9 as built (2026-10-19)
+
+- **Units** (in `gfx.ui.context`): `navigation.cpp` (the keymap, the commands of `UiFrameInput::navigation`, directional
+  moves, Tab steps, MENU, window cycling, scrolling to the item the focus moved to), `shortcuts.cpp` (chords and their
+  routes), `accessibility.cpp` (the tree: building, finishing, comparing; requests; `announce()`); the public tree types in
+  the partition `:accessibility_tree`; `later.cpp` became `reports.cpp` (the frame arena, reports, the diagnostics window:
+  nothing is declared without its phase any more, `UiFrame::not_implemented()` is gone, `UiFrameProblem::NOT_IMPLEMENTED`
+  stays). In `gfx.ui.platform`: the navigation context of the input system, `navigation_input()`, `UiAccessibilityAdapter`
+  over AccessKit (the plain translation unit `accesskit_bridge.cpp` behind the std-free `accesskit_bridge.hpp`).
+- **Navigation commands**: `UiNavigationCommand` (ACTIVATE, CANCEL, INPUT, MENU, CONTEXT_MENU, MOVE_LEFT/RIGHT/UP/DOWN,
+  NEXT, PREVIOUS, NEXT_WINDOW, PREVIOUS_WINDOW). The keyboard keymap (`UiInputSettings::keyboard_navigation`, on by
+  default) turns key events into them: Tab and Shift+Tab, Control(+Shift)+Tab, the arrows, Space, Return and keypad Enter
+  (ACTIVATE and INPUT), Escape, Alt pressed and released with nothing else, the Application key and Shift+F10; while a
+  field is edited only Tab and Escape (the field's keys are its own). `UiFrameInput::navigation` adds commands held and
+  pressed (a gamepad, an input context): a command that becomes held is pressed; held moves and steps repeat at the key
+  repeat delay and interval; `scroll` scrolls the focused item's window (or the first that scrolls) at
+  `navigation_scroll_speed`. Widgets that use a command consume it (`consume_navigation()`), so its default behavior does
+  not happen: a focused slider or drag steps with MOVE_LEFT/RIGHT, a tree node opens with MOVE_RIGHT and closes with
+  MOVE_LEFT, a bar menu opens with MOVE_DOWN and a submenu row with MOVE_RIGHT, a popup closes with CANCEL and a submenu
+  with MOVE_LEFT; buttons press on ACTIVATE (held while it is held); sliders type their value on INPUT; text fields start
+  editing on INPUT or a gamepad's ACTIVATE (a gamepad's ACTIVATE confirms, its CANCEL reverts).
+- **Directional moves** score the focusable items of the focused window and its child regions against the focused
+  item's rectangle as Dear ImGui's NavScoreItem does (box distance, vertically between the middle 60%, scaled down when
+  apart on both axes; the quadrant; ties by centers, then the later item); resolved at end_frame unless consumed. Nothing
+  focused (or focused elsewhere): the first item (DOWN, RIGHT) or the last (UP, LEFT); nothing that way: the focus stays,
+  except in a popup that is not a modal (around to the first or last item, as Up/Down stepped before). Arriving by a
+  direction does not start editing a text field (Tab still does). The window of the item the keyboard moved to (by Tab, a
+  direction or set_keyboard_focus_here()) scrolls to show it, and its parents show the child region. The rectangle the next
+  move starts from is the item's this frame, or the one the focus just moved to, or a clicked item's.
+- **Menus and windows**: MENU moves the focus to the first item of the focused window's menu bar (else the main menu
+  bar), remembering where it was; MENU again, or CANCEL when no popup is focused, goes back (a click leaves the mode);
+  MOVE_LEFT/RIGHT that the items of an open bar menu did not use close it and open the bar menu beside it (around the
+  ends) the next frame, its first item focused. NEXT_WINDOW/PREVIOUS_WINDOW focus the next or previous root window in
+  creation order that shows (not popups, tooltips, dock hosts, the main menu bar, NO_NAVIGATION_FOCUS windows, docked
+  windows behind another tab), with the item it last had focused (`WindowState::navigation_last_id`). CONTEXT_MENU on the
+  focused item opens its `begin_popup_context_item()` under it (first item focused); with no item used,
+  `begin_popup_context_window()`'s.
+- **Shortcuts** (Dear ImGui's routing, decided a frame ahead): each chord has a route (`UiContextLimits::shortcut_routes`
+  slots, open addressing, stale slots reused); each call scores its owner â€” ROUTE_ACTIVE: the item, while active; the
+  default (ROUTE_FOCUSED): the window, 2 + its distance up from the window of the focused item (only windows on that
+  chain); ROUTE_GLOBAL: 1000 â€” the lowest score of a frame wins the chord for the next frame; ROUTE_ALWAYS routes nothing.
+  It fires when pressed and its owner won. Chords match the layout's symbols (letters case-blind; named keys by their
+  physical key) with exactly the chord's modifier groups (Shift, Control, Alt, Super, either side); REPEAT also on key
+  repeats. A text field being edited keeps the chords it uses (no modifier or Shift; Control or Super with A, C, V, X, Y,
+  Z, the arrows, Home, End, Backspace, Delete, Insert, Return). `set_next_item_shortcut()` routes the next item's chord
+  for that item: when it fires, the item is activated (`item_activated()`: buttons, check boxes, menu items, tree nodes;
+  text fields start editing); a menu item without shortcut text shows its chord. `key_chord_text()` (constexpr) writes
+  "Ctrl+Shift+S", "Alt+PageDown", "F5", "Delete".
+- **Accessibility tree**: built while `UiContext::set_accessibility_enabled(true)` (reserving its capacities then:
+  `accessibility_nodes`, `accessibility_text_bytes`); nothing otherwise. Records under a stack of containers: the root
+  (`ACCESSIBILITY_ROOT_NODE`, the display); windows under it (WINDOW, DIALOG for modals, MENU for menus, TOOLTIP, LIST for
+  combos' lists; child regions GROUP or LIST for list boxes, under where they are; dock hosts, dock spaces over the
+  display and the main menu bar's window are none); menu bars (MENU_BAR), open tree nodes, tab bars (TAB_LIST, the
+  selected tab's content a TAB_PANEL in it), tables (TABLE). Widgets describe themselves after `item_add()`
+  (`describe_item()`): role, label (or the accessible label given), description, value (fields' text â€” not passwords â€”,
+  sliders' and drags' formatted value with number, range and step, combos' choice, progress bars' overlay with their
+  fraction), states (DISABLED, FOCUSABLE, CHECKABLE/CHECKED, SELECTABLE/SELECTED, EXPANDABLE/EXPANDED, MODAL, READ_ONLY,
+  PROTECTED, MULTILINE, BUSY), actions (FOCUS, CLICK, INCREMENT/DECREMENT/SET_VALUE, EXPAND/COLLAPSE, SCROLL_INTO_VIEW),
+  the shortcut's text; static texts (`describe_text()`) have identifiers by their order in their window. At end_frame the
+  tree is finished (an identifier seen twice keeps its first node, the second's children going to its parent; children
+  laid out per node; texts become views), its focus found (the focused item's node, else the focused window's, else the
+  root), and compared with the tree before through an index of each by identifier: `changed` (new or different nodes:
+  every field, texts and children by content) and `removed`. Two trees alternate (their texts too): the last stays valid
+  until the next end_frame().
+- **Requests and announcements**: `UiFrameInput::accessibility_requests` are copied at begin_frame; FOCUS focuses at once
+  (the window by the identifier's high bits); the others are found by the item they name (`item_request()`, every request
+  of the frame: a screen reader focuses then clicks): CLICK activates (as a shortcut), SET_VALUE sets a field's text or a
+  slider's number, INCREMENT/DECREMENT step, EXPAND/COLLAPSE toggle a tree node, SHOW_CONTEXT_MENU opens the item's
+  context popup, SCROLL_INTO_VIEW scrolls in `item_add()`. `announce()` keeps the text; the next trees have it as a live
+  STATIC_TEXT node under the root with a new identifier per announcement.
+- **The input context** (gfx.ui.platform): `ui_navigation_actions()` / `with_ui_navigation_actions(actions)` (one button
+  action per command, UI_NAVIGATION_ACTIONS, and the two-dimensional UI_SCROLL_ACTION and UI_MOVE_ACTION),
+  `ui_navigation_context(description)` (the keyboard's bindings â€” the built-in keymap's keys, Alt as a tap of
+  UI_MENU_TAP_MILLISECONDS â€” and a gamepad's: south ACTIVATE, east CANCEL, north INPUT, west MENU, back CONTEXT_MENU, the
+  d-pad the moves, the left stick UI_MOVE_ACTION, the shoulders the windows, the right stick UI_SCROLL_ACTION),
+  `ui_gamepad_navigation_context()` (the gamepad's only), `UI_NAVIGATION_CONTEXT_DESCRIPTION` (priority 1000, consumes its
+  inputs); `navigation_input(frame, player)`: actions held and just pressed, the left stick's larger axis past
+  UI_STICK_MOVE_THRESHOLD held as a move, the right stick's scrolling (+y downwards).
+- **The provider**: `UiAccessibilityAdapter(window)` on the window's thread: AccessKit's (non-subclassing) Windows adapter
+  of the window's Win32 handle, the window subclassed with SetWindowSubclass (WM_GETOBJECT to AccessKit, WM_SETFOCUS/
+  WM_KILLFOCUS its window focus state). The first WM_GETOBJECT of an assistive technology activates it: AccessKit is given
+  the root alone, named after the window's title; `update(context)` then enables the context's tree, and from the next
+  tree gives AccessKit every node (after an activation, or when a tree was skipped) or the changed ones, bounds in pixels
+  (UI units Ã— pixels per unit), the root named after the window; the events AccessKit queues are raised after.
+  AccessKit's requests (any thread) are copied under a mutex; `take_requests()` hands them to the next frame. Elsewhere
+  than Windows the constructor throws UiCapabilityError (ACCESSIBILITY). `gfx_require_accesskit()` fetches AccessKit's C
+  bindings 0.23.1 (their prebuilt static libraries, 67 MB, SHA-256 pinned; linked with comctl32 and AccessKit's system
+  libraries).
+- **Fixed along the way**: starting to edit a field made a new `TextEditor` and so allocated its storage again (Tab
+  through fields allocated): `TextEditor::reset(description)` keeps it (found by the allocation test); the platform's
+  `make_input_schema()` warned about an unused lambda for a schema without contexts (`[[maybe_unused]]`).
+- **Toolchain defect 12**: a block-scope using-declaration of another module's enumeration in a consteval function of a
+  module interface crashes GCC 16 while it writes the module file (internal compiler error in import_entity_module);
+  minimized in tests/toolchain/defects/using_declaration_* (detector
+  `CompilationFailure.UsingDeclarationOfImportedEnumerationCrashesCompiler`); the gamepad bindings name the enumerations
+  in full.
+- **Deviations from the design, for your validation**:
+  1. **Two keymaps**: the design made the keymap an input context; the UI keeps a fixed built-in keyboard keymap (on by
+     default, so a UI fed by UiPlatformInput navigates without the input system) and the rebindable input context
+     besides, whose keyboard part needs the built-in one turned off (`keyboard_navigation = false`), or
+     `ui_gamepad_navigation_context()` to keep it.
+  2. **AccessKit, Windows only for now**: AccessKit also has macOS and Unix (AT-SPI) adapters; their bridges are not
+     written (the constructor throws there). gfx subclasses the window itself because AccessKit's subclassing adapter
+     must be made before the window is first shown, and windows of the platform library are shown when made.
+  3. **One thread for the adapter**: made, updated and destroyed on the window's thread (AccessKit's Windows adapter is
+     driven by the window procedure); a UI run on another thread must hand its tree over. Requests come from any thread.
+  4. **A placeholder first**: an assistive technology's first request gets the root alone; the whole tree follows a frame
+     later (as egui does), since building it costs nothing until then.
+  5. **Static texts' identifiers** are their order among their window's texts in the frame: a text inserted before others
+     changes theirs (they are removed and added again).
+  6. **Clipped items are not nodes** (their widgets return before describing them; a list clipper's skipped rows are not
+     submitted at all): screen readers see what is laid out, as in Dear ImGui-based accessibility layers.
+  7. **Not described**: relations (labelled by, controls), text ranges (caret, selection) of fields, table rows and cells
+     (a cell's items are the table's children), scroll bars, separators (splitters are SEPARATOR nodes), title bar
+     buttons; a tab's content is a TAB_PANEL inside its TAB_LIST.
+  8. **Shortcuts are routed a frame ahead** (as Dear ImGui): a chord pressed in the first frame a call routes it, or right
+     after the focus changed, goes to last frame's winner. Calls of one window share a chord (they all fire); items' own
+     shortcuts compete per item.
+  9. **Menus**: Left/Right between the bar's menus closes one menu at the end of the bar and opens the other the next
+     frame (a frame without a menu); MENU from the main menu bar when the focused window has no bar.
+  10. **Window cycling** follows creation order (Dear ImGui lists windows by focus order while Control is held); moves do
+      not cross windows.
+  11. **A stick's moves** come from a two-dimensional action (the input system reads a button action's axis by its
+      magnitude, both directions pressing it), held past a threshold of 0.5.
+  12. **API added**: the enumerations AccessibilityState, AccessibilityAction, UiNavigationCommand; UiNavigationInput,
+      UiAccessibilityRequest, `UiFrameInput::navigation` and `accessibility_requests`; UiAccessibilityNode,
+      UiAccessibilityTree; `UiContext::set_accessibility_enabled()`, `accessibility_enabled()`, `accessibility_tree()`;
+      KeyChordText, `key_chord_text()`; `UiInputSettings::keyboard_navigation`, `navigation_scroll_speed`;
+      `UiContextLimits::shortcut_routes`, `accessibility_nodes`, `accessibility_text_bytes`; `AccessibilityNodeId`;
+      `TextEditor::reset()`; constants ACCESSIBILITY_ROOT_NODE, DEFAULT_NAVIGATION_SCROLL_SPEED,
+      MAXIMUM_KEY_CHORD_TEXT_SIZE, UI_NAVIGATION_CONTEXT, UI_NAVIGATION_ACTIONS, UI_SCROLL_ACTION, UI_MOVE_ACTION,
+      UI_STICK_MOVE_THRESHOLD, UI_MENU_TAP_MILLISECONDS; in gfx.ui.platform the navigation functions, UI_NAVIGATION_ACTION_COUNT,
+      UI_NAVIGATION_CONTEXT_DESCRIPTION and UiAccessibilityAdapter.
+- **Facts found**: a window appearing takes the focus (tests focus their first window on the second frame); AccessKit
+  turns a UI Automation Invoke into a FOCUS request then a CLICK, often in one frame; the input system presses a button
+  action from an axis by magnitude; GCC -O3 reports a bitmask command of no bit as an out-of-bounds index (guarded), and a
+  `get_if()` on the NativeWindowHandle `native_handle()` returns (a temporary) as a dangling pointer â€” a real bug of the
+  first draft, fixed.
+- **Tests**: `gfx_ui_context_tests` +26: navigation_test.cpp (10: arrows to the nearest item, Tab order, a gamepad and
+  held repeats, the keymap off, scrolling to the focus and with a stick, a slider using Left/Right, text fields and INPUT/
+  a gamepad, the context menu key, Alt and the menu bar with Left/Right between menus, Control+Tab), shortcut_test.cpp (8:
+  the focused window and exact modifiers, the focused item's window first, global and always routes, active routes and
+  repeats, a field keeping its chords, items' shortcuts, chord texts, the routes' capacity), accessibility_test.cpp (9:
+  enabled only, items' roles/names/values/states/bounds/actions, containers, the application's overrides, only changes
+  listed, the focus, announcements, one node per identifier, requests); the later-phase report test removed.
+  `gfx_ui_text_allocation_tests` +1 (a window of every container, the tree built and compared, keys moving the focus,
+  shortcuts, a gamepad and a screen reader's clicks: no allocation over 100 frames). `gfx_ui_platform_tests` +5:
+  navigation_input_test.cpp (3: the context's keys and gamepad, the gamepad-only context, a schema without the actions
+  refused) and accessibility_platform_test.cpp (a UI Automation client on another thread finds the window's nodes and
+  invokes Save, on SDL3 and GLFW). Compile-failure `UiNavigationContextsNeedTheirActions` and the defect detector.
+
 ## C. The API as proposed (for validation, not final code)
 
 ### C1. Atlas at build time, checked at compile time
@@ -1275,7 +1426,7 @@ enum class AccessibilityRole : std::uint8_t { WINDOW, BUTTON, CHECK_BOX, RADIO_B
 | 8 | `.notdef` and a report now, an optional run-time SDF cache later | **Yes** |
 | 9 | Phase order U0–U10 | **Yes** |
 | 10 | FreeType always fetched and pinned | **Yes** |
-| 11 | UI Automation or AccessKit | **As recommended**: decided in U9 after a trial |
+| 11 | UI Automation or AccessKit | **As recommended**: decided in U9 after a trial — **AccessKit** (2026-10-18): both passed a UI Automation client test (the button found and invoked); AccessKit chosen for its macOS, Unix, Android and iOS adapters (the hand-written UI Automation provider was 377 lines, Windows only) |
 | 12 | Fetched OFL test fonts | **Yes** |
 
 The questions as asked:

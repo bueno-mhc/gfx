@@ -1,7 +1,7 @@
 /// @file types.cppm
 /// @brief gfx.ui.context:types: how a UiContext is made (UiContextDescription, UiContextLimits,
 ///        UiInputSettings), what a frame reports (UiFrameReport, UiFrameIssue, UiFrameStatistics), and the
-///        values widgets take or return (KeyChord, InputTextOptions, PlotOptions, table sort specifications,
+///        values widgets take or return (KeyChord and its text, InputTextOptions, PlotOptions, table sort specifications,
 ///        drag and drop payloads).
 export module gfx.ui.context:types;
 
@@ -29,6 +29,9 @@ struct UiContextLimits
     std::uint32_t tables = 32;                ///< Tables remembered (their columns are allocated when a table first appears).
     std::uint32_t dock_nodes = 64;            ///< Nodes of the dock trees.
     std::size_t drag_drop_payload_bytes = 1024; ///< Bytes of a drag and drop payload.
+    std::uint32_t shortcut_routes = 128;      ///< Key chords shortcut() and set_next_item_shortcut() route in a frame.
+    std::uint32_t accessibility_nodes = 2048; ///< Nodes of the accessibility tree (when it is built).
+    std::size_t accessibility_text_bytes = 64 * 1024; ///< Bytes of its names, descriptions and values.
 };
 
 /// @brief How mouse and keyboard input is interpreted.
@@ -40,6 +43,10 @@ struct UiInputSettings
     double repeat_delay_seconds = DEFAULT_REPEAT_DELAY_SECONDS;       ///< Time a button is held before ButtonFlag::REPEAT repeats.
     double repeat_interval_seconds = DEFAULT_REPEAT_INTERVAL_SECONDS; ///< Time between repeats.
     bool move_windows_from_title_bar_only = false;                    ///< Windows move by their title bar only (otherwise by any empty area).
+    bool keyboard_navigation = true;                                  ///< The keyboard keymap: Tab, the arrows, Space, Return, Escape, Alt and the
+                                                                      ///< Application key move the focus and use items (false: the application sends
+                                                                      ///< them as UiFrameInput::navigation, from a rebindable input context).
+    float navigation_scroll_speed = DEFAULT_NAVIGATION_SCROLL_SPEED;  ///< UiNavigationInput::scroll at full deflection, UI units per second.
 };
 
 /// @brief How a UiContext is made.
@@ -106,6 +113,115 @@ struct KeyChord
     /// @brief Chords compare member by member.
     [[nodiscard]] constexpr auto operator==(const KeyChord&) const noexcept -> bool = default;
 };
+
+/// @brief The text of a key chord ("Ctrl+Shift+S"), as menus show shortcuts.
+struct KeyChordText
+{
+    std::array<char, MAXIMUM_KEY_CHORD_TEXT_SIZE> storage{}; ///< The characters.
+    std::uint8_t size = 0;                                   ///< How many are used.
+
+    /// @brief The text.
+    [[nodiscard]] constexpr auto view() const noexcept -> std::string_view
+    {
+        return {storage.data(), size};
+    }
+};
+
+/// @brief The text of @p chord: its modifiers ("Ctrl+", "Shift+", "Alt+", "Super+", in that order), then its key: a
+///        letter in upper case, another character as itself, a named key in words ("Space", "PageDown", "F5",
+///        "Delete"). Empty for KeyCode::UNKNOWN.
+[[nodiscard]] constexpr auto
+key_chord_text(KeyChord chord) noexcept -> KeyChordText
+{
+    KeyChordText text{};
+    const auto append = [&text](std::string_view part)
+    {
+        for (const char character : part)
+        {
+            if (text.size < text.storage.size())
+            {
+                text.storage[text.size++] = character;
+            }
+        }
+    };
+    const auto code = static_cast<std::uint32_t>(std::to_underlying(chord.key));
+    if (code == 0)
+    {
+        return text;
+    }
+
+    // The modifiers, either side of each.
+    if (has_any(chord.modifiers, KeyModifier::CONTROL))
+    {
+        append("Ctrl+");
+    }
+    if (has_any(chord.modifiers, KeyModifier::SHIFT))
+    {
+        append("Shift+");
+    }
+    if (has_any(chord.modifiers, KeyModifier::ALT))
+    {
+        append("Alt+");
+    }
+    if (has_any(chord.modifiers, KeyModifier::SUPER))
+    {
+        append("Super+");
+    }
+
+    // A character: letters in upper case, others as they are (UTF-8).
+    if (code > 0x20 && code != 0x7F && (code & KEY_CODE_NON_PRINTABLE_FLAG) == 0)
+    {
+        const std::uint32_t character = code >= 'a' && code <= 'z' ? code - 'a' + 'A' : code;
+        std::array<char, 4> bytes{};
+        std::size_t count = 0;
+        if (character < 0x80)
+        {
+            bytes[count++] = static_cast<char>(character);
+        }
+        else if (character < 0x800)
+        {
+            bytes[count++] = static_cast<char>(0xC0 | (character >> 6));
+            bytes[count++] = static_cast<char>(0x80 | (character & 0x3F));
+        }
+        else if (character < 0x10000)
+        {
+            bytes[count++] = static_cast<char>(0xE0 | (character >> 12));
+            bytes[count++] = static_cast<char>(0x80 | ((character >> 6) & 0x3F));
+            bytes[count++] = static_cast<char>(0x80 | (character & 0x3F));
+        }
+        else
+        {
+            bytes[count++] = static_cast<char>(0xF0 | ((character >> 18) & 0x07));
+            bytes[count++] = static_cast<char>(0x80 | ((character >> 12) & 0x3F));
+            bytes[count++] = static_cast<char>(0x80 | ((character >> 6) & 0x3F));
+            bytes[count++] = static_cast<char>(0x80 | (character & 0x3F));
+        }
+        append({bytes.data(), count});
+        return text;
+    }
+
+    // A named key: its enumerator's words, each capitalized ("PAGE_DOWN" is "PageDown").
+    if (chord.key == KeyCode::DELETE_FORWARD)
+    {
+        append("Delete");
+        return text;
+    }
+    const std::string_view name = to_string(chord.key);
+    bool word_start = true;
+    for (const char character : name)
+    {
+        if (character == '_')
+        {
+            word_start = true;
+            continue;
+        }
+        const bool upper = character >= 'A' && character <= 'Z';
+        const char shown = word_start || !upper ? character : static_cast<char>(character - 'A' + 'a');
+        append({&shown, 1});
+        word_start = false;
+    }
+    return text;
+}
 
 /// @brief How a text field behaves (UiFrame::input_text()).
 struct InputTextOptions

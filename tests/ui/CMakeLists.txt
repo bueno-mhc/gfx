@@ -116,6 +116,7 @@ gfx_add_ui_atlas(gfx_ui_text_allocation_tests
 # The immediate-mode UI driven by synthetic input (UiContext, UiFrame), with an atlas built for it.
 gfx_add_test(gfx_ui_context_tests
     SOURCES context_test.cpp context_render_test.cpp input_widgets_test.cpp structure_test.cpp table_test.cpp docking_test.cpp
+            navigation_test.cpp shortcut_test.cpp accessibility_test.cpp
     MODULES context_test_support.cppm
     LIBRARIES gfx::ui)
 gfx_add_ui_atlas(gfx_ui_context_tests
@@ -127,12 +128,17 @@ gfx_add_ui_atlas(gfx_ui_context_tests
 target_include_directories(gfx_ui_context_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
 target_compile_definitions(gfx_ui_context_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_ui_layer_directory}")
 
-# The UI on the platform library: frame input from window events, window services, and a UI in a visible
-# window on every platform backend, presented with Vulkan and the validation layers.
+# The UI on the platform library: frame input from window events, window services, a UI in a visible window on
+# every platform backend, presented with Vulkan and the validation layers, and its accessibility tree read by a
+# UI Automation client through the AccessKit adapter.
 if(TARGET gfx_ui_platform AND TARGET gfx_platform_graphics)
     gfx_add_test(gfx_ui_platform_tests
-        SOURCES ui_platform_test.cpp
+        SOURCES ui_platform_test.cpp accessibility_platform_test.cpp navigation_input_test.cpp
         LIBRARIES gfx::ui_platform gfx::platform_graphics)
+    if(WIN32)
+        # The UI Automation client of accessibility_platform_test.cpp.
+        target_link_libraries(gfx_ui_platform_tests PRIVATE ole32 oleaut32 uuid uiautomationcore)
+    endif()
     gfx_add_ui_atlas(gfx_ui_platform_tests
         NAME platform_latin
         FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf

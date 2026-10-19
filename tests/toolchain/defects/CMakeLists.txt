@@ -53,3 +53,13 @@ gfx_add_compilation_failure_test(TableLookupInModuleInterfaceCorruptsModuleFile
     EXPECTED_DIAGNOSTIC "failed to read compiled module"
     LIBRARIES gfx::platform
     WITHOUT_PROJECT_OPTIONS)
+
+# A block-scope using-declaration of another module's enumeration (`using platform::Button;`) in a consteval
+# function of a module interface crashes GCC 16 while it writes the module file (internal compiler error in
+# import_entity_module). A using-declaration of a function, or the same function inline (not consteval), is fine.
+# Workaround: the enumeration named in full (navigation_bindings::gamepad() in source/ui/platform/ui_platform.cppm).
+gfx_add_compilation_failure_test(UsingDeclarationOfImportedEnumerationCrashesCompiler
+    SOURCES using_declaration_importer.cpp
+    MODULES using_declaration_enumerations.cppm using_declaration_function.cppm
+    EXPECTED_DIAGNOSTIC "internal compiler error"
+    WITHOUT_PROJECT_OPTIONS)

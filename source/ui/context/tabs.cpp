@@ -293,6 +293,12 @@ tab_item(ContextState& state,
     {
         hit.right = std::min(hit.right, close.left);
     }
+    const auto panel = [&state, &window, id, &text_label]
+    {
+        // The selected tab's content: a node of its own until end_tab_item().
+        state.accessible_push(state.accessible_node((static_cast<AccessibilityNodeId>(window.id) << 32) | ContextState::hash(id, "#PANEL"),
+                                                    AccessibilityRole::TAB_PANEL, {}, text_label));
+    };
     if (!state.item_add(window, hit, id, true, "begin_tab_item", label))
     {
         if (selected && !has_any(flags, TabItemFlag::NO_PUSH_IDENTIFIER))
@@ -301,6 +307,10 @@ tab_item(ContextState& state,
             bar.content_pushed = true;
         }
         bar.content_tab = selected ? id : 0;
+        if (selected && !tab_button)
+        {
+            panel();
+        }
         return selected;
     }
 
@@ -308,6 +318,10 @@ tab_item(ContextState& state,
     // closes it; a dragged payload held over it selects it.
     const ButtonState button = state.button_behavior(window, hit, id, tab_button ? ButtonFlag::NONE : ButtonFlag::PRESS_ON_CLICK);
     const bool hovered = button.hovered || state.hovered_id_previous == close_id;
+    static_cast<void>(state.describe_item(tab_button ? AccessibilityRole::BUTTON : AccessibilityRole::TAB,
+                                          tab_button ? AccessibilityState::NONE
+                                                     : AccessibilityState::SELECTABLE | (selected ? AccessibilityState::SELECTED : AccessibilityState::NONE),
+                                          AccessibilityAction::CLICK));
     if (button.pressed && !tab_button)
     {
         bar.next_selected = id;
@@ -398,6 +412,7 @@ tab_item(ContextState& state,
         {
             state.id_stack.push_back(id);
         }
+        panel();
     }
     return selected;
 }
@@ -494,8 +509,9 @@ begin_tab_bar_at(ContextState& state,
         return nullptr;
     }
 
-    // The tabs are identified under the bar (and whatever push_id() adds inside it).
+    // The tabs are identified under the bar (and whatever push_id() adds inside it); they are nodes of its node.
     state.id_stack.push_back(bar_id);
+    state.accessible_push(state.accessible_node((static_cast<AccessibilityNodeId>(window.id) << 32) | bar_id, AccessibilityRole::TAB_LIST, rectangle, {}));
     return &state.tab_bars[index];
 }
 
@@ -617,6 +633,7 @@ UiFrame::end_tab_bar() noexcept
         state.report(UiFrameProblem::UNBALANCED_STACK, "end_tab_bar", "push_id() without pop_id() inside the tab bar");
     }
     state.tab_bar_stack.pop_back();
+    state.accessible_pop();
 }
 
 auto
@@ -654,6 +671,7 @@ UiFrame::end_tab_item() noexcept
     }
     bar->content_tab = 0;
     bar->content_pushed = false;
+    state.accessible_pop();
 }
 
 auto

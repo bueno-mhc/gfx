@@ -41,6 +41,10 @@ public:
     /// @brief Replaces the text (cut to the capacity), puts the cursor at its end, forgets the undo history.
     void set_text(std::string_view text);
 
+    /// @brief Starts over as an editor made with @p description would (an empty text, no history, not overwriting),
+    ///        keeping the storage it has: a field edited again allocates nothing.
+    void reset(const TextEditorDescription& description);
+
     /// @brief The text.
     [[nodiscard]] auto text() const noexcept -> std::string_view
     {

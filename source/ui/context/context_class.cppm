@@ -14,6 +14,7 @@ import gfx.ui.style;
 import gfx.ui.text;
 import gfx.ui.input;
 import :types;
+import :accessibility_tree;
 import :frame;
 
 namespace gfx::ui
@@ -208,6 +209,17 @@ public:
     ///        (with the JSON path of the problem) when @p json is not such a layout.
     /// @throws InvalidUsageError during a frame.
     auto load_layout(std::string_view json) -> std::expected<void, std::string>;
+
+    /// @brief Builds the accessibility tree of each frame from the next one (false: none, at no cost). Providers
+    ///        enable it when an assistive technology connects (UiAccessibilityAdapter does).
+    void set_accessibility_enabled(bool enabled) noexcept;
+
+    /// @brief Whether the accessibility tree is built.
+    [[nodiscard]] auto accessibility_enabled() const noexcept -> bool;
+
+    /// @brief The accessibility tree of the last frame, and what changed since the frame before (empty while
+    ///        accessibility is not enabled). Valid until the next end_frame().
+    [[nodiscard]] auto accessibility_tree() const noexcept -> UiAccessibilityTree;
 
 private:
     std::unique_ptr<ContextState> m_state;

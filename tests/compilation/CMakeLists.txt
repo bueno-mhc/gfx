@@ -181,4 +181,10 @@ if(GFX_BUILD_UI)
         SOURCES ui/ui_dock_builders_come_from_their_context.cpp
         EXPECTED_DIAGNOSTIC "private within this context|no matching function"
         LIBRARIES gfx::ui)
+    if(TARGET gfx_ui_platform)
+        gfx_add_compilation_failure_test(UiNavigationContextsNeedTheirActions
+            SOURCES ui/ui_navigation_contexts_need_their_actions.cpp
+            EXPECTED_DIAGNOSTIC "input_schema_error_a_binding_names_an_undeclared_action"
+            LIBRARIES gfx::ui_platform)
+    endif()
 endif()

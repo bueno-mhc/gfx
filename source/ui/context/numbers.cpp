@@ -408,11 +408,56 @@ keyboard_focused(const ContextState& state,
     return state.focus_id == id && state.focus_visible && !state.disabled && state.focused_window != ContextState::NO_WINDOW && window.root == state.focused_window;
 }
 
-/// The presses of Right minus those of Left this frame.
+/// The steps asked of item @p id (the last item) this frame: MOVE_RIGHT minus MOVE_LEFT while the keyboard focuses it
+/// (the moves are used), and an assistive technology's INCREMENT or DECREMENT.
 auto
-horizontal_steps(const ContextState& state) noexcept -> std::int32_t
+value_steps(ContextState& state,
+            const WindowState& window,
+            std::uint32_t id) noexcept -> std::int32_t
 {
-    return static_cast<std::int32_t>(state.keys_pressed[std::to_underlying(Key::RIGHT)]) - static_cast<std::int32_t>(state.keys_pressed[std::to_underlying(Key::LEFT)]);
+    std::int32_t steps = 0;
+    if (keyboard_focused(state, window, id))
+    {
+        const auto count = [&state](UiNavigationCommand command)
+        {
+            return state.navigation_triggered(command) ? static_cast<std::int32_t>(state.navigation_count(command)) : 0;
+        };
+        const std::int32_t right = count(UiNavigationCommand::MOVE_RIGHT);
+        const std::int32_t left = count(UiNavigationCommand::MOVE_LEFT);
+        if (right + left > 0)
+        {
+            state.consume_navigation(UiNavigationCommand::MOVE_LEFT | UiNavigationCommand::MOVE_RIGHT);
+        }
+        steps = right - left;
+    }
+    steps += state.item_request(AccessibilityAction::INCREMENT) != nullptr ? 1 : 0;
+    steps -= state.item_request(AccessibilityAction::DECREMENT) != nullptr ? 1 : 0;
+    return steps;
+}
+
+/// The number an assistive technology set for the last item this frame, if any.
+auto
+requested_number(const ContextState& state) noexcept -> std::optional<Number>
+{
+    const UiAccessibilityRequest* set = state.item_request(AccessibilityAction::SET_VALUE);
+    return set != nullptr && set->has_number ? std::optional<Number>{static_cast<Number>(set->number)} : std::nullopt;
+}
+
+/// Describes the numeric last item for assistive technologies: @p role, its value as @p text and as a number, its range
+/// (when @p ranged) and its step. Its record.
+auto
+describe_number_item(ContextState& state,
+                     AccessibilityRole role,
+                     const NumberField& field,
+                     std::string_view text,
+                     bool ranged,
+                     double step) noexcept -> std::uint32_t
+{
+    const std::uint32_t record = state.describe_item(role, AccessibilityState::NONE,
+                                                     AccessibilityAction::INCREMENT | AccessibilityAction::DECREMENT | AccessibilityAction::SET_VALUE, text);
+    state.describe_number(record, static_cast<double>(to_number(field.value)), ranged ? static_cast<double>(to_number(field.minimum)) : 0.0,
+                          ranged ? static_cast<double>(to_number(field.maximum)) : 0.0, step);
+    return record;
 }
 
 /// Typed input of a slider or drag: starts on Control+click, a double click or Return (unless SliderFlag::NO_INPUT);
@@ -443,8 +488,7 @@ typed_input(ContextState& state,
         const bool hovered = state.item_hoverable(window, item.frame, item.id);
         const bool control = has_any(state.modifiers, KeyModifier::CONTROL | KeyModifier::SUPER);
         const bool clicked = hovered && state.mouse[0].clicked && (control || state.mouse[0].double_clicked);
-        const bool returned = keyboard_focused(state, window, item.id)
-                              && (state.keys_pressed[std::to_underlying(Key::RETURN)] > 0 || state.keys_pressed[std::to_underlying(Key::KEYPAD_ENTER)] > 0);
+        const bool returned = keyboard_focused(state, window, item.id) && state.navigation_pressed(UiNavigationCommand::INPUT);
         if (!clicked && !returned)
         {
             return false;
@@ -547,8 +591,27 @@ UiFrame::number_input(std::string_view label,
         state.report(UiFrameProblem::INVALID_ARGUMENT, "input_number", "the format is not a std::format format for this type: the default one is used", label, item.id);
     }
 
+    // Its node now (the step buttons become the last item), with what assistive technologies ask of it.
+    const std::uint32_t record = describe_number_item(state, AccessibilityRole::SPIN_BUTTON, field, format_value(field, format).view(), false,
+                                                      static_cast<double>(to_number(step)));
+    const std::int32_t requested_steps = (state.item_request(AccessibilityAction::INCREMENT) != nullptr ? 1 : 0)
+                                         - (state.item_request(AccessibilityAction::DECREMENT) != nullptr ? 1 : 0);
+    const std::optional<Number> requested = requested_number(state);
+
     // Step buttons first (the field stays the last item): Control steps by step_fast.
     bool changed = false;
+    if (requested.has_value())
+    {
+        const NumberField::Value value = make_value(field, *requested);
+        changed = value != field.value;
+        field.value = value;
+    }
+    if (requested_steps != 0)
+    {
+        const NumberField::Value value = make_value(field, to_number(field.value) + static_cast<Number>(requested_steps) * to_number(step));
+        changed = changed || value != field.value;
+        field.value = value;
+    }
     if (buttons)
     {
         const bool control = has_any(state.modifiers, KeyModifier::CONTROL | KeyModifier::SUPER);
@@ -604,6 +667,8 @@ UiFrame::number_input(std::string_view label,
     if (changed)
     {
         state.mark_edited(item.id);
+        state.accessible_text(record, 2, format_value(field, format).view());
+        state.describe_number(record, static_cast<double>(to_number(field.value)), 0.0, 0.0, static_cast<double>(to_number(step)));
     }
     return changed;
 }
@@ -633,12 +698,14 @@ UiFrame::number_slider(std::string_view label,
 
     // Typed input replaces the slider while it lasts.
     bool changed = false;
+    const std::optional<Number> requested = requested_number(state);
     if (typed_input(state, *window, label, item, field, format, flags, has_any(flags, SliderFlag::CLAMP_ON_INPUT), changed))
     {
         if (changed)
         {
             state.mark_edited(item.id);
         }
+        static_cast<void>(describe_number_item(state, AccessibilityRole::SLIDER, field, format_value(field, format).view(), true, 0.0));
         return changed;
     }
 
@@ -704,21 +771,27 @@ UiFrame::number_slider(std::string_view label,
         }
     }
 
-    // The keyboard: Left and Right step (integers by 1, others by a hundredth of the range; Shift: ten times more).
-    if (keyboard_focused(state, *window, item.id) && horizontal_steps(state) != 0)
+    // The keyboard: MOVE_LEFT and MOVE_RIGHT step (integers by 1, others by a hundredth of the range; Shift: ten times
+    // more), as assistive technologies' INCREMENT and DECREMENT do; they can also set the value.
+    const std::int32_t steps = value_steps(state, *window, item.id);
+    const bool fast = has_any(state.modifiers, KeyModifier::SHIFT);
+    const Number unit = integer ? Number{1} : (maximum - minimum) / 100;
+    if (steps != 0)
     {
-        const bool fast = has_any(state.modifiers, KeyModifier::SHIFT);
-        const Number unit = integer ? Number{1} : (maximum - minimum) / 100;
-        const Number step = unit * (fast ? DRAG_FAST_FACTOR : 1.0L) * static_cast<Number>(horizontal_steps(state));
+        const Number step = unit * (fast ? DRAG_FAST_FACTOR : 1.0L) * static_cast<Number>(steps);
         if (logarithmic_scale && !integer)
         {
             const float ratio = slider_ratio(to_number(field.value), minimum, maximum, true, epsilon);
-            set(slider_value(std::clamp(ratio + static_cast<float>(horizontal_steps(state)) * (fast ? 0.1F : 0.01F), 0.0F, 1.0F), minimum, maximum, true, epsilon));
+            set(slider_value(std::clamp(ratio + static_cast<float>(steps) * (fast ? 0.1F : 0.01F), 0.0F, 1.0F), minimum, maximum, true, epsilon));
         }
         else
         {
             set(to_number(field.value) + step);
         }
+    }
+    if (requested.has_value())
+    {
+        set(*requested);
     }
 
     // The frame, the grab, the value, the label.
@@ -735,6 +808,8 @@ UiFrame::number_slider(std::string_view label,
     }
     draw_centered_value(state, list, item.frame, changed ? format_value(field, format).view() : shown.view(), "slider");
     draw_number_label(state, *window, item);
+    static_cast<void>(describe_number_item(state, AccessibilityRole::SLIDER, field, changed ? format_value(field, format).view() : shown.view(), true,
+                                           static_cast<double>(unit)));
     if (changed)
     {
         state.mark_edited(item.id);
@@ -771,12 +846,14 @@ UiFrame::number_drag(std::string_view label,
     const Number maximum = to_number(field.maximum);
     const bool clamped = minimum < maximum || (minimum == maximum && (minimum != 0 || has_any(flags, SliderFlag::CLAMP_ZERO_RANGE)));
     bool changed = false;
+    const std::optional<Number> requested = requested_number(state);
     if (typed_input(state, *window, label, item, field, format, flags, clamped && has_any(flags, SliderFlag::CLAMP_ON_INPUT), changed))
     {
         if (changed)
         {
             state.mark_edited(item.id);
         }
+        static_cast<void>(describe_number_item(state, AccessibilityRole::SPIN_BUTTON, field, format_value(field, format).view(), clamped, 0.0));
         return changed;
     }
 
@@ -827,11 +904,18 @@ UiFrame::number_drag(std::string_view label,
         }
     }
 
-    // The keyboard: Left and Right step by the speed (integers by at least 1).
-    if (keyboard_focused(state, *window, item.id) && horizontal_steps(state) != 0)
+    // The keyboard: MOVE_LEFT and MOVE_RIGHT step by the speed (integers by at least 1), as assistive technologies'
+    // INCREMENT and DECREMENT do.
+    const std::int32_t steps = value_steps(state, *window, item.id);
+    const double unit = integer ? std::max(1.0, std::round(static_cast<double>(speed))) : static_cast<double>(speed);
+    if (steps != 0)
     {
-        const double unit = integer ? std::max(1.0, std::round(static_cast<double>(speed))) : static_cast<double>(speed);
-        amount += unit * tweak * horizontal_steps(state);
+        amount += unit * tweak * steps;
+        state.drag_remainder = 0;
+    }
+    if (requested.has_value())
+    {
+        amount += static_cast<double>(*requested - to_number(field.value));
         state.drag_remainder = 0;
     }
 
@@ -867,6 +951,7 @@ UiFrame::number_drag(std::string_view label,
     state.draw_focus(list, item.frame, item.id, style.frame_rounding);
     draw_centered_value(state, list, item.frame, changed ? format_value(field, format).view() : shown.view(), "drag");
     draw_number_label(state, *window, item);
+    static_cast<void>(describe_number_item(state, AccessibilityRole::SPIN_BUTTON, field, changed ? format_value(field, format).view() : shown.view(), clamped, unit));
     if (changed)
     {
         state.mark_edited(item.id);

@@ -15,6 +15,7 @@ import gfx.ui.style;
 import gfx.ui.text;
 import gfx.ui.input;
 import :types;
+import :accessibility_tree;
 import :frame;
 
 namespace gfx::ui
@@ -174,6 +175,10 @@ struct WindowState
     DrawList front_list{};                        ///< A floating dock tree's host: its border and grip, drawn over its docked windows.
     ColumnsState columns{};                       ///< Legacy columns.
     std::uint32_t identifier_stack_base = 0;      ///< Identifier stack depth at begin.
+    std::uint32_t navigation_last_id = 0;         ///< Roots: the item last focused in it (a window cycle gives it back).
+    std::uint32_t accessibility_record = 0xFFFFFFFFU; ///< Its accessibility node this frame (none: not built).
+    std::uint64_t accessibility_frame = 0;        ///< The frame accessibility_record belongs to.
+    std::uint32_t accessibility_depth = 0;        ///< Depth of the accessibility containers at its begin.
     DrawList draw_list{};                         ///< Its drawing (roots; children draw into their root's).
 };
 
@@ -487,6 +492,9 @@ struct MenuBarState
     UiRectangle rectangle{};                  ///< Its rectangle.
     UiRectangle saved_clip{};                 ///< The window's content clip, restored by end_menu_bar().
     float x = 0;                              ///< Where its next menu goes.
+    std::array<std::uint32_t, 64> items{};    ///< Its items this frame, in order (MOVE_LEFT and MOVE_RIGHT go between its menus).
+    std::uint32_t item_count = 0;             ///< How many.
+    std::uint32_t record = 0xFFFFFFFFU;       ///< Its accessibility node (none: not built).
 };
 
 /// A drag and drop in progress.
@@ -581,6 +589,138 @@ struct DockPlacement
     bool visible = false;    ///< Its node's selected window, laid out.
     UiRectangle area{};      ///< Its node's area under the tab bar.
     UiRectangle clip{};      ///< Its node's host's clip.
+};
+
+/// The commands NavigationState counts: one per bit of UiNavigationCommand.
+inline constexpr std::size_t NAVIGATION_COMMANDS = EnumerationTraits<UiNavigationCommand>::NAMES.size();
+
+/// The navigation commands of a frame (from the keyboard keymap and UiFrameInput::navigation) and the directional
+/// move they ask for.
+struct NavigationState
+{
+    std::array<std::uint8_t, NAVIGATION_COMMANDS> presses{};    ///< Presses and repeats of each command this frame.
+    std::array<std::uint8_t, NAVIGATION_COMMANDS> repeats{};    ///< Repeats among them.
+    std::array<double, NAVIGATION_COMMANDS> held_seconds{};     ///< How long each command of UiFrameInput::navigation is held (-1: not).
+    UiNavigationCommand down = UiNavigationCommand::NONE;       ///< Commands held (keys of the keymap, or the input's).
+    UiNavigationCommand external = UiNavigationCommand::NONE;   ///< Commands pressed this frame through UiFrameInput::navigation.
+    UiNavigationCommand consumed = UiNavigationCommand::NONE;   ///< Commands a widget used this frame (their default behavior is skipped).
+    bool alt_alone = false;                                     ///< Alt is held and nothing else was pressed since.
+    Vector2 scroll{};                                           ///< UiFrameInput::navigation.scroll.
+    UiNavigationCommand move = UiNavigationCommand::NONE;       ///< The directional move asked for this frame (one MOVE_* bit).
+    UiRectangle focus_rectangle{};                              ///< The focused item's rectangle last frame, screen.
+    std::uint32_t focus_root = 0xFFFFFFFFU;                     ///< Its root window then (none: not added last frame).
+    std::uint32_t focus_window = 0xFFFFFFFFU;                   ///< The window (child or root) it was added in then.
+    std::uint32_t next_focus_id = 0;                            ///< The item whose place this frame's next_focus_* hold.
+    UiRectangle next_focus_rectangle{};                         ///< The same, this frame.
+    std::uint32_t next_focus_root = 0xFFFFFFFFU;                ///< ...
+    std::uint32_t next_focus_window = 0xFFFFFFFFU;              ///< ...
+    std::uint32_t best_id = 0;                                  ///< The best item for the move so far (0: none).
+    std::uint32_t best_window = 0xFFFFFFFFU;                    ///< Its window.
+    UiRectangle best_rectangle{};                               ///< Its rectangle.
+    float best_box = std::numeric_limits<float>::max();         ///< Its distance between boxes.
+    float best_center = std::numeric_limits<float>::max();      ///< Its distance between centers (ties).
+    std::uint32_t first_window = 0xFFFFFFFFU;                   ///< The window of the focus order's first item (focus_first).
+    UiRectangle first_rectangle{};                              ///< Its rectangle.
+    std::uint32_t last_window = 0xFFFFFFFFU;                    ///< The window of its last item (focus_last).
+    UiRectangle last_rectangle{};                               ///< Its rectangle.
+    std::uint32_t before_window = 0xFFFFFFFFU;                  ///< The window of the item before the focused one (Shift+Tab).
+    UiRectangle before_rectangle{};                             ///< Its rectangle.
+    std::uint32_t after_window = 0xFFFFFFFFU;                   ///< The window of the item after it (Tab).
+    UiRectangle after_rectangle{};                              ///< Its rectangle.
+    std::uint32_t here_window = 0xFFFFFFFFU;                    ///< The window of the item set_keyboard_focus_here() focuses.
+    UiRectangle here_rectangle{};                               ///< Its rectangle.
+    std::uint32_t scroll_window = 0xFFFFFFFFU;                  ///< A window to scroll so that scroll_rectangle shows (next frame).
+    UiRectangle scroll_rectangle{};                             ///< What it shows, screen (in that window's last layout).
+    std::uint32_t menu_bar_window = 0xFFFFFFFFU;                ///< MENU this frame: the root window whose menu bar takes the focus.
+    std::uint32_t menu_bar_first = 0;                           ///< ...its first item, found this frame.
+    std::uint32_t menu_return_id = 0;                           ///< Where MENU gives the focus back to (the item focused before).
+    std::uint32_t menu_return_window = 0xFFFFFFFFU;             ///< ...in this root window.
+};
+
+/// A key chord's route (shortcut()): the owner that scored best this frame fires next frame.
+struct ShortcutRoute
+{
+    std::uint64_t chord = 0;                                    ///< The chord's key (0: a free slot).
+    std::uint64_t frame = 0;                                    ///< The last frame something routed it.
+    std::uint32_t owner = 0;                                    ///< The best owner this frame.
+    std::uint32_t score = std::numeric_limits<std::uint32_t>::max(); ///< Its score (lower wins).
+    std::uint32_t winner = 0;                                   ///< The owner that won last frame (it fires this frame).
+    bool has_winner = false;                                    ///< A route won last frame.
+};
+
+/// What the next item's set_next_item_shortcut() and set_next_item_accessible_*() calls said.
+struct NextItemAccessibility
+{
+    bool has_shortcut = false;                                  ///< set_next_item_shortcut() was called.
+    KeyChord shortcut{};                                        ///< Its chord.
+    ShortcutFlag shortcut_flags = ShortcutFlag::NONE;           ///< Its routing.
+    bool has_label = false;                                     ///< set_next_item_accessible_label() was called.
+    std::string label{};                                        ///< Its label.
+    bool has_description = false;                               ///< set_next_item_accessible_description() was called.
+    std::string description{};                                  ///< Its description.
+    bool has_role = false;                                      ///< set_next_item_accessibility_role() was called.
+    AccessibilityRole role = AccessibilityRole::GENERIC;        ///< Its role.
+};
+
+/// A node of the accessibility tree being built: its public part, and where its texts are in the build text.
+struct AccessibilityRecord
+{
+    UiAccessibilityNode node{};                                 ///< Texts and children are set when the tree is finished.
+    std::uint32_t parent = 0;                                   ///< Index of its parent record (the root: itself).
+    std::array<std::uint32_t, 8> text{};                        ///< Offset and size of its name, description, value and shortcut.
+};
+
+/// A finished accessibility tree: its nodes, children and texts (what UiAccessibilityTree views), and an index of its
+/// nodes by identifier.
+struct AccessibilityTreeData
+{
+    std::vector<UiAccessibilityNode> nodes{};                   ///< The nodes.
+    std::vector<AccessibilityNodeId> children{};                ///< Every node's children, one after another.
+    std::string text{};                                         ///< Their texts.
+    std::vector<AccessibilityNodeId> keys{};                    ///< Open addressing: node identifiers (0: free).
+    std::vector<std::uint32_t> indices{};                       ///< ...their indices in nodes.
+    AccessibilityNodeId focus = ACCESSIBILITY_ROOT_NODE;        ///< The focused node.
+    std::uint64_t frame = 0;                                    ///< The frame (0: none).
+
+    /// The index of node @p id, or none.
+    [[nodiscard]] auto find(AccessibilityNodeId id) const noexcept -> std::optional<std::uint32_t>;
+};
+
+/// The accessibility tree: built during the frame while enabled, finished and compared with the last one at
+/// end_frame().
+struct AccessibilityBuildState
+{
+    /// No record, no request.
+    static constexpr std::uint32_t NONE = 0xFFFFFFFFU;
+
+    bool enabled = false;                                       ///< Built (UiContext::set_accessibility_enabled()).
+    bool building = false;                                      ///< Built this frame.
+    std::vector<AccessibilityRecord> records{};                 ///< The nodes of this frame (the root first).
+    std::string text{};                                         ///< Their texts.
+    std::vector<std::uint32_t> containers{};                    ///< Records new nodes go under (the root at the bottom).
+    std::uint32_t last_record = 0xFFFFFFFFU;                    ///< The last item's record (its widget describes it), or none.
+    std::uint32_t last_item = 0;                                ///< The item item_add() registered last (the widget describes it).
+    std::string_view last_label{};                              ///< Its label (the widget's call is running).
+    std::uint32_t last_window = 0xFFFFFFFFU;                    ///< Its window.
+    UiRectangle last_rectangle{};                               ///< Its rectangle.
+    bool last_focusable = false;                                ///< Whether the keyboard can focus it.
+    bool pending_label = false;                                 ///< It has NextItemAccessibility's label (until it is described).
+    bool pending_description = false;                           ///< ...its description.
+    bool pending_role = false;                                  ///< ...its role.
+    std::uint32_t text_counter = 0;                             ///< Static texts of the frame (their identifiers).
+    AccessibilityRole next_window_role = AccessibilityRole::GENERIC; ///< The role the next window takes (list boxes, combos), or GENERIC.
+    std::array<AccessibilityTreeData, 2> trees{};               ///< The last finished tree, and the one before.
+    std::uint32_t current = 0;                                  ///< Which one is the last.
+    std::vector<std::uint32_t> changed{};                       ///< UiAccessibilityTree::changed.
+    std::vector<AccessibilityNodeId> removed{};                 ///< UiAccessibilityTree::removed.
+    std::vector<std::uint32_t> child_counts{};                  ///< Scratch: children per record.
+    bool focus_changed = false;                                 ///< UiAccessibilityTree::focus_changed.
+    std::uint64_t previous_frame = 0;                           ///< UiAccessibilityTree::previous_frame.
+    std::string announcement{};                                 ///< The last text announce() gave.
+    AccessibilityLiveRegion announcement_live = AccessibilityLiveRegion::POLITE; ///< How.
+    std::uint32_t announcement_counter = 0;                     ///< Announcements made (each is a new node).
+    std::vector<UiAccessibilityRequest> requests{};             ///< The frame's requests (texts in request_text).
+    std::string request_text{};                                 ///< Their texts.
 };
 
 /// What button_behavior() found.
@@ -778,8 +918,8 @@ struct ContextState
     [[nodiscard]] auto popup_level_of(std::uint32_t window) const noexcept -> std::size_t;
 
     /// Popups at the start of a frame: those not begun last frame close; a click outside closes those above it
-    /// (never a modal); Escape closes the top one (not a modal) and Left a submenu, the keyboard focus going back to
-    /// their opener. Returns whether Escape closed one.
+    /// (never a modal); CANCEL closes the top one (not a modal) and MOVE_LEFT a submenu, the keyboard focus going
+    /// back to their opener (the commands are used). Returns whether CANCEL closed one.
     auto update_popups() noexcept -> bool;
 
     // ----------------------------------------------------------------------------------------- tooltips and drag and drop
@@ -903,6 +1043,124 @@ struct ContextState
 
     /// Ends the edit in progress: committed (Return, Tab, a click elsewhere) or canceled (Escape).
     void end_text_edit(bool committed) noexcept;
+
+    // ----------------------------------------------------------------------------------------- navigation
+
+    /// Turns this frame's keys (the keymap, when on) and UiFrameInput::navigation into navigation commands, and the
+    /// directional move or focus step they ask for.
+    void update_navigation(const UiFrameInput& input) noexcept;
+
+    /// At begin_frame(), after the popups used theirs: the commands that move the focus by themselves — Tab and
+    /// Shift+Tab (a step this frame), MENU (into the menu bar or back), CANCEL (back from the menu bar, else the
+    /// focus is dropped).
+    void begin_navigation() noexcept;
+
+    /// Presses and repeats of @p command (one bit) this frame.
+    [[nodiscard]] auto navigation_count(UiNavigationCommand command) const noexcept -> std::uint32_t;
+
+    /// Whether @p command (one bit) was pressed this frame (not repeated) and no widget used it.
+    [[nodiscard]] auto navigation_pressed(UiNavigationCommand command) const noexcept -> bool;
+
+    /// Whether @p command (one bit) was pressed or repeated this frame and no widget used it.
+    [[nodiscard]] auto navigation_triggered(UiNavigationCommand command) const noexcept -> bool;
+
+    /// Whether @p command is held.
+    [[nodiscard]] auto navigation_held(UiNavigationCommand command) const noexcept -> bool;
+
+    /// A widget used @p commands this frame: what they do by default (moving the focus, closing a popup) does not
+    /// happen.
+    void consume_navigation(UiNavigationCommand commands) noexcept;
+
+    /// Item @p id of @p window, at @p rectangle, as a destination of this frame's directional move.
+    void score_navigation(std::uint32_t id,
+                          const WindowState& window,
+                          const UiRectangle& rectangle) noexcept;
+
+    /// At end_frame(): the keyboard focus moves (Tab, a direction, MENU, a window cycle) or leaves an item no longer
+    /// submitted; the window of an item the keyboard moved to scrolls to show it.
+    void resolve_navigation() noexcept;
+
+    /// Scrolls @p window (and its parents, up to its root) so that @p rectangle (screen) shows, from the next frame.
+    void scroll_into_view(std::uint32_t window,
+                          const UiRectangle& rectangle) noexcept;
+
+    // ----------------------------------------------------------------------------------------- shortcuts
+
+    /// Whether @p chord was pressed this frame (and repeated, with @p repeat).
+    [[nodiscard]] auto chord_pressed(KeyChord chord,
+                                     bool repeat) const noexcept -> bool;
+
+    /// Routes @p chord as @p flags say for @p owner, from @p window (nullptr: outside windows); true when it fires
+    /// this frame (it was pressed and @p owner won its route last frame).
+    auto route_shortcut(KeyChord chord,
+                        ShortcutFlag flags,
+                        std::uint32_t owner,
+                        const WindowState* window,
+                        bool owner_active) noexcept -> bool;
+
+    /// At end_frame(): the best route of each chord this frame wins it next frame.
+    void update_shortcut_routes() noexcept;
+
+    /// Whether item @p id was activated this frame without the mouse: its shortcut (set_next_item_shortcut()), or
+    /// an assistive technology's CLICK.
+    [[nodiscard]] auto item_activated(std::uint32_t id) const noexcept -> bool;
+
+    // ----------------------------------------------------------------------------------------- accessibility
+
+    /// At begin_frame(): the tree of the frame starts (when enabled), the requests of assistive technologies are
+    /// copied; a FOCUS request focuses its item.
+    void begin_accessibility(const UiFrameInput& input) noexcept;
+
+    /// A node @p id of @p role at @p bounds, named @p name, under the current container: its record (none when the
+    /// tree is not built).
+    auto accessible_node(AccessibilityNodeId id,
+                         AccessibilityRole role,
+                         const UiRectangle& bounds,
+                         std::string_view name) noexcept -> std::uint32_t;
+
+    /// Text @p field (0: name, 1: description, 2: value, 3: shortcut) of record @p record.
+    void accessible_text(std::uint32_t record,
+                         std::uint32_t field,
+                         std::string_view content) noexcept;
+
+    /// Nodes made from now on go under record @p record (none: nothing changes).
+    void accessible_push(std::uint32_t record) noexcept;
+
+    /// Ends the last accessible_push().
+    void accessible_pop() noexcept;
+
+    /// @p window's node (at its begin_window() or begin_child()); later calls of the frame continue it.
+    void accessible_begin_window(WindowState& window) noexcept;
+
+    /// Ends @p window's node (end_window(), end_child()).
+    void accessible_end_window(const WindowState& window) noexcept;
+
+    /// Describes the last item (its widget calls it after item_add()): a node of @p role (unless the application gave
+    /// another), its label (unless it gave an accessible label), @p states, @p actions (FOCUS added when the keyboard
+    /// can focus it, CLICK when @p role is clicked), @p value. Its record, or none.
+    auto describe_item(AccessibilityRole role,
+                       AccessibilityState states = AccessibilityState::NONE,
+                       AccessibilityAction actions = AccessibilityAction::NONE,
+                       std::string_view value = {}) noexcept -> std::uint32_t;
+
+    /// A text of @p window at @p rectangle (a node of @p role, STATIC_TEXT by default, named @p content).
+    void describe_text(const WindowState& window,
+                       const UiRectangle& rectangle,
+                       std::string_view content,
+                       AccessibilityRole role = AccessibilityRole::STATIC_TEXT) noexcept;
+
+    /// The numeric value of record @p record.
+    void describe_number(std::uint32_t record,
+                         double value,
+                         double minimum,
+                         double maximum,
+                         double step) noexcept;
+
+    /// What an assistive technology asked of the last item this frame with @p action, or nullptr.
+    [[nodiscard]] auto item_request(AccessibilityAction action) const noexcept -> const UiAccessibilityRequest*;
+
+    /// At end_frame(): the frame's tree is finished (children, texts, focus) and compared with the last one.
+    void finish_accessibility() noexcept;
 
     // ----------------------------------------------------------------------------------------- drawing
 
@@ -1096,6 +1354,20 @@ struct ContextState
     std::vector<std::uint8_t> dock_placed{};
     std::vector<std::uint32_t> dock_scratch{};
     ColorEditFlag color_options = ColorEditFlag::DISPLAY_RGB | ColorEditFlag::INTEGER_CHANNELS | ColorEditFlag::PICKER_HUE_BAR;
+
+    // Navigation, shortcuts and accessibility.
+    NavigationState navigation{};
+    std::vector<ShortcutRoute> shortcut_routes{};
+    std::array<std::uint8_t, 128> key_codes_repeated{}; ///< Repeats among key_codes_pressed.
+    std::uint32_t shortcut_activated_id = 0;
+    NextItemAccessibility next_item{};
+    KeyChord item_shortcut{};                           ///< The last item's set_next_item_shortcut() chord (menus show it).
+    std::uint32_t menu_bar_switch_window = NO_WINDOW;   ///< MOVE_LEFT or MOVE_RIGHT in an open menu of this window's bar: the one beside opens.
+    std::uint32_t menu_bar_switch_from = 0;             ///< ...the open bar menu.
+    std::int32_t menu_bar_switch_step = 0;              ///< ...-1 (left) or +1 (right).
+    std::uint32_t menu_bar_open_id = 0;                 ///< The bar menu to open from the keyboard this frame (0: none).
+    bool menu_item_checkable = false;                   ///< The menu_item() running has a check mark (its bool* overload).
+    AccessibilityBuildState accessibility{};
 
     // The frame arena and the report.
     std::vector<std::byte> arena_buffer{};

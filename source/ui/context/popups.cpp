@@ -354,8 +354,8 @@ ContextState::update_popups() noexcept -> bool
         return false;
     }
 
-    // The keyboard (unless a text field uses it): Escape closes the top popup (not a modal), Left the focused
-    // submenu; the focus goes back to the item that opened it.
+    // The navigation (unless a text field uses the keyboard): CANCEL closes the top popup (not a modal), MOVE_LEFT
+    // the focused submenu; the focus goes back to the item that opened it.
     const auto close_to_opener = [this](std::size_t level)
     {
         const std::uint32_t opener_item = popups[level].opener_item;
@@ -366,14 +366,16 @@ ContextState::update_popups() noexcept -> bool
             focus_visible = true;
         }
     };
-    if (keys_pressed[std::to_underlying(Key::ESCAPE)] > 0 && !popups.back().modal)
+    if (navigation_pressed(UiNavigationCommand::CANCEL) && !popups.back().modal)
     {
+        consume_navigation(UiNavigationCommand::CANCEL);
         close_to_opener(popups.size() - 1);
         return true;
     }
     const std::size_t focused = popup_level_of(focused_window);
-    if (keys_pressed[std::to_underlying(Key::LEFT)] > 0 && focused < popups.size() && popups[focused].submenu)
+    if (navigation_triggered(UiNavigationCommand::MOVE_LEFT) && focused < popups.size() && popups[focused].submenu)
     {
+        consume_navigation(UiNavigationCommand::MOVE_LEFT);
         close_to_opener(focused);
     }
     return false;
@@ -485,18 +487,31 @@ UiFrame::begin_popup_context_item(std::string_view id,
         state.report(UiFrameProblem::INVALID_ARGUMENT, "begin_popup_context_item", "the last item has no identifier: give the popup one");
         return false;
     }
-    if (state.mouse[popup_button(flags)].released && is_item_hovered(HoveredFlag::ALLOW_WHEN_BLOCKED_BY_ACTIVE_ITEM))
+    // From the keyboard (CONTEXT_MENU on the focused item) or an assistive technology (SHOW_CONTEXT_MENU): under the
+    // item, its first item focused.
+    const LastItem& item = state.last_item;
+    const bool keyboard = item.id != 0 && item.window < state.windows.size() && state.keyboard_focused(state.windows[item.window], item.id)
+                          && state.navigation_pressed(UiNavigationCommand::CONTEXT_MENU);
+    const bool requested = state.item_request(AccessibilityAction::SHOW_CONTEXT_MENU) != nullptr;
+    const bool clicked = state.mouse[popup_button(flags)].released && is_item_hovered(HoveredFlag::ALLOW_WHEN_BLOCKED_BY_ACTIVE_ITEM);
+    if (clicked || keyboard || requested)
     {
         const std::size_t level = state.current_popup_level();
         const bool open_here = level < state.popups.size() && state.popups[level].id == popup;
         if (!(open_here && has_any(flags, PopupFlag::NO_REOPEN)) && !(has_any(flags, PopupFlag::NO_OPEN_OVER_EXISTING_POPUP) && level < state.popups.size()))
         {
-            if (PopupState* opened = state.open_popup(popup, state.mouse_position, 0, 0))
+            const Vector2 position = clicked ? state.mouse_position : Vector2{.x = item.rectangle.left, .y = item.rectangle.bottom};
+            if (PopupState* opened = state.open_popup(popup, position, 0, 0))
             {
-                opened->position = state.mouse_position;
+                opened->position = position;
                 opened->opened_frame = state.frame;
-                opened->opener_item = state.last_item.id;
+                opened->opener_item = item.id;
+                opened->focus_first = !clicked;
             }
+        }
+        if (keyboard)
+        {
+            state.consume_navigation(UiNavigationCommand::CONTEXT_MENU);
         }
     }
     return state.begin_popup(*this, popup, UiWindowFlag::NONE);
@@ -518,17 +533,29 @@ UiFrame::begin_popup_context_window(std::string_view id,
     const auto index = static_cast<std::uint32_t>(window - state.windows.data());
     const bool over_window = state.hovered_window == index && state.mouse_present;
     const bool over_item = state.hovered_id != 0;
-    if (state.mouse[popup_button(flags)].released && over_window && !(has_any(flags, PopupFlag::NO_OPEN_OVER_ITEMS) && over_item))
+    const bool clicked = state.mouse[popup_button(flags)].released && over_window && !(has_any(flags, PopupFlag::NO_OPEN_OVER_ITEMS) && over_item);
+
+    // From the keyboard: CONTEXT_MENU no item used while the window has the focus (with NO_OPEN_OVER_ITEMS: no item
+    // focused), at the window's content start, its first item focused.
+    const bool keyboard = window->root == state.focused_window && state.navigation_pressed(UiNavigationCommand::CONTEXT_MENU)
+                          && !(has_any(flags, PopupFlag::NO_OPEN_OVER_ITEMS) && state.focus_id != 0);
+    if (clicked || keyboard)
     {
         const std::size_t level = state.current_popup_level();
         const bool open_here = level < state.popups.size() && state.popups[level].id == popup;
         if (!(open_here && has_any(flags, PopupFlag::NO_REOPEN)) && !(has_any(flags, PopupFlag::NO_OPEN_OVER_EXISTING_POPUP) && level < state.popups.size()))
         {
-            if (PopupState* opened = state.open_popup(popup, state.mouse_position, 0, 0))
+            const Vector2 position = clicked ? state.mouse_position : Vector2{.x = window->inner.left + window->padding.x, .y = window->inner.top + window->padding.y};
+            if (PopupState* opened = state.open_popup(popup, position, 0, 0))
             {
-                opened->position = state.mouse_position;
+                opened->position = position;
                 opened->opened_frame = state.frame;
+                opened->focus_first = !clicked;
             }
+        }
+        if (keyboard)
+        {
+            state.consume_navigation(UiNavigationCommand::CONTEXT_MENU);
         }
     }
     return state.begin_popup(*this, popup, UiWindowFlag::NONE);

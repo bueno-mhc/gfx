@@ -137,6 +137,10 @@ bar_item(ContextState& state,
                                 .right = bar.x + label_width + std::floor(style.item_spacing.x * 0.5F),
                                 .bottom = bar.rectangle.bottom};
     bar.x += label_width + style.item_spacing.x;
+    if (bar.item_count < bar.items.size())
+    {
+        bar.items[bar.item_count++] = id;
+    }
     static_cast<void>(state.item_add(window, rectangle, id, true, operation, label));
     return rectangle;
 }
@@ -183,6 +187,9 @@ UiFrame::begin_menu_bar() noexcept -> bool
     bar.x = bar.rectangle.left + std::max(window->padding.x, state.style.item_spacing.x);
     window->clip = bar.rectangle.intersection(window->hit);
     state.list_of(*window).push_clip_rectangle(window->clip, false);
+    bar.record = state.accessible_node((static_cast<AccessibilityNodeId>(window->id) << 32) | ContextState::hash(window->id, "##menu_bar"),
+                                       AccessibilityRole::MENU_BAR, bar.rectangle, {});
+    state.accessible_push(bar.record);
     return true;
 }
 
@@ -200,6 +207,33 @@ UiFrame::end_menu_bar() noexcept
     WindowState& window = state.windows[bar.window];
     state.list_of(window).pop_clip_rectangle();
     window.clip = bar.saved_clip;
+    if (bar.record != AccessibilityBuildState::NONE)
+    {
+        state.accessible_pop();
+    }
+
+    // MOVE_LEFT or MOVE_RIGHT in one of its open menus: it closes, the menu beside it opens next frame (around the
+    // ends), its first item focused.
+    if (state.menu_bar_switch_window == bar.window && bar.item_count > 0)
+    {
+        const auto items = std::span{bar.items}.first(bar.item_count);
+        const auto found = std::ranges::find(items, state.menu_bar_switch_from);
+        if (found != items.end())
+        {
+            const auto count = static_cast<std::int32_t>(items.size());
+            const auto at = static_cast<std::int32_t>(found - items.begin());
+            state.menu_bar_open_id = items[static_cast<std::size_t>((at + state.menu_bar_switch_step + count) % count)];
+            for (std::size_t popup = 0; popup < state.popups.size(); ++popup)
+            {
+                if (state.popups[popup].id == state.menu_bar_switch_from)
+                {
+                    state.close_popups_from(popup);
+                    break;
+                }
+            }
+        }
+        state.menu_bar_switch_window = ContextState::NO_WINDOW;
+    }
     bar = MenuBarState{};
 }
 
@@ -282,7 +316,15 @@ UiFrame::begin_menu(std::string_view label,
         // Return opens it from the keyboard with its first item focused.
         const UiRectangle rectangle = bar_item(state, window, id, text.width, label, "begin_menu");
         const ButtonState button = state.button_behavior(window, rectangle, id, ButtonFlag::PRESS_ON_CLICK);
-        keyboard = state.keyboard_focused(window, id) && (state.presses(Key::DOWN) > 0 || button.pressed);
+        const bool down = state.keyboard_focused(window, id) && state.navigation_triggered(UiNavigationCommand::MOVE_DOWN);
+        if (down)
+        {
+            state.consume_navigation(UiNavigationCommand::MOVE_DOWN);
+        }
+        keyboard = (state.keyboard_focused(window, id) && (down || button.pressed)) || state.menu_bar_open_id == id;
+        state.menu_bar_open_id = state.menu_bar_open_id == id ? 0 : state.menu_bar_open_id;
+        static_cast<void>(state.describe_item(AccessibilityRole::MENU_ITEM, AccessibilityState::EXPANDABLE | (open ? AccessibilityState::EXPANDED : AccessibilityState::NONE),
+                                              AccessibilityAction::CLICK));
         const bool closed_by_click = std::ranges::contains(state.popups_closed_by_click, id);
         want_open = !open && ((button.pressed && !closed_by_click) || (button.hovered && bar_menu_open(state, level, index)) || keyboard);
         want_close = open && button.pressed && !keyboard;
@@ -306,7 +348,15 @@ UiFrame::begin_menu(std::string_view label,
             const ButtonState button = state.button_behavior(window, row.hit, id, ButtonFlag::PRESS_ON_CLICK);
             const WindowState* sibling = open ? nullptr : child_menu(state, level);
             const bool sibling_kept = sibling != nullptr && moving_toward(state, *sibling);
-            keyboard = state.keyboard_focused(window, id) && (state.presses(Key::RIGHT) > 0 || button.pressed);
+            const bool right = state.keyboard_focused(window, id) && state.navigation_triggered(UiNavigationCommand::MOVE_RIGHT);
+            if (right)
+            {
+                state.consume_navigation(UiNavigationCommand::MOVE_RIGHT);
+            }
+            keyboard = state.keyboard_focused(window, id) && (right || button.pressed);
+            static_cast<void>(state.describe_item(AccessibilityRole::MENU_ITEM,
+                                                  AccessibilityState::EXPANDABLE | (open ? AccessibilityState::EXPANDED : AccessibilityState::NONE),
+                                                  AccessibilityAction::CLICK));
             want_open = !open && ((button.hovered && !sibling_kept && state.active_id != id) || button.pressed || keyboard);
             position = {.x = window.outer.right - 1.0F, .y = row.top - window.padding.y};
             flip_right = window.outer.left + 1.0F;
@@ -353,6 +403,21 @@ UiFrame::end_menu() noexcept
         state.report(UiFrameProblem::END_WITHOUT_BEGIN, "end_menu", "end_menu() without a begin_menu() that returned true");
         return;
     }
+
+    // A menu of a bar, focused: MOVE_LEFT and MOVE_RIGHT its items did not use go to the bar's menus beside it.
+    const PopupState& popup = state.popups[level];
+    if (popup.bar_window != ContextState::NO_WINDOW && state.popup_level_of(state.focused_window) == level)
+    {
+        const bool left = state.navigation_triggered(UiNavigationCommand::MOVE_LEFT);
+        const bool right = state.navigation_triggered(UiNavigationCommand::MOVE_RIGHT);
+        if (left != right)
+        {
+            state.consume_navigation(left ? UiNavigationCommand::MOVE_LEFT : UiNavigationCommand::MOVE_RIGHT);
+            state.menu_bar_switch_window = popup.bar_window;
+            state.menu_bar_switch_from = popup.id;
+            state.menu_bar_switch_step = left ? -1 : 1;
+        }
+    }
     state.end_popup(*this);
 }
 
@@ -376,7 +441,18 @@ UiFrame::menu_item(std::string_view label,
     const bool in_bar = state.menu_bar.active && state.menu_bar.window == index;
     const std::size_t level = state.current_popup_level();
     const TextLayout text = state.layout_text(ContextState::display_text(label), 0, "menu_item");
-    const TextLayout shortcut_text = state.layout_text(shortcut, 0, "menu_item");
+    const KeyChordText chord = shortcut.empty() && state.next_item.has_shortcut ? key_chord_text(state.next_item.shortcut) : KeyChordText{};
+    const std::string_view shown = shortcut.empty() ? chord.view() : shortcut;
+    const TextLayout shortcut_text = state.layout_text(shown, 0, "menu_item");
+    const bool checkable = std::exchange(state.menu_item_checkable, false) || selected;
+    const auto describe = [&state, checkable, selected, shortcut]
+    {
+        const std::uint32_t record = state.describe_item(AccessibilityRole::MENU_ITEM,
+                                                         (checkable ? AccessibilityState::CHECKABLE : AccessibilityState::NONE)
+                                                             | (selected ? AccessibilityState::CHECKED : AccessibilityState::NONE),
+                                                         AccessibilityAction::CLICK);
+        state.accessible_text(record, 3, shortcut);
+    };
     const bool was_disabled = state.disabled;
     state.disabled = state.disabled || !enabled;
     DrawList& list = state.list_of(window);
@@ -388,6 +464,7 @@ UiFrame::menu_item(std::string_view label,
         const UiRectangle rectangle = bar_item(state, window, id, text.width, label, "menu_item");
         const ButtonState button = state.button_behavior(window, rectangle, id);
         pressed = button.pressed;
+        describe();
         if (button.hovered || selected)
         {
             list.add_rectangle_filled(rectangle, state.color(button.held ? StyleColor::HEADER_ACTIVE : button.hovered ? StyleColor::HEADER_HOVERED : StyleColor::HEADER));
@@ -404,6 +481,7 @@ UiFrame::menu_item(std::string_view label,
         {
             const ButtonState button = state.button_behavior(window, row.hit, id);
             pressed = button.pressed;
+            describe();
             if (const WindowState* sibling = child_menu(state, level); button.hovered && sibling != nullptr && !moving_toward(state, *sibling))
             {
                 state.close_popups_from(level);
@@ -437,6 +515,7 @@ UiFrame::menu_item(std::string_view label,
                    bool* selected,
                    bool enabled) noexcept -> bool
 {
+    m_state->menu_item_checkable = selected != nullptr;
     if (!menu_item(label, shortcut, selected != nullptr && *selected, enabled))
     {
         return false;

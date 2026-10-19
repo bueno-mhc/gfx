@@ -817,6 +817,62 @@ enum class AccessibilityLiveRegion : std::uint8_t
     ASSERTIVE, ///< Announced at once, interrupting.
 };
 
+/// @brief What an item is in, for assistive technologies. Bitmask.
+enum class AccessibilityState : std::uint16_t
+{
+    NONE       = 0,        ///< No bit.
+    DISABLED   = 1U << 0,  ///< Shown but not usable.
+    FOCUSABLE  = 1U << 1,  ///< The keyboard can focus it.
+    CHECKABLE  = 1U << 2,  ///< It has an on and an off state (a check box, a radio button, a menu item with a check mark).
+    CHECKED    = 1U << 3,  ///< On.
+    MIXED      = 1U << 4,  ///< Neither on nor off (a check box of several flags, some set).
+    SELECTABLE = 1U << 5,  ///< It can be selected (a selectable, a tab).
+    SELECTED   = 1U << 6,  ///< Selected.
+    EXPANDABLE = 1U << 7,  ///< It shows or hides content (a tree node, a collapsing header, a combo, a menu).
+    EXPANDED   = 1U << 8,  ///< Its content is shown.
+    MODAL      = 1U << 9,  ///< A modal window: nothing else can be used.
+    READ_ONLY  = 1U << 10, ///< A field that cannot be edited.
+    PROTECTED  = 1U << 11, ///< A password field (its value is not given).
+    MULTILINE  = 1U << 12, ///< A field of several lines.
+    BUSY       = 1U << 13, ///< An indeterminate progress bar.
+};
+
+/// @brief What assistive technologies can ask of an item (UiAccessibilityRequest). Bitmask.
+enum class AccessibilityAction : std::uint16_t
+{
+    NONE              = 0,       ///< No bit.
+    FOCUS             = 1U << 0, ///< Gives it the keyboard focus.
+    CLICK             = 1U << 1, ///< Its default action: presses a button, toggles a check box, selects a tab, opens a node.
+    INCREMENT         = 1U << 2, ///< Raises a slider's or drag's value by a step.
+    DECREMENT         = 1U << 3, ///< Lowers it by a step.
+    SET_VALUE         = 1U << 4, ///< Sets a field's text or a slider's value.
+    EXPAND            = 1U << 5, ///< Shows its content (tree nodes, collapsing headers).
+    COLLAPSE          = 1U << 6, ///< Hides it.
+    SHOW_CONTEXT_MENU = 1U << 7, ///< Opens its context menu.
+    SCROLL_INTO_VIEW  = 1U << 8, ///< Scrolls its window to show it.
+};
+
+/// @brief What the navigation keys and a gamepad ask of the UI: the keymap turns keys and buttons into these
+///        commands (UiInputSettings::keyboard_navigation for the keyboard, UiFrameInput::navigation for an input
+///        context). Bitmask.
+enum class UiNavigationCommand : std::uint16_t
+{
+    NONE            = 0,        ///< No bit.
+    ACTIVATE        = 1U << 0,  ///< Presses the focused item (Space, Return; a gamepad's bottom face button).
+    CANCEL          = 1U << 1,  ///< Closes the top popup, stops editing, leaves the menu bar, else drops the focus (Escape; right face button).
+    INPUT           = 1U << 2,  ///< Types the focused slider's or drag's value, edits the focused text field (Return; top face button).
+    MENU            = 1U << 3,  ///< Moves the focus to the menu bar and back (Alt pressed and released alone; left face button).
+    CONTEXT_MENU    = 1U << 4,  ///< Opens the focused item's context menu (the Application key, Shift+F10; Back).
+    MOVE_LEFT       = 1U << 5,  ///< Moves the focus to the nearest item on the left (Left; d-pad, left stick).
+    MOVE_RIGHT      = 1U << 6,  ///< ... on the right.
+    MOVE_UP         = 1U << 7,  ///< ... above.
+    MOVE_DOWN       = 1U << 8,  ///< ... below.
+    NEXT            = 1U << 9,  ///< Moves the focus to the next item in submission order, wrapping around (Tab).
+    PREVIOUS        = 1U << 10, ///< ... the previous one (Shift+Tab).
+    NEXT_WINDOW     = 1U << 11, ///< Focuses the next window (Control+Tab; right shoulder).
+    PREVIOUS_WINDOW = 1U << 12, ///< Focuses the previous window (Control+Shift+Tab; left shoulder).
+};
+
 // ----------------------------------------------------------------- immediate mode (U4)
 
 /// @brief Where a TextEditor moves its cursor (or erases to).
@@ -949,6 +1005,38 @@ inline constexpr std::string_view LAYOUT_FORMAT = "gfx.ui.layout";
 
 /// @brief The "version" member of a saved layout; load_layout() reads this version.
 inline constexpr std::uint32_t LAYOUT_FORMAT_VERSION = 1;
+
+/// @brief The accessibility node of the whole UI (UiAccessibilityTree::root): its windows are its children.
+inline constexpr std::uint64_t ACCESSIBILITY_ROOT_NODE = 1;
+
+/// @brief Default speed at which UiNavigationInput::scroll scrolls the focused window at full deflection, in UI
+///        units per second.
+inline constexpr float DEFAULT_NAVIGATION_SCROLL_SPEED = 600.0F;
+
+/// @brief Bytes of the text of a key chord (key_chord_text(): "Ctrl+Shift+PageDown").
+inline constexpr std::size_t MAXIMUM_KEY_CHORD_TEXT_SIZE = 40;
+
+/// @brief The name of the UI's navigation context in an input schema (gfx.ui.platform's ui_navigation_context()).
+inline constexpr std::string_view UI_NAVIGATION_CONTEXT = "ui_navigation";
+
+/// @brief The names of the UI's navigation actions in an input schema, one per bit of UiNavigationCommand in order.
+inline constexpr std::array<std::string_view, 13> UI_NAVIGATION_ACTIONS{
+    "ui_activate", "ui_cancel", "ui_input", "ui_menu", "ui_context_menu", "ui_move_left", "ui_move_right",
+    "ui_move_up", "ui_move_down", "ui_next", "ui_previous", "ui_next_window", "ui_previous_window",
+};
+
+/// @brief The name of the UI's two-dimensional scrolling action (UiNavigationInput::scroll).
+inline constexpr std::string_view UI_SCROLL_ACTION = "ui_scroll";
+
+/// @brief The name of the UI's two-dimensional moving action (a stick: its direction is a held MOVE_* command).
+inline constexpr std::string_view UI_MOVE_ACTION = "ui_move";
+
+/// @brief How far a stick bound to UI_MOVE_ACTION is pushed before it holds a move, in [0, 1].
+inline constexpr float UI_STICK_MOVE_THRESHOLD = 0.5F;
+
+/// @brief Time Alt is held at most, pressed and released alone, to move the focus to the menu bar through the
+///        UI's navigation context, in milliseconds.
+inline constexpr std::int64_t UI_MENU_TAP_MILLISECONDS = 400;
 
 /// @brief Issues a UiFrameReport holds; more set UiFrameProblem::ISSUES_DROPPED.
 inline constexpr std::size_t MAXIMUM_FRAME_ISSUES = 64;
@@ -1925,6 +2013,66 @@ struct EnumerationTraits<ui::AccessibilityLiveRegion>
 };
 
 template<>
+struct EnumerationTraits<ui::AccessibilityState>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::AccessibilityState::DISABLED, "DISABLED"},
+        EnumeratorName{ui::AccessibilityState::FOCUSABLE, "FOCUSABLE"},
+        EnumeratorName{ui::AccessibilityState::CHECKABLE, "CHECKABLE"},
+        EnumeratorName{ui::AccessibilityState::CHECKED, "CHECKED"},
+        EnumeratorName{ui::AccessibilityState::MIXED, "MIXED"},
+        EnumeratorName{ui::AccessibilityState::SELECTABLE, "SELECTABLE"},
+        EnumeratorName{ui::AccessibilityState::SELECTED, "SELECTED"},
+        EnumeratorName{ui::AccessibilityState::EXPANDABLE, "EXPANDABLE"},
+        EnumeratorName{ui::AccessibilityState::EXPANDED, "EXPANDED"},
+        EnumeratorName{ui::AccessibilityState::MODAL, "MODAL"},
+        EnumeratorName{ui::AccessibilityState::READ_ONLY, "READ_ONLY"},
+        EnumeratorName{ui::AccessibilityState::PROTECTED, "PROTECTED"},
+        EnumeratorName{ui::AccessibilityState::MULTILINE, "MULTILINE"},
+        EnumeratorName{ui::AccessibilityState::BUSY, "BUSY"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::AccessibilityAction>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::AccessibilityAction::FOCUS, "FOCUS"},
+        EnumeratorName{ui::AccessibilityAction::CLICK, "CLICK"},
+        EnumeratorName{ui::AccessibilityAction::INCREMENT, "INCREMENT"},
+        EnumeratorName{ui::AccessibilityAction::DECREMENT, "DECREMENT"},
+        EnumeratorName{ui::AccessibilityAction::SET_VALUE, "SET_VALUE"},
+        EnumeratorName{ui::AccessibilityAction::EXPAND, "EXPAND"},
+        EnumeratorName{ui::AccessibilityAction::COLLAPSE, "COLLAPSE"},
+        EnumeratorName{ui::AccessibilityAction::SHOW_CONTEXT_MENU, "SHOW_CONTEXT_MENU"},
+        EnumeratorName{ui::AccessibilityAction::SCROLL_INTO_VIEW, "SCROLL_INTO_VIEW"},
+    };
+};
+
+template<>
+struct EnumerationTraits<ui::UiNavigationCommand>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{ui::UiNavigationCommand::ACTIVATE, "ACTIVATE"},
+        EnumeratorName{ui::UiNavigationCommand::CANCEL, "CANCEL"},
+        EnumeratorName{ui::UiNavigationCommand::INPUT, "INPUT"},
+        EnumeratorName{ui::UiNavigationCommand::MENU, "MENU"},
+        EnumeratorName{ui::UiNavigationCommand::CONTEXT_MENU, "CONTEXT_MENU"},
+        EnumeratorName{ui::UiNavigationCommand::MOVE_LEFT, "MOVE_LEFT"},
+        EnumeratorName{ui::UiNavigationCommand::MOVE_RIGHT, "MOVE_RIGHT"},
+        EnumeratorName{ui::UiNavigationCommand::MOVE_UP, "MOVE_UP"},
+        EnumeratorName{ui::UiNavigationCommand::MOVE_DOWN, "MOVE_DOWN"},
+        EnumeratorName{ui::UiNavigationCommand::NEXT, "NEXT"},
+        EnumeratorName{ui::UiNavigationCommand::PREVIOUS, "PREVIOUS"},
+        EnumeratorName{ui::UiNavigationCommand::NEXT_WINDOW, "NEXT_WINDOW"},
+        EnumeratorName{ui::UiNavigationCommand::PREVIOUS_WINDOW, "PREVIOUS_WINDOW"},
+    };
+};
+
+template<>
 struct EnumerationTraits<ui::TextMotion>
 {
     static constexpr bool IS_BITMASK = false;
@@ -2002,6 +2150,11 @@ static_assert(verify<ui::DockNodeFlag>(), "EnumerationTraits<ui::DockNodeFlag>::
 static_assert(verify<ui::ShortcutFlag>(), "EnumerationTraits<ui::ShortcutFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AccessibilityRole>(), "EnumerationTraits<ui::AccessibilityRole>::NAMES is out of sync with the enumeration");
 static_assert(verify<ui::AccessibilityLiveRegion>(), "EnumerationTraits<ui::AccessibilityLiveRegion>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::AccessibilityState>(), "EnumerationTraits<ui::AccessibilityState>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::AccessibilityAction>(), "EnumerationTraits<ui::AccessibilityAction>::NAMES is out of sync with the enumeration");
+static_assert(verify<ui::UiNavigationCommand>(), "EnumerationTraits<ui::UiNavigationCommand>::NAMES is out of sync with the enumeration");
+static_assert(ui::UI_NAVIGATION_ACTIONS.size() == EnumerationTraits<ui::UiNavigationCommand>::NAMES.size(),
+              "UI_NAVIGATION_ACTIONS needs one action per UiNavigationCommand");
 static_assert(verify<ui::TextMotion>(), "EnumerationTraits<ui::TextMotion>::NAMES is out of sync with the enumeration");
 static_assert(ui::CHARACTER_SET_RANGES.size() == ENUMERATOR_COUNT<ui::CharacterSet>,
               "CHARACTER_SET_RANGES needs one range per CharacterSet");

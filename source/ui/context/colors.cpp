@@ -269,6 +269,7 @@ UiFrame::color_button(std::string_view id,
         return false;
     }
     const ButtonState button = state.button_behavior(*window, rectangle, identifier);
+    static_cast<void>(state.describe_item(AccessibilityRole::BUTTON, AccessibilityState::NONE, AccessibilityAction::CLICK, to_hexadecimal(color).view()));
 
     // The color (opaque without alpha; over a checkerboard where translucent, half of it with ALPHA_PREVIEW_HALF).
     DrawList& list = state.list_of(*window);

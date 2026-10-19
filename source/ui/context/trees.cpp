@@ -125,10 +125,12 @@ tree_node_behavior(ContextState& state,
     }
     state.item_size(window, {.x = arrow_offset + text.width + padding.x, .y = height}, padding.y);
     const bool shown = state.item_add(window, hit, id, true, operation, label);
+    std::uint32_t record = AccessibilityBuildState::NONE;
     if (shown)
     {
         // The mouse: a click toggles it (on the arrow at once; elsewhere when released over it), or only on the
-        // arrow, or a double click; the keyboard: Space or Return, Left closes, Right opens.
+        // arrow, or a double click; the keyboard: ACTIVATE, MOVE_LEFT closes, MOVE_RIGHT opens (the moves are used);
+        // assistive technologies: CLICK, EXPAND, COLLAPSE.
         const float arrow_left = row.left;
         const float arrow_right = position.x + font.size + padding.x * 2;
         const float press_x = state.active_id == id ? state.mouse[0].clicked_position.x : state.mouse_position.x;
@@ -138,14 +140,21 @@ tree_node_behavior(ContextState& state,
         if (!leaf)
         {
             const bool keyboard = state.keyboard_focused(window, id);
-            const bool keyboard_activated = keyboard && (state.presses(Key::SPACE) > 0 || state.presses(Key::RETURN) > 0 || state.presses(Key::KEYPAD_ENTER) > 0);
+            const bool keyboard_activated = (keyboard && state.navigation_pressed(UiNavigationCommand::ACTIVATE)) || state.item_activated(id);
             if (button.pressed)
             {
                 toggled = keyboard_activated || !has_any(flags, TreeNodeFlag::OPEN_ON_ARROW | TreeNodeFlag::OPEN_ON_DOUBLE_CLICK);
                 toggled = toggled || (has_any(flags, TreeNodeFlag::OPEN_ON_ARROW) && over_arrow);
             }
             toggled = toggled || (has_any(flags, TreeNodeFlag::OPEN_ON_DOUBLE_CLICK) && button.hovered && state.mouse[0].double_clicked);
-            toggled = toggled || (keyboard && open && state.presses(Key::LEFT) > 0) || (keyboard && !open && state.presses(Key::RIGHT) > 0);
+            const UiNavigationCommand side = open ? UiNavigationCommand::MOVE_LEFT : UiNavigationCommand::MOVE_RIGHT;
+            if (keyboard && state.navigation_triggered(side))
+            {
+                state.consume_navigation(side);
+                toggled = true;
+            }
+            toggled = toggled || (open && state.item_request(AccessibilityAction::COLLAPSE) != nullptr)
+                      || (!open && state.item_request(AccessibilityAction::EXPAND) != nullptr);
 
             // A dragged payload held over a closed node opens it.
             const bool payload_over = state.drag_drop.active && state.mouse_present && state.hovered_window == index
@@ -158,6 +167,13 @@ tree_node_behavior(ContextState& state,
                 state.mark_edited(id);
             }
         }
+        const bool header = has_any(flags, TreeNodeFlag::COLLAPSING_HEADER);
+        const AccessibilityState expansion = leaf ? AccessibilityState::NONE
+                                                  : AccessibilityState::EXPANDABLE | (open ? AccessibilityState::EXPANDED : AccessibilityState::NONE);
+        const AccessibilityAction actions = leaf ? AccessibilityAction::CLICK
+                                                 : AccessibilityAction::CLICK | (open ? AccessibilityAction::COLLAPSE : AccessibilityAction::EXPAND);
+        record = state.describe_item(header ? AccessibilityRole::BUTTON : AccessibilityRole::TREE_ITEM,
+                                     expansion | (has_any(flags, TreeNodeFlag::SELECTED) ? AccessibilityState::SELECTED : AccessibilityState::NONE), actions);
 
         // The frame (FRAMED) or the highlight (hovered, held, SELECTED), the arrow or bullet, the label.
         DrawList& list = state.list_of(window);
@@ -205,11 +221,12 @@ tree_node_behavior(ContextState& state,
         state.last_item.rectangle = hit;
     }
 
-    // Open: its children follow, indented under its identifier (also when it is clipped).
+    // Open: its children follow, indented under its identifier (also when it is clipped), and under its node.
     if (open && !has_any(flags, TreeNodeFlag::NO_TREE_PUSH_ON_OPEN))
     {
         frame.indent();
         state.id_stack.push_back(id);
+        state.accessible_push(record);
         try
         {
             state.tree_stack.push_back(index);
@@ -248,6 +265,7 @@ UiFrame::tree_push(std::string_view id) noexcept
     }
     indent();
     push_id(id);
+    state.accessible_push(AccessibilityBuildState::NONE);
     try
     {
         state.tree_stack.push_back(static_cast<std::uint32_t>(window - state.windows.data()));
@@ -269,6 +287,7 @@ UiFrame::tree_pop() noexcept
         return;
     }
     state.tree_stack.pop_back();
+    state.accessible_pop();
     unindent();
     pop_id();
 }

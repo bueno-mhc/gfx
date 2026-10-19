@@ -1,7 +1,7 @@
 // The immediate-mode UI (UiContext, UiFrame) driven by synthetic input: windows (fitting, moving, resizing,
 // collapsing, closing, z-order, scrolling, child regions), layout, widgets, identifiers, keyboard focus, item
 // queries, styles and themes, the frame report, published draw data (scale, order, leases on another thread)
-// and the declared widgets of later phases.
+// and the diagnostics window.
 #include <gtest/gtest.h>
 
 import std;
@@ -1137,23 +1137,6 @@ TEST(UiReportTest, TooManyIssuesAreCountedAsDropped)
     EXPECT_EQ(report.issues.size(), MAXIMUM_FRAME_ISSUES);
     EXPECT_EQ(report.dropped_issues, 9U);
     EXPECT_TRUE(has_any(report.problems, UiFrameProblem::ISSUES_DROPPED));
-}
-
-TEST(UiReportTest, WidgetsOfLaterPhasesReportOnceAndDoNothing)
-{
-    UiHarness ui;
-    std::array<bool, 3> results{true, true, true};
-    const UiFrameReport report = ui.frame([&](UiFrame& frame)
-    {
-        frame.begin_window("Later");
-        results[0] = frame.shortcut({.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL});
-        results[1] = frame.shortcut({.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL});
-        frame.announce("Saved");
-        frame.end_window();
-    });
-    EXPECT_EQ(results, (std::array{false, false, true}));
-    EXPECT_EQ(std::ranges::count_if(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "shortcut"; }), 1);
-    EXPECT_TRUE(std::ranges::any_of(report.issues, [](const UiFrameIssue& issue) { return issue.operation == "announce"; }));
 }
 
 TEST(UiReportTest, TheDiagnosticsWindowShowsThePreviousReport)

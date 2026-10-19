@@ -1,6 +1,7 @@
 // A cached layout allocates nothing, nor does the layout of a text that changes every frame (it reuses the storage
 // of an earlier one that holds it), nor a draw list refilled every frame, nor an immediate-mode UI after its first
-// frames: this executable counts every operator new while it lays texts out, fills lists and runs frames.
+// frames, nor its navigation, shortcuts and accessibility tree: this executable counts every operator new while it
+// lays texts out, fills lists and runs frames.
 #include <gtest/gtest.h>
 
 import std;
@@ -840,6 +841,140 @@ TEST(TextAllocationTest, DockedWindowsAllocateNothingWhileTheMouseMovesOverThem)
     EXPECT_EQ(g_allocations.load(), 0U);
     EXPECT_EQ(problems, 0U);
     EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+}
+
+TEST(TextAllocationTest, NavigationShortcutsAndTheAccessibilityTreeAllocateNothing)
+{
+    // A window of every kind of container and item, its accessibility tree built and compared every frame; the keys
+    // move the focus (arrows, Tab), shortcuts are routed and pressed, a gamepad navigates, an assistive technology
+    // clicks, announcements are made, a text changes every frame.
+    UiContext ui;
+    ui.load_font(FontAtlas::load(gfx::tests::text_atlases::allocation_latin), 16.0F);
+    ui.set_accessibility_enabled(true);
+    bool checked = false;
+    std::int32_t volume = 3;
+    std::string name = "name";
+    std::uint32_t saved = 0;
+    const auto build = [&](UiFrame& frame, std::uint32_t frame_number)
+    {
+        frame.set_next_window_position({.x = 20, .y = 20}, UiCondition::FIRST_USE_EVER);
+        frame.set_next_window_size({.x = 600, .y = 520}, UiCondition::FIRST_USE_EVER);
+        if (frame.begin_window("Accessible", UiWindowFlag::MENU_BAR))
+        {
+            if (frame.begin_menu_bar())
+            {
+                if (frame.begin_menu("File"))
+                {
+                    static_cast<void>(frame.menu_item("Open", "Ctrl+O"));
+                    frame.end_menu();
+                }
+                if (frame.begin_menu("Edit"))
+                {
+                    frame.end_menu();
+                }
+                frame.end_menu_bar();
+            }
+            frame.set_next_item_shortcut({.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL});
+            saved += frame.button("Save") ? 1U : 0U;
+            frame.same_line();
+            static_cast<void>(frame.checkbox("Checked", checked));
+            frame.slider("Volume", volume, 0, 10);
+            static_cast<void>(frame.input_text("Name", name));
+            frame.text("Frame {:03}", frame_number % 100);
+            frame.set_next_item_open(true, UiCondition::ONCE);
+            if (frame.tree_node("Folder"))
+            {
+                frame.text_unformatted("Leaf");
+                static_cast<void>(frame.button("Leaf button"));
+                frame.tree_pop();
+            }
+            if (frame.begin_tab_bar("tabs"))
+            {
+                if (frame.begin_tab_item("First"))
+                {
+                    static_cast<void>(frame.button("In the tab"));
+                    frame.end_tab_item();
+                }
+                if (frame.begin_tab_item("Second"))
+                {
+                    frame.end_tab_item();
+                }
+                frame.end_tab_bar();
+            }
+            if (frame.begin_table("table", 2, TableFlag::BORDERS))
+            {
+                frame.table_setup_column("Key");
+                frame.table_setup_column("Value");
+                frame.table_headers_row();
+                for (std::int32_t row = 0; row < 4; ++row)
+                {
+                    frame.table_next_row();
+                    frame.table_next_column();
+                    frame.text("Row {}", row);
+                    frame.table_next_column();
+                    frame.push_id(row);
+                    static_cast<void>(frame.button("Edit"));
+                    frame.pop_id();
+                }
+                frame.end_table();
+            }
+            static_cast<void>(frame.shortcut({.key = gfx::KeyCode::Z, .modifiers = gfx::KeyModifier::CONTROL}, ShortcutFlag::ROUTE_GLOBAL));
+            if (frame_number % 10 == 0)
+            {
+                frame.announce(frame_number % 20 == 0 ? "Saved" : "Loaded");
+            }
+        }
+        frame.end_window();
+    };
+
+    // Each frame a key of the cycle (the arrows, Tab, Control+S), a gamepad's move every few frames, a click of an
+    // assistive technology on Save every fifth frame.
+    constexpr std::array KEYS{gfx::Key::DOWN, gfx::Key::RIGHT, gfx::Key::TAB, gfx::Key::UP, gfx::Key::LEFT, gfx::Key::DOWN, gfx::Key::S};
+    AccessibilityNodeId save = 0;
+    std::array<UiKeyEvent, 2> keys{};
+    std::array<UiAccessibilityRequest, 1> requests{};
+    const auto run = [&](std::uint32_t frame_number)
+    {
+        const gfx::Key key = KEYS[frame_number % KEYS.size()];
+        const bool control = key == gfx::Key::S;
+        keys = {UiKeyEvent{.key = key, .key_code = control ? gfx::KeyCode::S : gfx::KeyCode::UNKNOWN, .down = true},
+                UiKeyEvent{.key = key, .key_code = control ? gfx::KeyCode::S : gfx::KeyCode::UNKNOWN, .down = false}};
+        requests[0] = {.action = AccessibilityAction::CLICK, .target = save};
+        const UiFrameInput input{.time = static_cast<double>(frame_number) / 60.0,
+                                 .display_size = {.x = 800, .y = 600},
+                                 .keys = keys,
+                                 .modifiers = control ? gfx::KeyModifier::CONTROL : gfx::KeyModifier::NONE,
+                                 .navigation = {.pressed = frame_number % 3 == 0 ? UiNavigationCommand::MOVE_DOWN : UiNavigationCommand::NONE},
+                                 .accessibility_requests = frame_number % 5 == 0 && save != 0 ? std::span<const UiAccessibilityRequest>{requests}
+                                                                                               : std::span<const UiAccessibilityRequest>{}};
+        build(ui.begin_frame(input), frame_number);
+        return ui.end_frame();
+    };
+    for (std::uint32_t frame_number = 0; frame_number < 100; ++frame_number)
+    {
+        const UiFrameReport report = run(frame_number);
+        EXPECT_TRUE(report.ok()) << frame_number << ": " << (report.issues.empty() ? std::string_view{} : report.issues.front().detail);
+        const UiAccessibilityTree tree = ui.accessibility_tree();
+        const auto found = std::ranges::find(tree.nodes, std::string_view{"Save"}, &UiAccessibilityNode::name);
+        save = found != tree.nodes.end() ? found->id : save;
+    }
+    ASSERT_NE(save, 0U);
+    const std::uint32_t saved_before = saved;
+    g_allocations = 0;
+    g_counting = true;
+    std::uint32_t problems = 0;
+    std::uint32_t changes = 0;
+    for (std::uint32_t frame_number = 100; frame_number < 200; ++frame_number)
+    {
+        problems += run(frame_number).ok() ? 0U : 1U;
+        changes += static_cast<std::uint32_t>(ui.accessibility_tree().changed.size());
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, 0U);
+    EXPECT_EQ(ui.last_report().statistics.allocations, 0U);
+    EXPECT_GT(saved, saved_before) << "the clicks and Control+S pressed Save";
+    EXPECT_GT(changes, 100U) << "the tree changed every frame (the counter's text)";
 }
 
 } // namespace

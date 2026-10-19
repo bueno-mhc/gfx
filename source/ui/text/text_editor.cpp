@@ -83,6 +83,14 @@ TextEditor::set_text(std::string_view text)
     ++m_revision;
 }
 
+void
+TextEditor::reset(const TextEditorDescription& description)
+{
+    m_description = description;
+    m_overwrite = false;
+    set_text({});
+}
+
 auto
 TextEditor::selected_text() const noexcept -> std::string_view
 {

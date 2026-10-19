@@ -39,6 +39,7 @@ target_sources(gfx_ui
             input/frame_input.cppm
             context/context.cppm
             context/types.cppm
+            context/accessibility_tree.cppm
             context/frame.cppm
             context/context_class.cppm
     PRIVATE
@@ -81,7 +82,10 @@ target_sources(gfx_ui
         context/docking.cpp
         context/persistence.cpp
         context/json_reader.cpp
-        context/later.cpp)
+        context/navigation.cpp
+        context/shortcuts.cpp
+        context/accessibility.cpp
+        context/reports.cpp)
 
 target_compile_features(gfx_ui PUBLIC cxx_std_23)
 target_link_libraries(gfx_ui
@@ -97,8 +101,10 @@ gfx_add_shaders(gfx_ui
 
 # ==============================================================================
 # gfx::ui_platform: the UI on the gfx platform library (`import gfx.ui.platform;`): frame input from a
-# window's events, and the platform services (clipboard, cursors, text input). Built with the platform
-# library; gfx::ui does not depend on it.
+# window's events, the platform services (clipboard, cursors, text input), the navigation context of the
+# input system, and the accessibility adapter (AccessKit on Windows, through the plain translation unit
+# accesskit_bridge.cpp: AccessKit's header includes <windows.h>). Built with the platform library; gfx::ui
+# does not depend on it.
 # ==============================================================================
 if(TARGET gfx_platform)
     add_library(gfx_ui_platform)
@@ -114,6 +120,12 @@ if(TARGET gfx_platform)
     target_link_libraries(gfx_ui_platform
         PUBLIC gfx::ui gfx::platform
         PRIVATE gfx::project_options)
+    if(WIN32)
+        gfx_require_accesskit()
+        target_sources(gfx_ui_platform PRIVATE platform/accesskit_bridge.cpp)
+        target_compile_definitions(gfx_ui_platform PRIVATE GFX_UI_ACCESSKIT=1)
+        target_link_libraries(gfx_ui_platform PRIVATE gfx::accesskit comctl32)
+    endif()
 endif()
 
 # ==============================================================================

@@ -3,9 +3,6 @@
 ///        window, layout call and widget of the frame is one of its member functions, until
 ///        UiContext::end_frame(). Every member is noexcept: misuse is reported in the frame's UiFrameReport.
 ///
-/// The widgets of later phases (shortcuts, accessibility) are declared already (the whole surface can be reviewed):
-/// until their phase, each does nothing, returns false (or an empty value) and reports
-/// UiFrameProblem::NOT_IMPLEMENTED.
 /// UiListClipper lays out only the visible items of long lists and tables.
 export module gfx.ui.context:frame;
 
@@ -1191,26 +1188,35 @@ public:
     /// @brief The node the current window is docked in (null when floating).
     [[nodiscard]] auto window_dock_node() noexcept -> DockNodeHandle;
 
-    // ===================================================================================== U9: mapping and accessibility
+    // ===================================================================================== shortcuts and accessibility
 
-    /// @brief Whether @p chord was pressed, routed as @p flags say (the focused window by default). Phase U9.
+    /// @brief Whether @p chord was pressed this frame (by the keyboard layout's symbols; modifiers exactly, either
+    ///        side), routed as @p flags say. Each chord goes, from the next frame, to the call that routed it best
+    ///        this frame: by default (ShortcutFlag::ROUTE_FOCUSED) a call from the window holding the keyboard focus,
+    ///        else from the nearest window it is in; ROUTE_GLOBAL from any window, after those; ROUTE_ACTIVE only
+    ///        while the last item is active; ROUTE_ALWAYS always, routing nothing. A text field being edited keeps the
+    ///        chords it types and edits with (Control+Z, the arrows...). Calls of one window share a chord's route.
+    ///        With ShortcutFlag::REPEAT, also true on key repeats.
     auto shortcut(KeyChord chord,
                   ShortcutFlag flags = ShortcutFlag::NONE) noexcept -> bool;
 
-    /// @brief Makes @p chord activate the next item. Phase U9.
+    /// @brief Makes @p chord activate the next item (a button presses, a check box toggles, a menu item is chosen) as
+    ///        shortcut() routes it for that item; menu items show it when given no shortcut text.
     void set_next_item_shortcut(KeyChord chord,
                                 ShortcutFlag flags = ShortcutFlag::NONE) noexcept;
 
-    /// @brief What assistive technologies announce for the next item (instead of its label). Phase U9.
+    /// @brief What assistive technologies call the next item (instead of its label).
     void set_next_item_accessible_label(std::string_view label) noexcept;
 
-    /// @brief A longer description of the next item for assistive technologies. Phase U9.
+    /// @brief A longer description of the next item for assistive technologies.
     void set_next_item_accessible_description(std::string_view description) noexcept;
 
-    /// @brief The role of the next item for assistive technologies (instead of the widget's). Phase U9.
+    /// @brief What the next item is for assistive technologies (instead of what its widget says).
     void set_next_item_accessibility_role(AccessibilityRole role) noexcept;
 
-    /// @brief Announces @p text to assistive technologies (a status message). Phase U9.
+    /// @brief Announces @p text to assistive technologies (a status message, read by screen readers when the user
+    ///        is idle, or at once with AccessibilityLiveRegion::ASSERTIVE). Nothing while accessibility is not
+    ///        enabled.
     void announce(std::string_view text,
                   AccessibilityLiveRegion live_region = AccessibilityLiveRegion::POLITE) noexcept;
 
@@ -1255,10 +1261,6 @@ private:
 
     /// Reports text that could not be formatted.
     void report_format_failure() noexcept;
-
-    /// Reports @p operation, a widget of a later phase, and returns false.
-    auto not_implemented(std::string_view operation,
-                         std::string_view detail) noexcept -> bool;
 
     /// The numeric widgets on any arithmetic type (the templates' cores).
     auto number_input(std::string_view label,

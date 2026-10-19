@@ -1505,6 +1505,8 @@ UiFrame::begin_table(std::string_view id,
         return false;
     }
     state.id_stack.push_back(table.id);
+    state.accessible_push(state.accessible_node((static_cast<AccessibilityNodeId>(host.id) << 32) | table.id, AccessibilityRole::TABLE, table.outer,
+                                                ContextState::display_text(id)));
 
     // Its rows in a child region of its rectangle when it scrolls; else in the window, from its top.
     if (table.scrolls)
@@ -1516,6 +1518,7 @@ UiFrame::begin_table(std::string_view id,
         {
             state.table_stack.pop_back();
             end_child();
+            state.accessible_pop();
             state.id_stack.resize(table.identifier_depth);
             return false;
         }
@@ -1622,6 +1625,7 @@ UiFrame::end_table() noexcept
 
     // The cells' window gets its own layout back; the table is an item of its host.
     state.table_stack.pop_back();
+    state.accessible_pop();
     window.table = ContextState::NO_WINDOW;
     window.indent = table.base_indent;
     window.item_width = table.base_item_width;
@@ -1870,6 +1874,7 @@ UiFrame::table_header(std::uint32_t index) noexcept
         return;
     }
     const ButtonState button = state.button_behavior(window, cell, id);
+    static_cast<void>(state.describe_item(AccessibilityRole::COLUMN_HEADER, AccessibilityState::NONE, can_sort ? AccessibilityAction::CLICK : AccessibilityAction::NONE));
 
     // Dragged past a neighbor: it moves there next frame (the mouse moving that way, so it does not swing back).
     const bool reorderable = has_any(table.flags, TableFlag::REORDERABLE) && !has_any(column.flags, TableColumnFlag::NO_REORDER);

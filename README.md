@@ -962,6 +962,86 @@ layout_to_save(const gfx::ui::UiContext& ui) -> std::string
   visibility, sort) as JSON; `load_layout()` restores them, all or nothing, reporting each problem of a document with
   its JSON path. Windows and tables with `NO_SAVED_SETTINGS` are left out.
 
+## UI: navigation, shortcuts and accessibility
+
+```cpp
+using namespace gfx::platform::literals;
+
+// The game's schema with the UI's navigation actions and context: the keyboard's keymap and a gamepad's
+// (A activates, B cancels, the d-pad and the left stick move the focus), rebindable and saved like the game's.
+constexpr auto SCHEMA = gfx::platform::make_input_schema(
+    gfx::ui::with_ui_navigation_actions(gfx::platform::actions(gfx::platform::action("jump"))),
+    gfx::platform::context("gameplay", gfx::platform::bind("jump"_action, gfx::Key::SPACE)),
+    gfx::ui::ui_navigation_context());
+
+constexpr gfx::ui::KeyChord SAVE{.key = gfx::KeyCode::S, .modifiers = gfx::KeyModifier::CONTROL};
+
+// Each frame: the navigation commands of the input system and the requests of screen readers go to the UI; the
+// accessibility tree goes back to them.
+void
+editor_frame(gfx::ui::UiContext& ui,
+             gfx::ui::UiPlatformInput& input,
+             gfx::ui::UiAccessibilityAdapter& accessibility,
+             const gfx::platform::InputFrame& actions,
+             double seconds,
+             Editor& editor)
+{
+    gfx::ui::UiFrameInput frame_input = input.frame_input(seconds);
+    frame_input.navigation = gfx::ui::navigation_input(actions);
+    frame_input.accessibility_requests = accessibility.take_requests();
+    gfx::ui::UiFrame& frame = ui.begin_frame(frame_input);
+    if (frame.begin_window("Editor", gfx::ui::UiWindowFlag::MENU_BAR))
+    {
+        if (frame.begin_menu_bar())
+        {
+            if (frame.begin_menu("File"))
+            {
+                // The menu item shows "Ctrl+S"; the chord chooses it while the menu is open.
+                frame.set_next_item_shortcut(SAVE);
+                editor.save_requested |= frame.menu_item("Save");
+                frame.end_menu();
+            }
+            frame.end_menu_bar();
+        }
+
+        // Control+S while this window (or a window in it) has the keyboard focus.
+        if (frame.shortcut(SAVE) || std::exchange(editor.save_requested, false))
+        {
+            editor.save();
+            frame.announce("Saved");
+        }
+        frame.set_next_item_accessible_description("Seconds between automatic saves");
+        frame.slider("Autosave", editor.autosave_seconds, 0, 600);
+    }
+    frame.end_window();
+    static_cast<void>(ui.end_frame());
+    accessibility.update(ui);
+}
+```
+
+- **Navigation**: the keyboard keymap of `UiInputSettings::keyboard_navigation` turns keys into
+  `UiNavigationCommand`s: the arrows move the focus to the nearest item in their direction (scored as Dear ImGui
+  scores it), Tab and Shift+Tab step through the focus order, Space and Return activate, Return types a slider's
+  value, Escape closes the top popup or drops the focus, Alt alone goes to the menu bar and back (Left and Right
+  then go between its menus), Control+Tab cycles the windows, the Application key or Shift+F10 opens the focused
+  item's context menu. Widgets that use an arrow keep it (a slider steps, a tree node opens or closes, a menu
+  opens). The window scrolls to show the item the focus moves to. `UiFrameInput::navigation` brings the same
+  commands from a gamepad (held moves repeat) and a stick's scrolling; `gfx.ui.platform` reads them from the
+  input system's `ui_navigation` context (or `ui_gamepad_navigation_context()` to keep the built-in keymap).
+- **Shortcuts**: `shortcut(chord, flags)` is true when its chord is pressed (by the layout's symbols, modifiers
+  exactly) and routed to the call: by default from the window holding the keyboard focus, else the nearest
+  window it is in; `ROUTE_GLOBAL` after those, `ROUTE_ACTIVE` for the active item, `ROUTE_ALWAYS` without routing.
+  A text field being edited keeps the chords it edits with. `set_next_item_shortcut()` activates an item;
+  `key_chord_text()` writes a chord as menus show it ("Ctrl+Shift+S").
+- **Accessibility**: `UiContext::set_accessibility_enabled()` builds an accessibility tree each frame — windows,
+  menu bars, tree nodes, tab bars, tables, lists and their items, with roles, names, values, numbers, states,
+  bounds and actions — compared with the tree before, so that providers send only the changes.
+  `set_next_item_accessible_label()`, `set_next_item_accessible_description()` and
+  `set_next_item_accessibility_role()` override what a widget says; `announce()` reads a status message out.
+  `UiAccessibilityAdapter` (gfx.ui.platform) gives the tree to screen readers through
+  [AccessKit](https://accesskit.dev) (Windows UI Automation for now), enabling it when one connects, and
+  their requests (focus, click, set a value, step, expand, open the context menu) back to the next frame.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -1005,7 +1085,8 @@ fetched. [RenderDoc](https://renderdoc.org/) itself is optional: when installed,
 The UI library's font pipeline is fetched at pinned versions, so that atlases are byte-for-byte
 reproducible: FreeType 2.14.3 (with Brotli 1.2.0 for WOFF2), msdfgen 1.13, msdf-atlas-gen 1.4,
 HarfBuzz 14.2.1, zstd 1.5.7 and stb_truetype 1.26; SheenBidi 3.0.0 and libunibreak 7.0 are used
-from the system when installed. With the tests on, configuring downloads the OFL test fonts (Noto
+from the system when installed. The UI's screen reader adapter links AccessKit's C bindings 0.23.1 on Windows,
+fetched as the AccessKit project publishes them (static libraries for each platform: a 67 MB archive). With the tests on, configuring downloads the OFL test fonts (Noto
 Sans, Arabic, Hebrew; Source Sans 3 as OpenType CFF, CFF2, WOFF and WOFF2) into `<build>/ui-test-fonts`,
 checked against their hashes.
 
@@ -1093,11 +1174,13 @@ gfx/
 │   │                       (swapchain_description_for(), WindowSwapchain)
 │   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
 │       │                 errors.cppm
-│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables), UiListClipper,
-│       │                 the frame report; internal partition :state, one implementation unit per area
+│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables, docking,
+│       │                 navigation, shortcuts), UiListClipper, the frame report, the accessibility tree;
+│       │                 internal partition :state, one implementation unit per area
 │       ├── style/        gfx.ui.style: Style, Theme, builtin_theme()
 │       ├── input/        gfx.ui.input: UiFrameInput, UiPlatformServices, UiNullPlatformServices
-│       ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices
+│       ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices, the
+│       │                 navigation context of the input system, UiAccessibilityAdapter (AccessKit)
 │       ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
 │       │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
 │       ├── draw/         gfx.ui.draw: DrawList, Color, Transform2D, TextStyle, UiDrawData;
