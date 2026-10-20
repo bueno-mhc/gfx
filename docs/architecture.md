@@ -1,24 +1,36 @@
 # gfx — architecture overview (the code as built)
 
-This document describes the code as it is built, on 2026-10-16: the libraries, their modules, the
+This document describes the code as it is built, on 2026-10-19: the libraries, their modules, the
 objects and how they relate, the paths a frame and an event take, the threads, and how everything is
-built and tested. The decisions behind the platform library, with the alternatives considered, are in
-[platform-design.md](platform-design.md); how to use the libraries is in the [README](../README.md).
+built and tested. The decisions behind the platform library and the UI library, with the alternatives
+considered, are in [platform-design.md](platform-design.md) and [ui-design.md](ui-design.md) (which also
+records what each phase built); the atlas file format is in [ui-atlas-format.md](ui-atlas-format.md); how
+to use the libraries is in the [README](../README.md).
 
 Diagrams are [Mermaid](https://mermaid.js.org/) (GitHub renders them). Arrows read "uses" or "depends
 on" unless a diagram says otherwise.
 
 ## 1. Libraries, modules and dependencies
 
-Four libraries, each a CMake target whose public API is a set of C++ modules. Backends are modules of a
-**private** file set: only the factory of their library imports them, so no consumer can name a
-backend type or include a native header through gfx.
+Six libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
+Backends are modules of a **private** file set: only the factory of their library imports them, so no
+consumer can name a backend type or include a native header through gfx.
 
 ```mermaid
 flowchart TB
     subgraph app["applications"]
         example["gfx_windowed_example<br/>examples/windowed"]
+        editor["gfx_ui_editor_example<br/>examples/ui_editor"]
         tests["tests/*"]
+    end
+    subgraph ui_platform_lib["gfx::ui_platform"]
+        ui_platform["gfx.ui.platform<br/>UiPlatformInput, UiWindowServices,<br/>navigation context, UiAccessibilityAdapter"]
+    end
+    subgraph ui_lib["gfx::ui"]
+        ui["gfx.ui<br/>atlas format, text, draw, renderer,<br/>style, input, context"]
+    end
+    subgraph tools_lib["gfx::ui_atlas_tools, gfx_ui_atlas_builder (build time)"]
+        atlas_tools["gfx.ui.atlas_tools<br/>decoders, SDF generators, packers, writer"]
     end
     subgraph bridge_lib["gfx::platform_graphics"]
         bridge["gfx.platform.graphics<br/>swapchain_description_for, WindowSwapchain"]
@@ -38,7 +50,18 @@ flowchart TB
         tables["gfx.core.slot_table, gfx.core.handle_table<br/>(backend utilities)"]
     end
     example --> bridge
+    example --> ui_platform
+    editor --> bridge
+    editor --> ui_platform
     tests --> bridge
+    tests --> ui_platform
+    ui_platform --> ui
+    ui_platform --> platform_module
+    ui --> gfx_module
+    atlas_tools --> ui
+    ui --> third_ui["HarfBuzz, SheenBidi, libunibreak, zstd,<br/>nlohmann/json (saved layouts)"]
+    ui_platform --> third_accesskit["AccessKit (Windows)"]
+    atlas_tools --> third_tools["FreeType, Brotli, msdfgen, msdf-atlas-gen,<br/>HarfBuzz subset, stb_truetype, zstd"]
     bridge --> gfx_module
     bridge --> platform_module
     gfx_module --> core
@@ -62,6 +85,9 @@ flowchart TB
 | graphics | `source/graphics/` | `gfx` = `gfx.enums`, `gfx.errors`, `gfx.handles`, `gfx.interface` (one partition per object or concept), `gfx.backend_factory`, `gfx.shader_tools` | `gfx` |
 | platform | `source/platform/` | `gfx.platform` = `gfx.platform.enums`, `.handles`, `.interface` (partitions), `.input` (partitions), `.backend_factory` | `gfx::platform` |
 | bridge | `source/platform_graphics/` | `gfx.platform.graphics` (re-exports `gfx` and `gfx.platform`) | `gfx::platform` |
+| ui | `source/ui/` | `gfx.ui` = `gfx.ui.enums`, `.handles`, `.errors`, `.atlas_format`, `.unicode`, `.text` (partitions), `.draw`, `.debug_overlay`, `.renderer`, `.style`, `.input`, `.context` (partitions) | `gfx::ui` |
+| ui platform | `source/ui/platform/` | `gfx.ui.platform` (imports `gfx.ui` and `gfx.platform`) | `gfx::ui` |
+| ui atlas tools | `source/ui/font/`, `source/ui/tools/` | `gfx.ui.atlas_tools` (partitions); the executable `gfx_ui_atlas_builder` that `gfx_add_ui_atlas()` runs | `gfx::ui` |
 
 Rules every library follows:
 
@@ -70,8 +96,8 @@ Rules every library follows:
   spelling of each enumerator. `to_string`, `from_string`, `std::formatter` and the bitmask operators
   come from `gfx.core.enums`, which also holds what several libraries share — among them the keyboard,
   mouse and cursor enumerations (`Key`, `KeyCode`, `KeyModifier`, `MouseButton`, `MouseButtonMask`,
-  `CursorShape`) of the platform and UI libraries (UI step U4; the platform library names them
-  `gfx::platform::Key` too). The UI library is described in docs/ui-design.md until its overview here (U10).
+  `CursorShape`) of the platform and UI libraries (the platform library names them `gfx::platform::Key`
+  too).
 - **Typed handles** (`Handle<Tag>`, 32 bits: 24-bit slot, 8-bit generation) name objects in commands
   and events; only backends can create them (`HandleKey`, constructible by `HandleIssuer` only).
 - **RAII**: objects are owned through `std::unique_ptr`; destruction releases (or defers the release
@@ -80,7 +106,8 @@ Rules every library follows:
   silently.
 - **Native headers stay out of module purviews**: C headers in global module fragments, and headers
   that need `<windows.h>` or that conflict with `import std` in plain translation units behind small
-  std-free headers (`vulkan_surface.hpp`, `glfw_native.hpp`, `json_reader.hpp`, `renderdoc_capture.hpp`).
+  std-free headers (`vulkan_surface.hpp`, `glfw_native.hpp`, `json_reader.hpp`, `renderdoc_capture.hpp`,
+  `freetype_library.hpp`, `accesskit_bridge.hpp`).
 
 ## 2. Core: what the libraries share
 
@@ -532,14 +559,287 @@ sequenceDiagram
     PE-->>WS: OPTIMAL / SUBOPTIMAL / OUT_OF_DATE (recreation noted)
 ```
 
-## 6. Build and tests
+## 6. UI library
+
+An immediate-mode UI over retained state (Dear ImGui's model: no widget objects, no callbacks) whose every
+glyph is drawn from a signed distance field. Text, drawing and rendering are usable on their own; the
+context adds windows, widgets, tables, docking, navigation, shortcuts and an accessibility tree.
+
+### 6.1 Modules
+
+```mermaid
+flowchart TB
+    context["gfx.ui.context<br/>:types, :frame (UiFrame), :context (UiContext),<br/>:accessibility_tree; internal :state;<br/>an implementation unit per area"]
+    ui_input["gfx.ui.input<br/>UiFrameInput, UiPlatformServices"]
+    ui_style["gfx.ui.style<br/>Style, Theme, builtin_theme()"]
+    draw["gfx.ui.draw<br/>DrawList, DrawListSplitter, Color,<br/>Transform2D, TextStyle, UiDrawData"]
+    overlay["gfx.ui.debug_overlay<br/>DebugOverlay"]
+    renderer["gfx.ui.renderer<br/>UiRenderer, shaders ui.vert / ui.frag"]
+    text["gfx.ui.text<br/>:font_atlas, :font_library, :text_layout,<br/>:boundaries, :text_editor; internal :engine"]
+    unicode["gfx.ui.unicode<br/>constexpr UTF-8"]
+    atlas_format["gfx.ui.atlas_format<br/>.uiatlas layout, AtlasView::parse (constexpr)"]
+    foundations["gfx.ui.enums, gfx.ui.handles, gfx.ui.errors"]
+    platform_adapter["gfx.ui.platform (gfx::ui_platform)"]
+    atlas_tools["gfx.ui.atlas_tools (gfx::ui_atlas_tools)"]
+    context --> ui_input
+    context --> ui_style
+    context --> draw
+    context --> text
+    ui_style --> draw
+    ui_input --> draw
+    overlay --> draw
+    renderer --> draw
+    renderer --> graphics["gfx (graphics)"]
+    draw --> text
+    text --> atlas_format
+    text --> unicode
+    atlas_format --> foundations
+    platform_adapter --> context
+    platform_adapter --> platform["gfx.platform"]
+    atlas_tools --> atlas_format
+```
+
+The context never imports the renderer or the graphics library: it produces `UiDrawData` (lists of vertices,
+indices and commands, in pixels), which `UiRenderer` or any other renderer draws. Errors are the core's
+(`UiCapabilityError` is `BackendCapabilityError`, messages start with `[gfx::ui::FONT]`, `[gfx::ui::WIDGETS]`, ...),
+and every enumeration and constant of the library is in `source/ui/enums.cppm`.
+
+### 6.2 Fonts: from a font file to a glyph on screen
 
 ```mermaid
 flowchart LR
-    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
-    configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), test helpers"]
-    modules --> targets["gfx_core, gfx, gfx_platform,<br/>gfx_platform_graphics, examples, tests"]
-    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, example runs"]
+    subgraph build["build time: gfx_ui_atlas_builder"]
+        direction TB
+        font["font file<br/>TTF, OTF (CFF, CFF2), TTC,<br/>WOFF, WOFF2, variable"] --> subset["hb-subset: the characters<br/>and their closure, .notdef,<br/>axes pinned (static instance)"]
+        subset --> outlines["glyph outlines<br/>(FreeType or stb_truetype)"]
+        outlines --> fields["SdfGenerator on worker threads:<br/>SDF, PSDF, MSDF, MTSDF (msdfgen)<br/>or the built-in SDF"]
+        fields --> pack["AtlasPacker: TIGHT or GRID pages"]
+        pack --> pairs["kerning and ligature pairs<br/>(every Latin, Greek and Cyrillic<br/>pair shaped with HarfBuzz)"]
+        pairs --> write["write_atlas(): sections,<br/>zstd pages, xxHash64"]
+    end
+    subgraph program["into the program"]
+        direction TB
+        file[".uiatlas file"] -- "EMBED: #embed in a<br/>generated module" --> bytes["constexpr std::array<br/>of bytes"]
+        bytes -- "AtlasView::parse(): every<br/>offset and size checked<br/>(also at compile time)" --> view["AtlasView"]
+    end
+    subgraph run["run time"]
+        direction TB
+        atlas["FontAtlas::load(): pages and<br/>shaping font decompressed once"] --> library["FontLibrary: atlases and fonts<br/>(atlas, fallbacks, size,<br/>language, shaping)"]
+        library --> layout["TextLayoutEngine::layout()"]
+        layout --> list["DrawList::add_text()"]
+        list --> gpu["UiRenderer: page uploaded<br/>on first use, the fragment<br/>shader evaluates the field"]
+    end
+    build --> program --> run
+```
+
+No glyph is rasterized at run time: an atlas is a few sections (descriptor, face metrics, glyphs, character
+map, kerning, ligatures, the subset font HarfBuzz shapes with, and the pixel pages) read in place. The same
+font and description give the same bytes on every machine, which a test checks.
+
+### 6.3 Text layout
+
+```mermaid
+flowchart LR
+    utf8["UTF-8 text, FontHandle,<br/>TextLayoutDescription"] --> hash{"cached?<br/>(text, font,<br/>description)"}
+    hash -- "yes" --> view["TextLayout view<br/>(valid until<br/>new_frame())"]
+    hash -- "no" --> miss
+    subgraph miss["a miss"]
+        direction TB
+        points["code points and their<br/>byte offsets"] --> fallback["an atlas per character:<br/>the first of the font's<br/>chain that has it"]
+        fallback --> bidi["paragraphs, bidi levels and<br/>script runs (SheenBidi; level 0<br/>at once without right-to-left text)"]
+        bidi --> shape["shaping per run: HarfBuzz,<br/>or the basic shaper (character<br/>map, ligatures, pair kerning)"]
+        shape --> breaks["line breaks and wrapping<br/>(libunibreak), alignment,<br/>visual runs per line"]
+        breaks --> entry["glyphs and lines,<br/>copied into a cache entry"]
+    end
+    miss --> view
+```
+
+The cache keeps the layouts of the frames before, so that a UI whose texts do not change lays nothing out;
+a text that changes every frame (a counter, a frame time) takes the storage of a layout no longer used, so
+that it allocates nothing either once texts of its length have been seen:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Probation: a miss takes a free entry
+    Probation --> Retained: found again in a later frame
+    Probation --> Probation: replaced by a miss<br/>(unused for 2 frames)
+    Retained --> Retained: found again
+    Retained --> Probation: replaced by a miss<br/>(unused for 30 frames, or the<br/>least recently used when full)
+```
+
+A miss is laid out in scratch storage first; then, of the oldest 16 replaceable entries of each list, the one
+whose storage holds the layout with the least to spare is replaced (storage grows only in powers of two). When
+every entry is in use this frame, the layout goes to an overflow entry and is reported (`CACHE_FULL`).
+`TextBoundaries` and `TextEditor` (graphemes, words, editing with undo) serve the text fields.
+
+### 6.4 Drawing and rendering
+
+`DrawList` records rectangles (rounded, bordered, gradients), circles, lines, polylines, polygons, images and
+laid-out text under transform and clip stacks, as 48-byte vertices, 32-bit indices and commands; a command
+changes only when the clip rectangle or the texture changes (shapes and glyphs share commands: the shader mode
+is per vertex). `UiRenderer` draws `UiDrawData` with one graphics pipeline on the bindless layout: `prepare()`
+uploads the atlas pages the data samples for the first time (before the pass), `record()` writes the frame's
+vertices and indices into its region of one persistently mapped buffer (a region per frame in flight), and per
+command sets the scissor and push constants (scale, translation, the buffer's bindless index, the texture and
+sampler indices) and draws; the vertex shader pulls its vertex from the buffer. Shapes are signed distances
+(edges one pixel wide at any scale), glyphs are their atlas's field (outline, shadow and glow included).
+
+### 6.5 The context and a frame
+
+```mermaid
+classDiagram
+    direction LR
+    class UiContext {
+        +begin_frame(UiFrameInput) UiFrame&
+        +end_frame() UiFrameReport
+        +draw_data() UiDrawData
+        +acquire_draw_data() UiDrawDataLease
+        +fonts() FontLibrary&
+        +save_layout() / load_layout()
+        +dock_builder()
+        +set_accessibility_enabled()
+        +accessibility_tree()
+    }
+    class UiFrame {
+        windows, child regions, layout
+        text, buttons, inputs, sliders, colors
+        trees, tabs, menus, popups, tooltips
+        tables, plots, drag and drop
+        dock spaces, shortcuts, focus
+    }
+    class ContextState {
+        windows (WindowState: draw lists, scroll, layout)
+        popups, tab bars, tables, menu bars, dock nodes
+        the item being edited, drag and drop
+        navigation, shortcut routes
+        accessibility tree being built, two finished
+        frame arena (counted)
+    }
+    class DrawDataSlot {
+        lists, one per window and list kind
+        UiDrawData
+        leases (atomic)
+    }
+    UiContext *-- ContextState : owns (pimpl)
+    UiContext ..> UiFrame : begin_frame() returns
+    UiFrame --> ContextState : reads and writes
+    ContextState *-- FontLibrary
+    ContextState *-- TextLayoutEngine
+    ContextState *-- "3" DrawDataSlot
+    UiContext ..> UiDrawDataLease : acquire_draw_data()
+    UiDrawDataLease --> DrawDataSlot : holds
+```
+
+```mermaid
+sequenceDiagram
+    participant App as application
+    participant C as UiContext
+    participant S as ContextState
+    App->>C: begin_frame(UiFrameInput)
+    C->>S: time, display, keys and mouse of the frame
+    C->>S: hover from last frame's rectangles (popups, then windows front to back)
+    C->>S: wheel, focus click, window moves, dock drops
+    C->>S: navigation commands, popups closed (click outside, Escape), focus steps
+    C-->>App: UiFrame
+    App->>S: windows and widgets (each item: identifier, rectangle, hover and press,<br/>focus scoring, accessibility record, drawing into its window's list)
+    App->>C: end_frame()
+    C->>S: close what was left open (reported), resolve the focus for the next frame
+    C->>S: shortcut routes for the next frame, the accessibility tree and its changes
+    C->>S: dock drop targets, docked windows' order
+    C->>S: publish: window lists swapped into a slot, in display order<br/>(windows, popups, tooltips over them)
+    C-->>App: UiFrameReport (problems, statistics, what the UI wants)
+```
+
+- **Nothing throws in a frame**: misuse is reported in the frame's report. After its first frames a frame
+  allocates nothing: containers keep their storage, the frame's scratch memory is an arena whose upstream
+  counts allocations, identifier maps grow only past half load.
+- **Windows** are found by their identifier (the name hashed with the identifier stack); their first frame is
+  measured, not drawn. Hover, clicks and the wheel use the rectangles of the frame before.
+- **Docking**: dock nodes (in slots with generations) are splits (side by side or stacked, with a ratio) or
+  leaves (windows in tab order, the selected one, central). A dock space roots a tree in a window or over the
+  display; a floating tree has a host window. Docked windows take their node's area, and their tabs are tab
+  bars drawn by the tree's layout; drag a window over a node to dock it (targets and a preview in an overlay
+  list), drag its tab away to tear it off. `save_layout()` and `load_layout()` write and read JSON (windows,
+  trees, tables' columns), all or nothing.
+
+### 6.6 Navigation, shortcuts and accessibility
+
+```mermaid
+flowchart TB
+    keys["keys (the built-in keymap)"] --> commands["UiNavigationCommand<br/>held, pressed, repeated"]
+    pad["InputFrame: the ui_navigation context<br/>(gamepad, rebindable)"] -- "navigation_input()" --> commands
+    commands --> widgets["widgets consume what they use<br/>(slider steps, tree nodes, menus)"]
+    commands --> steps["begin_navigation(): Tab steps,<br/>MENU, CANCEL"]
+    widgets --> scoring["each item scored against the<br/>focused one, in the direction asked"]
+    scoring --> resolve["end_frame(): the focus moves,<br/>the window scrolls to it"]
+    chords["key chords"] --> routes["shortcut routes: the focused window's<br/>chain first, then global ones;<br/>decided one frame ahead"]
+    routes --> widgets
+```
+
+```mermaid
+flowchart LR
+    subgraph frame["each frame (platform thread)"]
+        direction TB
+        records["widgets describe themselves:<br/>role, name, value, states,<br/>actions"] --> finish["finish: identifiers, children,<br/>changes against the tree before"]
+        finish --> tree["UiAccessibilityTree<br/>(nodes, changed, removed,<br/>focus, announcements)"]
+    end
+    subgraph adapter["UiAccessibilityAdapter (Windows)"]
+        direction TB
+        update["update(): the changed<br/>nodes"] --> bridge["accesskit_bridge.cpp<br/>(plain translation unit)"]
+        bridge --> accesskit["AccessKit Windows adapter"]
+        accesskit --> uia["UI Automation:<br/>screen readers"]
+    end
+    subgraph back["back to the UI"]
+        direction TB
+        requests["focus, click, set value, step,<br/>expand, menu: queued by the<br/>window procedure"] --> take["take_requests()"]
+        take --> next["UiFrameInput::<br/>accessibility_requests<br/>(the next frame)"]
+    end
+    frame --> adapter --> back
+```
+
+A node's identifier is its window's identifier and its item's (`window << 32 | item`); the adapter answers
+`WM_GETOBJECT` through a window subclass and sends AccessKit only the changed nodes.
+
+### 6.7 Threads: a render thread
+
+The context runs on one thread; `end_frame()` publishes into one of three slots, in turn (the slot published
+longest ago, else the other one not leased), and a `UiDrawDataLease` keeps a slot's lists untouched while
+another thread reads them. A window's lists trade their storage with the same lists of each slot, so what each
+storage holds does not depend on the threads' timing. The editor example:
+
+```mermaid
+sequenceDiagram
+    participant M as main thread (platform, input, UI)
+    participant C as UiContext
+    participant B as mailbox (one packet)
+    participant R as render thread
+    M->>M: poll_events(), InputSystem::update()
+    M->>C: begin_frame(), the editor's windows, end_frame()
+    C->>C: publish into the next free slot
+    M->>C: acquire_draw_data()
+    C-->>M: lease
+    M->>B: put(lease and a snapshot of the scene)<br/>(waits while the packet before is there)
+    B->>R: take()
+    R->>R: WindowSwapchain::acquire(), FrameTimeline::begin_frame()
+    R->>R: clear, the scene's squares
+    R->>R: UiRenderer begin_frame, prepare, record (geometry copied out)
+    R->>R: submit, present
+    R->>C: the packet goes: lease released
+```
+
+The main thread builds frame N + 1 while the render thread draws frame N. Only the render thread touches the
+swapchain; the main thread tells it to recreate (`requires_swapchain_recreation()` on the window's events,
+`WindowSwapchain::request_recreation()` on the render thread).
+
+## 7. Build and tests
+
+```mermaid
+flowchart TB
+    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
+    configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), gfx_add_ui_atlas(), test helpers"]
+    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, examples, tests"]
+    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, atlas tool runs, example runs"]
 ```
 
 | Suite | What it covers |
@@ -550,12 +850,15 @@ flowchart LR
 | `tests/platform` | the platform library through a fake platform: events, windows, the pump, watchers, threads, the input system (schemas, contexts, players, triggers, rebinding, saved bindings, `EventChannel`) |
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
 | `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, the UI renderer drawing into the window (with the UI library), resize, minimize, frame latency, unsupported settings |
-| `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, ...) and a check that no enumerator collides with a platform macro |
+| `tests/ui` | the atlas tools (every font format, decoder, generator and packer; reproducible bytes; the command-line tool), embedded atlases, text layout (bidi, fallbacks, shaping, breaking, the cache), the text editor, draw lists, the renderer on every GPU (shapes and text read back, text compared with the field evaluated on the CPU), the context under synthetic input (windows, widgets, tables, docking and layouts, navigation, shortcuts, the accessibility tree; drawn on every GPU), allocation counts (`operator new` replaced: none after the first frames), the platform adapter, a UI in visible windows, a UI Automation client reading the tree through AccessKit |
+| `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, UI misuse such as sliders over booleans, ...) and a check that no enumerator collides with a platform macro |
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
+| `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 
 Toolchain workarounds the build applies (each with a detector test): `--allow-multiple-definition`
 for template static locals `import std` emits twice; `<windows.h>`, glfw3native.h, nlohmann/json and
 Vulkan platform headers in plain translation units; handle-table lookups only in implementation units;
 brace-initialized members of classes declared in partitions; `STBI_NO_STDIO` before stb_image; no
-capturing lambdas in in-class constructors of classes declared across partitions. Details are in
-`.claude/CLAUDE.md` §6.
+capturing lambdas in in-class constructors of classes declared across partitions; FreeType, msdfgen and
+AccessKit behind std-free headers; no block-scope using-declarations of another module's enumerations in
+`consteval` functions of module interfaces. Details are in `.claude/CLAUDE.md` §6.

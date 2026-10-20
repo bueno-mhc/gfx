@@ -34,6 +34,12 @@ constexpr std::uint64_t PROBATION_FRAMES = 2;
 /// rather than growing a short one's.
 constexpr std::uint32_t FIT_CANDIDATES = 16;
 
+/// Frames after which a layout used in several frames, then no more, is replaceable: a text that stood still for a few
+/// frames and then changed leaves its entry in the retained list, whose storage a miss compares with the replaceable
+/// layouts' of the probation list (the oldest FIT_CANDIDATES of each) and which is replaced before a free entry is taken,
+/// rather than a short entry's or a free entry's storage grown.
+constexpr std::uint64_t RETAINED_FRAMES = 30;
+
 /// Whether @p code_point ends a paragraph (bidi class B, and the line separator).
 constexpr auto
 is_paragraph_separator(std::uint32_t code_point) noexcept -> bool
@@ -285,25 +291,32 @@ struct TextLayoutEngine::State
         entries[index].next_in_bucket = NO_ENTRY;
     }
 
-    /// An entry for a new layout of @p size: one whose layout was used in one frame only, PROBATION_FRAMES frames ago or
-    /// more (its storage is reused: of the oldest FIT_CANDIDATES, the one that holds the new layout with the least to
-    /// spare, else the oldest, whose storage grows), a free one, the least recently used one not used this frame, or
-    /// none (NO_ENTRY).
+    /// An entry for a new layout of @p size: of the replaceable ones (used in one frame only, PROBATION_FRAMES frames ago
+    /// or more, and used in several frames, RETAINED_FRAMES frames ago or more; the oldest FIT_CANDIDATES of each), the
+    /// one whose storage holds the new layout with the least to spare; else the oldest replaceable one (whose storage
+    /// grows), a free one, the least recently used one not used this frame, or none (NO_ENTRY).
     [[nodiscard]] auto acquire(const StorageSize& size) noexcept -> std::uint32_t
     {
-        // The replaceable layouts, from the oldest: the one whose storage holds the new layout with the least to spare.
+        // The replaceable layouts, from the oldest of each list: the one whose storage holds the new layout with the least
+        // to spare.
         std::uint32_t best = NO_ENTRY;
-        std::uint32_t candidate = probation.oldest;
-        for (std::uint32_t compared = 0; compared < FIT_CANDIDATES && candidate != NO_ENTRY && entries[candidate].frame + PROBATION_FRAMES <= frame;
-             ++compared)
+        const auto compare = [this, &size, &best](const EntryList& list,
+                                                  std::uint64_t unused_frames)
         {
-            const Entry& entry = entries[candidate];
-            if (entry.holds(size) && (best == NO_ENTRY || entry.storage_bytes() < entries[best].storage_bytes()))
+            std::uint32_t candidate = list.oldest;
+            for (std::uint32_t compared = 0; compared < FIT_CANDIDATES && candidate != NO_ENTRY && entries[candidate].frame + unused_frames <= frame;
+                 ++compared)
             {
-                best = candidate;
+                const Entry& entry = entries[candidate];
+                if (entry.holds(size) && (best == NO_ENTRY || entry.storage_bytes() < entries[best].storage_bytes()))
+                {
+                    best = candidate;
+                }
+                candidate = entry.newer;
             }
-            candidate = entry.newer;
-        }
+        };
+        compare(probation, PROBATION_FRAMES);
+        compare(retained, RETAINED_FRAMES);
         if (best != NO_ENTRY)
         {
             return evict(best);
@@ -311,6 +324,10 @@ struct TextLayoutEngine::State
         if (probation.oldest != NO_ENTRY && entries[probation.oldest].frame + PROBATION_FRAMES <= frame)
         {
             return evict(probation.oldest);
+        }
+        if (retained.oldest != NO_ENTRY && entries[retained.oldest].frame + RETAINED_FRAMES <= frame)
+        {
+            return evict(retained.oldest);
         }
         if (used < entries.size())
         {

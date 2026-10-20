@@ -13,7 +13,7 @@ to present frames.
 | graphics | `import gfx;` | the rendering abstraction and its backends ([below](#gfx)) |
 | platform | `import gfx.platform;` | windows, monitors, cursors, events, input devices, action mapping ([Platform library](#platform-library-windows-and-input)) |
 | bridge | `import gfx.platform.graphics;` | swapchains for platform windows ([Presenting](#presenting-to-a-window)) |
-| ui (in progress) | `import gfx.ui;` | immediate-mode UI over retained state, every text through SDF/MSDF atlases built at build time ([design](docs/ui-design.md)) |
+| ui | `import gfx.ui;` | immediate-mode UI over retained state (widgets, tables, docking, navigation, accessibility), every text through SDF/MSDF atlases built at build time ([design](docs/ui-design.md)) |
 
 > **Status:** the graphics interface is complete: objects, typed recording, bindless resources,
 > parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
@@ -24,11 +24,12 @@ to present frames.
 > (Win32, XCB, Cocoa and Web are reported as not built), and the [windowed example](#examples) runs on
 > both. The design and the decisions behind the platform library are in
 > [docs/platform-design.md](docs/platform-design.md); [docs/architecture.md](docs/architecture.md)
-> describes the code as built, with diagrams. The **UI library** is being built in phases
-> ([docs/ui-design.md](docs/ui-design.md)): its foundations, its [font atlases](#ui-font-atlases)
-> (any font format turned into SDF/MSDF atlases at build time, checked at compile time) and its
-> [text layout](#ui-text-layout) (bidi, fallback fonts, shaping, line breaking) are in place; rendering
-> and widgets arrive in the next phases.
+> describes the code as built, with diagrams. The **UI library** is complete
+> ([docs/ui-design.md](docs/ui-design.md)): [font atlases](#ui-font-atlases) (any font format turned into
+> SDF/MSDF atlases at build time, checked at compile time), [text layout](#ui-text-layout) (bidi, fallback
+> fonts, shaping, line breaking), [drawing](#ui-drawing), the [immediate-mode UI](#ui-immediate-mode) with
+> Dear ImGui's widgets, tables and docking, keyboard and gamepad navigation, shortcuts and an accessibility
+> tree for screen readers; the [UI editor example](#examples) draws it from a render thread.
 
 ```cpp
 import std;
@@ -643,9 +644,7 @@ const gfx::ui::UiFrameReport report = ui.end_frame();             // problems of
   `end_frame()` returns; `show_diagnostics_window()` shows the last one. After its first frames, a frame
   allocates nothing (a test counts `operator new`).
 - **Threads**: frames run on one thread; `acquire_draw_data()` gives any thread the last published draw data,
-  whose lists the context does not reuse while the lease lives (three sets of lists rotate).
-- **Later phases**: the widgets of the next phases (tables, plots, docking, shortcuts, accessibility) are
-  declared; until their phase each reports `UiFrameProblem::NOT_IMPLEMENTED` and returns false.
+  whose lists the context does not reuse while the lease lives ([below](#ui-a-render-thread)).
 
 ## UI: input widgets
 
@@ -1042,6 +1041,42 @@ editor_frame(gfx::ui::UiContext& ui,
   [AccessKit](https://accesskit.dev) (Windows UI Automation for now), enabling it when one connects, and
   their requests (focus, click, set a value, step, expand, open the context menu) back to the next frame.
 
+## UI: a render thread
+
+The thread that owns the platform builds UI frames; a render thread draws them. `end_frame()` publishes the
+frame's draw data into one of three slots, in turn, skipping a slot that a `UiDrawDataLease` still holds;
+`acquire_draw_data()` leases the slot just published, so the lists stay untouched while another thread reads
+them. The renderer copies them into the frame's geometry buffer, after which the lease can go.
+
+```cpp
+// What the main thread hands over for a frame: a lease on the UI's draw data (and whatever else the frame draws).
+struct FramePacket
+{
+    gfx::ui::UiDrawDataLease draw_data{};
+    bool recreate_swapchain = false;
+};
+
+// The main thread, each frame: the UI frame, then its draw data to the render thread.
+gfx::ui::UiFrame& frame = ui.begin_frame(input.frame_input(seconds));
+editor_frame(frame);
+static_cast<void>(ui.end_frame());
+mailbox.put(FramePacket{.draw_data = ui.acquire_draw_data(), .recreate_swapchain = recreate});
+
+// The render thread, each packet: the draw data into the image, read through the lease.
+const gfx::ui::UiDrawData& data = packet.draw_data.data();
+renderer.begin_frame(frame_number);
+renderer.prepare(recorder, data);                                 // before the pass: atlas pages
+{
+    gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
+    renderer.record(scope, data);                                 // the lists' geometry copied out
+}
+```
+
+The render thread owns its frame pacing (`FrameTimeline`, `FrameCommandPools`) and the swapchain's
+acquire, present and recreation; the main thread reads the window's events and only tells it to recreate
+(`requires_swapchain_recreation()` → `WindowSwapchain::request_recreation()`), because a `WindowSwapchain`
+is used by one thread at a time.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -1061,6 +1096,37 @@ the Vulkan validation layers (the exit code is then 1 if they report an error), 
 frame metrics from the start, and `--frames <count>` closes the window after that many frames. CTest
 runs it with `--frames 120 --metrics --validation` on every platform backend
 (`ctest --preset debug -L example`).
+
+`examples/ui_editor` is an editor-like UI over a scene of colored squares, drawn by a render thread
+([above](#ui-a-render-thread)) while the main thread builds the next frame. A main menu bar (File, Edit,
+View, Theme, Help, with shortcuts shown) sits over a dock space whose default layout docks a text panel on
+the left, an inspector on the right, the objects' table and the statistics at the bottom, and the scene in
+the middle. Tabs can be dragged out, redocked and saved as a layout. In it:
+
+- the **text panel**: a multiline text field whose text is drawn below at any size, rotated, outlined and
+  shadowed, all from one SDF atlas (Hebrew and Arabic come from two fallback atlases);
+- the **inspector**: the selected object's name, visibility, animation, size, position, velocity and color,
+  the scene's speed and background (a color wheel), with "(?)" tooltips;
+- the **objects' table**: sortable, resizable, reorderable and hideable columns, rows selected by a click,
+  a context menu per row;
+- the **statistics**: frame times (a plot and a progress bar), the UI's work (windows, items, draw lists,
+  vertices, the frame arena, the text layout cache), allocations, the screen reader;
+- **shortcuts** from any window (Control+N adds an object, Control+D duplicates it, Delete removes it,
+  Control+S and Control+O save and load the layout, Control+Q quits), keyboard and gamepad
+  **navigation**, the four built-in **themes**, and the **accessibility tree** for screen readers
+  (through UI Automation on Windows).
+
+```bash
+build/debug/examples/ui_editor/gfx_ui_editor_example.exe --backend sdl3 --layout editor_layout.json
+```
+
+`--backend`, `--device`, `--frames` and `--validation` work as for the windowed example; `--layout <file>`
+loads the layout from the file, and File > Save layout (Control+S) writes it there. `--sweep` moves a synthetic mouse along a path closed
+every 120 frames, over items, tooltips and table rows, with the time advancing 1/60 s per frame, so every
+run draws the same frames. `--check-allocations` counts `operator new` in the UI's frames and in its
+renderer after `--warm-up <frames>`, and prints the frames that allocated. CTest runs it on every platform
+backend with `--frames 600 --warm-up 360 --sweep --check-allocations --validation`: five cycles of the
+path, the last two without any allocation and without any validation error.
 
 ## Requirements (Windows)
 
@@ -1088,7 +1154,8 @@ HarfBuzz 14.2.1, zstd 1.5.7 and stb_truetype 1.26; SheenBidi 3.0.0 and libunibre
 from the system when installed. The UI's screen reader adapter links AccessKit's C bindings 0.23.1 on Windows,
 fetched as the AccessKit project publishes them (static libraries for each platform: a 67 MB archive). With the tests on, configuring downloads the OFL test fonts (Noto
 Sans, Arabic, Hebrew; Source Sans 3 as OpenType CFF, CFF2, WOFF and WOFF2) into `<build>/ui-test-fonts`,
-checked against their hashes.
+checked against their hashes. [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) lists every dependency,
+its version, its license and what of it ends up in a program.
 
 | CMake option | Default | Backend |
 |---|---|---|
@@ -1099,9 +1166,9 @@ checked against their hashes.
 | `GFX_PLATFORM_BACKEND_SDL3` | `ON` | SDL3 windowing and input (SDL 3.4 found, or 3.4.10 fetched and linked statically) |
 | `GFX_PLATFORM_BACKEND_GLFW` | `ON` | GLFW windowing and input (GLFW 3.4 found, or fetched and linked statically) |
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
-| `GFX_BUILD_UI` | `ON` | The UI library (in progress) |
+| `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
-| `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one needs the platform library and Vulkan) |
+| `GFX_BUILD_EXAMPLES` | `ON` | The examples (both need the platform library and Vulkan; the UI editor needs the UI library and its atlas tools) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
 ## Project layout
@@ -1120,9 +1187,12 @@ gfx/
 │   ├── GfxShaders.cmake                 gfx_add_shaders(): GLSL/HLSL to SPIR-V at build time
 │   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
 │   └── scripts/                         CMake scripts run by builds and tests (SPIR-V embedding, ...)
-├── docs/                 platform-design.md (windowing and input: decisions and plan),
-│                         architecture.md (the code as built, with diagrams)
+├── THIRD_PARTY_LICENSES.md  every dependency: version, license, what a program contains of it
+├── docs/                 architecture.md (the code as built, with diagrams), platform-design.md
+│                         (windowing and input: decisions and plan), ui-design.md (the UI: decisions,
+│                         phases, what each phase built), ui-atlas-format.md (the .uiatlas format)
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
+├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,
@@ -1172,8 +1242,7 @@ gfx/
 │   │   └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
 │   ├── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
 │   │                       (swapchain_description_for(), WindowSwapchain)
-│   └── ui/               the UI library (`import gfx.ui;`, in progress): enums.cppm, handles.cppm,
-│       │                 errors.cppm
+│   └── ui/               the UI library (`import gfx.ui;`): enums.cppm, handles.cppm, errors.cppm
 │       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables, docking,
 │       │                 navigation, shortcuts), UiListClipper, the frame report, the accessibility tree;
 │       │                 internal partition :state, one implementation unit per area
@@ -1259,6 +1328,8 @@ stops at its first failed assertion; select the test's frame in the call stack.
 | `DescriptorSet::update` | One thread at a time per set (bindless needs none) |
 | `TransientBufferAllocator::allocate`, `GpuProfiler::scope` | Thread-safe, lock-free; `begin_frame` must not run concurrently |
 | `Device::poll_shader_changes` | Once per frame, while no thread records |
+| `UiContext`, `UiFrame`, `UiRenderer` | One thread at a time (the context: the thread that builds frames) |
+| `UiContext::acquire_draw_data`, `UiDrawDataLease` | Any thread: the leased lists are not reused until the lease is released |
 
 ## Using gfx together with `<windows.h>`
 
@@ -1289,4 +1360,5 @@ import gfx;
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The dependencies, and the fonts the tests and examples build atlases from, have their own
+licenses: see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

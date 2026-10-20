@@ -352,6 +352,29 @@ Original hard requirements (from the user's initial specification):
   make_input_schema unused-lambda warning with no contexts. Gotchas: a new window takes the focus (tests focus the first on
   frame 2); AccessKit Invoke = FOCUS then CLICK in one frame; `native_handle().get_if<>()` dangles (copy the handle first);
   bash heredocs break on apostrophes in this shell (write scripts with the Write tool).
+- **UI sample and documentation (U10 as built, 2026-10-19)** — docs/ui-design.md §B "U10 as built" (5 deviations).
+  `examples/ui_editor/ui_editor_example.cpp` (+ CMakeLists: 3 atlases editor_latin/hebrew/arabic, MTSDF 32/4, explicit
+  code point ranges + REQUIRE_ALL_CHARACTERS, EMBED modules ui_editor.*_font): main thread = platform + InputSystem
+  (`make_input_schema(ui_navigation_actions(), ui_gamepad_navigation_context())`) + UiContext; `FramePacket{UiDrawDataLease,
+  background, squares, recreate_swapchain}` through a one-packet `Mailbox` to a render thread (FrameTimeline,
+  FrameCommandPools, WindowSwapchain acquire/present, `request_recreation()`, squares via clear_attachments, UiRenderer).
+  Editor: main menu bar with global shortcuts (Ctrl+N/D, Delete, Ctrl+S/O/Q), dock_builder default layout, text panel
+  (SDF preview rotated/outlined/shadowed), inspector, sortable objects table, statistics, About modal, accessibility
+  adapter. Options --sweep (Lissajous 1:3 every SWEEP_FRAMES 120, **simulated clock 1/60 s** incl. frame times shown),
+  --check-allocations (global operator new; `AllocationScope` thread_local flag; `counted_allocation()` noinline for gdb
+  breakpoints; prints the first 10 allocating frames), --warm-up (60), --layout. CTest `UiEditorExample.{SDL3,GLFW}`:
+  `--frames 600 --warm-up 360 --sweep --check-allocations --validation` (Debug allocates at frames 122, 124, 172, 292 then
+  never; deterministic). Library fixes found by it: text_layout.cpp **RETAINED_FRAMES 30** (stale retained entries are fit
+  candidates too — the oldest 16 of each list — and replaced before free entries; before, a text found again in a later
+  frame stayed retained for good and short entries grew); context.cpp publication **in turn** (slot published longest ago,
+  else the other) and **keyed storage** (`window_list_key()`: BACKGROUND/DOCK_OVERLAY/MODAL_DIM/FOREGROUND_LIST_KEY, then 2
+  per window) instead of the first free slot and position-based swaps. API: `UiFrameStatistics::text_layouts`. Docs:
+  README ("UI: a render thread", editor in Examples), THIRD_PARTY_LICENSES.md (new), architecture.md §6 UI library (9 new
+  diagrams; all 22 render in Mermaid 10.9.1 + 11.4.1: `style` is a reserved node id; long LR chains are unreadable —
+  use subgraphs with `direction TB` linked as wholes), U9 section mojibake repaired. Finding not fixed (task chip offered):
+  the Vulkan backend allocates std::vectors per copy/blit/resolve/clear_attachments/AS build (vulkan_commands.cpp).
+  Debugging allocations: gdb -batch with `break counted_allocation` + `commands bt 14; continue` (scratchpad
+  allocations.gdb, summarize_sites.py).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -691,8 +714,11 @@ gfx/
 │           GfxRuntimeDeployment, GfxDependencies (volk, VMA, SPIRV-Cross, glslang, RenderDoc header),
 │           GfxShaders (gfx_add_shaders), GfxTesting,
 │           scripts/{GfxCheckPlatformMacroCollisions, GfxEmbedSpirv}
-├── docs/   platform-design.md (windowing + input design, decisions, phases), architecture.md (as built, diagrams)
+├── THIRD_PARTY_LICENSES.md  every dependency + fonts (U10)
+├── docs/   platform-design.md (windowing + input design, decisions, phases), architecture.md (as built, diagrams;
+│           §6 UI library since U10), ui-design.md (UI decisions, phases, "Ux as built"), ui-atlas-format.md
 ├── examples/windowed/  gfx_windowed_example (P6)
+├── examples/ui_editor/ gfx_ui_editor_example (U10: render thread, docking editor, allocation check)
 ├── source/ CMakeLists.txt (add_subdirectory core, graphics)
 │   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
 │   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp
@@ -771,11 +797,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts) committed; **U9 (navigation: keymap, gamepad, directional moves, menu bar, window cycling; shortcuts with routing; accessibility tree with diffs; AccessKit provider; the input system's navigation context) done, awaiting validation** (§B "U9 as built", 12 deviations); U10 (sample `examples/ui_editor`, THIRD_PARTY_LICENSES.md, architecture overview) next. |
-| 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`); a headless sample (compute + readback) not yet |
-| 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) done, awaiting validation** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. |
+| 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`); a headless sample (compute + readback) not yet |
+| 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **801**, all passing in Debug and Release, 2026-10-19 (after U9: + 27 context tests (10 navigation,
+Test count at last report: **805**, all passing in Debug and Release, 2026-10-19 (after U10: + 1 context test (slots in turn),
++ 1 allocation test (retained layouts reused), + 2 example runs `UiEditorExample.{SDL3,GLFW}`; skips Debug 4, Release 19; run from
+PowerShell). Before U10: 801 (after U9: + 27 context tests (10 navigation,
 8 shortcut, 9 accessibility; − 1 later-phase test), + 1 allocation, + 3 navigation input, + 1 UI Automation client × 2 platform
 backends, + 1 compile-failure, + 1 defect detector; skips Debug 4, Release 19; run from PowerShell). Before U9: 767 (after U8:
 + 14 docking/layout tests, + 1 render × 2 GPUs, + 1 allocation, + 1 compile-failure). Before U8: 749 (after the

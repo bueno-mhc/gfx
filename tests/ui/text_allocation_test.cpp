@@ -241,6 +241,47 @@ TEST(TextAllocationTest, TextsOfMixedLengthsChangingEveryFrameAllocateNothingAft
     EXPECT_EQ(engine.statistics().misses, layouts) << "every text is new";
 }
 
+TEST(TextAllocationTest, TextsThatStandStillAndThenChangeLeaveTheirStorageToLaterTexts)
+{
+    // A long statistics line changes every frame but stands still every fourth frame (its layout, found again in a
+    // later frame, is retained), among short counters that are new every frame; the first two frames lay out many more
+    // counters (windows appearing), whose entries stay replaceable from then on, the oldest ones. The line's retained
+    // layouts, unused for a while, hold its later layouts. Without that, every pause would leave a long storage in the
+    // retained list for good and, the oldest replaceable entries being short, grow a counter's.
+    FontLibrary library;
+    const FontAtlasHandle atlas = library.add_atlas(FontAtlas::load(gfx::tests::text_atlases::allocation_latin));
+    const FontHandle font = library.add_font({.atlas = atlas});
+    TextLayoutEngine engine{library};
+    std::array<char, 96> buffer{};
+    std::uint32_t counters = 0;
+    TextLayoutProblem problems = TextLayoutProblem::NONE;
+    const auto lay_out = [&](std::uint32_t frame)
+    {
+        engine.new_frame();
+        problems |= engine.layout("Statistics", font).problems;
+        for (std::uint32_t counter = 0; counter < (frame < 2 ? 120U : 8U); ++counter)
+        {
+            problems |= engine.layout(format_into(buffer, "{}", 100000 + counters++), font).problems;
+        }
+        const std::uint32_t value = frame - frame / 4;
+        problems |= engine.layout(format_into(buffer, "UI: 9 windows, 63 items, {} vertices, {} indices", 4000 + value, 7000 + value * 2), font).problems;
+    };
+    for (std::uint32_t frame = 0; frame < 90; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_allocations = 0;
+    g_counting = true;
+    for (std::uint32_t frame = 90; frame < 390; ++frame)
+    {
+        lay_out(frame);
+    }
+    g_counting = false;
+    EXPECT_EQ(g_allocations.load(), 0U);
+    EXPECT_EQ(problems, TextLayoutProblem::NONE);
+    EXPECT_EQ(engine.statistics().misses, 1U + counters + 390U - 97U) << "the line is found again in the frames where it stands still";
+}
+
 TEST(TextAllocationTest, LayoutsMadeWhileTheCacheIsFullAllocateNothingAfterTheFirstFrames)
 {
     // Four new texts every frame in a cache of two entries: two replace the layouts of the frame before, two live

@@ -86,6 +86,7 @@ struct UiFrameStatistics
     std::uint32_t indices = 0;       ///< Indices published.
     std::size_t arena_bytes = 0;     ///< Frame arena memory used.
     std::uint32_t allocations = 0;   ///< Allocations made because a reserved capacity was exceeded.
+    TextLayoutStatistics text_layouts{}; ///< The text layout cache's totals since the context was made.
 };
 
 /// @brief What UiContext::end_frame() reports: the frame's problems (UiFrameProblem::NONE when it went well),

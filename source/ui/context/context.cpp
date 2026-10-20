@@ -66,6 +66,23 @@ contains(const UiRectangle& rectangle,
     return point.x >= rectangle.left && point.x < rectangle.right && point.y >= rectangle.top && point.y < rectangle.bottom;
 }
 
+// Keys of the lists of a draw data slot: the context's own lists, then two per window (its list, then its front list). A
+// published list trades its storage with the slot's list of the same key, so that a window's storage only ever holds
+// what that window draws (a tooltip never receives a large window's storage, nor a large window a tooltip's).
+constexpr std::size_t BACKGROUND_LIST_KEY = 0;
+constexpr std::size_t DOCK_OVERLAY_LIST_KEY = 1;
+constexpr std::size_t MODAL_DIM_LIST_KEY = 2;
+constexpr std::size_t FOREGROUND_LIST_KEY = 3;
+constexpr std::size_t WINDOW_LIST_KEYS = 4;
+
+/// The key of the list (@p front: the front list) of the window @p index in a draw data slot.
+constexpr auto
+window_list_key(std::size_t index,
+                bool front) noexcept -> std::size_t
+{
+    return WINDOW_LIST_KEYS + index * 2 + (front ? 1U : 0U);
+}
+
 /// Throws the InvalidUsageError of a context operation.
 [[noreturn]] void
 throw_context_error(std::string_view operation,
@@ -258,8 +275,8 @@ ContextState::ContextState(const UiContextDescription& context_description)
     drag_drop.data.reserve(limits.drag_drop_payload_bytes);
     for (DrawDataSlot& slot : slots)
     {
-        slot.lists.reserve(std::size_t{limits.windows} + 2);
-        slot.pointers.reserve(std::size_t{limits.windows} + 2);
+        slot.lists.reserve(window_list_key(limits.windows, false));
+        slot.pointers.reserve(window_list_key(limits.windows, false));
     }
     style = theme.style;
     colors = theme.colors;
@@ -1532,44 +1549,49 @@ UiContext::end_frame() noexcept -> UiFrameReport
         }
     }
 
-    // Publication into a slot that is neither the published one nor leased (waiting only when both others are).
+    // Publication into a slot that is neither the published one nor leased, in turn: the one published longest ago, else
+    // the other (waiting only when both are leased). Each slot then holds every third frame, whatever the timing of the
+    // threads that lease them, so that the storage the window lists receive back is the same from run to run.
     const std::uint32_t published = state.published.load();
+    const std::uint32_t oldest = published < 3 ? (published + 1) % 3 : 0U;
+    const std::uint32_t other = published < 3 ? (published + 2) % 3 : 1U;
     std::uint32_t target = 3;
     while (target == 3)
     {
-        for (std::uint32_t slot = 0; slot < state.slots.size(); ++slot)
+        if (state.slots[oldest].leases.load() == 0)
         {
-            if (slot != published && state.slots[slot].leases.load() == 0)
-            {
-                target = slot;
-                break;
-            }
+            target = oldest;
         }
-        if (target == 3)
+        else if (state.slots[other].leases.load() == 0)
         {
-            const std::uint32_t waited = published == 0 ? 1U : 0U;
-            state.slots[waited].leases.wait(state.slots[waited].leases.load());
+            target = other;
+        }
+        else
+        {
+            state.slots[oldest].leases.wait(state.slots[oldest].leases.load());
         }
     }
     state.update_dock_drop();
     state.arrange_docked_windows();
+    // The slot's lists: one per key (a list for each new window, once per slot), swapped with the lists drawn.
     DrawDataSlot& slot = state.slots[target];
-    std::size_t count = 0;
-    const auto publish = [&](DrawList& list)
+    if (const std::size_t keys = window_list_key(state.windows.size(), false); slot.lists.size() < keys)
+    {
+        state.allocations += keys > slot.lists.capacity() ? 1U : 0U;
+        slot.lists.resize(keys);
+    }
+    slot.pointers.clear();
+    const auto publish = [&slot](DrawList& list,
+                                 std::size_t key)
     {
         if (list.vertices().empty())
         {
             return;
         }
-        if (count == slot.lists.size())
-        {
-            state.allocations += slot.lists.size() == slot.lists.capacity() ? 1U : 0U;
-            slot.lists.emplace_back();
-        }
-        std::swap(slot.lists[count], list);
-        ++count;
+        std::swap(slot.lists[key], list);
+        slot.pointers.push_back(&slot.lists[key]);
     };
-    publish(state.background);
+    publish(state.background, BACKGROUND_LIST_KEY);
     std::uint32_t windows_drawn = 0;
     for (const std::uint32_t entry : state.publish_order)
     {
@@ -1580,17 +1602,17 @@ UiContext::end_frame() noexcept -> UiFrameReport
         {
             if (window.active && !window.hidden)
             {
-                publish(window.front_list);
+                publish(window.front_list, window_list_key(index, true));
             }
             continue;
         }
         windows_drawn += window.active ? 1U : 0U;
         if (window.active && !window.hidden && !window.popup && !window.tooltip)
         {
-            publish(window.draw_list);
+            publish(window.draw_list, window_list_key(index, false));
         }
     }
-    publish(state.dock_overlay);
+    publish(state.dock_overlay, DOCK_OVERLAY_LIST_KEY);
     const std::size_t modal = state.top_modal_level();
     for (std::size_t level = 0; level < state.popups.size(); ++level)
     {
@@ -1614,9 +1636,9 @@ UiContext::end_frame() noexcept -> UiFrameReport
                     {
                         state.report(UiFrameProblem::CAPACITY_EXCEEDED, "end_frame", "the modal's dimming could not be drawn");
                     }
-                    publish(state.modal_dim);
+                    publish(state.modal_dim, MODAL_DIM_LIST_KEY);
                 }
-                publish(window.draw_list);
+                publish(window.draw_list, window_list_key(popup.window, false));
             }
         }
     }
@@ -1626,19 +1648,17 @@ UiContext::end_frame() noexcept -> UiFrameReport
         WindowState& window = state.windows[index];
         if (window.active && !window.hidden && window.tooltip)
         {
-            publish(window.draw_list);
+            publish(window.draw_list, window_list_key(index, false));
         }
     }
-    publish(state.foreground);
-    slot.pointers.clear();
+    publish(state.foreground, FOREGROUND_LIST_KEY);
     UiFrameStatistics statistics{.windows = static_cast<std::uint32_t>(state.children_this_frame.size()) + windows_drawn, .items = state.items};
-    for (std::size_t list = 0; list < count; ++list)
+    for (const DrawList* list : slot.pointers)
     {
-        slot.pointers.push_back(&slot.lists[list]);
-        statistics.vertices += static_cast<std::uint32_t>(slot.lists[list].vertices().size());
-        statistics.indices += static_cast<std::uint32_t>(slot.lists[list].indices().size());
+        statistics.vertices += static_cast<std::uint32_t>(list->vertices().size());
+        statistics.indices += static_cast<std::uint32_t>(list->indices().size());
     }
-    statistics.draw_lists = static_cast<std::uint32_t>(count);
+    statistics.draw_lists = static_cast<std::uint32_t>(slot.pointers.size());
     slot.data = UiDrawData{.lists = slot.pointers,
                            .width = std::round(state.display_size.x * state.pixels_per_unit),
                            .height = std::round(state.display_size.y * state.pixels_per_unit),
@@ -1653,6 +1673,7 @@ UiContext::end_frame() noexcept -> UiFrameReport
     }
     statistics.allocations = state.allocations;
     statistics.arena_bytes = state.arena_used;
+    statistics.text_layouts = state.text.statistics();
     std::copy_n(state.issues.begin(), state.issue_count, state.report_issues.begin());
     state.report_value = UiFrameReport{.problems = state.problems,
                                        .issues = std::span{state.report_issues.data(), state.issue_count},

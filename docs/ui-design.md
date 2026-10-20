@@ -1,8 +1,8 @@
 # gfx ui: hybrid immediate/retained UI with an SDF/MSDF font pipeline — architecture, decisions and plan
 
-Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U8
-committed (with the text layout follow-ups after U6 and U7); U9 built, awaiting validation (§B, "U9 as built").** This
-document answers the
+Status: **approved 2026-10-17 with the answers of §D (audio out of scope, everything else as recommended); U0 to U9
+committed (with the text layout follow-ups after U6 and U7); U10 built, awaiting validation (§B, "U10 as built"): every
+phase of the plan is implemented.** This document answers the
 request "C++23 Commercial-Grade UI & Font System (SDF/MSDF)". It follows the platform design's form:
 §0 lists where the request meets the existing project (each with a recommendation and a question in §D),
 §A gives the architecture and decisions, §B the implementation plan, §C the API as proposed, §D the questions.
@@ -1220,9 +1220,9 @@ report, and your validation (you commit).
   focused item opens its `begin_popup_context_item()` under it (first item focused); with no item used,
   `begin_popup_context_window()`'s.
 - **Shortcuts** (Dear ImGui's routing, decided a frame ahead): each chord has a route (`UiContextLimits::shortcut_routes`
-  slots, open addressing, stale slots reused); each call scores its owner â€” ROUTE_ACTIVE: the item, while active; the
+  slots, open addressing, stale slots reused); each call scores its owner — ROUTE_ACTIVE: the item, while active; the
   default (ROUTE_FOCUSED): the window, 2 + its distance up from the window of the focused item (only windows on that
-  chain); ROUTE_GLOBAL: 1000 â€” the lowest score of a frame wins the chord for the next frame; ROUTE_ALWAYS routes nothing.
+  chain); ROUTE_GLOBAL: 1000 — the lowest score of a frame wins the chord for the next frame; ROUTE_ALWAYS routes nothing.
   It fires when pressed and its owner won. Chords match the layout's symbols (letters case-blind; named keys by their
   physical key) with exactly the chord's modifier groups (Shift, Control, Alt, Super, either side); REPEAT also on key
   repeats. A text field being edited keeps the chords it uses (no modifier or Shift; Control or Super with A, C, V, X, Y,
@@ -1236,7 +1236,7 @@ report, and your validation (you commit).
   combos' lists; child regions GROUP or LIST for list boxes, under where they are; dock hosts, dock spaces over the
   display and the main menu bar's window are none); menu bars (MENU_BAR), open tree nodes, tab bars (TAB_LIST, the
   selected tab's content a TAB_PANEL in it), tables (TABLE). Widgets describe themselves after `item_add()`
-  (`describe_item()`): role, label (or the accessible label given), description, value (fields' text â€” not passwords â€”,
+  (`describe_item()`): role, label (or the accessible label given), description, value (fields' text — not passwords —,
   sliders' and drags' formatted value with number, range and step, combos' choice, progress bars' overlay with their
   fraction), states (DISABLED, FOCUSABLE, CHECKABLE/CHECKED, SELECTABLE/SELECTED, EXPANDABLE/EXPANDED, MODAL, READ_ONLY,
   PROTECTED, MULTILINE, BUSY), actions (FOCUS, CLICK, INCREMENT/DECREMENT/SET_VALUE, EXPAND/COLLAPSE, SCROLL_INTO_VIEW),
@@ -1254,8 +1254,8 @@ report, and your validation (you commit).
   STATIC_TEXT node under the root with a new identifier per announcement.
 - **The input context** (gfx.ui.platform): `ui_navigation_actions()` / `with_ui_navigation_actions(actions)` (one button
   action per command, UI_NAVIGATION_ACTIONS, and the two-dimensional UI_SCROLL_ACTION and UI_MOVE_ACTION),
-  `ui_navigation_context(description)` (the keyboard's bindings â€” the built-in keymap's keys, Alt as a tap of
-  UI_MENU_TAP_MILLISECONDS â€” and a gamepad's: south ACTIVATE, east CANCEL, north INPUT, west MENU, back CONTEXT_MENU, the
+  `ui_navigation_context(description)` (the keyboard's bindings — the built-in keymap's keys, Alt as a tap of
+  UI_MENU_TAP_MILLISECONDS — and a gamepad's: south ACTIVATE, east CANCEL, north INPUT, west MENU, back CONTEXT_MENU, the
   d-pad the moves, the left stick UI_MOVE_ACTION, the shoulders the windows, the right stick UI_SCROLL_ACTION),
   `ui_gamepad_navigation_context()` (the gamepad's only), `UI_NAVIGATION_CONTEXT_DESCRIPTION` (priority 1000, consumes its
   inputs); `navigation_input(frame, player)`: actions held and just pressed, the left stick's larger axis past
@@ -1265,7 +1265,7 @@ report, and your validation (you commit).
   WM_KILLFOCUS its window focus state). The first WM_GETOBJECT of an assistive technology activates it: AccessKit is given
   the root alone, named after the window's title; `update(context)` then enables the context's tree, and from the next
   tree gives AccessKit every node (after an activation, or when a tree was skipped) or the changed ones, bounds in pixels
-  (UI units Ã— pixels per unit), the root named after the window; the events AccessKit queues are raised after.
+  (UI units × pixels per unit), the root named after the window; the events AccessKit queues are raised after.
   AccessKit's requests (any thread) are copied under a mutex; `take_requests()` hands them to the next frame. Elsewhere
   than Windows the constructor throws UiCapabilityError (ACCESSIBILITY). `gfx_require_accesskit()` fetches AccessKit's C
   bindings 0.23.1 (their prebuilt static libraries, 67 MB, SHA-256 pinned; linked with comctl32 and AccessKit's system
@@ -1318,7 +1318,7 @@ report, and your validation (you commit).
 - **Facts found**: a window appearing takes the focus (tests focus their first window on the second frame); AccessKit
   turns a UI Automation Invoke into a FOCUS request then a CLICK, often in one frame; the input system presses a button
   action from an axis by magnitude; GCC -O3 reports a bitmask command of no bit as an out-of-bounds index (guarded), and a
-  `get_if()` on the NativeWindowHandle `native_handle()` returns (a temporary) as a dangling pointer â€” a real bug of the
+  `get_if()` on the NativeWindowHandle `native_handle()` returns (a temporary) as a dangling pointer — a real bug of the
   first draft, fixed.
 - **Tests**: `gfx_ui_context_tests` +26: navigation_test.cpp (10: arrows to the nearest item, Tab order, a gamepad and
   held repeats, the keymap off, scrolling to the focus and with a stick, a slider using Left/Right, text fields and INPUT/
@@ -1332,6 +1332,89 @@ report, and your validation (you commit).
   navigation_input_test.cpp (3: the context's keys and gamepad, the gamepad-only context, a schema without the actions
   refused) and accessibility_platform_test.cpp (a UI Automation client on another thread finds the window's nodes and
   invokes Save, on SDL3 and GLFW). Compile-failure `UiNavigationContextsNeedTheirActions` and the defect detector.
+
+### U10 as built (2026-10-19)
+
+- **The sample** `examples/ui_editor` (`gfx_ui_editor_example`, built when the UI platform library and the atlas tool
+  are): an editor over a scene of colored squares. The main thread owns the platform, the input system (the UI's
+  gamepad navigation context) and the UI; each frame it builds the editor's windows, then hands a `FramePacket` (a
+  `UiDrawDataLease` on the frame's draw data, the scene's squares in pixels, the background, whether the window asked
+  for a new swapchain) through a one-packet mailbox to a render thread, and builds the next frame meanwhile. The render
+  thread owns the frame pacing (`FrameTimeline`, `FrameCommandPools`), the swapchain's acquire, present and recreation
+  (`WindowSwapchain::request_recreation()` when the packet says so: `requires_swapchain_recreation()` on the main
+  thread's events), clears the image and the squares (`clear_attachments`) and draws the UI (`UiRenderer` begin_frame,
+  prepare, record); the packet, and with it the lease, goes after the submission.
+- **The editor**: a main menu bar (File: save, load, reset the layout, quit; Edit: add, duplicate, remove an object;
+  View: show the windows, the diagnostics; Theme: the four built-in themes; Help: About, a modal), each item showing its
+  chord; the chords work from any window (global routes). A dock space over the display whose default layout
+  (`dock_builder()`) docks the text panel left (0.24), the inspector right (0.32), the objects' table and the statistics
+  as tabs at the bottom (0.34) and the scene in the middle; `--layout <file>` loads a saved layout instead and Save
+  writes it there. The **text panel**: a multiline field whose text is drawn in a preview at any size (12 to 200
+  units), rotated (or spinning) about its center, outlined and shadowed, from one 32-pixel MTSDF atlas of Noto Sans
+  with Noto Sans Hebrew and Arabic as fallbacks (bidi and shaping included). The **inspector**: the selected object's
+  name, visibility, animation, size, position, velocity and color (an editor with its picker), the scene's speed and
+  background (a hue wheel), "(?)" tooltips. The **objects' table**: sortable, resizable, reorderable, hideable columns,
+  scrolling, rows selected by a click, a context menu per row (duplicate, remove). The **statistics**: frame times (a
+  plot and a progress bar against a 60 Hz frame), the UI's work, the frame arena, the text layout cache, allocations
+  counted, whether a screen reader is connected. The **scene** window has no background: the squares show through
+  it. `UiAccessibilityAdapter` is made for the window (Windows), so screen readers read the editor.
+- **Options**: `--backend`, `--device`, `--frames`, `--validation` (as the windowed example), `--layout <file>`,
+  `--sweep` (a synthetic mouse on a Lissajous path, 1:3, closed every 120 frames: menus, items, tooltips, table rows,
+  the plot; the time advancing 1/60 s per frame), `--check-allocations` (`operator new` replaced; counted from
+  `begin_frame()` to `end_frame()`, the editor's own code in the frame included, and in `UiRenderer`'s calls on the
+  render thread, after `--warm-up <frames>`, default 60;
+  the frames that allocated are printed, the first ten; break on `counted_allocation()` in a debugger to see where;
+  exit code 1 if any). The end prints the frames built and presented, the measured time per frame, the validation
+  errors, the allocations and the text layout cache's totals.
+- **CTest** `UiEditorExample.SDL3` and `UiEditorExample.GLFW` (label `example`): `--frames 600 --warm-up 360 --sweep
+  --check-allocations --validation`. Every run draws the same frames: in Debug on this machine the UI allocates in frames
+  122, 124, 172 and 292 (the plot's tooltips first drawn, in the second cycle; a statistics line needing a larger text
+  entry, in the third) and never after; 0 validation errors on both GPUs (NVIDIA 5 ms per frame, Intel 30 ms with the
+  validation layers).
+- **Found by the sample and fixed in the library**:
+  1. **Retained text layouts were never reused** while single-frame layouts were replaceable: a text that changes every
+     frame but stands still now and then (a statistics line) is found again in a later frame and so retained; when it
+     changed, its entry stayed retained, and the next miss grew a short entry of the probation list instead (a trickle of
+     allocations that never stopped). `RETAINED_FRAMES` (30): a retained layout unused for that long is replaceable; a
+     miss compares the oldest 16 replaceable entries of **both** lists (the one whose storage holds it with the least to
+     spare), and a stale retained entry is taken before a free one. Test
+     `TextAllocationTest.TextsThatStandStillAndThenChangeLeaveTheirStorageToLaterTexts` (140 allocations without the
+     comparison, 0 with it).
+  2. **Draw data publication depended on the threads' timing**: `end_frame()` took the first slot by index that was
+     neither published nor leased, and swapped the window lists with the slot's lists **by position** in the published
+     order, so storage migrated between windows (a tooltip received a large window's storage and the other way round,
+     every storage growing to the largest list) and which storage held which content changed with the render thread's
+     timing. Now the slots are taken in turn (the one published longest ago, else the other one not leased) and each
+     list trades storage with the slot's list of its own **key** (the background, the dock overlay, the modal dimming,
+     the foreground, then two per window: its list and its front list). Test `UiDrawDataTest.FramesArePublishedInTurn`.
+- **API added**: `UiFrameStatistics::text_layouts` (the text layout cache's totals, `TextLayoutStatistics`).
+- **Documentation**: README (status, the library table, "UI: a render thread", the editor in Examples, the threading
+  table, the layout, the licenses), [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) (every dependency with its
+  version, SPDX license, copyright and where it ends up; AccessKit's bundled Rust crates; the toolchain's runtime DLLs;
+  the fonts and what the OFL asks of a program that embeds atlases; the FreeType credit; Dear ImGui acknowledged), and
+  [architecture.md](architecture.md) §6 "UI library" (modules, fonts from file to screen, text layout and the cache's
+  states, drawing and rendering, the context and a frame, docking, navigation, shortcuts and accessibility, a render
+  thread) with 9 new diagrams, the libraries diagram and the build and test tables updated; the 22 diagrams render with
+  Mermaid 10.9.1 and 11.4.1. Seven lines of "U9 as built" had their dashes and a multiplication sign double-encoded
+  (UTF-8 read as Windows-1252): repaired.
+- **Deviations from the plan, for your validation**:
+  1. **"N frames, zero allocations after warm-up"** is 600 frames with a warm-up of 360 (three cycles of the sweep) and
+     240 counted: the sweep reaches some content for the first time in its second and third cycles (above).
+  2. **A simulated clock in sweeps**: with `--sweep` the UI's time, the animation and the frame times shown advance
+     1/60 s per frame; the measured time is printed at the end. With the measured clock, tooltips' delays and the
+     lengths of the texts showing frame times depend on the machine's speed (and on a debugger), and so did the
+     allocations counted.
+  3. **What is counted**: the UI's frames and `UiRenderer` (begin_frame, prepare, record). The rest of the render
+     thread is not: the Vulkan backend allocates on each `clear_attachments`, copy, blit, resolve and acceleration
+     structure build it records (barriers reuse their storage). Proposed as a separate task (making those paths reuse
+     storage, with an allocation test).
+  4. **The scene is drawn with `clear_attachments`** (a colored rectangle per object), not with a pipeline of its own:
+     the sample is about the UI.
+  5. **The atlases' characters** are given as the blocks' assigned code points the fonts draw (Greek without the Coptic
+     letters, the Hebrew block without its unassigned points) with `REQUIRE_ALL_CHARACTERS`, rather than the named
+     blocks (whose unassigned points made the atlas tool warn on every build).
+- **Tests**: `gfx_ui_context_tests` +1 (`FramesArePublishedInTurn`), `gfx_ui_text_allocation_tests` +1, CTest
+  `UiEditorExample.SDL3` and `.GLFW`.
 
 ## C. The API as proposed (for validation, not final code)
 

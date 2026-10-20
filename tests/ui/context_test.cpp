@@ -1181,6 +1181,46 @@ TEST(UiDrawDataTest, DrawDataIsInPixelsWithTheUnitsScale)
     EXPECT_EQ(data.lists.back()->vertices().front().color, GREEN.packed()) << "the foreground last";
 }
 
+TEST(UiDrawDataTest, FramesArePublishedInTurn)
+{
+    // Without leases, each of the three slots holds every third frame; while one is leased, the frames alternate
+    // between the two others. (The windows' lists trade their storage with the lists of the slot they are published
+    // into: what each storage holds does not depend on when leases are released.)
+    UiHarness ui;
+    const auto body = [](UiFrame& frame)
+    {
+        place(frame, {.x = 10, .y = 10}, {.x = 200, .y = 100});
+        frame.begin_window("In turn");
+        frame.end_window();
+    };
+    ui.frame(body);
+    std::array<const DrawList* const*, 6> published{};
+    for (const DrawList* const*& slot : published)
+    {
+        ui.frame(body);
+        slot = ui.context().draw_data().lists.data();
+    }
+    EXPECT_NE(published[0], published[1]);
+    EXPECT_NE(published[1], published[2]);
+    EXPECT_NE(published[2], published[0]);
+    EXPECT_EQ(published[3], published[0]);
+    EXPECT_EQ(published[4], published[1]);
+    EXPECT_EQ(published[5], published[2]);
+
+    const UiDrawDataLease lease = ui.context().acquire_draw_data();
+    std::array<const DrawList* const*, 4> while_leased{};
+    for (const DrawList* const*& slot : while_leased)
+    {
+        ui.frame(body);
+        slot = ui.context().draw_data().lists.data();
+    }
+    EXPECT_EQ(lease.data().lists.data(), published[5]);
+    EXPECT_EQ(while_leased[0], published[3]);
+    EXPECT_EQ(while_leased[1], published[4]);
+    EXPECT_EQ(while_leased[2], published[3]);
+    EXPECT_EQ(while_leased[3], published[4]);
+}
+
 TEST(UiDrawDataTest, ARenderThreadReadsPublishedDataWhileFramesAreBuilt)
 {
     UiHarness ui;

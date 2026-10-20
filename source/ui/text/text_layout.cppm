@@ -88,9 +88,11 @@ struct CaretPosition
 /// @brief Capacities of a TextLayoutEngine.
 struct TextLayoutEngineDescription
 {
-    /// @brief Layouts kept. A new layout replaces one used in a single frame at least two frames ago (texts that change
-    ///        every frame reuse each other's storage: nothing is allocated for a text no longer than earlier ones), else
-    ///        takes a free entry, else replaces the least recently used layout not used this frame.
+    /// @brief Layouts kept. A new layout replaces one used in a single frame at least two frames ago, or one used in
+    ///        several frames and in none of the last 30 (a text that stood still, then changed), whose storage holds it
+    ///        (texts that change every frame reuse each other's storage: nothing is allocated for a text no longer than
+    ///        earlier ones); else the oldest of those, else takes a free entry, else replaces the least recently used
+    ///        layout not used this frame.
     std::uint32_t cache_capacity = 1024;
 };
 
