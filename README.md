@@ -1077,6 +1077,51 @@ acquire, present and recreation; the main thread reads the window's events and o
 (`requires_swapchain_recreation()` → `WindowSwapchain::request_recreation()`), because a `WindowSwapchain`
 is used by one thread at a time.
 
+## Camera
+
+`import gfx.camera;` (target `gfx::camera`) gives cameras that know nothing of a renderer, a window or an input
+system: the application says which clip conventions its renderer expects — depth range `[0, 1]` (Vulkan,
+Direct3D, Metal, WebGPU) or `[-1, 1]` (OpenGL), reversed depth, +Y up or down in normalized device
+coordinates — and gets view, projection and inverse matrices, a world-space frustum, culling and screen rays.
+The camera library depends on gfx::core and the physics foundations only (the build checks it).
+
+```cpp
+import std;
+import gfx.camera;
+
+using namespace gfx::camera;
+
+// A camera 8 units back and 3 up, looking at the origin: reversed depth and an infinite far plane, the usual
+// choice with a floating-point depth buffer.
+const std::unique_ptr<Camera> camera = create_camera(
+    {.projection = PerspectiveProjection{.vertical_field_of_view = 1.0F, .aspect_ratio = 16.0F / 9.0F,
+                                         .near_plane = 0.1F, .far_plane = INFINITE_FAR_PLANE},
+     .clip = {.reversed_depth = true},
+     .position = {.y = 3, .z = 8}});
+camera->look_at({});
+
+// Matrices for the renderer, culling, and picking under the mouse.
+const gfx::Matrix4 view_projection = camera->view_projection();
+const bool visible = camera->classify(Aabb::from_center({}, {.x = 1, .y = 1, .z = 1})) != FrustumIntersection::OUTSIDE;
+const Ray picking = camera->screen_to_world_ray({.x = 960, .y = 540}, {.width = 1920, .height = 1080});
+
+// A first-person controller, fed with values the application computes from its input.
+const std::unique_ptr<CameraController> walker = create_camera_controller(FirstPersonControllerDescription{.speed = 4});
+walker->update(*camera, {.movement = {.z = 1}, .look = {.x = 0.01F}, .seconds = 1.0F / 60});
+
+// The same functions at compile time, without a camera object: a map camera looking straight down.
+constexpr CameraDescription map{.projection = orthographic({.width = 100, .height = 100, .near_plane = 0, .far_plane = 200}),
+                                .position = {.y = 100},
+                                .orientation = gfx::Quaternion::from_axis_angle({.x = 1}, -std::numbers::pi_v<float> / 2)};
+static_assert(camera_frustum(map).contains({.x = 10, .z = -20}));
+```
+
+Conventions: right-handed world and view space, the camera looking along -Z with +Y up; column-major matrices
+of column vectors; unit quaternions for orientations (no Euler angles are kept, so the camera itself has no
+gimbal lock; `set_orientation_from()` and `yaw_pitch_roll()` convert). Screen points are pixels of a viewport,
+origin at its top-left corner. Controllers (free fly, first person, orbit) clamp pitch and distance; an
+application's own camera (off-axis stereo, jittered projections) derives from `Camera` and is constructed directly.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an

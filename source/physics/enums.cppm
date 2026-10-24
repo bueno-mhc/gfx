@@ -329,6 +329,72 @@ inline constexpr float GEOMETRIC_TOLERANCE = 1.0e-6F;
 
 } // namespace gfx::physics
 
+export namespace gfx::camera
+{
+
+// The bitmask operators and helpers of gfx, found by argument-dependent lookup for the bitmask
+// enumerations of this namespace too.
+using gfx::operator|;
+using gfx::operator&;
+using gfx::operator^;
+using gfx::operator~;
+using gfx::operator|=;
+using gfx::operator&=;
+using gfx::operator^=;
+using gfx::has_all;
+using gfx::has_any;
+using gfx::is_empty;
+using gfx::to_string;
+
+// =================================================================================================
+// Enumerations
+// =================================================================================================
+
+/// @brief A camera implementation: what create_camera() builds. Errors name it ("[gfx::camera::STANDARD] ...").
+enum class CameraBackendKind : std::uint8_t
+{
+    STANDARD, ///< The library's camera: symmetric perspective and orthographic projections, every clip convention.
+    CUSTOM,   ///< An application's camera (a class derived from Camera, constructed directly).
+};
+
+/// @brief The kind of a camera projection (the alternative a CameraProjection holds).
+enum class CameraProjectionKind : std::uint8_t
+{
+    PERSPECTIVE,  ///< Perspective: a vertical field of view and an aspect ratio.
+    ORTHOGRAPHIC, ///< Orthographic: the bounds of a box seen along -Z.
+};
+
+/// @brief A camera controller (the alternative a CameraControllerDescription holds).
+enum class CameraControllerKind : std::uint8_t
+{
+    FREE_FLY,     ///< Six degrees of freedom: turns about the camera's own axes, moves along them.
+    FIRST_PERSON, ///< Yaw about the world's up axis, clamped pitch, no roll; moves on the horizontal plane.
+    ORBIT,        ///< Turns around a target at a distance; zooms the distance, pans the target.
+};
+
+/// @brief Where +Y points in normalized device coordinates (what a projection matrix produces).
+enum class NormalizedDeviceYAxis : std::uint8_t
+{
+    UP,   ///< +Y up: Direct3D, Metal, WebGPU, OpenGL, Vulkan with a negative-height viewport.
+    DOWN, ///< +Y down: Vulkan with a positive-height viewport.
+};
+
+/// @brief The frame a rotation axis or a movement is given in.
+enum class ReferenceFrame : std::uint8_t
+{
+    WORLD, ///< World space.
+    LOCAL, ///< The camera's own axes: +X right, +Y up, -Z forward.
+};
+
+// =================================================================================================
+// Constants
+// =================================================================================================
+
+/// @brief A far plane at infinity (PerspectiveProjection::far_plane): the projection maps it to the far depth.
+inline constexpr float INFINITE_FAR_PLANE = std::numeric_limits<float>::infinity();
+
+} // namespace gfx::camera
+
 // =================================================================================================
 // Enumeration descriptions
 // =================================================================================================
@@ -680,6 +746,58 @@ struct EnumerationTraits<physics::LayerMask>
     };
 };
 
+template<>
+struct EnumerationTraits<camera::CameraBackendKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::string_view BACKEND_LIBRARY = "gfx::camera"; ///< Errors name these "gfx::camera::<NAME>".
+    static constexpr std::array NAMES{
+        EnumeratorName{camera::CameraBackendKind::STANDARD, "STANDARD"},
+        EnumeratorName{camera::CameraBackendKind::CUSTOM, "CUSTOM"},
+    };
+};
+
+template<>
+struct EnumerationTraits<camera::CameraProjectionKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{camera::CameraProjectionKind::PERSPECTIVE, "PERSPECTIVE"},
+        EnumeratorName{camera::CameraProjectionKind::ORTHOGRAPHIC, "ORTHOGRAPHIC"},
+    };
+};
+
+template<>
+struct EnumerationTraits<camera::CameraControllerKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{camera::CameraControllerKind::FREE_FLY, "FREE_FLY"},
+        EnumeratorName{camera::CameraControllerKind::FIRST_PERSON, "FIRST_PERSON"},
+        EnumeratorName{camera::CameraControllerKind::ORBIT, "ORBIT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<camera::NormalizedDeviceYAxis>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{camera::NormalizedDeviceYAxis::UP, "UP"},
+        EnumeratorName{camera::NormalizedDeviceYAxis::DOWN, "DOWN"},
+    };
+};
+
+template<>
+struct EnumerationTraits<camera::ReferenceFrame>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{camera::ReferenceFrame::WORLD, "WORLD"},
+        EnumeratorName{camera::ReferenceFrame::LOCAL, "LOCAL"},
+    };
+};
+
 } // namespace gfx
 
 namespace gfx::enumeration_verification
@@ -707,5 +825,10 @@ static_assert(verify<physics::PlaneSide>(), "EnumerationTraits<physics::PlaneSid
 static_assert(verify<physics::DepthRange>(), "EnumerationTraits<physics::DepthRange>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::AxisPlane>(), "EnumerationTraits<physics::AxisPlane>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::LayerMask>(), "EnumerationTraits<physics::LayerMask>::NAMES is out of sync with the enumeration");
+static_assert(verify<camera::CameraBackendKind>(), "EnumerationTraits<camera::CameraBackendKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<camera::CameraProjectionKind>(), "EnumerationTraits<camera::CameraProjectionKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<camera::CameraControllerKind>(), "EnumerationTraits<camera::CameraControllerKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<camera::NormalizedDeviceYAxis>(), "EnumerationTraits<camera::NormalizedDeviceYAxis>::NAMES is out of sync with the enumeration");
+static_assert(verify<camera::ReferenceFrame>(), "EnumerationTraits<camera::ReferenceFrame>::NAMES is out of sync with the enumeration");
 
 } // namespace gfx::enumeration_verification

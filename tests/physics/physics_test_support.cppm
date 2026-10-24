@@ -1,5 +1,5 @@
-// Helpers of the physics tests: handles as a world would issue them, projection matrices (the camera module comes
-// later), and a deterministic generator of floats.
+// Helpers of the physics and camera tests: handles as a world would issue them, projection matrices written out by hand
+// (references independent of the camera library), and a deterministic generator of floats.
 export module gfx.tests.physics_support;
 
 import std;
@@ -27,14 +27,14 @@ public:
 [[nodiscard]] constexpr auto
 perspective(float field_of_view,
             float aspect_ratio,
-            float near,
-            float far,
+            float near_plane,
+            float far_plane,
             physics::DepthRange depth = physics::DepthRange::ZERO_TO_ONE) -> Matrix4
 {
     const float focal = 1.0F / tangent(field_of_view * 0.5F);
     const bool zero_to_one = depth == physics::DepthRange::ZERO_TO_ONE;
-    const float depth_scale = zero_to_one ? far / (near - far) : (far + near) / (near - far);
-    const float depth_offset = zero_to_one ? near * far / (near - far) : 2.0F * near * far / (near - far);
+    const float depth_scale = zero_to_one ? far_plane / (near_plane - far_plane) : (far_plane + near_plane) / (near_plane - far_plane);
+    const float depth_offset = zero_to_one ? near_plane * far_plane / (near_plane - far_plane) : 2.0F * near_plane * far_plane / (near_plane - far_plane);
     return {.columns = {Vector4{.x = focal / aspect_ratio}, Vector4{.y = focal}, Vector4{.z = depth_scale, .w = -1}, Vector4{.z = depth_offset}}};
 }
 
@@ -42,10 +42,10 @@ perspective(float field_of_view,
 [[nodiscard]] constexpr auto
 reversed_infinite_perspective(float field_of_view,
                               float aspect_ratio,
-                              float near) -> Matrix4
+                              float near_plane) -> Matrix4
 {
     const float focal = 1.0F / tangent(field_of_view * 0.5F);
-    return {.columns = {Vector4{.x = focal / aspect_ratio}, Vector4{.y = focal}, Vector4{.z = 0, .w = -1}, Vector4{.z = near}}};
+    return {.columns = {Vector4{.x = focal / aspect_ratio}, Vector4{.y = focal}, Vector4{.z = 0, .w = -1}, Vector4{.z = near_plane}}};
 }
 
 /// "(x, y, z)", for assertion messages.

@@ -2,6 +2,7 @@
 # The physics and camera libraries (docs/physics-design.md), decoupled from graphics, platform and UI: they link
 # gfx::core only, which the build checks (gfx_require_decoupled) along with the modules their sources import.
 #   gfx::physics_common  enumerations, handles, errors, geometric primitives (`import gfx.physics.primitives;`)
+#   gfx::camera          cameras and camera controllers (`import gfx.camera;`), on gfx::physics_common only
 # ==============================================================================
 include(GfxDependencies)
 include(GfxDecoupling)
@@ -42,3 +43,37 @@ target_link_libraries(gfx_physics_common
     PUBLIC gfx::core
     PRIVATE gfx::project_options gfx::simde)
 gfx_require_decoupled(gfx_physics_common FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES})
+
+# ------------------------------------------------------------------------------ camera
+# The interface and the factory are public modules; the standard implementation is a module of a private file set,
+# imported only by the factory's implementation unit. The camera never depends on the physics interface.
+add_library(gfx_camera)
+add_library(gfx::camera ALIAS gfx_camera)
+target_sources(gfx_camera
+    PUBLIC
+        FILE_SET public_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            camera/camera.cppm
+            camera/camera_factory.cppm
+            camera/interface/interface.cppm
+            camera/interface/projection.cppm
+            camera/interface/camera_object.cppm
+            camera/interface/controller.cppm
+    PRIVATE
+        FILE_SET backend_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            camera/backends/standard/standard.cppm
+    PRIVATE
+        camera/interface/camera.cpp
+        camera/interface/controller.cpp
+        camera/backends/standard/standard_camera.cpp
+        camera/backends/standard/standard_controllers.cpp
+        camera/camera_factory.cpp)
+
+target_compile_features(gfx_camera PUBLIC cxx_std_23)
+target_link_libraries(gfx_camera
+    PUBLIC gfx::physics_common
+    PRIVATE gfx::project_options)
+gfx_require_decoupled(gfx_camera FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_physics)

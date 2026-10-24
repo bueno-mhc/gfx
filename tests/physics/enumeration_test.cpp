@@ -1,5 +1,5 @@
-// The enumerations and constants of the physics library: described, verified at compile time, spelled and parsed; the
-// layer mask is a 64-bit bitmask; the backends and subsystems name themselves in errors.
+// The enumerations and constants of the physics and camera libraries: described, verified at compile time, spelled and
+// parsed; the layer mask is a 64-bit bitmask; the backends and subsystems name themselves in errors.
 #include <gtest/gtest.h>
 
 import std;
@@ -46,6 +46,11 @@ TEST(PhysicsEnumerationsTest, EveryEnumeratorIsSpelledAndParsed)
     EXPECT_TRUE(round_trips<DepthRange>());
     EXPECT_TRUE(round_trips<AxisPlane>());
     EXPECT_TRUE(round_trips<LayerMask>());
+    EXPECT_TRUE(round_trips<gfx::camera::CameraBackendKind>());
+    EXPECT_TRUE(round_trips<gfx::camera::CameraProjectionKind>());
+    EXPECT_TRUE(round_trips<gfx::camera::CameraControllerKind>());
+    EXPECT_TRUE(round_trips<gfx::camera::NormalizedDeviceYAxis>());
+    EXPECT_TRUE(round_trips<gfx::camera::ReferenceFrame>());
     EXPECT_EQ(std::format("{}", PhysicsCapability::SOFT_BODIES), "SOFT_BODIES");
     EXPECT_FALSE(gfx::from_string<BodyKind>("FLOATING").has_value());
 }
@@ -73,6 +78,11 @@ TEST(PhysicsEnumerationsTest, BackendsAndSubsystemsNameTheirLibrary)
     EXPECT_EQ(std::format("{}", subsystem), "gfx::physics::NARROW_PHASE");
     EXPECT_TRUE(backend == PhysicsBackendKind::BOX3D);
     EXPECT_FALSE(backend == PhysicsBackendKind::REFERENCE);
+
+    // The camera's enumerations share the file, in their own namespace and library.
+    static_assert(gfx::BackendEnumeration<gfx::camera::CameraBackendKind>);
+    EXPECT_EQ(std::format("{}", gfx::BackendIdentity{gfx::camera::CameraBackendKind::STANDARD}), "gfx::camera::STANDARD");
+    static_assert(gfx::camera::INFINITE_FAR_PLANE == std::numeric_limits<float>::infinity());
 }
 
 TEST(PhysicsEnumerationsTest, ConstantsHoldTheirDocumentedValues)
