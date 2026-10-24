@@ -1409,10 +1409,9 @@ VulkanQueue::bind_sparse(const SparseBindDescription& description)
     // Refuse an order of timeline waits and signals that would deadlock the hardware queue.
     const bool ordered = validates(ValidationLevel::CREATION);
     const std::array timeline_batch{TimelineBatch{.waits = description.timeline_waits, .signals = description.timeline_signals}};
-    std::vector<UnresolvedWait> unresolved;
     if (ordered)
     {
-        unresolved = order_timeline_batches(timeline_batch, OPERATION);
+        order_timeline_batches(timeline_batch, OPERATION);
     }
 
     // The queue's progress is signaled with the binding.
@@ -1447,7 +1446,7 @@ VulkanQueue::bind_sparse(const SparseBindDescription& description)
     // What the binding promised, and the waits the hardware queue may now be stalled on.
     if (ordered)
     {
-        record_timeline_batches(timeline_batch, std::move(unresolved));
+        record_timeline_batches(timeline_batch);
     }
 }
 

@@ -1123,10 +1123,11 @@ build/debug/examples/ui_editor/gfx_ui_editor_example.exe --backend sdl3 --layout
 `--backend`, `--device`, `--frames` and `--validation` work as for the windowed example; `--layout <file>`
 loads the layout from the file, and File > Save layout (Control+S) writes it there. `--sweep` moves a synthetic mouse along a path closed
 every 120 frames, over items, tooltips and table rows, with the time advancing 1/60 s per frame, so every
-run draws the same frames. `--check-allocations` counts `operator new` in the UI's frames and in its
-renderer after `--warm-up <frames>`, and prints the frames that allocated. CTest runs it on every platform
-backend with `--frames 600 --warm-up 360 --sweep --check-allocations --validation`: five cycles of the
-path, the last two without any allocation and without any validation error.
+run draws the same frames. `--check-allocations` counts `operator new` in the UI's frames (main thread)
+and in the render thread's whole frames (acquisition, recording, submission, presentation) after
+`--warm-up <frames>`, and prints the frames that allocated, with each thread's count. CTest runs it on every
+platform backend with `--frames 600 --warm-up 360 --sweep --check-allocations --validation`: five cycles of
+the path, the last two without any allocation on either thread and without any validation error.
 
 ## Requirements (Windows)
 

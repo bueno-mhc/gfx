@@ -102,7 +102,6 @@ VulkanQueue::submit(std::span<const SubmitDescription> batches,
 
         // Refuse an order of timeline waits and signals that would deadlock the hardware queue.
         const bool ordered = validates(ValidationLevel::CREATION);
-        std::vector<UnresolvedWait> unresolved;
         if (ordered)
         {
             m_timeline_batches.clear();
@@ -110,7 +109,7 @@ VulkanQueue::submit(std::span<const SubmitDescription> batches,
             {
                 m_timeline_batches.push_back({.waits = batch.timeline_waits, .signals = batch.timeline_signals});
             }
-            unresolved = order_timeline_batches(m_timeline_batches, OPERATION);
+            order_timeline_batches(m_timeline_batches, OPERATION);
         }
 
         // Sizes first: the arrays must not reallocate while submit informations point into them.
@@ -248,7 +247,7 @@ VulkanQueue::submit(std::span<const SubmitDescription> batches,
         // What the submission promised, and the waits the hardware queue may now be stalled on.
         if (ordered)
         {
-            record_timeline_batches(m_timeline_batches, std::move(unresolved));
+            record_timeline_batches(m_timeline_batches);
         }
     }
 
@@ -256,9 +255,9 @@ VulkanQueue::submit(std::span<const SubmitDescription> batches,
     m_device.vulkan_deleter().collect();
 }
 
-auto
+void
 VulkanQueue::order_timeline_batches(std::span<const TimelineBatch> batches,
-                                    std::string_view operation) const -> std::vector<UnresolvedWait>
+                                    std::string_view operation)
 {
     HandleTables& handles = m_device.handles();
 
@@ -276,32 +275,34 @@ VulkanQueue::order_timeline_batches(std::span<const TimelineBatch> batches,
         return current >= value;
     };
 
-    // The waits the hardware queue may still be stalled on: those nothing satisfied or promised since.
-    std::vector<UnresolvedWait> unresolved;
+    // The waits the hardware queue may still be stalled on: those nothing satisfied or promised since. The
+    // arrays are the queue's (under the native queue's mutex): they only grow for more waits or signals
+    // than any earlier submission had.
+    m_unresolved_waits.clear();
+    m_promised_signals.clear();
     for (const UnresolvedWait& wait : m_native.unresolved_waits)
     {
         const SemaphoreRecord* record = handles.timeline_semaphores.find(wait.semaphore);
         if (record != nullptr && !reached(*record, wait.value))
         {
-            unresolved.push_back(wait);
+            m_unresolved_waits.push_back(wait);
         }
     }
 
     // The batches in submission order; in a batch, the waits come before the signals.
-    std::vector<TimelineSemaphoreSignal> promised;
     for (const TimelineBatch& batch : batches)
     {
         // A wait that neither an earlier batch nor anything before satisfies stalls the hardware queue.
         for (const TimelineSemaphoreWait& wait : batch.waits)
         {
             const SemaphoreRecord& record = handles.timeline_semaphores.get(wait.semaphore, operation);
-            const bool earlier_batch = std::ranges::any_of(promised, [&](const TimelineSemaphoreSignal& signal)
+            const bool earlier_batch = std::ranges::any_of(m_promised_signals, [&](const TimelineSemaphoreSignal& signal)
             {
                 return signal.semaphore == wait.semaphore && signal.value >= wait.value;
             });
             if (!earlier_batch && !reached(record, wait.value))
             {
-                unresolved.push_back({.semaphore = wait.semaphore, .value = wait.value, .queue = m_handle});
+                m_unresolved_waits.push_back({.semaphore = wait.semaphore, .value = wait.value, .queue = m_handle});
             }
         }
 
@@ -310,18 +311,17 @@ VulkanQueue::order_timeline_batches(std::span<const TimelineBatch> batches,
         // the wait. A greater value is accepted: a smaller one from elsewhere may release the wait first.
         for (const TimelineSemaphoreSignal& signal : batch.signals)
         {
-            const auto blocked = std::ranges::find_if(unresolved, [&](const UnresolvedWait& wait)
+            const auto blocked = std::ranges::find_if(m_unresolved_waits, [&](const UnresolvedWait& wait)
             {
                 return wait.semaphore == signal.semaphore && wait.value == signal.value;
             });
-            if (blocked != unresolved.end())
+            if (blocked != m_unresolved_waits.end())
             {
                 reject_deadlock(*blocked, signal, operation);
             }
-            promised.push_back(signal);
+            m_promised_signals.push_back(signal);
         }
     }
-    return unresolved;
 }
 
 void
@@ -371,8 +371,7 @@ VulkanQueue::reject_deadlock(const UnresolvedWait& wait,
 }
 
 void
-VulkanQueue::record_timeline_batches(std::span<const TimelineBatch> batches,
-                                     std::vector<UnresolvedWait> unresolved)
+VulkanQueue::record_timeline_batches(std::span<const TimelineBatch> batches)
 {
     // Raise every signaled semaphore's promised value.
     HandleTables& handles = m_device.handles();
@@ -389,8 +388,9 @@ VulkanQueue::record_timeline_batches(std::span<const TimelineBatch> batches,
         }
     }
 
-    // The waits the hardware queue may now be stalled on.
-    m_native.unresolved_waits = std::move(unresolved);
+    // The waits the hardware queue may now be stalled on, copied: the native queue's array keeps its storage
+    // (the gfx queues sharing a native queue each order their batches in their own arrays).
+    m_native.unresolved_waits.assign(m_unresolved_waits.begin(), m_unresolved_waits.end());
 }
 
 auto
@@ -536,8 +536,25 @@ VulkanDeleter::enqueue(std::move_only_function<void()> deletion)
         pending.submitted[index] = queues[index]->submitted.load(std::memory_order_acquire);
     }
     const std::scoped_lock lock{m_mutex};
-    m_pending.push_back(std::move(pending));
-    m_pending_count.store(m_pending.size(), std::memory_order_relaxed);
+
+    // A full ring grows (doubles), its entries moved in order: enqueues allocate only for more deletions
+    // pending at once than ever before.
+    const std::size_t count = m_pending_count.load(std::memory_order_relaxed);
+    if (count == m_pending.size())
+    {
+        static constexpr std::size_t INITIAL_CAPACITY = 64;
+        std::vector<Pending> grown(std::max(2 * m_pending.size(), INITIAL_CAPACITY));
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            grown[index] = std::move(m_pending[(m_oldest + index) % m_pending.size()]);
+        }
+        m_pending = std::move(grown);
+        m_oldest = 0;
+    }
+
+    // The newest entry follows the others.
+    m_pending[(m_oldest + count) % m_pending.size()] = std::move(pending);
+    m_pending_count.store(count + 1, std::memory_order_relaxed);
 }
 
 auto
@@ -553,34 +570,37 @@ VulkanDeleter::collect() -> std::size_t
                               "Deleter::collect", "vkGetSemaphoreCounterValue");
     }
 
-    // Entries are in enqueue order and their submission values only grow: stop at the first not ready.
-    std::vector<std::move_only_function<void()>> ready;
+    // The deletions pending now, oldest first: entries are in enqueue order and their submission values only
+    // grow, so stop at the first not ready. Those enqueued meanwhile wait for the next collection.
+    std::size_t count = 0;
+    for (std::size_t remaining = pending_count(); remaining > 0; --remaining)
     {
-        const std::scoped_lock lock{m_mutex};
-        while (!m_pending.empty())
+        std::move_only_function<void()> deletion;
         {
-            const Pending& front = m_pending.front();
+            const std::scoped_lock lock{m_mutex};
+            if (m_pending_count.load(std::memory_order_relaxed) == 0)
+            {
+                break;
+            }
+            const Pending& oldest = m_pending[m_oldest];
             bool done = true;
             for (std::size_t index = 0; index < queues.size(); ++index)
             {
-                done = done && completed[index] >= front.submitted[index];
+                done = done && completed[index] >= oldest.submitted[index];
             }
             if (!done)
             {
                 break;
             }
-            ready.push_back(std::move(m_pending.front().deletion));
-            m_pending.pop_front();
+            deletion = take_oldest();
         }
-        m_pending_count.store(m_pending.size(), std::memory_order_relaxed);
-    }
 
-    // Run them outside the lock: a deletion may enqueue another one.
-    for (std::move_only_function<void()>& deletion : ready)
-    {
+        // Each runs outside the lock (a deletion may enqueue another one), one at a time: nothing is set
+        // aside, so collecting allocates nothing.
         deletion();
+        ++count;
     }
-    return ready.size();
+    return count;
 }
 
 void
@@ -599,32 +619,40 @@ VulkanDeleter::pending_count() const noexcept -> std::size_t
 auto
 VulkanDeleter::run_all() noexcept -> std::size_t
 {
-    // Deletions may enqueue more deletions: repeat until none is left.
+    // Oldest first, outside the lock; deletions may enqueue more deletions: run until none is left.
     std::size_t count = 0;
     while (true)
     {
-        std::deque<Pending> pending;
+        std::move_only_function<void()> deletion;
         {
             const std::scoped_lock lock{m_mutex};
-            pending.swap(m_pending);
-            m_pending_count.store(0, std::memory_order_relaxed);
-        }
-        if (pending.empty())
-        {
-            return count;
-        }
-        for (Pending& entry : pending)
-        {
-            try
+            if (m_pending_count.load(std::memory_order_relaxed) == 0)
             {
-                entry.deletion();
+                return count;
             }
-            catch (...)
-            {
-            }
-            ++count;
+            deletion = take_oldest();
         }
+        try
+        {
+            deletion();
+        }
+        catch (...)
+        {
+        }
+        ++count;
     }
+}
+
+auto
+VulkanDeleter::take_oldest() noexcept -> std::move_only_function<void()>
+{
+    // The oldest entry leaves the ring; its slot is emptied (what the function captured is released by the
+    // caller) and kept for a later enqueue.
+    std::move_only_function<void()> deletion = std::move(m_pending[m_oldest].deletion);
+    m_pending[m_oldest].deletion = nullptr;
+    m_oldest = (m_oldest + 1) % m_pending.size();
+    m_pending_count.store(m_pending_count.load(std::memory_order_relaxed) - 1, std::memory_order_relaxed);
+    return deletion;
 }
 
 } // namespace gfx::vulkan

@@ -392,7 +392,7 @@ Original hard requirements (from the user's initial specification):
   release operator new's memory (-Wmismatched-new-delete, an error in Release; text_allocation_test happens not to hit it). Still
   allocating: breadcrumb labels (opt-in GPU_CRASH_MARKERS: the strings must outlive the GPU work); **Queue::submit at
   ≥ CREATION** (order_timeline_batches' local `unresolved`/`promised` vectors, VulkanDeleter::collect's `ready` vector) —
-  not addressed (follow-up offered). Worktree builds: the app's sync tool refused (pinned origin to confirm in Help →
+  fixed by the follow-up on submissions below. Worktree builds: the app's sync tool refused (pinned origin to confirm in Help →
   Troubleshooting); fast-forwarded with `git merge --ff-only main`; configured with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=
   <main>/build/debug/_deps/<name>-src` for the 16 downloaded dependencies (the deeper path makes 4 compile-failure tests warn
   about CMAKE_OBJECT_PATH_MAX; they still pass).
@@ -407,6 +407,34 @@ Original hard requirements (from the user's initial specification):
   Test `TextLayoutTest.CaretsAndHitTestsMatchTheStraightforwardSearch` (the old algorithms as references: every offset and
   x every 0.25 px on every line, Latin ligatures/marks, Hebrew points, Arabic vowels, bidi, wrapping, RTL paragraphs, basic
   shaper: exact equality). Not changed: the field draws every glyph of its text (clipped by the scissor), linear.
+- **Follow-up after U10: Vulkan submissions without allocations, the editor's render thread counted (2026-10-24)** —
+  vulkan_queue.cpp: `order_timeline_batches(batches, operation)` (now void, non-const) fills the VulkanQueue's
+  `m_unresolved_waits` / `m_promised_signals` (cleared + refilled under the native queue's mutex, like m_submits);
+  `record_timeline_batches(batches)` copies them into `NativeQueue::unresolved_waits` with `assign()` (storage kept; gfx
+  queues sharing a native queue each order in their own arrays); bind_sparse adapted. **VulkanDeleter**: `std::deque<Pending>`
+  (a node allocated every ~3 enqueues: Pending = 168 bytes) → ring `std::vector<Pending> m_pending` + `m_oldest` +
+  `m_pending_count` (written under m_mutex), doubling from 64 only when full; `take_oldest()` moves the function out and
+  empties the slot; `collect()` runs the ready deletions **one at a time** (lock, check the oldest against the completed
+  values read first, take, unlock, run) for at most the count pending when it started (deletions enqueued meanwhile — even by
+  a deletion — wait for the next collection, as before; no `ready` vector); `run_all()` the same without the check.
+  `std::move_only_function` stores a callable inline up to 24 bytes (3 pointers) when nothrow-movable — larger captures
+  allocate when the caller builds it (by design, not per frame). Checked and allocation-free per frame: present
+  (`m_present_waits`), FrameTimeline, FrameCommandPools, fences/timeline waits and signals, WindowSwapchain acquire/present.
+  Still allocating: `bind_sparse()` (its local wait/signal/bind vectors, per call), swapchain recreation (resize).
+  Test `VulkanSubmissionAllocationTest.SubmissionsWaitsAndDeletionsAllocateNothingAfterTheFirstFrames` (in
+  gfx_vulkan_allocation_tests; whole frames counted after 4 warm-up frames: FrameTimeline + FrameCommandPools on the graphics
+  and compute queues, compute fill → handoff semaphore + fence, 1..4 graphics batches chained by a timeline semaphore, the
+  first also waiting for a value the CPU signals after the submission (an unresolved wait), the last signaling the frame;
+  1..4 deletions per frame + 100 before the first frame (ring grows); checks values, the last frame's words and FIFO order of
+  every deletion): old code 440 allocations in 60 frames on both GPUs, new 0. CTest **`VulkanAllocation.FirstPhysicalDevice`**
+  runs the executable with GFX_TEST_PHYSICAL_DEVICE=0 (Intel here: one hardware queue shared by every queue type).
+  Example: `--check-allocations` counts the render thread's **whole frame** (take, acquire, begin_frame, record, submit,
+  present) into `g_render_allocations`, the UI into `g_ui_allocations` (`thread_local std::atomic<std::uint64_t>* t_counter`;
+  `AllocationScope{counter, counted}`; `counted_allocation(counter)` still the breakpoint); frame lines, statistics window
+  and last line show both. Old submission code: 240 on the render thread in 240 counted frames (1 per frame: `promised`
+  with the frame signal) + 15 in the UI (the statistics line changing); new: 0 + 0 with SDL3, GLFW, NVIDIA and Intel
+  (`--device 0`). Docs: README editor paragraph, ui-design.md §B "Follow-up after U10: the render thread's whole frame
+  counted". Worktree: the app's sync refused again after the user confirmed the origin; `git merge --ff-only main` worked.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -810,6 +838,9 @@ gfx/
   GTEST_BREAK_ON_FAILURE=1 stops gdb at the failing assertion (select the test frame in the call stack).
   The executable list in launch.json must be updated when a test executable is added.
 - PowerShell splits `-DNAME=a.b` arguments at the dot: quote `-D` arguments.
+- A fresh build may stop at a POST_BUILD test discovery ("Process terminated due to timeout", gtest's 5 s): executables
+  that enumerate GPUs when they start (gfx_ui_draw_tests) took 7 s the first time the idle NVIDIA GPU woke, 0.7 s after.
+  Building again fixes it (2026-10-24).
 - Since 2026-10-18 the linker's error output (ld's stderr) is lost in Claude's Bash shell: the defect detector
   `CompilationFailure.ImportStdDuplicatesStaticLocals` fails there with an empty diagnostic. Run ctest from PowerShell.
 - Vulkan tests: `build/debug/tests/graphics/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
@@ -830,12 +861,13 @@ gfx/
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
-| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free) committed; **fix after U10 (linear caret positions and hit tests: edited text fields no longer slow down) done, awaiting validation**. |
+| UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **808**, all passing in Debug and Release, 2026-10-24 (after the fix after U10: + 1 caret/hit-test
-reference test). Before: 807 (after the follow-up after U10: + 2
+Test count at last report: **810**, all passing in Debug and Release, 2026-10-24 (after the follow-up on submissions: + 1
+submission allocation test, + 1 CTest run of gfx_vulkan_allocation_tests on physical device 0; skips Debug 4, Release 19; run
+from PowerShell). Before: 808 (after the fix after U10: + 1 caret/hit-test reference test). Before: 807 (after the follow-up after U10: + 2
 gfx_vulkan_allocation_tests; skips Debug 4, Release 19; run from PowerShell). Before: 805 (after U10: + 1 context test (slots in turn),
 + 1 allocation test (retained layouts reused), + 2 example runs `UiEditorExample.{SDL3,GLFW}`; skips Debug 4, Release 19; run from
 PowerShell). Before U10: 801 (after U9: + 27 context tests (10 navigation,

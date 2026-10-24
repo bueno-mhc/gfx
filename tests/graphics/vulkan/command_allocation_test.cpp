@@ -1,7 +1,8 @@
-// Recording commands allocates nothing once a command buffer's reused storage has grown: this executable counts every
+// Recording and submitting commands allocates nothing once the reused storage has grown: this executable counts every
 // operator new while frames of barriers, attachment clears, resolves, image and buffer copies, blits, debug labels,
 // acceleration structure builds and property queries are recorded on a real GPU (GFX_TEST_PHYSICAL_DEVICE selects it),
-// after warm-up frames that record the largest commands.
+// and while whole frames are recorded, submitted to two queues with timeline waits and signals and a fence, waited for and
+// their deletions collected, after warm-up frames that record and submit the largest work.
 #include "vulkan_test.hpp"
 
 namespace
@@ -95,6 +96,21 @@ constexpr GlobalMemoryBarrier AFTER_BUILD{
     .destination_access = MemoryAccess::ACCELERATION_STRUCTURE_READ | MemoryAccess::ACCELERATION_STRUCTURE_WRITE,
 };
 
+/// @brief Frames the CPU records ahead of the GPU in the submission test.
+constexpr std::uint32_t FRAMES_IN_FLIGHT = 2;
+
+/// @brief Deletions enqueued before the submission test's first frame: more than the deleter first holds, so that its
+///        storage grows before the counted frames.
+constexpr std::uint32_t EARLY_DELETIONS = 100;
+
+/// @brief Orders a frame's fills after those of earlier frames (they write the same words).
+constexpr GlobalMemoryBarrier BETWEEN_FILLS{
+    .source_stages = PipelineStage::TRANSFER,
+    .source_access = MemoryAccess::TRANSFER_WRITE,
+    .destination_stages = PipelineStage::TRANSFER,
+    .destination_access = MemoryAccess::TRANSFER_WRITE,
+};
+
 /// @brief Regions (rectangles, builds) of the commands of @p frame: 1 to MAXIMUM_REGIONS in turn, so that counted frames
 ///        record commands smaller than, and as large as, the largest of the warm-up frames.
 constexpr auto
@@ -167,6 +183,12 @@ protected:
     {
         return {DeviceFeature::RAY_QUERY};
     }
+};
+
+/// @brief Frames submitted to the compute and graphics queues: recorded, submitted with timeline waits and signals and a
+///        fence, waited for, deletions enqueued and collected; frames are counted whole after the warm-up frames.
+class VulkanSubmissionAllocationTest : public VulkanDeviceTest
+{
 };
 
 TEST_F(VulkanCommandAllocationTest, TransfersAndAttachmentClearsAllocateNothingAfterTheFirstFrames)
@@ -388,6 +410,133 @@ TEST_F(VulkanAccelerationStructureAllocationTest, BuildsAndPropertyQueriesAlloca
         EXPECT_LE(compacted[index], largest.structure_size) << "bottom level " << index;
     }
     EXPECT_NE(top_level->device_address(), 0U);
+}
+
+TEST_F(VulkanSubmissionAllocationTest, SubmissionsWaitsAndDeletionsAllocateNothingAfterTheFirstFrames)
+{
+    // Frames paced by a timeline, recorded into per-frame pools of both queues (on a GPU with one queue, such as an
+    // integrated one, both queue types share its hardware queue).
+    Queue& graphics = m_device->queue(QueueType::GRAPHICS);
+    Queue& compute = m_device->queue(QueueType::COMPUTE);
+    FrameTimeline timeline{*m_device, FRAMES_IN_FLIGHT, "allocation test frames"};
+    FrameCommandPools graphics_pools{*m_device, {.queue_type = QueueType::GRAPHICS, .debug_name = "allocation test graphics"},
+                                     timeline.timeline(), FRAMES_IN_FLIGHT};
+    FrameCommandPools compute_pools{*m_device, {.queue_type = QueueType::COMPUTE, .debug_name = "allocation test compute"},
+                                    timeline.timeline(), FRAMES_IN_FLIGHT};
+
+    // Timeline semaphores from the compute work to the graphics work, from batch to batch of a submission, and from the
+    // CPU to the GPU; a fence on the compute work.
+    std::unique_ptr<TimelineSemaphore> handoff = m_device->create_timeline_semaphore({.debug_name = "handoff"});
+    std::unique_ptr<TimelineSemaphore> chain = m_device->create_timeline_semaphore({.debug_name = "chain"});
+    std::unique_ptr<TimelineSemaphore> host = m_device->create_timeline_semaphore({.debug_name = "host"});
+    std::unique_ptr<Fence> compute_done = m_device->create_fence({.debug_name = "compute done"});
+
+    // Each queue writes the frame's number into words of its own buffer: the compute work one, each graphics batch its own.
+    std::unique_ptr<Buffer> compute_words =
+        m_device->create_buffer({.size = 4, .usage = BufferUsage::TRANSFER_DESTINATION, .debug_name = "compute words"});
+    std::unique_ptr<Buffer> graphics_words = m_device->create_buffer({.size = MAXIMUM_REGIONS * 4,
+                                                                      .usage = BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION,
+                                                                      .debug_name = "graphics words"});
+
+    // Deletions record the order they run in (into storage reserved here), early ones first.
+    std::vector<std::uint32_t> deleted;
+    deleted.reserve(EARLY_DELETIONS + MAXIMUM_REGIONS * (WARM_UP_FRAMES + COUNTED_FRAMES));
+    std::uint32_t enqueued = 0;
+    const auto enqueue_deletions = [&](std::uint32_t count)
+    {
+        for (std::uint32_t deletion = 0; deletion < count; ++deletion)
+        {
+            m_device->deleter().enqueue([&deleted, sequence = enqueued++] { deleted.push_back(sequence); });
+        }
+    };
+    enqueue_deletions(EARLY_DELETIONS);
+
+    g_allocations = 0;
+    std::uint64_t chain_value = 0;
+    for (std::uint32_t frame_index = 0; frame_index < WARM_UP_FRAMES + COUNTED_FRAMES && !HasFatalFailure(); ++frame_index)
+    {
+        // The frame: the pools of the frame that last used them reset, the deletions the GPU is done with run.
+        g_counting = frame_index >= WARM_UP_FRAMES;
+        const std::uint64_t frame = timeline.begin_frame();
+        graphics_pools.begin_frame(frame);
+        compute_pools.begin_frame(frame);
+
+        // The compute work: one fill, signaling the handoff, with the fence.
+        CommandBuffer& compute_commands = compute_pools.command_buffer();
+        {
+            ComputeRecorder recorder{compute_commands};
+            recorder.fill_buffer(compute_words->handle(), 0, 4, static_cast<std::uint32_t>(frame));
+        }
+        const std::array compute_buffers{compute_commands.handle()};
+        const std::array compute_signals{TimelineSemaphoreSignal{.semaphore = handoff->handle(), .value = frame}};
+        const std::array compute_batches{SubmitDescription{.command_buffers = compute_buffers, .timeline_signals = compute_signals}};
+        compute.submit(compute_batches, compute_done->handle());
+
+        // The graphics work: 1 to MAXIMUM_REGIONS batches in turn, each waiting for the one before through the chain. The
+        // first waits for the compute work and for a value the CPU signals only after the submission (a wait nothing has
+        // promised: the hardware queue may stall on it); the last signals the frame.
+        const std::uint32_t batch_count = regions_of(frame_index);
+        const std::array first_waits{TimelineSemaphoreWait{.semaphore = handoff->handle(), .value = frame},
+                                     TimelineSemaphoreWait{.semaphore = host->handle(), .value = frame}};
+        const std::array frame_signals{timeline.frame_signal()};
+        std::array<CommandBufferHandle, MAXIMUM_REGIONS> graphics_buffers{};
+        std::array<TimelineSemaphoreWait, MAXIMUM_REGIONS> chain_waits{};
+        std::array<TimelineSemaphoreSignal, MAXIMUM_REGIONS> chain_signals{};
+        std::array<SubmitDescription, MAXIMUM_REGIONS> graphics_batches{};
+        for (std::uint32_t batch = 0; batch < batch_count; ++batch)
+        {
+            CommandBuffer& commands = graphics_pools.command_buffer();
+            {
+                GraphicsRecorder recorder{commands};
+                const std::array before_fill{BETWEEN_FILLS};
+                recorder.barrier({.memory_barriers = before_fill});
+                recorder.fill_buffer(graphics_words->handle(), std::uint64_t{batch} * 4, 4, static_cast<std::uint32_t>(frame));
+            }
+            graphics_buffers[batch] = commands.handle();
+            chain_waits[batch] = {.semaphore = chain->handle(), .value = chain_value}; // Used from the second batch on.
+            const bool last = batch + 1 == batch_count;
+            if (!last)
+            {
+                chain_signals[batch] = {.semaphore = chain->handle(), .value = ++chain_value};
+            }
+            graphics_batches[batch] = {
+                .command_buffers = std::span{graphics_buffers}.subspan(batch, 1),
+                .timeline_waits = batch == 0 ? std::span<const TimelineSemaphoreWait>{first_waits} : std::span{chain_waits}.subspan(batch, 1),
+                .timeline_signals = last ? std::span<const TimelineSemaphoreSignal>{frame_signals} : std::span{chain_signals}.subspan(batch, 1),
+            };
+        }
+        graphics.submit(std::span{graphics_batches}.first(batch_count));
+
+        // Deletions (as many as batches), the CPU's value, the compute work waited for through its fence.
+        enqueue_deletions(batch_count);
+        host->signal(frame);
+        const WaitStatus compute_status = compute_done->wait(std::chrono::seconds{10});
+        compute_done->reset();
+        g_counting = false;
+        ASSERT_EQ(compute_status, WaitStatus::SIGNALED) << "frame " << frame;
+    }
+    EXPECT_EQ(g_allocations.load(), 0U) << "frames allocated after " << WARM_UP_FRAMES << " warm-up frames";
+
+    // The GPU reached every value; the last frame's batches wrote its number.
+    timeline.wait_idle();
+    const std::uint64_t last_frame = timeline.current_frame();
+    EXPECT_EQ(handoff->value(), last_frame);
+    EXPECT_EQ(host->value(), last_frame);
+    EXPECT_EQ(chain->value(), chain_value);
+    const std::vector<std::uint32_t> words = read_buffer<std::uint32_t>(*graphics_words, MAXIMUM_REGIONS);
+    for (std::uint32_t batch = 0; batch < regions_of(WARM_UP_FRAMES + COUNTED_FRAMES - 1); ++batch)
+    {
+        EXPECT_EQ(words[batch], last_frame) << "batch " << batch;
+    }
+
+    // Every deletion ran once, in the order of its enqueue.
+    m_device->deleter().flush();
+    EXPECT_EQ(m_device->deleter().pending_count(), 0U);
+    ASSERT_EQ(deleted.size(), enqueued);
+    for (std::uint32_t sequence = 0; sequence < enqueued; ++sequence)
+    {
+        ASSERT_EQ(deleted[sequence], sequence) << "deletion " << sequence << " of " << enqueued;
+    }
 }
 
 } // namespace

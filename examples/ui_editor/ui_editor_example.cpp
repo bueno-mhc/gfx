@@ -17,8 +17,9 @@
 //   --sweep                moves a synthetic mouse across the window along a path closed every 120 frames (hovering
 //                          items, tooltips and table rows); the time then advances 1/60 s per frame (the frame times
 //                          shown too: every run draws the same frames) and the measured time is printed at the end
-//   --check-allocations    counts the allocations of the UI's frames and of its renderer after the first frames;
-//                          the exit code is 1 if there is one
+//   --check-allocations    counts the allocations of the UI's frames (main thread) and of the render thread's frames
+//                          (acquisition, recording with the UI's renderer, submission, presentation) after the first
+//                          frames; the exit code is 1 if there is one
 //   --warm-up N            the frames before allocations are counted (default 60)
 //   --layout <file>        loads the layout from the file (when it exists); File > Save layout writes it there
 import std;
@@ -34,17 +35,19 @@ import ui_editor.arabic_font;
 namespace
 {
 
-/// Allocations are counted on a thread while this is set (the measured sections of the UI).
-thread_local bool t_counting = false;
+/// The allocations counted on the main thread (the UI's frames) and on the render thread (its frames: acquisition,
+/// recording, submission, presentation).
+std::atomic<std::uint64_t> g_ui_allocations{0};
+std::atomic<std::uint64_t> g_render_allocations{0};
 
-/// The allocations counted.
-std::atomic<std::uint64_t> g_allocations{0};
+/// Allocations are counted on a thread while this points at its counter (the measured sections).
+thread_local std::atomic<std::uint64_t>* t_counter = nullptr;
 
 /// Called for each allocation counted: a breakpoint here shows where it comes from.
 [[gnu::noinline]] void
-counted_allocation() noexcept
+counted_allocation(std::atomic<std::uint64_t>& counter) noexcept
 {
-    g_allocations.fetch_add(1, std::memory_order_relaxed);
+    counter.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -53,9 +56,9 @@ counted_allocation() noexcept
 auto
 operator new(std::size_t size) -> void*
 {
-    if (t_counting)
+    if (t_counter != nullptr)
     {
-        counted_allocation();
+        counted_allocation(*t_counter);
     }
     if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr)
     {
@@ -107,13 +110,14 @@ using gfx::ui::UiFrame;
 using gfx::ui::UiRectangle;
 using gfx::Vector2;
 
-/// Counts this thread's allocations while it lives, when @p counted.
+/// Counts this thread's allocations in @p counter while it lives, when @p counted.
 class AllocationScope
 {
 public:
-    explicit AllocationScope(bool counted) noexcept
+    AllocationScope(std::atomic<std::uint64_t>& counter,
+                    bool counted) noexcept
     {
-        t_counting = counted;
+        t_counter = counted ? &counter : nullptr;
     }
 
     AllocationScope(const AllocationScope&) = delete;
@@ -121,7 +125,7 @@ public:
 
     ~AllocationScope()
     {
-        t_counting = false;
+        t_counter = nullptr;
     }
 };
 
@@ -453,6 +457,10 @@ render(RenderTarget& target,
                                          timeline.timeline(), FRAMES_IN_FLIGHT};
     while (std::optional<FramePacket> packet = mailbox.take())
     {
+        // The whole frame's allocations are counted after the warm-up: acquisition, recording, submission, presentation.
+        const bool counted = target.check_allocations && target.presented.load(std::memory_order_relaxed) >= target.warm_up;
+        const AllocationScope counting{g_render_allocations, counted};
+
         // An image (none while the window is minimized: the frame is dropped, its lease released).
         if (packet->recreate_swapchain)
         {
@@ -467,7 +475,6 @@ render(RenderTarget& target,
         command_pools.begin_frame(frame_number);
         const gfx::Extent extent = target.presentation.extent();
         const gfx::ui::UiDrawData& ui_data = packet->draw_data.data();
-        const bool counted = target.check_allocations && target.presented.load(std::memory_order_relaxed) >= target.warm_up;
 
         // Record: the background, the scene's squares (inside the image), the UI over them; to presentation.
         gfx::CommandBuffer& commands = command_pools.command_buffer();
@@ -475,11 +482,8 @@ render(RenderTarget& target,
             gfx::GraphicsRecorder recorder{commands};
             const std::array to_attachment{gfx::image_barrier(image->image.image, gfx::ResourceState::UNDEFINED, gfx::ResourceState::COLOR_ATTACHMENT_WRITE)};
             recorder.barrier({.image_barriers = to_attachment});
-            {
-                const AllocationScope counting{counted};
-                target.ui_renderer.begin_frame(frame_number);
-                target.ui_renderer.prepare(recorder, ui_data);
-            }
+            target.ui_renderer.begin_frame(frame_number);
+            target.ui_renderer.prepare(recorder, ui_data);
             {
                 const std::array attachments{gfx::ColorAttachment{.view = image->image.view, .clear_color = packet->background}};
                 gfx::RenderingScope scope = recorder.begin_rendering({
@@ -505,7 +509,6 @@ render(RenderTarget& target,
                                                                        .height = static_cast<std::uint32_t>(bottom - top)}}};
                     scope.clear_attachments(clear, area);
                 }
-                const AllocationScope counting{counted};
                 target.ui_renderer.record(scope, ui_data);
             }
             const std::array to_present{gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE, gfx::ResourceState::PRESENT)};
@@ -563,7 +566,8 @@ struct Editor
     gfx::ui::UiFrameStatistics statistics{};
     std::uint64_t frames = 0;
     std::uint64_t presented = 0;
-    std::uint64_t allocations = 0;
+    std::uint64_t ui_allocations = 0;     ///< Counted on the main thread after the warm-up.
+    std::uint64_t render_allocations = 0; ///< Counted on the render thread after the warm-up.
     std::uint64_t warm_up = 0;
     bool counting = false;
     bool accessibility = false;
@@ -899,7 +903,8 @@ statistics(UiFrame& frame,
         frame.text("Text layouts: {} cached, {} hits, {} misses, {} replaced", texts.cached, texts.hits, texts.misses, texts.evictions);
         if (editor.counting)
         {
-            frame.text("Allocations after the first {} frames: {}", editor.warm_up, editor.allocations);
+            frame.text("Allocations after the first {} frames: {} in the UI, {} on the render thread", editor.warm_up, editor.ui_allocations,
+                       editor.render_allocations);
         }
         frame.text("Screen reader: {}", editor.accessibility ? "connected (the accessibility tree is built)" : "none");
         frame.text("Status: {}", editor.status);
@@ -1147,7 +1152,7 @@ run(const Options& options) -> int
         UiRectangle viewport{};
         gfx::ui::UiFrameReport report{};
         {
-            const AllocationScope counting{options.check_allocations && built >= options.warm_up};
+            const AllocationScope counting{g_ui_allocations, options.check_allocations && built >= options.warm_up};
             UiFrame& frame = ui.begin_frame(frame_input);
             preview.engine.new_frame();
             viewport = editor_frame(frame, editor, preview, fonts, static_cast<float>(time));
@@ -1161,15 +1166,19 @@ run(const Options& options) -> int
         editor.statistics = report.statistics;
         editor.frames = ++built;
         editor.presented = target.presented.load(std::memory_order_relaxed);
-        if (const std::uint64_t allocations = g_allocations.load(std::memory_order_relaxed); allocations != editor.allocations)
+        const std::uint64_t ui_allocations = g_ui_allocations.load(std::memory_order_relaxed);
+        const std::uint64_t render_allocations = g_render_allocations.load(std::memory_order_relaxed);
+        if (ui_allocations != editor.ui_allocations || render_allocations != editor.render_allocations)
         {
             // The frames that allocated (the first few; the render thread's are counted with the frame being built).
             if (++allocating_frames <= REPORTED_ALLOCATING_FRAMES)
             {
-                std::println("frame {}: {} allocation(s) counted (break on counted_allocation() in a debugger to see where)", built - 1,
-                             allocations - editor.allocations);
+                std::println("frame {}: {} allocation(s) counted in the UI, {} on the render thread (break on counted_allocation() in a "
+                             "debugger to see where)",
+                             built - 1, ui_allocations - editor.ui_allocations, render_allocations - editor.render_allocations);
             }
-            editor.allocations = allocations;
+            editor.ui_allocations = ui_allocations;
+            editor.render_allocations = render_allocations;
         }
 
         // What the frame asked for, outside it: the theme, the layout, the window's title.
@@ -1223,7 +1232,8 @@ run(const Options& options) -> int
     // The render thread finishes the frame it has, then the GPU is idle.
     mailbox.stop();
     render_thread.join();
-    const std::uint64_t allocations = g_allocations.load();
+    const std::uint64_t ui_allocations = g_ui_allocations.load();
+    const std::uint64_t render_allocations = g_render_allocations.load();
     const gfx::ui::TextLayoutStatistics& texts = ui.last_report().statistics.text_layouts;
     std::println("text layouts: {} cached, {} hits, {} misses, {} replaced, {} overflows", texts.cached, texts.hits, texts.misses, texts.evictions,
                  texts.overflows);
@@ -1231,8 +1241,10 @@ run(const Options& options) -> int
     std::println("{} frames built in {:.1f} s ({:.2f} ms each), {} presented, {} swapchain recreations, {} validation errors{}", built, seconds,
                  built > 0 ? seconds * 1000.0 / static_cast<double>(built) : 0.0, target.presented.load(), presentation.recreation_count(),
                  validation_errors.count(),
-                 options.check_allocations ? std::format(", {} allocations in the UI after the first {} frames", allocations, options.warm_up) : std::string{});
-    const bool allocated = options.check_allocations && allocations > 0;
+                 options.check_allocations ? std::format(", {} allocations in the UI and {} on the render thread after the first {} frames",
+                                                         ui_allocations, render_allocations, options.warm_up)
+                                           : std::string{});
+    const bool allocated = options.check_allocations && ui_allocations + render_allocations > 0;
     return validation_errors.count() == 0 && !allocated ? 0 : 1;
 }
 

@@ -56,14 +56,19 @@ target_compile_definitions(gfx_vulkan_tests PRIVATE
     GFX_TEST_VULKAN_SHADER_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
     GFX_TEST_WORK_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/work")
 
-# No allocation when commands are recorded again (operator new counted in this executable, which therefore
-# holds no other test).
+# No allocation when commands are recorded and submitted again (operator new counted in this executable, which
+# therefore holds no other test).
 gfx_add_test(gfx_vulkan_allocation_tests
     SOURCES command_allocation_test.cpp
     LIBRARIES gfx::gfx)
 target_compile_definitions(gfx_vulkan_allocation_tests PRIVATE
     GFX_TEST_VULKAN_LAYER_DIRECTORY="${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
 target_include_directories(gfx_vulkan_allocation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# The same tests on the first physical device too, which may not be the one the tests pick (an integrated GPU, whose
+# single hardware queue every queue type then shares: submissions go through the checks of shared hardware queues).
+add_test(NAME VulkanAllocation.FirstPhysicalDevice COMMAND gfx_vulkan_allocation_tests)
+set_tests_properties(VulkanAllocation.FirstPhysicalDevice PROPERTIES ENVIRONMENT "GFX_TEST_PHYSICAL_DEVICE=0")
 
 # A capture through RenderDoc's in-application API, when RenderDoc is installed: renderdoccmd injects
 # RenderDoc into the test process, which captures its own work and checks that the capture was written.

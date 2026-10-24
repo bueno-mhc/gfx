@@ -284,9 +284,6 @@ struct HandleTables
 
 // ---------------------------------------------------------------------------------------------- queues
 
-/// @brief One native queue. Several gfx queues share it when the family has fewer queues than were
-///        requested. Every submission also signals its progress timeline, which tells the deleter (and
-///        wait_idle) how far the GPU has come.
 /// @brief A timeline wait of a submitted batch that nothing signaled or promised to signal when it was
 ///        submitted: its hardware queue stalls there until a signal from elsewhere (the CPU, another
 ///        hardware queue) reaches the value.
@@ -297,6 +294,9 @@ struct UnresolvedWait
     QueueHandle queue{};                 ///< gfx queue that submitted the wait.
 };
 
+/// @brief One native queue. Several gfx queues share it when the family has fewer queues than were
+///        requested. Every submission also signals its progress timeline, which tells the deleter (and
+///        wait_idle) how far the GPU has come.
 struct NativeQueue
 {
     VkQueue queue = VK_NULL_HANDLE;
@@ -342,20 +342,21 @@ public:
     }
 
     /// @brief Checks the timeline waits and signals of @p batches, about to be submitted in this order
-    ///        to the native queue (whose mutex the caller holds), and returns the waits the native queue
-    ///        may then be stalled on. A hardware queue runs its submissions in order, so a signal of
-    ///        exactly the value an unresolved wait of an earlier submission to the same hardware queue
-    ///        waits for can never run: it alone could release the wait (anything else reaching the value
-    ///        first would make it decrease the semaphore). Such a submission is refused (GPU deadlock).
+    ///        to the native queue (whose mutex the caller holds), and keeps the waits the native queue
+    ///        may then be stalled on for record_timeline_batches(). A hardware queue runs its submissions
+    ///        in order, so a signal of exactly the value an unresolved wait of an earlier submission to the
+    ///        same hardware queue waits for can never run: it alone could release the wait (anything else
+    ///        reaching the value first would make it decrease the semaphore). Such a submission is refused
+    ///        (GPU deadlock).
     /// @throws InvalidUsageError when the wait and the signal come from this queue, BackendCapabilityError
     ///         when they come from two queues that share one hardware queue.
-    [[nodiscard]] auto order_timeline_batches(std::span<const TimelineBatch> batches,
-                                              std::string_view operation) const -> std::vector<UnresolvedWait>;
+    void order_timeline_batches(std::span<const TimelineBatch> batches,
+                                std::string_view operation);
 
     /// @brief Records what a successful submission of @p batches promised: the values it signals, and
-    ///        the waits the native queue may now be stalled on (from order_timeline_batches()).
-    void record_timeline_batches(std::span<const TimelineBatch> batches,
-                                 std::vector<UnresolvedWait> unresolved);
+    ///        the waits the native queue may now be stalled on (kept by order_timeline_batches(), called
+    ///        for the same batches under the same lock of the native queue's mutex).
+    void record_timeline_batches(std::span<const TimelineBatch> batches);
 
 private:
     /// @brief Throws the error explaining why @p signal can never run behind @p wait.
@@ -376,6 +377,8 @@ private:
     std::vector<VkSemaphoreSubmitInfo> m_signals;
     std::vector<TimelineBatch> m_timeline_batches;
     std::vector<VkSemaphore> m_present_waits;
+    std::vector<UnresolvedWait> m_unresolved_waits{};          ///< Kept by order_timeline_batches() for record_timeline_batches().
+    std::vector<TimelineSemaphoreSignal> m_promised_signals{}; ///< Signals of the batches order_timeline_batches() went through.
 };
 
 // --------------------------------------------------------------------------------------------- deleter
@@ -405,10 +408,15 @@ private:
         std::array<std::uint64_t, 16> submitted{}; ///< Last submission of each native queue at enqueue time.
     };
 
+    /// @brief Removes the oldest pending deletion from the ring and returns it (the caller holds m_mutex
+    ///        and one is pending).
+    [[nodiscard]] auto take_oldest() noexcept -> std::move_only_function<void()>;
+
     VulkanDevice& m_device;
     mutable std::mutex m_mutex;
-    std::deque<Pending> m_pending;
-    std::atomic<std::size_t> m_pending_count{0};
+    std::vector<Pending> m_pending{};            ///< Ring in enqueue order: m_pending_count entries from m_oldest (under m_mutex).
+    std::size_t m_oldest = 0;                    ///< Slot of the oldest pending deletion.
+    std::atomic<std::size_t> m_pending_count{0}; ///< Pending deletions (written under m_mutex).
     std::string m_debug_name{"deleter"};
 };
 

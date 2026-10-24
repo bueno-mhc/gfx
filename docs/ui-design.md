@@ -1438,6 +1438,19 @@ report, and your validation (you commit).
   combining marks, pointed Hebrew, vowelled Arabic, bidi mixes, line breaks and empty lines, wrapping, right-to-left
   paragraphs and the basic shaper; equal exactly.
 
+### Follow-up after U10: the render thread's whole frame counted (2026-10-24)
+
+- **Example**: `--check-allocations` now counts the render thread's whole frame after the warm-up (the packet taken,
+  the image acquired, the frame begun, recording with `UiRenderer`, submission, presentation), not only `UiRenderer`'s
+  calls. Each thread counts into its own counter (`AllocationScope{counter, counted}`, a thread-local pointer;
+  `counted_allocation(counter)` stays the place to break on); the frames that allocated print both counts, the statistics
+  window and the last line show both, and the exit code is 1 if either is not 0.
+- **Found by it, fixed in the Vulkan backend** (the graphics side of this follow-up; details in the project memory):
+  every `Queue::submit` at `ValidationLevel::CREATION` or above allocated the vectors of its deadlock check (one per frame
+  here: the frame timeline's signal), and `Deleter::collect()` and `enqueue()` allocated when deletions were pending. With
+  the former submission code the editor counts 240 allocations on the render thread in the 240 counted frames (the
+  command recording was already allocation-free); now 0 on both threads, both platform backends and both GPUs.
+
 ## C. The API as proposed (for validation, not final code)
 
 ### C1. Atlas at build time, checked at compile time
