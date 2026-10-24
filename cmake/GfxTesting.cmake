@@ -37,7 +37,15 @@ function(gfx_add_test name)
     # POST_BUILD discovery registers every test case as a direct call of the test executable.
     # (PRE_TEST discovery wraps each call in a `cmake -P` launcher script, which debuggers such as
     # CMake Tools' "Debug Test" would attach to instead of the test.)
-    gtest_discover_tests(${name} DISCOVERY_MODE POST_BUILD)
+    # Listing the tests runs the executable's static initialization, and executables whose
+    # parameterized suites enumerate GPUs create a Vulkan instance there: the first listing after the
+    # idle NVIDIA laptop GPU powered down took 7 s (0.7 s once awake), beyond GoogleTest's default
+    # 5 s, and a timed-out discovery fails the build. Listings also slow down while the parallel build
+    # loads every core (other executables took up to 2.7 s with the GPU awake), so the limit is
+    # generous: it only bounds an executable that hangs.
+    gtest_discover_tests(${name}
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 60)
 endfunction()
 
 # gfx_add_compilation_failure_test(<name> SOURCES <file>... EXPECTED_DIAGNOSTIC <regex>

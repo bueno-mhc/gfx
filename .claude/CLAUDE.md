@@ -700,8 +700,9 @@ Original hard requirements (from the user's initial specification):
   `cmake/GfxImportStandardLibrary.cmake` (experimental CMake gate UUID `451f2fe2-a8a2-47c3-bc32-94786d8fc91b`
   for CMake 4.4; `-DGFX_IMPORT_STD_GATE=<uuid>` override). `.hpp` only where a module cannot serve.
 - **Tests**: GoogleTest (built from source and linked statically on Windows) + CTest in parallel; every
-  test case is its own CTest test (`gtest_discover_tests(... DISCOVERY_MODE POST_BUILD)` — PRE_TEST wraps
-  each test in a `cmake -P` launcher that debuggers would attach to). Compilation-failure tests
+  test case is its own CTest test (`gtest_discover_tests(... DISCOVERY_MODE POST_BUILD DISCOVERY_TIMEOUT 60)` —
+  PRE_TEST wraps each test in a `cmake -P` launcher that debuggers would attach to; the timeout, see §8).
+  Compilation-failure tests
   (`gfx_add_compilation_failure_test`, RESOURCE_LOCK on the build tree, regex on the diagnostic), a
   platform-macro collision check (`cmake/scripts/GfxCheckPlatformMacroCollisions.cmake`), toolchain
   conformance tests and toolchain **defect detectors** (pass while a GCC defect exists).
@@ -838,9 +839,16 @@ gfx/
   GTEST_BREAK_ON_FAILURE=1 stops gdb at the failing assertion (select the test frame in the call stack).
   The executable list in launch.json must be updated when a test executable is added.
 - PowerShell splits `-DNAME=a.b` arguments at the dot: quote `-D` arguments.
-- A fresh build may stop at a POST_BUILD test discovery ("Process terminated due to timeout", gtest's 5 s): executables
-  that enumerate GPUs when they start (gfx_ui_draw_tests) took 7 s the first time the idle NVIDIA GPU woke, 0.7 s after.
-  Building again fixes it (2026-10-24).
+- build.py passes the compilers as `shutil.which` spells them (`C:/msys64/ucrt64/bin/g++.EXE`): a build directory
+  configured by hand with `g++.exe` (e.g. to add `FETCHCONTENT_SOURCE_DIR_*` overrides) counts as a compiler change at
+  the next `python build.py`, which deletes the cache and loses the overrides. Seed it with `gcc.EXE`/`g++.EXE`.
+- POST_BUILD test discovery runs `--gtest_list_tests`, so static initialization, under **`DISCOVERY_TIMEOUT 60`**
+  (`gfx_add_test`; gtest's default is 5 s, and a timed-out discovery fails the build: "Process terminated due to
+  timeout"). Executables whose suites enumerate GPUs at static initialization (gfx_ui_draw_tests, gfx_ui_context_tests,
+  gfx_presentation_tests) took 7 s the first time the idle NVIDIA GPU woke, 0.7 s after; on a busy machine other
+  listings took up to 2.7 s with the GPU awake (gfx_shader_tools_tests). Before the fix, a fresh `python build.py`
+  failed twice in a row on gfx_ui_draw_tests; after it, a fresh build (dependencies downloaded) + 810 tests passed
+  (2026-10-24).
 - Since 2026-10-18 the linker's error output (ld's stderr) is lost in Claude's Bash shell: the defect detector
   `CompilationFailure.ImportStdDuplicatesStaticLocals` fails there with an empty diagnostic. Run ctest from PowerShell.
 - Vulkan tests: `build/debug/tests/graphics/vulkan/gfx_vulkan_tests.exe`; physical device 0 is the Intel
@@ -855,7 +863,7 @@ gfx/
 |---|---|---|
 | 0 | Toolchain, CMake/presets/build.py, GoogleTest, toolchain tests | done, committed (ffae3d2, 0c8af25) |
 | 1 | enums, errors, handles, unit/compilation/macro tests, workarounds | done, committed (8b750f7, 58bbcfc) |
-| — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes |
+| — | VS Code debugging, preset PATH fix, POST_BUILD discovery | committed (bafcb25) + later fixes, incl. the 60 s discovery timeout (2026-10-24, §8) |
 | 2 | Interfaces, descriptions, Recorder<Q>, shader layouts; **2b**: run-time SPIR-V-reflected layouts, Debug-only reload API, parallel rendering passes, FrameCommandPools; **2c**: production interface (bindless/AZDO, validation levels, RT, mesh, GPU-driven, caches, frame resources, diagnostics) | done, committed (6bacc72, 1bbb792) |
 | 3 | backend_factory + Vulkan/Null/D3D12/Metal stubs + thread-safe handle table | done, committed (e839407) |
 | 3b | **Real Vulkan backend** (volk, VMA, sync2, dynamic rendering, bindless, pipeline cache, async pipelines, hot reload, RT, mesh, sparse, breadcrumbs, RenderDoc) | done, committed (e839407); presentation added in P5 |
