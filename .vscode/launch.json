@@ -133,6 +133,7 @@
                 { "label": "backend factory - BackendFactoryTest.*", "value": "graphics/backend_factory/gfx_backend_factory_tests.exe" },
                 { "label": "shader tools - SpirvReflectionTest.*, ShaderCompilerTest.*, ShaderCompilerDebugTest.*, GfxAddShadersTest.*", "value": "graphics/shader_tools/gfx_shader_tools_tests.exe" },
                 { "label": "vulkan     - Vulkan*Test.* (real GPU; GFX_TEST_PHYSICAL_DEVICE=<index> picks the GPU)", "value": "graphics/vulkan/gfx_vulkan_tests.exe" },
+                { "label": "vulkan allocation - Vulkan*AllocationTest.* (counts operator new while commands are recorded; real GPU)", "value": "graphics/vulkan/gfx_vulkan_allocation_tests.exe" },
                 { "label": "platform   - PlatformTest.*, WindowTest.*, EventTest.*, EventQueueTest.*, ImageTest.*, InputSystemTest.*, BindingStorageTest.*, ...", "value": "platform/gfx_platform_tests.exe" },
                 { "label": "backends   - Backends/PlatformBackendTest.* (every platform backend, real windows)", "value": "platform/backends/gfx_platform_backend_tests.exe" },
                 { "label": "sdl3       - Sdl3PlatformTest.*, Sdl3EventsTest.*, Sdl3GamepadTest.* (SDL3 backend)", "value": "platform/backends/sdl3/gfx_platform_sdl3_tests.exe" },

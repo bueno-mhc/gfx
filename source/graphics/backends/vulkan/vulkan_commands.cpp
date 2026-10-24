@@ -145,6 +145,18 @@ clear_color(Format format,
     return value;
 }
 
+/// @brief @p storage emptied, with room for @p count elements. Storage reused by every command grows only
+///        when a command is larger than every command before: recording allocates nothing once it has grown.
+template<class Element>
+auto
+reuse(std::vector<Element>& storage,
+      std::size_t count) -> std::vector<Element>&
+{
+    storage.clear();
+    storage.reserve(count);
+    return storage;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------------
@@ -510,6 +522,22 @@ private:
     std::vector<VkBufferMemoryBarrier2> m_buffer_barriers;
     std::vector<VkImageMemoryBarrier2> m_image_barriers;
     std::vector<VkRenderingAttachmentInfo> m_color_attachments;
+
+    // Arrays reused by copies, blits, resolves, attachment clears, acceleration structure builds and
+    // property queries, and the null-terminated name of a debug label: no allocation per command either.
+    std::vector<VkBufferCopy> m_buffer_copies{};
+    std::vector<VkBufferImageCopy> m_buffer_image_copies{};
+    std::vector<VkImageCopy> m_image_copies{};
+    std::vector<VkImageBlit> m_image_blits{};
+    std::vector<VkImageResolve> m_image_resolves{};
+    std::vector<VkClearAttachment> m_clear_attachments{};
+    std::vector<VkClearRect> m_clear_rectangles{};
+    std::vector<VkAccelerationStructureGeometryKHR> m_build_geometries{};
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> m_build_ranges{};
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> m_build_informations{};
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> m_build_range_pointers{};
+    std::vector<VkAccelerationStructureKHR> m_acceleration_structures{};
+    std::string m_label_name{};
 };
 
 // ---------------------------------------------------------------------------------------------------
@@ -952,9 +980,8 @@ VulkanCommandBuffer::record_copy_buffer(BufferHandle source,
     const BufferRecord& from = resolve(m_device.handles().buffers, source, OPERATION);
     const BufferRecord& to = resolve(m_device.handles().buffers, destination, OPERATION);
 
-    // Every region inside both buffers (checked when commands are validated).
-    std::vector<VkBufferCopy> native;
-    native.reserve(regions.size());
+    // Every region inside both buffers (checked when commands are validated), translated into reused storage.
+    std::vector<VkBufferCopy>& native = reuse(m_buffer_copies, regions.size());
     for (const BufferCopyRegion& region : regions)
     {
         if (validates(ValidationLevel::COMMANDS) &&
@@ -978,8 +1005,9 @@ VulkanCommandBuffer::record_copy_buffer_to_image(BufferHandle source,
     static constexpr std::string_view OPERATION = "Recorder::copy_buffer_to_image";
     const BufferRecord& buffer = resolve(m_device.handles().buffers, source, OPERATION);
     const ImageRecord& image = resolve(m_device.handles().images, destination, OPERATION);
-    std::vector<VkBufferImageCopy> native;
-    native.reserve(regions.size());
+
+    // The regions, translated into reused storage.
+    std::vector<VkBufferImageCopy>& native = reuse(m_buffer_image_copies, regions.size());
     for (const BufferImageCopyRegion& region : regions)
     {
         native.push_back({.bufferOffset = region.buffer_offset,
@@ -1002,8 +1030,9 @@ VulkanCommandBuffer::record_copy_image_to_buffer(ImageHandle source,
     static constexpr std::string_view OPERATION = "Recorder::copy_image_to_buffer";
     const ImageRecord& image = resolve(m_device.handles().images, source, OPERATION);
     const BufferRecord& buffer = resolve(m_device.handles().buffers, destination, OPERATION);
-    std::vector<VkBufferImageCopy> native;
-    native.reserve(regions.size());
+
+    // The regions, translated into reused storage.
+    std::vector<VkBufferImageCopy>& native = reuse(m_buffer_image_copies, regions.size());
     for (const BufferImageCopyRegion& region : regions)
     {
         native.push_back({.bufferOffset = region.buffer_offset,
@@ -1027,8 +1056,9 @@ VulkanCommandBuffer::record_copy_image(ImageHandle source,
     static constexpr std::string_view OPERATION = "Recorder::copy_image";
     const ImageRecord& from = resolve(m_device.handles().images, source, OPERATION);
     const ImageRecord& to = resolve(m_device.handles().images, destination, OPERATION);
-    std::vector<VkImageCopy> native;
-    native.reserve(regions.size());
+
+    // The regions, translated into reused storage.
+    std::vector<VkImageCopy>& native = reuse(m_image_copies, regions.size());
     for (const ImageCopyRegion& region : regions)
     {
         native.push_back({.srcSubresource = layers_of(from, region.source_subresource),
@@ -1111,8 +1141,9 @@ VulkanCommandBuffer::record_blit_image(ImageHandle source,
     static constexpr std::string_view OPERATION = "Recorder::blit_image";
     const ImageRecord& from = resolve(m_device.handles().images, source, OPERATION);
     const ImageRecord& to = resolve(m_device.handles().images, destination, OPERATION);
-    std::vector<VkImageBlit> native;
-    native.reserve(regions.size());
+
+    // The regions, translated into reused storage.
+    std::vector<VkImageBlit>& native = reuse(m_image_blits, regions.size());
     for (const ImageBlitRegion& region : regions)
     {
         native.push_back({.srcSubresource = layers_of(from, region.source_subresource),
@@ -1134,8 +1165,9 @@ VulkanCommandBuffer::record_resolve_image(ImageHandle source,
     static constexpr std::string_view OPERATION = "Recorder::resolve_image";
     const ImageRecord& from = resolve(m_device.handles().images, source, OPERATION);
     const ImageRecord& to = resolve(m_device.handles().images, destination, OPERATION);
-    std::vector<VkImageResolve> native;
-    native.reserve(regions.size());
+
+    // The regions, translated into reused storage.
+    std::vector<VkImageResolve>& native = reuse(m_image_resolves, regions.size());
     for (const ImageResolveRegion& region : regions)
     {
         native.push_back({.srcSubresource = layers_of(from, region.source_subresource),
@@ -1567,8 +1599,8 @@ void
 VulkanCommandBuffer::record_clear_attachments(std::span<const ClearAttachment> attachments,
                                               std::span<const ClearRectangle> rectangles)
 {
-    std::vector<VkClearAttachment> native_attachments;
-    native_attachments.reserve(attachments.size());
+    // The attachments with their clear values, then the rectangles, translated into reused storage.
+    std::vector<VkClearAttachment>& native_attachments = reuse(m_clear_attachments, attachments.size());
     for (const ClearAttachment& attachment : attachments)
     {
         VkClearValue value{};
@@ -1583,8 +1615,7 @@ VulkanCommandBuffer::record_clear_attachments(std::span<const ClearAttachment> a
         native_attachments.push_back(
             {.aspectMask = to_vulkan(attachment.aspects), .colorAttachment = attachment.color_attachment, .clearValue = value});
     }
-    std::vector<VkClearRect> native_rectangles;
-    native_rectangles.reserve(rectangles.size());
+    std::vector<VkClearRect>& native_rectangles = reuse(m_clear_rectangles, rectangles.size());
     for (const ClearRectangle& rectangle : rectangles)
     {
         native_rectangles.push_back({.rect = to_vulkan(rectangle.area), .baseArrayLayer = rectangle.base_layer, .layerCount = rectangle.layer_count});
@@ -1746,13 +1777,13 @@ VulkanCommandBuffer::record_begin_debug_label(std::string_view name,
         m_functions.vkCmdSetCheckpointNV(m_command_buffer, &node);
     }
 
-    // Labels reach debugging tools through VK_EXT_debug_utils.
+    // Labels reach debugging tools through VK_EXT_debug_utils, their names null-terminated in reused storage.
     ++m_open_labels;
     if (m_device.vulkan_physical_device().instance().has_debug_utils() && vkCmdBeginDebugUtilsLabelEXT != nullptr)
     {
-        const std::string terminated{name};
+        m_label_name.assign(name);
         const VkDebugUtilsLabelEXT label{.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
-                                         .pLabelName = terminated.c_str(),
+                                         .pLabelName = m_label_name.c_str(),
                                          .color = {color[0], color[1], color[2], color[3]}};
         vkCmdBeginDebugUtilsLabelEXT(m_command_buffer, &label);
     }
@@ -1837,13 +1868,41 @@ VulkanCommandBuffer::record_trace_rays_indirect(const ShaderBindingTable& table,
 namespace
 {
 
-/// @brief The native description of a build: its geometries, their primitive counts and ranges.
-struct BuildGeometry
+/// @brief Native geometries of a build: its triangles, its bounding boxes and, at the top level, its instances.
+[[nodiscard]] auto
+geometry_count(const AccelerationStructureBuildDescription& description) noexcept -> std::size_t
 {
-    std::vector<VkAccelerationStructureGeometryKHR> geometries;
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
-    std::vector<std::uint32_t> primitive_counts;
-    VkAccelerationStructureBuildGeometryInfoKHR information{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    return description.triangles.size() + description.bounding_boxes.size() +
+           (description.type == AccelerationStructureType::TOP_LEVEL ? 1 : 0);
+}
+
+/// @brief Storage for @p Capacity elements inside the object, or on the heap for a call that needs more:
+///        common calls allocate nothing, without storage that outlives them.
+template<class Element, std::size_t Capacity>
+class SmallArray
+{
+public:
+    explicit SmallArray(std::size_t size)
+        : m_size{size}
+    {
+        if (size > Capacity)
+        {
+            m_heap.resize(size);
+        }
+    }
+
+    SmallArray(const SmallArray&) = delete;
+    auto operator=(const SmallArray&) -> SmallArray& = delete;
+
+    [[nodiscard]] auto elements() noexcept -> std::span<Element>
+    {
+        return m_size > Capacity ? std::span<Element>{m_heap} : std::span<Element>{m_inline}.first(m_size);
+    }
+
+private:
+    std::size_t m_size{};
+    std::array<Element, Capacity> m_inline{};
+    std::vector<Element> m_heap{};
 };
 
 /// @brief Device address of @p buffer at @p offset (0 for a null handle).
@@ -1871,12 +1930,25 @@ address_of(VulkanDevice& device,
     return record.address + offset;
 }
 
-/// @brief Translates @p description; with @p for_sizes, the structures and scratch are not resolved.
+/// @brief Translates @p description into @p geometries and @p ranges (geometry_count() elements each, owned
+///        by the caller) and returns the build, which points at @p geometries; with @p for_sizes, the
+///        structures and scratch are not resolved.
 auto
-build_geometry(VulkanDevice& device, const AccelerationStructureBuildDescription& description, bool for_sizes, std::string_view operation)
-    -> BuildGeometry
+build_geometry(VulkanDevice& device,
+               const AccelerationStructureBuildDescription& description,
+               bool for_sizes,
+               std::string_view operation,
+               std::span<VkAccelerationStructureGeometryKHR> geometries,
+               std::span<VkAccelerationStructureBuildRangeInfoKHR> ranges) -> VkAccelerationStructureBuildGeometryInfoKHR
 {
-    BuildGeometry build;
+    // Each geometry with its range: the primitives it holds.
+    std::size_t next = 0;
+    const auto add = [&](const VkAccelerationStructureGeometryKHR& geometry, std::uint32_t primitive_count)
+    {
+        geometries[next] = geometry;
+        ranges[next] = {.primitiveCount = primitive_count};
+        ++next;
+    };
 
     // Triangles: vertex positions, optional indices and transform.
     for (const TriangleGeometry& triangles : description.triangles)
@@ -1895,8 +1967,7 @@ build_geometry(VulkanDevice& device, const AccelerationStructureBuildDescription
             .indexData = {.deviceAddress = for_sizes || !indexed ? 0 : address_of(device, triangles.index_buffer, triangles.index_offset, operation)},
             .transformData = {.deviceAddress = for_sizes ? 0 : address_of(device, triangles.transform_buffer, triangles.transform_offset, operation)},
         };
-        build.geometries.push_back(geometry);
-        build.primitive_counts.push_back((indexed ? triangles.index_count : triangles.vertex_count) / 3);
+        add(geometry, (indexed ? triangles.index_count : triangles.vertex_count) / 3);
     }
 
     // Bounding boxes of procedural geometry.
@@ -1910,8 +1981,7 @@ build_geometry(VulkanDevice& device, const AccelerationStructureBuildDescription
             .data = {.deviceAddress = for_sizes ? 0 : address_of(device, boxes.buffer, boxes.offset, operation)},
             .stride = boxes.stride,
         };
-        build.geometries.push_back(geometry);
-        build.primitive_counts.push_back(boxes.count);
+        add(geometry, boxes.count);
     }
 
     // Instances of a top-level structure.
@@ -1925,32 +1995,30 @@ build_geometry(VulkanDevice& device, const AccelerationStructureBuildDescription
             .data = {.deviceAddress = for_sizes ? 0
                                                 : address_of(device, description.instances.buffer, description.instances.offset, operation)},
         };
-        build.geometries.push_back(geometry);
-        build.primitive_counts.push_back(description.instances.count);
+        add(geometry, description.instances.count);
     }
 
-    // One range per geometry, and the build itself.
-    for (const std::uint32_t count : build.primitive_counts)
-    {
-        build.ranges.push_back({.primitiveCount = count});
-    }
+    // The build itself.
     HandleTables& handles = device.handles();
-    build.information.type = to_vulkan(description.type);
-    build.information.flags = to_vulkan(description.options);
-    build.information.mode = description.mode == AccelerationStructureBuildMode::UPDATE ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
-                                                                                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    build.information.geometryCount = static_cast<std::uint32_t>(build.geometries.size());
-    build.information.pGeometries = build.geometries.data();
+    VkAccelerationStructureBuildGeometryInfoKHR information{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = to_vulkan(description.type),
+        .flags = to_vulkan(description.options),
+        .mode = description.mode == AccelerationStructureBuildMode::UPDATE ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                                                                           : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .geometryCount = static_cast<std::uint32_t>(next),
+        .pGeometries = geometries.data(),
+    };
     if (!for_sizes)
     {
-        build.information.srcAccelerationStructure =
+        information.srcAccelerationStructure =
             description.mode == AccelerationStructureBuildMode::UPDATE
                 ? handles.acceleration_structures.get(description.source, operation).structure
                 : VK_NULL_HANDLE;
-        build.information.dstAccelerationStructure = handles.acceleration_structures.get(description.destination, operation).structure;
-        build.information.scratchData.deviceAddress = address_of(device, description.scratch_buffer, description.scratch_offset, operation);
+        information.dstAccelerationStructure = handles.acceleration_structures.get(description.destination, operation).structure;
+        information.scratchData.deviceAddress = address_of(device, description.scratch_buffer, description.scratch_offset, operation);
     }
-    return build;
+    return information;
 }
 
 /// @brief A bottom- or top-level acceleration structure in buffer storage.
@@ -2032,11 +2100,19 @@ VulkanDevice::acceleration_structure_build_sizes(const AccelerationStructureBuil
     static constexpr std::string_view OPERATION = "Device::acceleration_structure_build_sizes";
     require_acceleration_structures(*this, OPERATION);
 
-    // The driver sizes a build from its geometry and primitive counts alone.
-    const BuildGeometry build = build_geometry(const_cast<VulkanDevice&>(*this), description, true, OPERATION);
+    // The driver sizes a build from its geometries and primitive counts alone (translated on the stack
+    // unless the build has more geometries than SIZED_GEOMETRIES: sizing every frame allocates nothing).
+    static constexpr std::size_t SIZED_GEOMETRIES = 16;
+    const std::size_t count = geometry_count(description);
+    SmallArray<VkAccelerationStructureGeometryKHR, SIZED_GEOMETRIES> geometries{count};
+    SmallArray<VkAccelerationStructureBuildRangeInfoKHR, SIZED_GEOMETRIES> ranges{count};
+    SmallArray<std::uint32_t, SIZED_GEOMETRIES> primitive_counts{count};
+    const VkAccelerationStructureBuildGeometryInfoKHR information =
+        build_geometry(const_cast<VulkanDevice&>(*this), description, true, OPERATION, geometries.elements(), ranges.elements());
+    std::ranges::transform(ranges.elements(), primitive_counts.elements().begin(), &VkAccelerationStructureBuildRangeInfoKHR::primitiveCount);
     VkAccelerationStructureBuildSizesInfoKHR sizes{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    m_functions.vkGetAccelerationStructureBuildSizesKHR(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build.information,
-                                                        build.primitive_counts.data(), &sizes);
+    m_functions.vkGetAccelerationStructureBuildSizesKHR(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &information,
+                                                        primitive_counts.elements().data(), &sizes);
     return {.structure_size = sizes.accelerationStructureSize,
             .build_scratch_size = sizes.buildScratchSize,
             .update_scratch_size = sizes.updateScratchSize};
@@ -2116,16 +2192,30 @@ VulkanCommandBuffer::record_build_acceleration_structures(std::span<const Accele
     static constexpr std::string_view OPERATION = "Recorder::build_acceleration_structures";
     require_acceleration_structures(m_device, OPERATION);
 
+    // Reused storage sized for every build: the geometries and ranges of each build follow the previous
+    // build's, and nothing moves while builds point at them.
+    std::size_t geometry_total = 0;
+    for (const AccelerationStructureBuildDescription& build : builds)
+    {
+        geometry_total += geometry_count(build);
+    }
+    m_build_geometries.resize(geometry_total);
+    m_build_ranges.resize(geometry_total);
+    m_build_informations.resize(builds.size());
+    m_build_range_pointers.resize(builds.size());
+
     // Every build at once: the GPU runs them in parallel.
     const std::uint32_t scratch_alignment =
         m_device.vulkan_physical_device().capabilities().acceleration_structure_properties.minAccelerationStructureScratchOffsetAlignment;
-    std::vector<BuildGeometry> natives;
-    natives.reserve(builds.size());
-    for (const AccelerationStructureBuildDescription& build : builds)
+    std::size_t first_geometry = 0;
+    for (std::size_t index = 0; index < builds.size(); ++index)
     {
+        const std::size_t count = geometry_count(builds[index]);
+        const std::span<VkAccelerationStructureGeometryKHR> geometries = std::span{m_build_geometries}.subspan(first_geometry, count);
+        const std::span<VkAccelerationStructureBuildRangeInfoKHR> ranges = std::span{m_build_ranges}.subspan(first_geometry, count);
         try
         {
-            natives.push_back(build_geometry(m_device, build, false, OPERATION));
+            m_build_informations[index] = build_geometry(m_device, builds[index], false, OPERATION, geometries, ranges);
         }
         catch (...)
         {
@@ -2133,22 +2223,16 @@ VulkanCommandBuffer::record_build_acceleration_structures(std::span<const Accele
             throw;
         }
         if (validates(ValidationLevel::COMMANDS) && scratch_alignment != 0 &&
-            natives.back().information.scratchData.deviceAddress % scratch_alignment != 0)
+            m_build_informations[index].scratchData.deviceAddress % scratch_alignment != 0)
         {
             fail(OPERATION, std::format("the scratch memory of a build must be aligned to {} bytes", scratch_alignment),
                  "offset scratch ranges by multiples of the alignment");
         }
+        m_build_range_pointers[index] = ranges.data();
+        first_geometry += count;
     }
-    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> informations;
-    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> ranges;
-    for (BuildGeometry& native : natives)
-    {
-        native.information.pGeometries = native.geometries.data();
-        informations.push_back(native.information);
-        ranges.push_back(native.ranges.data());
-    }
-    m_functions.vkCmdBuildAccelerationStructuresKHR(m_command_buffer, static_cast<std::uint32_t>(informations.size()), informations.data(),
-                                                    ranges.data());
+    m_functions.vkCmdBuildAccelerationStructuresKHR(m_command_buffer, static_cast<std::uint32_t>(builds.size()), m_build_informations.data(),
+                                                    m_build_range_pointers.data());
 }
 
 void
@@ -2175,8 +2259,9 @@ VulkanCommandBuffer::record_write_acceleration_structure_properties(std::span<co
     static constexpr std::string_view OPERATION = "Recorder::write_acceleration_structure_properties";
     require_acceleration_structures(m_device, OPERATION);
     const QueryPoolRecord& queries = resolve(m_device.handles().query_pools, pool, OPERATION);
-    std::vector<VkAccelerationStructureKHR> natives;
-    natives.reserve(structures.size());
+
+    // The structures, resolved into reused storage.
+    std::vector<VkAccelerationStructureKHR>& natives = reuse(m_acceleration_structures, structures.size());
     for (const AccelerationStructureHandle structure : structures)
     {
         natives.push_back(resolve(m_device.handles().acceleration_structures, structure, OPERATION).structure);
