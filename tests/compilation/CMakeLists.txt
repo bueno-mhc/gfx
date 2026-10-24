@@ -188,3 +188,16 @@ if(GFX_BUILD_UI)
             LIBRARIES gfx::ui_platform)
     endif()
 endif()
+
+# ------------------------------------------------------------------------------ physics
+if(GFX_BUILD_PHYSICS)
+    gfx_add_compilation_failure_test(PhysicsHandlesOfDifferentKindsDoNotCompare
+        SOURCES physics/physics_handles_of_different_kinds_do_not_compare.cpp
+        EXPECTED_DIAGNOSTIC "no match for 'operator=='"
+        LIBRARIES gfx::physics_common)
+
+    gfx_add_compilation_failure_test(ConvexShapesNeedAMargin
+        SOURCES physics/convex_shapes_need_a_margin.cpp
+        EXPECTED_DIAGNOSTIC "ConvexShape.*(not satisfied|evaluated to 'false')"
+        LIBRARIES gfx::physics_common)
+endif()

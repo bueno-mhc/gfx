@@ -11,6 +11,13 @@ the fonts are listed separately.
 
 ## In programs
 
+### The core library (`gfx::core`, linked by every gfx library)
+
+| Component | Version | License | Copyright | Notes |
+|---|---|---|---|---|
+| [cglm](https://github.com/recp/cglm) | 0.9.6 | MIT | 2015 Recep Aslantas | Header only: the run-time SIMD paths of `gfx.core.math` (4×4 and 3×3 matrices, quaternions, 4-component vectors), compiled into each program that calls them |
+| [SIMDe](https://github.com/simd-everywhere/simde) (amalgamated headers) | 0.8.2 | MIT | 2017-2020 Evan Nemerson, 2015-2017 John W. Ratcliff, 2015 Brandon Rowlett, 2015 Ken Fast and the SIMDe contributors | Header only: the batch kernels of `gfx.core.math` and the physics primitives (SSE intrinsics, native on x86-64, translated elsewhere) |
+
 ### The graphics library (`gfx`)
 
 | Component | Version | License | Copyright | Notes |

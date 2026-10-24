@@ -737,3 +737,49 @@ function(gfx_require_ui_test_fonts)
     message(STATUS "gfx: UI test fonts (OFL) in ${_gfx_directory}")
     set(GFX_UI_TEST_FONT_DIRECTORY ${_gfx_directory} PARENT_SCOPE)
 endfunction()
+
+# ==============================================================================
+# The math library's run-time SIMD paths (docs/physics-design.md, "Math and SIMD"). gfx.core.math
+# computes in constant expressions when it can, and through these libraries at run time. Both are
+# header-only C, always fetched and pinned: the same version on every machine gives the same results
+# (deterministic simulations). Their headers stay in the math module's global module fragment.
+# ==============================================================================
+
+# gfx_require_cglm()
+#   Provides gfx::cglm: cglm 0.9.6 (MIT), SIMD vectors, matrices and quaternions (SSE/SSE2/AVX/NEON/WASM,
+#   scalar elsewhere). Its static inline functions are used, not its compiled library. CGLM_ALL_UNALIGNED:
+#   gfx.core.math's types are aligned, but no cglm load relies on it.
+function(gfx_require_cglm)
+    if(TARGET gfx::cglm)
+        return()
+    endif()
+    FetchContent_Declare(gfx_cglm
+        URL https://github.com/recp/cglm/archive/refs/tags/v0.9.6.tar.gz
+        URL_HASH SHA256=be5e7d384561eb0fca59724a92b7fb44bf03e588a7eae5123a7d796002928184
+        SOURCE_SUBDIR gfx-headers-only)
+    FetchContent_MakeAvailable(gfx_cglm)
+    add_library(gfx_cglm INTERFACE)
+    add_library(gfx::cglm ALIAS gfx_cglm)
+    target_include_directories(gfx_cglm SYSTEM INTERFACE ${gfx_cglm_SOURCE_DIR}/include)
+    target_compile_definitions(gfx_cglm INTERFACE CGLM_ALL_UNALIGNED)
+    message(STATUS "gfx: cglm 0.9.6 fetched (headers)")
+endfunction()
+
+# gfx_require_simde()
+#   Provides gfx::simde: SIMD Everywhere 0.8.2 (MIT; a few test headers CC0-1.0), portable SIMD
+#   intrinsics for the wide kernels over arrays (native SSE/AVX on x86, NEON on ARM, WASM SIMD, scalar
+#   elsewhere), from its amalgamated release (one header per instruction set).
+function(gfx_require_simde)
+    if(TARGET gfx::simde)
+        return()
+    endif()
+    FetchContent_Declare(gfx_simde
+        URL https://github.com/simd-everywhere/simde/releases/download/v0.8.2/simde-amalgamated-0.8.2.tar.xz
+        URL_HASH SHA256=59068edc3420e75c5ff85ecfd80a77196fb3a151227a666cc20abb313a5360bf
+        SOURCE_SUBDIR gfx-headers-only)
+    FetchContent_MakeAvailable(gfx_simde)
+    add_library(gfx_simde INTERFACE)
+    add_library(gfx::simde ALIAS gfx_simde)
+    target_include_directories(gfx_simde SYSTEM INTERFACE ${gfx_simde_SOURCE_DIR})
+    message(STATUS "gfx: SIMDe 0.8.2 fetched (amalgamated headers)")
+endfunction()

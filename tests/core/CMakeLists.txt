@@ -5,6 +5,7 @@ gfx_add_test(gfx_core_tests
         identifier_test.cpp
         backend_identity_test.cpp
         native_window_test.cpp
+        math_test.cpp
     LIBRARIES gfx::core)
 
 add_subdirectory(slot_table)

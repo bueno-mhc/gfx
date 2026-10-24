@@ -1155,7 +1155,9 @@ HarfBuzz 14.2.1, zstd 1.5.7 and stb_truetype 1.26; SheenBidi 3.0.0 and libunibre
 from the system when installed. The UI's screen reader adapter links AccessKit's C bindings 0.23.1 on Windows,
 fetched as the AccessKit project publishes them (static libraries for each platform: a 67 MB archive). With the tests on, configuring downloads the OFL test fonts (Noto
 Sans, Arabic, Hebrew; Source Sans 3 as OpenType CFF, CFF2, WOFF and WOFF2) into `<build>/ui-test-fonts`,
-checked against their hashes. [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) lists every dependency,
+checked against their hashes. The core library's math (`gfx.core.math`) is computed at compile time by its own code
+and at run time on SIMD through cglm 0.9.6 and SIMDe 0.8.2 (header-only, always fetched at those versions).
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) lists every dependency,
 its version, its license and what of it ends up in a program.
 
 | CMake option | Default | Backend |
@@ -1169,6 +1171,8 @@ its version, its license and what of it ends up in a program.
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
 | `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
+| `GFX_BUILD_PHYSICS` | `ON` | The physics library (in progress: its foundations `gfx::physics_common`, which depend on the core library only — the build checks it) |
+| `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (both need the platform library and Vulkan; the UI editor needs the UI library and its atlas tools) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
@@ -1187,11 +1191,13 @@ gfx/
 │   ├── GfxDependencies.cmake            system package or FetchContent for each dependency
 │   ├── GfxShaders.cmake                 gfx_add_shaders(): GLSL/HLSL to SPIR-V at build time
 │   ├── GfxTesting.cmake                 GoogleTest, compilation-failure and naming test helpers
+│   ├── GfxDecoupling.cmake              gfx_require_decoupled(): a target's link closure avoids forbidden targets
 │   └── scripts/                         CMake scripts run by builds and tests (SPIR-V embedding, ...)
 ├── THIRD_PARTY_LICENSES.md  every dependency: version, license, what a program contains of it
 ├── docs/                 architecture.md (the code as built, with diagrams), platform-design.md
 │                         (windowing and input: decisions and plan), ui-design.md (the UI: decisions,
-│                         phases, what each phase built), ui-atlas-format.md (the .uiatlas format)
+│                         phases, what each phase built), ui-atlas-format.md (the .uiatlas format),
+│                         physics-design.md (physics and camera: decisions, phases, what each built)
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
 ├── source/
@@ -1202,6 +1208,8 @@ gfx/
 │   │   │                            BackendIdentity (which library's backend raised an error)
 │   │   ├── handles.cppm             Handle<Tag> (issued by backends) and Identifier<Tag> (hashed names)
 │   │   ├── types.cppm               Version, Extent, Offset, Rectangle, Vector2
+│   │   ├── math.cppm, math_kernels.cpp   gfx.core.math (`import gfx.core.math;`): vectors, quaternions,
+│   │   │                            matrices, transforms; constexpr, SIMD at run time (cglm, SIMDe)
 │   │   ├── native_window.cppm       NativeWindowHandle: OS window handles, from the platform library
 │   │   │                            to the graphics library
 │   │   ├── slot_table.cppm, handle_table.cppm   thread-safe handle-to-object tables for backends
@@ -1243,27 +1251,33 @@ gfx/
 │   │   └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
 │   ├── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
 │   │                       (swapchain_description_for(), WindowSwapchain)
-│   └── ui/               the UI library (`import gfx.ui;`): enums.cppm, handles.cppm, errors.cppm
-│       ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables, docking,
-│       │                 navigation, shortcuts), UiListClipper, the frame report, the accessibility tree;
-│       │                 internal partition :state, one implementation unit per area
-│       ├── style/        gfx.ui.style: Style, Theme, builtin_theme()
-│       ├── input/        gfx.ui.input: UiFrameInput, UiPlatformServices, UiNullPlatformServices
-│       ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices, the
-│       │                 navigation context of the input system, UiAccessibilityAdapter (AccessKit)
-│       ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
-│       │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
-│       ├── draw/         gfx.ui.draw: DrawList, Color, Transform2D, TextStyle, UiDrawData;
-│       │                 gfx.ui.debug_overlay: DebugOverlay (frame metrics as SDF text)
-│       ├── render/       gfx.ui.renderer: UiRenderer; shaders/ui.vert, ui.frag (embedded by gfx_add_shaders())
-│       ├── font/         atlas/atlas_format.cppm: the .uiatlas format and AtlasView (in gfx.ui);
-│       │                 the atlas tools (gfx.ui.atlas_tools): source/ (fonts, characters), decoders/
-│       │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
-│       │                 builder), shaping/ (hb-subset, pair tables)
-│       └── tools/atlas_builder/  gfx_ui_atlas_builder, the atlas tool gfx_add_ui_atlas() runs
+│   ├── ui/               the UI library (`import gfx.ui;`): enums.cppm, handles.cppm, errors.cppm
+│   │   ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables, docking,
+│   │   │                 navigation, shortcuts), UiListClipper, the frame report, the accessibility tree;
+│   │   │                 internal partition :state, one implementation unit per area
+│   │   ├── style/        gfx.ui.style: Style, Theme, builtin_theme()
+│   │   ├── input/        gfx.ui.input: UiFrameInput, UiPlatformServices, UiNullPlatformServices
+│   │   ├── platform/     gfx.ui.platform (target gfx::ui_platform): UiPlatformInput, UiWindowServices, the
+│   │   │                 navigation context of the input system, UiAccessibilityAdapter (AccessKit)
+│   │   ├── text/         gfx.ui.text (in gfx.ui): FontAtlas, FontLibrary, TextLayoutEngine (bidi,
+│   │   │                 fallback, shaping, line breaking, cache), gfx.ui.unicode (UTF-8)
+│   │   ├── draw/         gfx.ui.draw: DrawList, Color, Transform2D, TextStyle, UiDrawData;
+│   │   │                 gfx.ui.debug_overlay: DebugOverlay (frame metrics as SDF text)
+│   │   ├── render/       gfx.ui.renderer: UiRenderer; shaders/ui.vert, ui.frag (embedded by gfx_add_shaders())
+│   │   ├── font/         atlas/atlas_format.cppm: the .uiatlas format and AtlasView (in gfx.ui);
+│   │   │                 the atlas tools (gfx.ui.atlas_tools): source/ (fonts, characters), decoders/
+│   │   │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
+│   │   │                 builder), shaping/ (hb-subset, pair tables)
+│   │   └── tools/atlas_builder/  gfx_ui_atlas_builder, the atlas tool gfx_add_ui_atlas() runs
+│   └── physics/          the physics library (in progress; core only): enums.cppm (physics and camera),
+│                         handles.cppm, errors.cppm; primitives/ (gfx.physics.primitives: planes, boxes,
+│                         spheres, oriented boxes, rays, segments, hulls, frustums, intersection tests,
+│                         SIMD frustum culling)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
-    ├── core/             gfx.core (imports gfx.core only) and the slot table
+    ├── core/             gfx.core (imports gfx.core only), its math and the slot table
+    ├── physics/          the physics foundations (primitives at compile time and against references, the
+    │                     SIMD batches against the scalar code) and the decoupling checks
     ├── graphics/<area>/  GoogleTest unit tests of the graphics library, one subfolder per area;
     │                     graphics/vulkan: the Vulkan backend on the machine's real GPUs
     ├── platform/         the platform library, through a test-only fake platform; platform/backends:

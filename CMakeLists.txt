@@ -40,6 +40,15 @@ cmake_dependent_option(GFX_PLATFORM_BACKEND_SDL3 "Build the SDL3 platform backen
                        "GFX_BUILD_PLATFORM" OFF)
 cmake_dependent_option(GFX_PLATFORM_BACKEND_GLFW "Build the GLFW platform backend (GLFW found or fetched)" ON
                        "GFX_BUILD_PLATFORM" OFF)
+# The physics and camera libraries (docs/physics-design.md): they depend on gfx::core only.
+option(GFX_BUILD_PHYSICS "Build the physics and camera libraries (decoupled from graphics, platform and UI)" ON)
+
+# The SIMD instruction set the math (gfx.core.math) and everything built on it compile for: SSE2 (every
+# x86-64 processor; NEON on 64-bit ARM, WASM SIMD on WebAssembly), AVX2 (with FMA: Intel Haswell, AMD
+# Excavator and later), NATIVE (the building machine's: not portable to other machines). Consumers
+# compile with the same flags (inline SIMD code), so it applies to the whole build.
+set(GFX_SIMD_INSTRUCTION_SET "SSE2" CACHE STRING "SIMD instruction set of the math: SSE2, AVX2 or NATIVE")
+set_property(CACHE GFX_SIMD_INSTRUCTION_SET PROPERTY STRINGS SSE2 AVX2 NATIVE)
 
 include(GfxToolchainRequirements)
 include(GfxProjectOptions)

@@ -26,6 +26,33 @@ if(MINGW)
 endif()
 
 # ------------------------------------------------------------------------------
+# SIMD instruction set (propagated to consumers: the math's inline SIMD code is compiled in them)
+# ------------------------------------------------------------------------------
+add_library(gfx_simd_options INTERFACE)
+add_library(gfx::simd_options ALIAS gfx_simd_options)
+# No fused multiply-add contraction: GCC and Clang fuse `a * b + c` when the instruction set has FMA (AVX2), which
+# would make results depend on the instruction set and scalar code differ from the SIMD kernels computing the same
+# arithmetic; simulations stay deterministic across builds (MSVC does not contract by default).
+if(NOT MSVC)
+    target_compile_options(gfx_simd_options INTERFACE -ffp-contract=off)
+endif()
+if(GFX_SIMD_INSTRUCTION_SET STREQUAL "AVX2")
+    if(MSVC)
+        target_compile_options(gfx_simd_options INTERFACE /arch:AVX2)
+    else()
+        target_compile_options(gfx_simd_options INTERFACE -mavx2 -mfma)
+    endif()
+elseif(GFX_SIMD_INSTRUCTION_SET STREQUAL "NATIVE")
+    if(MSVC)
+        message(FATAL_ERROR "gfx: GFX_SIMD_INSTRUCTION_SET=NATIVE has no MSVC equivalent; choose SSE2 or AVX2.")
+    endif()
+    target_compile_options(gfx_simd_options INTERFACE -march=native)
+elseif(NOT GFX_SIMD_INSTRUCTION_SET STREQUAL "SSE2")
+    message(FATAL_ERROR "gfx: GFX_SIMD_INSTRUCTION_SET is '${GFX_SIMD_INSTRUCTION_SET}'; choose SSE2, AVX2 or NATIVE.")
+endif()
+message(STATUS "gfx: SIMD instruction set ${GFX_SIMD_INSTRUCTION_SET}")
+
+# ------------------------------------------------------------------------------
 # Project options (gfx's own targets only)
 # ------------------------------------------------------------------------------
 add_library(gfx_project_options INTERFACE)

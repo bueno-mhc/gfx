@@ -9,4 +9,7 @@ endif()
 if(GFX_BUILD_UI)
     add_subdirectory(ui)        # the UI library, and the font pipeline's third-party libraries
 endif()
+if(GFX_BUILD_PHYSICS)
+    add_subdirectory(physics)   # the physics and camera libraries (decoupled from graphics, platform and UI)
+endif()
 add_subdirectory(compilation)  # code that must not compile, and naming checks
