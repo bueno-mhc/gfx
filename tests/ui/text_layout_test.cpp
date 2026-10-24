@@ -395,4 +395,160 @@ TEST_F(TextLayoutTest, CaretsAndHitTestsFollowClusters)
     EXPECT_GE(hit_test(lines, 1000, lines.lines[1].top + 1), 4U);
 }
 
+/// The caret before byte @p offset of @p layout, found the straightforward way (for each glyph, its cluster's end
+/// and extent over the whole line): the reference of caret_position().
+auto
+reference_caret_position(const TextLayout& layout,
+                         std::uint32_t offset) -> CaretPosition
+{
+    if (layout.lines.empty())
+    {
+        return {};
+    }
+
+    // The last line starting at or before the offset.
+    std::size_t line_index = 0;
+    for (std::size_t index = 1; index < layout.lines.size(); ++index)
+    {
+        line_index = layout.lines[index].text_begin <= offset ? index : line_index;
+    }
+    const LaidOutLine& line = layout.lines[line_index];
+    const std::span<const LaidOutGlyph> glyphs = layout.glyphs.subspan(line.first_glyph, line.glyph_count);
+    const auto end_of = [&](std::uint32_t cluster)
+    {
+        std::uint32_t end = line.text_end;
+        for (const LaidOutGlyph& other : glyphs)
+        {
+            end = other.cluster > cluster && other.cluster < end ? other.cluster : end;
+        }
+        return end;
+    };
+
+    // The first glyph in visual order whose cluster holds the offset, the cluster's share of its glyphs' width.
+    CaretPosition caret{.line = static_cast<std::uint32_t>(line_index), .top = line.top, .height = line.height};
+    for (const LaidOutGlyph& glyph : glyphs)
+    {
+        const std::uint32_t end = end_of(glyph.cluster);
+        if (offset >= glyph.cluster && offset < end)
+        {
+            float left = std::numeric_limits<float>::max();
+            float right = std::numeric_limits<float>::lowest();
+            for (const LaidOutGlyph& other : glyphs)
+            {
+                if (other.cluster == glyph.cluster)
+                {
+                    left = std::min(left, other.x);
+                    right = std::max(right, other.x + other.advance);
+                }
+            }
+            const float fraction = static_cast<float>(offset - glyph.cluster) / static_cast<float>(end - glyph.cluster);
+            caret.x = glyph.right_to_left ? right - fraction * (right - left) : left + fraction * (right - left);
+            return caret;
+        }
+    }
+    caret.x = line.right_to_left ? line.left : line.left + line.width;
+    return caret;
+}
+
+/// The offset nearest (@p x, @p y) in @p layout, found the straightforward way (both edges of every glyph's whole
+/// cluster): the reference of hit_test().
+auto
+reference_hit_test(const TextLayout& layout,
+                   float x,
+                   float y) -> std::uint32_t
+{
+    if (layout.lines.empty())
+    {
+        return 0;
+    }
+
+    // The line under y.
+    std::size_t line_index = 0;
+    while (line_index + 1 < layout.lines.size() && y >= layout.lines[line_index + 1].top)
+    {
+        ++line_index;
+    }
+    const LaidOutLine& line = layout.lines[line_index];
+    const std::span<const LaidOutGlyph> glyphs = layout.glyphs.subspan(line.first_glyph, line.glyph_count);
+
+    // For each glyph, its cluster's edges; the nearest one's offset.
+    std::uint32_t nearest = line.right_to_left ? line.text_end : line.text_begin;
+    float nearest_distance = std::numeric_limits<float>::max();
+    for (const LaidOutGlyph& glyph : glyphs)
+    {
+        float left = std::numeric_limits<float>::max();
+        float right = std::numeric_limits<float>::lowest();
+        std::uint32_t end = line.text_end;
+        for (const LaidOutGlyph& other : glyphs)
+        {
+            if (other.cluster == glyph.cluster)
+            {
+                left = std::min(left, other.x);
+                right = std::max(right, other.x + other.advance);
+            }
+            end = other.cluster > glyph.cluster && other.cluster < end ? other.cluster : end;
+        }
+        const std::uint32_t at_left = glyph.right_to_left ? end : glyph.cluster;
+        const std::uint32_t at_right = glyph.right_to_left ? glyph.cluster : end;
+        for (const auto& [edge, offset] : {std::pair{left, at_left}, std::pair{right, at_right}})
+        {
+            if (std::abs(edge - x) < nearest_distance)
+            {
+                nearest_distance = std::abs(edge - x);
+                nearest = offset;
+            }
+        }
+    }
+    return nearest;
+}
+
+TEST_F(TextLayoutTest, CaretsAndHitTestsMatchTheStraightforwardSearch)
+{
+    // Carets at every offset and hit tests across every line, in one pass over a line's glyphs (or two), as found by
+    // comparing every glyph with every other: Latin with ligatures and combining marks, pointed Hebrew, vowelled
+    // Arabic, bidi mixes, line breaks, empty lines, wrapping, right-to-left paragraphs, the basic shaper.
+    const std::array<std::string_view, 9> texts{
+        "",
+        "Hello world, fine office affinity, waffle",
+        "\xD7\xA9\xD6\xB8\xD7\x81\xD7\x9C\xD7\x95\xD6\xB9\xD7\x9D \xD7\xA2\xD7\x95\xD6\xB9\xD7\x9C\xD6\xB8\xD7\x9D",
+        "\xD9\x85\xD9\x8E\xD8\xB1\xD9\x92\xD8\xAD\xD9\x8E\xD8\xA8\xD9\x8B\xD8\xA7 \xD8\xA8\xD8\xA7\xD9\x84\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85",
+        "abc \xD7\x90\xD7\x91\xD7\x92 def 123 \xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7! end",
+        "first line\nsecond \xD7\x90\xD7\x91 line\n\nfourth after an empty one",
+        "The quick brown fox jumps over the lazy dog and keeps running far away",
+        "e\xCC\x81t\xC3\xA9 ffi \xEF\xAC\x81 tab\tend  ",
+        "123 \xD7\x90\xD7\x91\xD7\x92 456 \xD7\x93\xD7\x94 (\xD7\x95)",
+    };
+    const std::array<FontHandle, 4> handles{fonts.latin, fonts.basic, fonts.hebrew, fonts.arabic};
+    const std::array<TextLayoutDescription, 4> descriptions{TextLayoutDescription{}, TextLayoutDescription{.wrap_width = 60},
+                                                            TextLayoutDescription{.direction = ParagraphDirection::RIGHT_TO_LEFT},
+                                                            TextLayoutDescription{.wrap_width = 90, .alignment = TextAlignment::CENTER}};
+    for (const std::string_view text : texts)
+    {
+        for (const FontHandle font : handles)
+        {
+            for (const TextLayoutDescription& description : descriptions)
+            {
+                engine.new_frame();
+                const TextLayout layout = engine.layout(text, font, description);
+                for (std::uint32_t offset = 0; offset <= text.size() + 2; ++offset)
+                {
+                    const CaretPosition expected = reference_caret_position(layout, offset);
+                    const CaretPosition caret = caret_position(layout, offset);
+                    ASSERT_EQ(caret.line, expected.line) << text << " at " << offset;
+                    ASSERT_EQ(caret.x, expected.x) << text << " at " << offset;
+                    ASSERT_EQ(caret.top, expected.top) << text << " at " << offset;
+                    ASSERT_EQ(caret.height, expected.height) << text << " at " << offset;
+                }
+                for (const LaidOutLine& line : layout.lines)
+                {
+                    for (float x = -10; x <= layout.width + 10; x += 0.25F)
+                    {
+                        ASSERT_EQ(hit_test(layout, x, line.top + 1), reference_hit_test(layout, x, line.top + 1)) << text << " at x " << x;
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace

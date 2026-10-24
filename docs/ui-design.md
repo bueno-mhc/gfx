@@ -1416,6 +1416,28 @@ report, and your validation (you commit).
 - **Tests**: `gfx_ui_context_tests` +1 (`FramesArePublishedInTurn`), `gfx_ui_text_allocation_tests` +1, CTest
   `UiEditorExample.SDL3` and `.GLFW`.
 
+### Fix after U10: linear caret positions and hit tests (2026-10-24)
+
+- **Reported**: typing into the editor's text box made every frame slower the longer the text, and stayed slow while
+  the box was edited; a click elsewhere restored the frame rate.
+- **Cause**: `caret_position()` compared every glyph of the caret's line with every other (for each glyph, its
+  cluster's end over the whole line): O(g²) for a line of g glyphs. A field asks for its caret every frame while it is
+  edited, and at the end of a line, where typing leaves it, no glyph matches, so the whole quadratic walk ran; a field
+  not edited asks for offset 0, which the first glyph matches. `hit_test()` was quadratic in the same way (clicks, every
+  frame of a drag, Up and Down).
+- **Fix** (`text_layout.cpp`): the caret's cluster in one pass over the line (the largest cluster starting at or before
+  the offset; the smallest starting after it is where it ends) and its extent in a second; a hit test measures each group
+  of adjacent glyphs of one cluster once (a cluster's glyphs follow each other: clusters are monotonic within a run and a
+  cluster belongs to one run) and finds the winner's end in a second pass; the line of an offset by binary search (a
+  selection's drawing asks for two carets per line). Results are unchanged.
+- **Measured** (the test harness, one line of text being edited, Debug): 3264 bytes, 24.2 ms per frame before, 1.36 ms
+  after, the same as when the field is not edited. What remains grows linearly: the field draws every glyph of its text,
+  clipped by the scissor.
+- **Test**: `TextLayoutTest.CaretsAndHitTestsMatchTheStraightforwardSearch` compares both with the former algorithms,
+  kept in the test as references: every offset, and x every quarter pixel on every line, for Latin with ligatures and
+  combining marks, pointed Hebrew, vowelled Arabic, bidi mixes, line breaks and empty lines, wrapping, right-to-left
+  paragraphs and the basic shaper; equal exactly.
+
 ## C. The API as proposed (for validation, not final code)
 
 ### C1. Atlas at build time, checked at compile time

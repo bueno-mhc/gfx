@@ -845,58 +845,40 @@ TextLayoutEngine::statistics() const noexcept -> TextLayoutStatistics
 namespace
 {
 
-/// The line of @p layout holding byte @p offset (the last line starting at or before it).
+/// The line of @p layout (one at least) holding byte @p offset: the last line starting at or before it (the first
+/// line otherwise). Lines are in text order: a binary search.
 auto
 line_of(const TextLayout& layout,
         std::uint32_t offset) noexcept -> std::size_t
 {
-    std::size_t line = 0;
-    for (std::size_t index = 1; index < layout.lines.size(); ++index)
-    {
-        if (layout.lines[index].text_begin <= offset)
-        {
-            line = index;
-        }
-    }
-    return line;
+    const std::span<const LaidOutLine> following = layout.lines.subspan(1);
+    return static_cast<std::size_t>(std::ranges::upper_bound(following, offset, {}, &LaidOutLine::text_begin) - following.begin());
 }
 
-/// The byte where the cluster of glyph @p glyph of @p line ends: the next larger cluster of the line, or its end.
+/// The glyphs of @p line, in visual order.
 auto
-cluster_end(const TextLayout& layout,
-            const LaidOutLine& line,
-            std::uint32_t cluster) noexcept -> std::uint32_t
+glyphs_of(const TextLayout& layout,
+          const LaidOutLine& line) noexcept -> std::span<const LaidOutGlyph>
 {
-    std::uint32_t end = line.text_end;
-    for (std::uint32_t index = line.first_glyph; index < line.first_glyph + line.glyph_count; ++index)
+    return layout.glyphs.subspan(line.first_glyph, line.glyph_count);
+}
+
+/// The byte where the cluster starting at @p cluster ends in @p glyphs (a line's): where the next larger cluster
+/// starts, or @p text_end.
+auto
+cluster_end(std::span<const LaidOutGlyph> glyphs,
+            std::uint32_t cluster,
+            std::uint32_t text_end) noexcept -> std::uint32_t
+{
+    std::uint32_t end = text_end;
+    for (const LaidOutGlyph& glyph : glyphs)
     {
-        const std::uint32_t other = layout.glyphs[index].cluster;
-        if (other > cluster && other < end)
+        if (glyph.cluster > cluster && glyph.cluster < end)
         {
-            end = other;
+            end = glyph.cluster;
         }
     }
     return end;
-}
-
-/// The left and right of the glyphs of @p cluster on @p line.
-auto
-cluster_extent(const TextLayout& layout,
-               const LaidOutLine& line,
-               std::uint32_t cluster) noexcept -> std::pair<float, float>
-{
-    float left = std::numeric_limits<float>::max();
-    float right = std::numeric_limits<float>::lowest();
-    for (std::uint32_t index = line.first_glyph; index < line.first_glyph + line.glyph_count; ++index)
-    {
-        const LaidOutGlyph& glyph = layout.glyphs[index];
-        if (glyph.cluster == cluster)
-        {
-            left = std::min(left, glyph.x);
-            right = std::max(right, glyph.x + glyph.advance);
-        }
-    }
-    return {left, right};
 }
 
 } // namespace
@@ -912,19 +894,42 @@ caret_position(const TextLayout& layout,
     const std::size_t line_index = line_of(layout, offset);
     const LaidOutLine& line = layout.lines[line_index];
     CaretPosition caret{.line = static_cast<std::uint32_t>(line_index), .top = line.top, .height = line.height};
+    const std::span<const LaidOutGlyph> glyphs = glyphs_of(layout, line);
 
-    // Inside a cluster: its share of the cluster's width, from the side the cluster's direction starts on.
-    for (std::uint32_t index = line.first_glyph; index < line.first_glyph + line.glyph_count; ++index)
+    // The cluster holding the offset (one pass): the largest cluster starting at or before it, which ends where the
+    // smallest cluster starting after it starts (no cluster starts between the two), or at the line's end.
+    std::optional<std::uint32_t> start{};
+    std::uint32_t end = line.text_end;
+    for (const LaidOutGlyph& glyph : glyphs)
     {
-        const LaidOutGlyph& glyph = layout.glyphs[index];
-        const std::uint32_t end = cluster_end(layout, line, glyph.cluster);
-        if (offset >= glyph.cluster && offset < end)
+        if (glyph.cluster <= offset)
         {
-            const auto [left, right] = cluster_extent(layout, line, glyph.cluster);
-            const float fraction = static_cast<float>(offset - glyph.cluster) / static_cast<float>(end - glyph.cluster);
-            caret.x = glyph.right_to_left ? right - fraction * (right - left) : left + fraction * (right - left);
-            return caret;
+            start = std::max(start.value_or(glyph.cluster), glyph.cluster);
         }
+        else if (glyph.cluster < end)
+        {
+            end = glyph.cluster;
+        }
+    }
+
+    // Inside a cluster: its share of the cluster's width (all its glyphs), from the side its direction starts on.
+    if (start && offset < end)
+    {
+        float left = std::numeric_limits<float>::max();
+        float right = std::numeric_limits<float>::lowest();
+        std::optional<bool> right_to_left{};
+        for (const LaidOutGlyph& glyph : glyphs)
+        {
+            if (glyph.cluster == *start)
+            {
+                right_to_left = right_to_left.value_or(glyph.right_to_left);
+                left = std::min(left, glyph.x);
+                right = std::max(right, glyph.x + glyph.advance);
+            }
+        }
+        const float fraction = static_cast<float>(offset - *start) / static_cast<float>(end - *start);
+        caret.x = *right_to_left ? right - fraction * (right - left) : left + fraction * (right - left);
+        return caret;
     }
 
     // After the line's last character: where its direction ends.
@@ -949,25 +954,40 @@ hit_test(const TextLayout& layout,
         ++line_index;
     }
     const LaidOutLine& line = layout.lines[line_index];
-    std::uint32_t nearest = line.right_to_left ? line.text_end : line.text_begin;
+    const std::span<const LaidOutGlyph> glyphs = glyphs_of(layout, line);
+
+    // The cluster edge nearest x, each cluster measured once: a cluster's glyphs follow each other in the line's
+    // visual order (clusters are monotonic within a run, and a cluster belongs to one run).
+    const LaidOutGlyph* nearest = nullptr;
+    bool nearest_right = false;
     float nearest_distance = std::numeric_limits<float>::max();
-    for (std::uint32_t index = line.first_glyph; index < line.first_glyph + line.glyph_count; ++index)
+    for (std::size_t index = 0; index < glyphs.size();)
     {
-        const LaidOutGlyph& glyph = layout.glyphs[index];
-        const auto [left, right] = cluster_extent(layout, line, glyph.cluster);
-        const std::uint32_t end = cluster_end(layout, line, glyph.cluster);
-        const std::uint32_t at_left = glyph.right_to_left ? end : glyph.cluster;
-        const std::uint32_t at_right = glyph.right_to_left ? glyph.cluster : end;
-        for (const auto& [edge, offset] : {std::pair{left, at_left}, std::pair{right, at_right}})
+        const LaidOutGlyph& first = glyphs[index];
+        float left = std::numeric_limits<float>::max();
+        float right = std::numeric_limits<float>::lowest();
+        for (; index < glyphs.size() && glyphs[index].cluster == first.cluster; ++index)
+        {
+            left = std::min(left, glyphs[index].x);
+            right = std::max(right, glyphs[index].x + glyphs[index].advance);
+        }
+        for (const auto& [edge, is_right] : {std::pair{left, false}, std::pair{right, true}})
         {
             if (std::abs(edge - x) < nearest_distance)
             {
                 nearest_distance = std::abs(edge - x);
-                nearest = offset;
+                nearest = &first;
+                nearest_right = is_right;
             }
         }
     }
-    return nearest;
+    if (nearest == nullptr)
+    {
+        return line.right_to_left ? line.text_end : line.text_begin;
+    }
+
+    // The edge's offset: the cluster's start on the side its direction starts on, its end on the other.
+    return nearest_right != nearest->right_to_left ? cluster_end(glyphs, nearest->cluster, line.text_end) : nearest->cluster;
 }
 
 } // namespace gfx::ui
