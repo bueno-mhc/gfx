@@ -1,7 +1,7 @@
 # gfx physics and camera: a decoupled physics abstraction over Box3D, and a camera module — architecture, decisions and plan
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
-(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 implemented** (§B "PH2 as built"),
+(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 implemented** (§B "PH3 as built"),
 awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
@@ -686,6 +686,56 @@ Deviations from the proposal, for validation:
 6. **Manifold cache API**: update (warm start) → solve → `store()` → `end_step()`, keyed by colliders and sub-shapes;
    single-threaded (the narrow phase itself is pure and can run in parallel).
 
+### PH3 as built (2026-10-24)
+
+In `gfx::physics`, two more modules:
+
+**`gfx.physics.tasks`** (`source/physics/tasks/`): `TaskScheduler` (`parallel_for(count, minimum_range, task)` — ranges
+of at least the minimum, possibly concurrent, returning when all are done and rethrowing the first exception;
+`concurrency()`), `TaskFunction = std::function<void(begin, end)>`, the library's `InlineTaskScheduler` (on the caller) and
+`ThreadTaskScheduler` (std::jthread workers taking ranges by an atomic counter, the caller among them; the caller returns
+only when every range is done and no worker is still taking ranges).
+
+**`gfx.physics.spatial`** (`source/physics/spatial/`), every structure written against the primitives only:
+
+| Structure | As built |
+|---|---|
+| `Bvh` | dynamic AABB tree: leaves beside the sibling of least surface-area cost (Box2D's branch and bound), AVL rotations; mutations in bvh.cpp |
+| `Octree<Depth = 8, Looseness = 2>`, `Quadtree<Plane = XZ, Depth = 8, Looseness = 2>` | one `LooseTree<Dimensions, Plane, Depth, Looseness>`: region at construction (default ±1024), a proxy at the deepest level whose loose cells hold it, in its center's cell; cells hashed per level; queries visit per level the cells in range, or every used cell when fewer; too large or outside the region: level 0, always visited |
+| `Bsp` | axis-aligned planes by binned surface-area heuristic over a node's proxies (16 bins on the axis of widest spread); proxies a plane cuts stay at its node; leaves split past 8; node boxes for queries; rebuilt after as many changes as proxies or when a split would go past 2 · bit_width(n / 8 + 1) + 4 |
+| `UniformGrid<CellSize = 1>` | hashed cubic cells; a proxy in every cell it covers up to 64, larger ones in a list every search visits; each pair or hit reported by the cell of the smallest corner of the overlap (const, concurrent queries) |
+| `SweepAndPrune<Axes = 1>` | proxies sorted by lower end on x (or on each axis: 3), moved by insertion; pairs by a sweep (along the axis of widest spread with three) |
+
+`SpatialStructureConcept` (`KIND`, insert, remove, update → bool, key, box, size, queries by `Aabb`, `Ray` + maximum,
+`Segment`, `Sphere`, `Frustum` with visitors returning false to stop — a ray's visitor also gets the entry distance into
+the box —, pairs, iterate) — the static_assert in spatial.cppm checks all seven. Shared: `ProxyStore` (slots issuing
+`SpatialProxyHandle`s; stale handles throw PhysicsError [gfx::physics::SPATIAL]), `CellMap` (open addressing, backward-shift
+removal).
+
+**Broad phase**: `CollisionFilter` {category, mask, group} with `should_collide()` (Box3D's rule), `BroadPhasePair` (smaller
+handle first, ordered), `BroadPhaseDescription` {margin 0.1, prediction 2, proxies_per_task 128}, `SpatialBroadPhase<Structure>`
+(insert with filter, remove, `move(proxy, box, displacement)` → refits only when the box leaves its fat box: margin plus
+the predicted motion ahead, `set_filter`, `set_custom_filter`, `update(scheduler)` → sorted `pairs()`, `new_pairs()`,
+`ended_pairs()`); `DefaultBroadPhase = SpatialBroadPhase<Bvh>`, `FlatWorldBroadPhase = SpatialBroadPhase<Quadtree<XZ, 8>>`.
+
+Tests (in `gfx_physics_tests`, + 12): each of the seven structures through 1500 boxes moved, removed and added over 8
+steps — pairs (each once) and box, sphere, segment, ray (entry distances too) and frustum queries equal brute force,
+iteration, stopping visitors, stale handles; a BVH of 4096 sorted inserts at most 20 high, a BSP at most 24 deep, loose
+octree levels; filters, fat boxes, new and ended pairs; 3000 moving boxes over 6 steps give identical pairs on every
+structure with the structure's own search and with 1, 2 and 8 threads; the schedulers (every index once over 50 rounds,
+ranges of the minimum, exceptions to the caller).
+
+Deviations from the proposal, for validation:
+
+1. **Structures keep the boxes they are given**; fattening (margin and predicted displacement) is the broad phase's.
+2. **The BSP splits by axis-aligned planes** (a k-d tree): general planes fit polygon soups, not boxes; nodes keep boxes.
+3. **The parallel pair search is per-proxy queries** (the pair kept by its smaller collider) split over tasks; the
+   structure's own pair search runs single-threaded. Both give the same sorted pairs (tested).
+4. **The task scheduler arrived now** (§A14 placed it with PH4): needed by the pair search; `ThreadTaskScheduler` is a
+   library pool for applications without a job system.
+5. **The virtual `SpatialStructure`** (run-time choice of a structure, §A7) comes with the interfaces in PH4.
+6. **The broad phase indexes filters by the collider handle's slot**: colliders must not be null, one proxy per collider; a
+   custom filter must be thread-safe when a scheduler is given.
 ---
 
 ## C. The API as proposed (for validation, not final code)

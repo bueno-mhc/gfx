@@ -3,7 +3,8 @@
 # gfx::core only, which the build checks (gfx_require_decoupled) along with the modules their sources import.
 #   gfx::physics_common  enumerations, handles, errors, geometric primitives (`import gfx.physics.primitives;`)
 #   gfx::camera          cameras and camera controllers (`import gfx.camera;`), on gfx::physics_common only
-#   gfx::physics         collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`);
+#   gfx::physics         collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`),
+#                        spatial structures and the broad phase (`gfx.physics.spatial`), task schedulers (`gfx.physics.tasks`);
 #                        later the world interface, spatial structures, dynamics and the backends
 # ==============================================================================
 include(GfxDependencies)
@@ -104,7 +105,20 @@ target_sources(gfx_physics
             narrow_phase/convex.cppm
             narrow_phase/collide.cppm
             narrow_phase/manifold_cache.cppm
+            tasks/tasks.cppm
+            spatial/spatial.cppm
+            spatial/structure.cppm
+            spatial/bvh.cppm
+            spatial/loose_tree.cppm
+            spatial/bsp.cppm
+            spatial/uniform_grid.cppm
+            spatial/sweep_and_prune.cppm
+            spatial/broad_phase.cppm
     PRIVATE
+        tasks/tasks.cpp
+        spatial/spatial.cpp
+        spatial/bvh.cpp
+        spatial/bsp.cpp
         narrow_phase/collide.cpp
         narrow_phase/manifold_cache.cpp
         shapes/hull.cpp

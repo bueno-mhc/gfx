@@ -1216,7 +1216,7 @@ its version, its license and what of it ends up in a program.
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
 | `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
-| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, and `gfx::physics` with collision shapes and the narrow phase), which depend on the core library only — the build checks it |
+| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, and `gfx::physics` with collision shapes, the narrow phase, spatial structures and the broad phase), which depend on the core library only — the build checks it |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (both need the platform library and Vulkan; the UI editor needs the UI library and its atlas tools) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
@@ -1319,7 +1319,9 @@ gfx/
 │                         spheres, oriented boxes, rays, segments, hulls, frustums, intersection tests,
 │                         SIMD frustum culling); camera/ (gfx.camera); shapes/ (gfx.physics.shapes: convex shapes,
 │                         quickhull, mass properties, meshes, height fields, compounds); narrow_phase/ (GJK, EPA,
-│                         separating axes, contact manifolds, the manifold cache)
+│                         separating axes, contact manifolds, the manifold cache); spatial/ (gfx.physics.spatial:
+│                         BVH, loose octree and quadtree, BSP, uniform grid, sweep and prune, the broad phase);
+│                         tasks/ (gfx.physics.tasks: task schedulers)
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only), its math and the slot table
