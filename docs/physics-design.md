@@ -2,7 +2,7 @@
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
 (636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 committed** (db6ecce); **PH5
-committed** (d2b2c8e); **PH6 implemented** (§B "PH6 as built"), awaiting validation. This
+committed** (d2b2c8e); **PH6 committed** (7856f19); **PH7 implemented** (§B "PH7 as built"), awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -991,6 +991,102 @@ Deviations from the proposal, for validation:
 
 Known limits: a body much heavier than the particles it hangs from stretches them (XPBD's mass ratios: more sub-steps or
 long-range attachments help); a tether moves only its first particle.
+
+### PH7 as built (2026-10-25)
+
+**The solver's operations** (`gfx.physics.interface:pipeline`): `SolverBody` (center of mass, orientation, velocities,
+inverse mass, world inverse inertia with locked axes at 0, linear freedom), `SolverContact` (bodies, a manifold whose
+points carry last step's impulses in and this step's out, the pair's friction and restitution, a rolling impulse),
+`SolverJoint` (bodies — the second may be `NO_SOLVER_BODY`, the world —, a joint description or a `UserConstraint`, its
+frames about the bodies' centers of mass, its impulses per row, its force and torque out), `SolverStep`, and
+`Solver::solve(step)` (the bodies' velocities already include the step's forces: the solver solves velocities, moves the
+bodies, corrects positions). **User constraints** (deferred to this phase by PH4): `ConstraintRow` (EQUALITY, INEQUALITY,
+MOTOR or SPRING — `ConstraintRowKind` — with a full Jacobian on both bodies and an error), `ConstraintFrame`, the
+application's `UserConstraint` (`row_count()`, `rows(first, second, rows)`), `ConstraintDescription`, a `Constraint`
+object, `PhysicsWorld::create_constraint()`; edits, records, slots, cascades (a body's constraints go with it), checks in the
+framework; `JointEvent::constraint`, `PhysicsErrorContext::constraint`. Box3D refuses them (`USER_CONSTRAINTS`).
+`SteppedWorldBackend::broad_phase_component()` (and the other three) let a backend show its real components through
+`PhysicsWorld::broad_phase()` …; every `replace_*()` is refused during a step.
+
+**`SequentialImpulseSolver`** (`gfx.physics.dynamics:sequential_impulses`): warm starting from the impulses carried in;
+velocity iterations over the joints' rows then the contacts — Coulomb friction at each point (sticking while the
+impulse that stops the sliding fits the static cone, sliding at the dynamic coefficient beyond), rolling resistance (the
+relative turn opposed up to the coefficient, a lever in meters, times the push), normal impulses with speculative
+contacts (a point still apart lets the bodies approach until they touch); restitution for points that hit faster than the
+threshold (Box2D v3's pass after the iterations); the bodies moved; position iterations (non-linear Gauss–Seidel, no
+velocity bias): overlaps beyond `LINEAR_SLOP` and joint errors, `POSITION_CORRECTION_FACTOR` of each per iteration, at
+most `MAXIMUM_LINEAR_CORRECTION` / `MAXIMUM_ANGULAR_CORRECTION`. **Each run of equality rows** (a point, an orientation:
+up to six) is solved as one system (Cholesky), for velocities and positions, as Box2D solves its point constraints;
+springs are soft constraints (frequency, damping ratio); motors are bounded by force × time. Joints and contacts are
+**colored** by the dynamic bodies they move; a color of 128 or more runs on the task scheduler: the same bits on any
+thread count. **`joint_rows()`** (public) makes every joint kind's rows: points as three world-axis rows, alignments and
+orientations from the relative quaternion with **exact Jacobians** (d(2v)/dt = Ω · (w e + v × e), and the closed form for
+2 atan2(v, w) angles), limits as INEQUALITY pairs, the slider's and six-DOF's translations with the first lever reaching
+the second anchor; hinges turn about their frames' z, sliders along x, cone-twist joints twist about z; distance springs
+of frequency 0 leave the length free between the limits.
+
+**The reference backend** (`gfx.physics.backends.reference`, `source/physics/backends/reference/`, always built): a
+`SteppedWorldBackend` of the abstraction's components — `SpatialBroadPhaseComponent<Bvh>`, `GjkNarrowPhase`,
+`SequentialImpulseSolver`, `SemiImplicitEulerIntegrator` —, each replaceable between steps (a new broad phase gets every
+live collider). Its records are the truth (it reads the pending records each step, so the framework's soft-body
+corrections reach it as records). A step:
+
+1. bodies an edit woke wake; impulses apply at once; forces and gravity are kept for the sub-steps;
+2. collider boxes (continuous bodies' stretched by their motion) move in the broad phase; its pairs — of different bodies,
+   one dynamic, not kept apart by a joint, not both at rest (then last step's manifolds stay) — collide on the scheduler's
+   threads in chunks of 32 pairs, merged in order; the manifold cache gives returning points their impulses;
+3. islands (union-find over dynamic bodies joined by contacts, joints and constraints; touching a moving kinematic body
+   keeps one awake) wake as wholes;
+4. **sub-steps** (`SolverDescription::sub_steps`, 4 by default, as Box3D's): the forces through the integrator, then the
+   contact points moved with their bodies (their surface points kept in the bodies' frames), then the solve;
+5. poses and velocities back to the records; impulses into the cache; joint forces, torques and breaking (BROKEN events,
+   the joint disabled);
+6. islands whose bodies all stayed slow for the sleep time fall asleep;
+7. contact BEGIN (with HIT above the hit speed), END, the touching pairs' contacts; trigger ENTER, STAY, EXIT (overlap tests
+   against the colliders' boxes where the step left them).
+
+Tests (+ 20): `gfx_physics_reference_tests` (15: the factory; free fall; a stack at rest, asleep, its contacts, woken
+through its island; a pendulum's period within 2 %; hinge limits, a rope, a breaking weld, a hinge motor's speed; contact
+and trigger events; a kinematic platform lifting a crate; the same bits on one and four threads; six-DOF joints keeping
+their locked axes and a limited turn; a dynamic mesh resting on its face, static friction holding on a 20° slope and
+dynamic friction letting a pushed box slide; a bounce of 0.8² of the height, rolling resistance stopping a ball;
+continuous bodies stopped by a 5 cm wall a discrete one passes; user constraints holding, carrying the weight, breaking;
+each component replaced — the broad phase on sweep and prune and on an octree, the narrow phase, the solver, the
+integrator —; a rope holding a body), `gfx_physics_dynamics_tests` + 3 (every joint kind's Jacobians against the measured
+rates of its errors; an elastic collision exchanging velocities; a body hanging from a point carrying its weight),
+`SteppedWorldTest.UserConstraintsAreRecordedAndGoWithTheirBodies`, and `CMakeDefect.GoogleTestDiscoveryNamesNoTarget` (below).
+
+**Build**: CMake 4.4.0-rc2 writes no target name into GoogleTest's POST_BUILD discovery scripts, so the test executables of
+a directory list their tests into one JSON file; with six physics test executables linking at once, the Release build
+stopped on a clobbered listing. `gfx_add_test()` now links a directory's test executables one at a time (a Ninja job pool
+per directory; directories still link in parallel), and a detector test passes while the defect lasts.
+
+Deviations from the proposal, for validation:
+
+1. **`ReferenceWorld<BroadPhase, NarrowPhase, Solver, Integrator>` is not a class template**: the backend composes its
+   components at run time, each replaceable between steps through `PhysicsWorld::replace_*()` — a virtual call per
+   component per sub-step (per candidate pair for the narrow phase); the hot loops are compile-time templates inside the
+   components (`SpatialBroadPhaseComponent<Structure>`, the narrow phase's dispatch).
+2. **The solver's operations and user constraints added to the interface** (`Solver::solve`, `SolverBody`/`Contact`/
+   `Joint`/`Step`, `ConstraintRow`, `UserConstraint`, `Constraint`, `create_constraint`, `joint_rows()`), and
+   `SteppedWorldBackend::*_component()`.
+3. **The reference sub-steps** (`SolverDescription::sub_steps`): collided once, solved per sub-step. With one solve of eight
+   iterations per step, a stack of five boxes rocked and its top box ended 2 cm aside.
+4. **Static or dynamic friction is decided by the friction cone**, not by `static_friction_speed`: the sliding speed a
+   solver sees always includes the step's gravity (a box on a slope never started static). `static_friction_speed`,
+   `contact_hertz`, `contact_damping_ratio` and `maximum_push_speed` are Box3D's settings; the reference corrects
+   positions with non-linear Gauss–Seidel and its constants.
+5. **A motor's speed is the second body's relative to the first** (as Box3D's): a body joined to the world turns at minus
+   it. Documented on `JointMotor`.
+6. **Continuous collision is speculative**: a continuous body's contacts reach as far as it moves toward the other in the
+   step (no time of impact).
+7. **Triggers test every collider whose box overlaps theirs** (no tree): triggers × colliders box tests per step.
+8. **A dynamic body whose colliders give no mass** (open meshes) moves with a unit mass and inertia.
+9. **Replacing a component is refused during a step**, on every backend.
+10. **Fixed in earlier code**: inertia tensors were declared singular below a determinant of 10⁻⁹ — a 2 cm sphere's is
+    10⁻¹² — in the soft bodies' coupling (PH6) and the framework's default corrections; the test is now against float's
+    smallest normal value.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

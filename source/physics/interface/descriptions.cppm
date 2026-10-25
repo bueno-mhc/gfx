@@ -148,7 +148,7 @@ struct JointLimits
 /// @brief A drive on an axis: a target speed reached with at most a force (or torque).
 struct JointMotor
 {
-    float target_speed = 0.0F;  ///< Meters or radians per second.
+    float target_speed = 0.0F;  ///< Meters or radians per second, of the second body relative to the first (a body joined to the world moves at minus it).
     float maximum_force = 0.0F; ///< Newtons or newton-meters, at least 0 (0: no drive).
 
     [[nodiscard]] constexpr auto operator==(const JointMotor&) const noexcept -> bool = default;
@@ -273,6 +273,66 @@ struct JointState
     Vector3 torque{};    ///< The constraint torque on the second body.
 
     [[nodiscard]] constexpr auto operator==(const JointState&) const noexcept -> bool = default;
+};
+
+// ===================================================================================================== user constraints
+
+/// @brief A body as a constraint's rows see it: its center of mass, orientation and velocities (the world's: at rest,
+///        at the origin).
+struct ConstraintFrame
+{
+    Vector3 center{};           ///< Its center of mass, world space.
+    Quaternion orientation{};   ///< Its orientation.
+    Vector3 linear_velocity{};  ///< Of its center of mass.
+    Vector3 angular_velocity{}; ///< Radians per second, world axes.
+};
+
+/// @brief A row of a constraint: one scalar function of the two bodies' positions (its error) and how their velocities
+///        change it (its Jacobian: rate = linear_first · v₁ + angular_first · ω₁ + linear_second · v₂ + angular_second ·
+///        ω₂, velocities of the centers of mass). What joints are made of, and what user constraints give.
+struct ConstraintRow
+{
+    ConstraintRowKind kind = ConstraintRowKind::EQUALITY; ///< What it keeps.
+    Vector3 linear_first{};                               ///< The rate per unit velocity of the first body.
+    Vector3 angular_first{};                              ///< Per unit angular velocity of the first body.
+    Vector3 linear_second{};                              ///< Per unit velocity of the second body.
+    Vector3 angular_second{};                             ///< Per unit angular velocity of the second body.
+    float error = 0.0F;                                   ///< EQUALITY, INEQUALITY, SPRING: its value now (meters or radians).
+    float speed = 0.0F;                                   ///< MOTOR: the target rate.
+    float maximum_force = 0.0F;                           ///< MOTOR: the largest force (or torque) it exerts, at least 0.
+    JointSpring spring{};                                 ///< SPRING: its softness (frequency 0: rigid).
+};
+
+/// @brief A constraint of the application: rows the solver keeps, made from the two bodies' frames at each iteration
+///        (the reference backend solves them as it solves joints).
+class UserConstraint
+{
+public:
+    virtual ~UserConstraint() = default;
+
+    /// @brief Its rows: the same number every time, at most MAXIMUM_CONSTRAINT_ROWS.
+    [[nodiscard]] virtual auto row_count() const noexcept -> std::uint32_t = 0;
+
+    /// @brief Its rows at @p first and @p second into @p rows (row_count() of them). Called several times per step
+    ///        (velocity and position iterations), possibly from the solver's threads: it changes nothing.
+    virtual void rows(const ConstraintFrame& first,
+                      const ConstraintFrame& second,
+                      std::span<ConstraintRow> rows) const noexcept = 0;
+
+protected:
+    UserConstraint() = default;
+    UserConstraint(const UserConstraint&) = default;
+    auto operator=(const UserConstraint&) -> UserConstraint& = default;
+};
+
+/// @brief A user constraint between two bodies.
+struct ConstraintDescription
+{
+    RigidBodyHandle first{};                           ///< A body.
+    RigidBodyHandle second{};                          ///< The other (null: the world).
+    std::shared_ptr<const UserConstraint> constraint{}; ///< Its rows (not null; shared, immutable).
+    JointBreaking breaking{};                          ///< When it breaks.
+    bool collide_connected = false;                    ///< Whether the two bodies still collide.
 };
 
 /// @brief Any joint, in JointKind's order.
@@ -465,13 +525,14 @@ struct TriggerEvent
     ColliderHandle collider{};                       ///< The collider.
 };
 
-/// @brief A joint broke.
+/// @brief A joint (or a user constraint) broke.
 struct JointEvent
 {
     JointEventKind kind = JointEventKind::BROKEN; ///< What happened.
-    JointHandle joint{};                          ///< The joint.
+    JointHandle joint{};                          ///< The joint (null for a user constraint).
     float force = 0.0F;                           ///< Its constraint force.
     float torque = 0.0F;                          ///< Its constraint torque.
+    ConstraintHandle constraint{};                ///< The user constraint (null for a joint).
 };
 
 /// @brief A body fell asleep or woke up.

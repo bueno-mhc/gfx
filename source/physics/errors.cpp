@@ -66,6 +66,7 @@ context_lines(const PhysicsErrorContext& context) -> std::string
     add("Collider", context.collider);
     add("Shape", context.shape);
     add("Joint", context.joint);
+    add("Constraint", context.constraint);
     add("Trigger", context.trigger);
     return lines;
 }

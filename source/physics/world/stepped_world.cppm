@@ -143,7 +143,14 @@ public:
                                              float maximum,
                                              const QueryOptions& options) const noexcept -> std::optional<QueryResult<ClosestPointHit>>;
 
-    /// @brief Replaces its broad phase.
+    /// @brief The broad phase it runs when it runs a component (what PhysicsWorld::broad_phase() then returns); null by
+    ///        default: its own, described by pipeline(). The other three likewise.
+    [[nodiscard]] virtual auto broad_phase_component() noexcept -> BroadPhase*;
+    [[nodiscard]] virtual auto narrow_phase_component() noexcept -> NarrowPhase*;
+    [[nodiscard]] virtual auto solver_component() noexcept -> Solver*;
+    [[nodiscard]] virtual auto integrator_component() noexcept -> Integrator*;
+
+    /// @brief Replaces its broad phase (between steps: the framework refuses replacements during one).
     /// @throws BackendCapabilityError by default (PhysicsCapability::CUSTOM_BROAD_PHASE).
     virtual void replace_broad_phase(std::unique_ptr<BroadPhase> broad_phase);
 
@@ -195,6 +202,7 @@ public:
     [[nodiscard]] auto create_rigid_body(const RigidBodyDescription& description) -> std::unique_ptr<RigidBody> override;
     [[nodiscard]] auto create_soft_body(const SoftBodyDescription& description) -> std::unique_ptr<SoftBody> override;
     [[nodiscard]] auto create_joint(const JointDescription& description) -> std::unique_ptr<Joint> override;
+    [[nodiscard]] auto create_constraint(const ConstraintDescription& description) -> std::unique_ptr<Constraint> override;
     [[nodiscard]] auto create_trigger(const TriggerDescription& description) -> std::unique_ptr<Trigger> override;
 
     void set_gravity(Vector3 gravity) override;

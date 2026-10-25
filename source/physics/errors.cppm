@@ -34,6 +34,7 @@ struct PhysicsErrorContext
     std::optional<ColliderHandle> collider{};    ///< The collider.
     std::optional<ShapeHandle> shape{};          ///< The shape.
     std::optional<JointHandle> joint{};          ///< The joint.
+    std::optional<ConstraintHandle> constraint{}; ///< The user constraint.
     std::optional<TriggerHandle> trigger{};      ///< The trigger.
 };
 

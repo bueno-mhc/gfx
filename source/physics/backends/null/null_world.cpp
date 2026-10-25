@@ -48,6 +48,11 @@ public:
         refuse("PhysicsWorld::create_joint");
     }
 
+    [[nodiscard]] auto create_constraint(const ConstraintDescription& /*description*/) -> std::unique_ptr<Constraint> override
+    {
+        refuse("PhysicsWorld::create_constraint");
+    }
+
     [[nodiscard]] auto create_trigger(const TriggerDescription& /*description*/) -> std::unique_ptr<Trigger> override
     {
         refuse("PhysicsWorld::create_trigger");

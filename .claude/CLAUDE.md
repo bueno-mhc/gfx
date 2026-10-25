@@ -585,6 +585,36 @@ Original hard requirements (from the user's initial specification):
   throw_unsupported hides the free one inside SteppedWorld members (qualify physics::); bash heredocs with apostrophes fail → patch
   scripts via the Write tool (scratchpad patch_tool.py: patch(path, [(old, new)]) keeps CRLF). Tests gfx_physics_dynamics_tests (17),
   Box3dSoftBodyTest (4), SteppedWorldTest.TheFrameworkStepsSoftBodiesForBackendsWithoutTheirOwn.
+- **Reference backend (PH7 as built, 2026-10-25)** — docs/physics-design.md §B "PH7 as built" (10 deviations). Interface `:pipeline`:
+  SolverBody (COM, orientation, velocities, inverse mass, world inverse inertia (locks 0), linear freedom), SolverContact (manifold
+  impulses in/out, friction, restitution, rolling impulse), SolverJoint (second NO_SOLVER_BODY = world; description or `user`;
+  frames about COM; impulses per row; force/torque out — rows moving only the first body report the reaction), SolverStep,
+  **Solver::solve**. **User constraints** (PH4's deferred item): ConstraintRow (ConstraintRowKind EQUALITY/INEQUALITY/MOTOR/SPRING,
+  full Jacobian on both bodies, error), ConstraintFrame, UserConstraint (row_count, rows(first, second, rows) const noexcept),
+  ConstraintDescription, Constraint object, PhysicsWorld::create_constraint (framework: edits Create/Destroy/SetConstraintEnabled
+  appended to WorldEdit, ConstraintRecord, SlotList, cascades with bodies, checks; JointEvent::constraint, PhysicsErrorContext::
+  constraint; Box3D refuses USER_CONSTRAINTS). SteppedWorldBackend::broad_phase_component()/narrow/solver/integrator (world's
+  broad_phase() etc. return them); replace_* refused during steps. Constants MAXIMUM_CONSTRAINT_ROWS 18, NO_SOLVER_BODY, LINEAR_SLOP
+  0.005, ANGULAR_SLOP 2°, MAXIMUM_LINEAR/ANGULAR_CORRECTION 0.2/8°, POSITION_CORRECTION_FACTOR 0.2 (generator scratchpad
+  physics_enums_ph7.py, CRLF). **`SequentialImpulseSolver`** (`gfx.physics.dynamics:sequential_impulses`, units joint_rows.cpp,
+  sequential_impulses.cpp): warm start, velocity iterations (joints then contacts; friction by the static cone — stick while the
+  impulse fits μs·N, else μk —, rolling resistance, speculative normal impulses), Box2D v3 restitution pass, positions, NGS (slop,
+  factor, clamps); **runs of equality rows (≤ 6) solved as blocks (Cholesky)**; colors by dynamic bodies (≥ 128 → scheduler);
+  public **`joint_rows()`** with **exact angular Jacobians** (d(2v)/dt = Ω·(w e + v×e); 2 atan2(v, w) closed form). Backend
+  `gfx.physics.backends.reference` (backends/reference/: reference.cppm, reference_backend.cppm internal `:backend`, reference_world.cpp,
+  reference_contacts.cpp; always built; factory REFERENCE): components SpatialBroadPhaseComponent<Bvh>, GjkNarrowPhase,
+  SequentialImpulseSolver, SemiImplicitEulerIntegrator (replaceable; a new broad phase gets every live collider); records are the
+  truth (soft-body corrections reach it). Step: wakes + impulses; boxes (continuous stretched) → broad phase → narrow phase in chunks
+  of 32 pairs (parallel, merged in order; resting pairs keep last step's manifolds) → manifold cache warm start → islands
+  (union-find, smaller slot root) wake → **sub-steps** (SolverDescription::sub_steps: forces via the integrator, contact points
+  moved with their bodies from body-frame surface points, solve) → records, cache, joint forces/breaking → sleep → contact BEGIN/
+  HIT/END + contacts → triggers ENTER/STAY/EXIT. Findings: one 8-iteration solve per step left a 5-box stack rocking 2 cm (30
+  iterations or 4 sub-steps: < 1 mm); determinant > 1e-9 called a 2 cm sphere's inertia singular (fixed to float's smallest normal
+  in the solver, the soft-body proxies and the framework's default corrections); motors are second-relative-to-first (Box3D too).
+  Gotchas: std::ranges::binary_search needs totally ordered values (use a projection); a bash heredoc broke on apostrophes again;
+  CMake's discovery race (§6 defect 14) broke the Release build.
+  Tests gfx_physics_reference_tests (15), gfx_physics_dynamics_tests + solver_test.cpp (3: Jacobians vs measured rates of every
+  joint kind, elastic collision, hanging body), SteppedWorldTest.UserConstraintsAreRecordedAndGoWithTheirBodies.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -921,6 +951,14 @@ Original hard requirements (from the user's initial specification):
    Detector: `CompilationFailure.HandleInstantiatedInSeveralModulesCorruptsModuleFile` (tests/toolchain/defects/
    handle_instantiation_*: handles, context, key partition, primary, importer). Found by bisecting manifold_cache.cppm.
 
+14. **CMake 4.4.0-rc2: POST_BUILD gtest discovery scripts name no target** (GoogleTest.cmake writes no `TEST_TARGET`), so
+   GoogleTestAddTests.cmake hashes "" and every test executable of a directory lists into one
+   `cmake_test_discovery_e3b0c44298.json`: executables linking at once clobbered each other's listing ("string sub-command
+   JSON failed parsing", the build stops) — seen in PH7 when tests/physics had six executables. Workaround: `gfx_add_test()`
+   puts a directory's test executables in a Ninja link job pool of size 1 (`gfx_test_links_<md5 of the binary dir>`,
+   `JOB_POOL_LINK`; POST_BUILD commands are part of the link step). Detector: `CMakeDefect.GoogleTestDiscoveryNamesNoTarget`
+   (tests/toolchain/CMakeLists.txt + cmake/scripts/GfxCheckTestDiscovery.cmake: passes while the scripts lack TEST_TARGET).
+
 ## 7. Repository layout (current)
 
 ```
@@ -979,13 +1017,16 @@ gfx/
 │                  snapshot, stepped_world, state internal; stepped_world/world_objects/world_queries/validation/snapshot .cpp),
 │                  backends/null/ (null.cppm, null_world.cpp), PH5 backends/box3d/ (box3d.cppm, box3d_backend.cppm internal,
 │                  box3d_world/shapes/joints/queries .cpp), PH6 dynamics/ (gfx.physics.dynamics: dynamics, integrators, presets,
-│                  soft_body_solver .cppm + xpbd_math internal; integrators/presets/soft_body_model/soft_body_solver .cpp),
+│                  soft_body_solver .cppm + xpbd_math internal; integrators/presets/soft_body_model/soft_body_solver .cpp; PH7
+│                  sequential_impulses.cppm + joint_rows/sequential_impulses .cpp), PH7 backends/reference/ (reference.cppm,
+│                  reference_backend.cppm internal, reference_world/contacts .cpp),
 │                  physics.cppm (gfx.physics), physics_factory.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests incl. math_test.cpp + slot_table/), physics/ (PH0:
             gfx_physics_common_tests, PH1 gfx_camera_tests (camera_projection/camera/controller_test.cpp), PH2 gfx_physics_tests (shape/gjk_epa/contact/collide_test.cpp; PH3 spatial_test.cpp, broad_phase_test.cpp; PH4 shape_query_test.cpp), PH4
             gfx_physics_world_tests (interface_default_test.cpp generated, world_test.cpp, world_test_support.cppm), PH5
             gfx_physics_box3d_tests (box3d_test.cpp, PH6 box3d_soft_body_test.cpp), PH6 gfx_physics_dynamics_tests
-            (integrator_test.cpp, soft_body_test.cpp), physics_test_support.cppm,
+            (integrator_test.cpp, soft_body_test.cpp, PH7 solver_test.cpp), PH7 gfx_physics_reference_tests (reference_test.cpp),
+            physics_test_support.cppm,
             decoupling_fixture/ (+ camera/)), compilation/physics/, platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
@@ -1052,11 +1093,12 @@ gfx/
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
 | UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
-| PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) committed (e970d83)**; **PH3 (spatial structures, broad phase, task schedulers) committed (e33daf0)**; **PH4 (interfaces, SteppedWorld framework, null backend, factory, threading, shape queries, GJK/EPA robustness) committed (db6ecce)**; **PH5 (Box3D backend, task scheduler start/finish, PH3 race fix) committed (d2b2c8e)**; **PH6 (integrators, XPBD soft bodies coupled both ways with any backend, presets) implemented, awaiting validation** (§5 'Integrators and soft bodies', docs/physics-design.md §B 'PH6 as built', 9 deviations). Next: PH7 reference backend. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
+| PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) committed (e970d83)**; **PH3 (spatial structures, broad phase, task schedulers) committed (e33daf0)**; **PH4 (interfaces, SteppedWorld framework, null backend, factory, threading, shape queries, GJK/EPA robustness) committed (db6ecce)**; **PH5 (Box3D backend, task scheduler start/finish, PH3 race fix) committed (d2b2c8e)**; **PH6 (integrators, XPBD soft bodies coupled both ways with any backend, presets) committed (7856f19)**; **PH7 (reference backend, sequential-impulse solver, user constraints, sub-steps) implemented, awaiting validation** (§5 'Reference backend', docs/physics-design.md §B 'PH7 as built', 10 deviations). Next: PH8 sample and documentation. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **952**, all passing in Debug and Release, 2026-10-25 (after PH6: + 17 gfx_physics_dynamics_tests,
+Test count at last report: **972**, all passing in Debug and Release, 2026-10-25 (after PH7: + 15 gfx_physics_reference_tests,
++ 3 solver tests, + 1 SteppedWorldTest, + 1 CMake defect detector; skips Debug 4, Release 19; run from PowerShell). Before: 952 (after PH6: + 17 gfx_physics_dynamics_tests,
 + 4 Box3dSoftBodyTest, + 1 SteppedWorldTest; skips Debug 4, Release 19; run from PowerShell). Before: 930 (after PH5: + 12 gfx_physics_box3d_tests, + 1 TaskSchedulerTest; skips Debug 4, Release 19; run from PowerShell). Before: 917 (after PH4: + 15 gfx_physics_world_tests, + 5
 ShapeQueryTest, + 1 run-time spatial structures, + 1 GJK sliver regression; skips Debug 4, Release 19; run from PowerShell). Before: 895 (after PH3: + 12 in gfx_physics_tests — 7 typed structure tests, trees, 3 broad phase, scheduler; skips Debug 4, Release 19; run from PowerShell). Before: 883 (after PH2: + 22 gfx_physics_tests, + 1 defect detector HandleInstantiatedInSeveralModulesCorruptsModuleFile; skips Debug 4, Release 19; run from PowerShell). Before: 860 (after PH1: + 16 gfx_camera_tests, + 2 camera decoupling tests; skips Debug 4, Release 19; run from PowerShell). Before: 842 (after PH0: + 20 gfx_physics_common_tests, + 8 MathTest in gfx_core_tests, + 2 PhysicsDecoupling, + 2 physics compile-failure tests; skips Debug 4, Release 19; run from PowerShell). Before: 810 (after the follow-up on submissions: + 1
 submission allocation test, + 1 CTest run of gfx_vulkan_allocation_tests on physical device 0; skips Debug 4, Release 19; run

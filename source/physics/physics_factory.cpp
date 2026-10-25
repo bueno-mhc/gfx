@@ -6,6 +6,7 @@ import std;
 import gfx.core.errors;
 import gfx.physics.interface;
 import gfx.physics.backends.null;
+import gfx.physics.backends.reference;
 #if defined(GFX_WITH_PHYSICS_BOX3D_BACKEND)
 import gfx.physics.backends.box3d;
 #endif
@@ -47,7 +48,11 @@ physics_backend_availability(PhysicsBackendKind backend) -> PhysicsBackendAvaila
 #endif
         }
         case PhysicsBackendKind::REFERENCE:
-            return {.backend = backend, .built = false, .available = false, .reason = "the reference backend is not built yet (physics step PH7)"};
+        {
+            std::string reason = reference_backend::unavailable_reason();
+            const bool available = reason.empty();
+            return {.backend = backend, .built = true, .available = available, .reason = std::move(reason)};
+        }
         case PhysicsBackendKind::NULL_BACKEND:
         {
             std::string reason = null_backend::unavailable_reason();
@@ -101,6 +106,8 @@ create_physics_world(const PhysicsWorldDescription& description,
         case PhysicsBackendKind::BOX3D:
             return box3d_backend::create_physics_world(description);
 #endif
+        case PhysicsBackendKind::REFERENCE:
+            return reference_backend::create_physics_world(description);
         case PhysicsBackendKind::NULL_BACKEND:
             return null_backend::create_physics_world(description);
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)

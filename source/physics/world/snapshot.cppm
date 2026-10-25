@@ -48,6 +48,15 @@ struct JointRecord
     bool configuration_changed = false; ///< Set by the framework when an edit changed the configuration.
 };
 
+/// @brief A user constraint.
+struct ConstraintRecord
+{
+    ConstraintHandle handle{};               ///< Null: a free slot.
+    ConstraintDescription configuration{};   ///< Its configuration.
+    JointState state{};                      ///< How it did.
+    bool configuration_changed = false;      ///< Set by the framework when an edit changed the configuration.
+};
+
 /// @brief A trigger.
 struct TriggerRecord
 {
@@ -76,6 +85,7 @@ struct WorldSnapshot
     std::vector<RigidBodyRecord> rigid_bodies{}; ///< By slot.
     std::vector<ColliderRecord> colliders{};     ///< By slot.
     std::vector<JointRecord> joints{};           ///< By slot.
+    std::vector<ConstraintRecord> constraints{}; ///< By slot.
     std::vector<TriggerRecord> triggers{};       ///< By slot.
     std::vector<SoftBodyRecord> soft_bodies{};   ///< By slot.
     std::vector<ContactEvent> contact_events{};  ///< The step's (cleared when it starts).
@@ -109,6 +119,14 @@ struct WorldSnapshot
 /// @brief The record @p joint names, or null.
 [[nodiscard]] auto find(const WorldSnapshot& snapshot,
                         JointHandle joint) noexcept -> const JointRecord*;
+
+/// @brief The record @p constraint names, or null.
+[[nodiscard]] auto find(WorldSnapshot& snapshot,
+                        ConstraintHandle constraint) noexcept -> ConstraintRecord*;
+
+/// @brief The record @p constraint names, or null.
+[[nodiscard]] auto find(const WorldSnapshot& snapshot,
+                        ConstraintHandle constraint) noexcept -> const ConstraintRecord*;
 
 /// @brief The record @p trigger names, or null.
 [[nodiscard]] auto find(WorldSnapshot& snapshot,

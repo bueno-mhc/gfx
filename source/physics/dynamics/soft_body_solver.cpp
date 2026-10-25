@@ -456,7 +456,7 @@ XpbdSoftBodySolver::State::proxy_for(std::span<const CoupledBody> bodies,
     {
         proxy.inverse_mass = 1.0F / body.mass.mass;
         proxy.local_center = body.mass.center_of_mass;
-        if (std::abs(determinant(body.mass.inertia)) > TINY)
+        if (std::abs(determinant(body.mass.inertia)) > std::numeric_limits<float>::min())
         {
             proxy.local_inverse_inertia = inverse(body.mass.inertia);
         }

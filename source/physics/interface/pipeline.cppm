@@ -3,8 +3,8 @@
 ///        integrator (time). A backend reports its own — a description whose operations throw (is_external() false) —
 ///        or runs components of the abstraction (is_external() true), which a backend that allows it lets the
 ///        application replace (PhysicsWorld::replace_broad_phase() ...). The abstraction's broad phase on any spatial
-///        structure and its GJK narrow phase are here; its solver and integrators come with the soft bodies and the
-///        reference backend.
+///        structure and its GJK narrow phase are here; its integrators and its sequential-impulse solver are in
+///        gfx.physics.dynamics.
 export module gfx.physics.interface:pipeline;
 
 import std;
@@ -224,8 +224,56 @@ public:
 
 // ===================================================================================================== solver
 
-/// @brief What solves a world's constraints (contacts, joints, attachments). Its operations come with the reference
-///        backend; a backend reports its own (Box3D: SOFT_STEP).
+/// @brief A body as a solver sees it, about its center of mass.
+struct SolverBody
+{
+    Vector3 center{};                                                      ///< Its center of mass, world space.
+    Quaternion orientation{};                                              ///< Its orientation.
+    Vector3 linear_velocity{};                                             ///< Of its center of mass.
+    Vector3 angular_velocity{};                                            ///< Radians per second, world axes.
+    float inverse_mass = 0.0F;                                             ///< 0: constraints do not move it (static, kinematic, asleep).
+    Matrix3 inverse_inertia{.columns = {Vector3{}, Vector3{}, Vector3{}}}; ///< About its center of mass, world space, 0 about the axes it may not turn about.
+    Vector3 linear_freedom{.x = 1.0F, .y = 1.0F, .z = 1.0F};               ///< 0 along the world axes it may not move along.
+};
+
+/// @brief The contacts of a pair of colliders as a solver solves them.
+struct SolverContact
+{
+    std::uint32_t first = 0;    ///< The first collider's body, an index into the bodies.
+    std::uint32_t second = 0;   ///< The second collider's body.
+    ContactManifold manifold{}; ///< From the first to the second; last step's impulses in (warm starting), this step's out.
+    Friction friction{};        ///< The pair's coefficients (static, dynamic, rolling resistance in meters).
+    float restitution = 0.0F;   ///< The pair's.
+    Vector3 rolling_impulse{};  ///< The accumulated rolling-resistance impulse, in and out like the points'.
+};
+
+/// @brief A joint or a user constraint as a solver solves it.
+struct SolverJoint
+{
+    std::uint32_t first = 0;                               ///< Its first body, an index into the bodies.
+    std::uint32_t second = NO_SOLVER_BODY;                 ///< Its second body, or NO_SOLVER_BODY: the world.
+    JointDescription description{};                        ///< A joint's kind and settings (not used for user constraints).
+    const UserConstraint* user = nullptr;                  ///< A user constraint (not null), or a joint (null).
+    Transform frame_first{};                               ///< A joint's frame, about the first body's center of mass and in its orientation.
+    Transform frame_second{};                              ///< About the second body's (the world's for NO_SOLVER_BODY).
+    std::array<float, MAXIMUM_CONSTRAINT_ROWS> impulses{}; ///< Accumulated per row: last step's in (warm starting), this step's out.
+    Vector3 force{};                                       ///< Out: the force on the second body over the step (world space); for rows that move only the first body, the reaction to the force on it.
+    Vector3 torque{};                                      ///< Out: the torque on the second body over the step, about its center of mass (likewise).
+};
+
+/// @brief A step of a solver.
+struct SolverStep
+{
+    float seconds = 0.0F;                ///< Its duration, greater than 0.
+    SolverDescription settings{};        ///< Iterations, warm starting, thresholds.
+    std::span<SolverBody> bodies{};      ///< The bodies, moved by the step.
+    std::span<SolverContact> contacts{}; ///< The contacts.
+    std::span<SolverJoint> joints{};     ///< The joints and user constraints.
+    TaskScheduler* scheduler = nullptr;  ///< Splits the work when given.
+};
+
+/// @brief What solves a world's constraints (contacts, joints, user constraints): the abstraction's sequential impulses
+///        (gfx.physics.dynamics), or a description of a backend's own (Box3D: SOFT_STEP).
 class Solver : public PhysicsObject
 {
 public:
@@ -234,6 +282,13 @@ public:
 
     /// @brief Whether it is a component the world runs (true), or a description of the backend's own (false).
     [[nodiscard]] virtual auto is_external() const noexcept -> bool = 0;
+
+    /// @brief Solves @p step: the velocity constraints of its contacts and joints (warm started from their impulses), the
+    ///        bodies moved by their velocities over the step, then their positions corrected. The bodies' velocities
+    ///        already include the step's forces. Leaves the accumulated impulses in the contacts and joints, and the
+    ///        joints' forces and torques.
+    /// @throws BackendCapabilityError by default (CUSTOM_SOLVER).
+    virtual void solve(const SolverStep& step) = 0;
 
 protected:
     using PhysicsObject::PhysicsObject;

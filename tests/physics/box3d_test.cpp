@@ -318,6 +318,23 @@ TEST(Box3dTest, WhatBox3dCannotDoIsRefusedWhenRecorded)
     expect_refused([&] { (void)ground->add_collider({.shape = field, .pose = {.position = {.y = 1}}}); }, "POSED_HEIGHT_FIELDS");
     const std::unique_ptr<Collider> terrain = ground->add_collider({.shape = mesh});
     expect_refused([&] { ground->set_kind(BodyKind::DYNAMIC); }, "DYNAMIC_TRIANGLE_MESHES");
+
+    // User constraints: the reference backend's.
+    class Nothing final : public UserConstraint
+    {
+    public:
+        [[nodiscard]] auto row_count() const noexcept -> std::uint32_t override
+        {
+            return 1;
+        }
+
+        void rows(const ConstraintFrame& /*first*/,
+                  const ConstraintFrame& /*second*/,
+                  std::span<ConstraintRow> /*rows*/) const noexcept override
+        {
+        }
+    };
+    expect_refused([&] { (void)world->create_constraint({.first = body->handle(), .constraint = std::make_shared<Nothing>()}); }, "USER_CONSTRAINTS");
 }
 
 TEST(Box3dTest, CompoundsMeshesAndHeightFieldsCollide)

@@ -234,6 +234,32 @@ protected:
     using PhysicsObject::PhysicsObject;
 };
 
+// ===================================================================================================== user constraints
+
+/// @brief A user constraint between two bodies (a body and the world).
+class Constraint : public PhysicsObject
+{
+public:
+    /// @brief Its handle.
+    [[nodiscard]] virtual auto handle() const noexcept -> ConstraintHandle = 0;
+
+    /// @brief Its two bodies (the second null for the world).
+    [[nodiscard]] virtual auto bodies() const noexcept -> std::pair<RigidBodyHandle, RigidBodyHandle> = 0;
+
+    /// @brief What it was made with.
+    /// @throws PhysicsError if the world was destroyed.
+    [[nodiscard]] virtual auto description() const -> ConstraintDescription = 0;
+
+    /// @brief How it did in the last completed step.
+    [[nodiscard]] virtual auto state() const -> JointState = 0;
+
+    /// @brief Enables or disables it (enabling a broken one makes it hold again).
+    virtual void set_enabled(bool enabled) = 0;
+
+protected:
+    using PhysicsObject::PhysicsObject;
+};
+
 // ===================================================================================================== soft bodies
 
 /// @brief Particles held together by constraints (cloth, ropes, volumes).

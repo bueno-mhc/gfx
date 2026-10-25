@@ -87,6 +87,20 @@ find(const WorldSnapshot& snapshot,
 
 auto
 find(WorldSnapshot& snapshot,
+     ConstraintHandle constraint) noexcept -> ConstraintRecord*
+{
+    return record_of(snapshot.constraints, constraint);
+}
+
+auto
+find(const WorldSnapshot& snapshot,
+     ConstraintHandle constraint) noexcept -> const ConstraintRecord*
+{
+    return record_of(snapshot.constraints, constraint);
+}
+
+auto
+find(WorldSnapshot& snapshot,
      TriggerHandle trigger) noexcept -> TriggerRecord*
 {
     return record_of(snapshot.triggers, trigger);

@@ -70,12 +70,12 @@ expect_capability_error(Operation&& operation,
 
 TEST(PhysicsFactoryTest, EachBackendReportsWhetherItWasBuiltAndCanRun)
 {
-    // Box3D when GFX_PHYSICS_BACKEND_BOX3D is on; the reference backend comes with PH7; no custom backend in this build.
+    // Box3D when GFX_PHYSICS_BACKEND_BOX3D is on; the reference and null backends always; no custom backend in this build.
     const PhysicsBackendAvailability box3d = physics_backend_availability(PhysicsBackendKind::BOX3D);
     EXPECT_EQ(box3d.built, box3d.available);
     EXPECT_EQ(box3d.reason.empty(), box3d.available);
-    EXPECT_FALSE(physics_backend_availability(PhysicsBackendKind::REFERENCE).available);
-    EXPECT_NE(physics_backend_availability(PhysicsBackendKind::REFERENCE).reason.find("PH7"), std::string::npos);
+    EXPECT_TRUE(physics_backend_availability(PhysicsBackendKind::REFERENCE).available);
+    EXPECT_TRUE(physics_backend_availability(PhysicsBackendKind::REFERENCE).reason.empty());
     EXPECT_FALSE(physics_backend_availability(PhysicsBackendKind::CUSTOM).built);
     EXPECT_NE(physics_backend_availability(PhysicsBackendKind::CUSTOM).reason.find("GFX_PHYSICS_CUSTOM_BACKEND_TARGET"), std::string::npos);
     EXPECT_TRUE(physics_backend_availability(PhysicsBackendKind::NULL_BACKEND).available);
@@ -84,16 +84,18 @@ TEST(PhysicsFactoryTest, EachBackendReportsWhetherItWasBuiltAndCanRun)
     {
         expected.push_back(PhysicsBackendKind::BOX3D);
     }
+    expected.push_back(PhysicsBackendKind::REFERENCE);
     expected.push_back(PhysicsBackendKind::NULL_BACKEND);
     EXPECT_EQ(available_physics_backends(), expected) << "simulating backends first";
+    EXPECT_TRUE(create_physics_world({}, PhysicsBackendKind::REFERENCE)->backend() == PhysicsBackendKind::REFERENCE);
     try
     {
-        (void)create_physics_world({}, PhysicsBackendKind::REFERENCE);
-        ADD_FAILURE() << "a reference world before PH7";
+        (void)create_physics_world({}, PhysicsBackendKind::CUSTOM);
+        ADD_FAILURE() << "a custom world without a custom backend";
     }
     catch (const BackendCapabilityError& error)
     {
-        EXPECT_NE(std::string_view{error.what()}.find("[gfx::physics::REFERENCE]"), std::string_view::npos) << error.what();
+        EXPECT_NE(std::string_view{error.what()}.find("[gfx::physics::CUSTOM]"), std::string_view::npos) << error.what();
     }
 }
 
@@ -113,6 +115,7 @@ TEST(NullBackendTest, EveryOperationThrowsAndEveryQueryIsUnsupported)
     expect_capability_error([&] { (void)world->create_rigid_body({}); }, CAPABILITY);
     expect_capability_error([&] { (void)world->create_soft_body({}); }, CAPABILITY);
     expect_capability_error([&] { (void)world->create_joint(HingeJointDescription{}); }, CAPABILITY);
+    expect_capability_error([&] { (void)world->create_constraint({}); }, CAPABILITY);
     expect_capability_error([&] { (void)world->create_trigger({}); }, CAPABILITY);
     expect_capability_error([&] { world->set_gravity({}); }, CAPABILITY);
     expect_capability_error([&] { world->set_solver_description({}); }, CAPABILITY);
@@ -588,6 +591,61 @@ TEST(SteppedWorldTest, TheFrameworkStepsSoftBodiesForBackendsWithoutTheirOwn)
     expect_physics_error([&] { (void)world->create_soft_body({.particles = {{}, {}}, .constraints = {{.particles = {1, 1}}}}); }, "particle 1 twice");
 }
 
+/// One row that holds nothing.
+class EmptyConstraint final : public UserConstraint
+{
+public:
+    explicit EmptyConstraint(std::uint32_t rows = 1) noexcept
+        : m_rows{rows}
+    {
+    }
+
+    [[nodiscard]] auto row_count() const noexcept -> std::uint32_t override
+    {
+        return m_rows;
+    }
+
+    void rows(const ConstraintFrame& /*first*/,
+              const ConstraintFrame& /*second*/,
+              std::span<ConstraintRow> /*rows*/) const noexcept override
+    {
+    }
+
+private:
+    std::uint32_t m_rows;
+};
+
+TEST(SteppedWorldTest, UserConstraintsAreRecordedAndGoWithTheirBodies)
+{
+    auto [world, backend] = make_recording_world();
+    std::unique_ptr<RigidBody> first = world->create_rigid_body({});
+    const std::unique_ptr<RigidBody> second = world->create_rigid_body({});
+    const auto rows = std::make_shared<EmptyConstraint>();
+
+    // Recorded, applied, enabled and disabled by edits; its description as made.
+    const std::unique_ptr<Constraint> constraint = world->create_constraint({.first = first->handle(), .second = second->handle(), .constraint = rows});
+    EXPECT_EQ(constraint->bodies(), (std::pair{first->handle(), second->handle()}));
+    constraint->set_enabled(false);
+    world->step(STEP);
+    EXPECT_FALSE(constraint->state().enabled);
+    EXPECT_EQ(constraint->description().constraint, rows);
+    const std::vector<AppliedEdit> applied = backend->applied();
+    EXPECT_EQ(std::ranges::count(applied, edit_kind<edits::CreateConstraint>(), &AppliedEdit::kind), 1);
+    EXPECT_EQ(std::ranges::count(applied, edit_kind<edits::SetConstraintEnabled>(), &AppliedEdit::kind), 1);
+
+    // Destroyed with its first body: its object then says so.
+    first.reset();
+    world->step(STEP);
+    EXPECT_EQ(std::ranges::count(backend->applied(), edit_kind<edits::DestroyConstraint>(), &AppliedEdit::kind), 1);
+    expect_physics_error([&] { (void)constraint->state(); }, "was destroyed with its body");
+
+    // Invalid constraints.
+    expect_physics_error([&] { (void)world->create_constraint({.first = second->handle()}); }, "null");
+    expect_physics_error([&] { (void)world->create_constraint({.first = second->handle(), .constraint = std::make_shared<EmptyConstraint>(MAXIMUM_CONSTRAINT_ROWS + 1)}); },
+                         "rows");
+    expect_physics_error([&] { (void)world->create_constraint({.first = second->handle(), .second = second->handle(), .constraint = rows}); }, "to itself");
+}
+
 TEST(SteppedWorldTest, ThePipelineIsTheBackendsOwn)
 {
     auto [world, backend] = make_recording_world();
@@ -598,6 +656,7 @@ TEST(SteppedWorldTest, ThePipelineIsTheBackendsOwn)
     expect_capability_error([&] { (void)world->broad_phase().insert({}, {}, {}); }, "CUSTOM_BROAD_PHASE");
     expect_capability_error([&] { world->replace_broad_phase(std::make_unique<SpatialBroadPhaseComponent<Bvh>>()); }, "CUSTOM_BROAD_PHASE");
     expect_capability_error([&] { world->replace_solver(nullptr); }, "CUSTOM_SOLVER");
+    expect_capability_error([&] { world->solver().solve({}); }, "CUSTOM_SOLVER");
     expect_capability_error([&] { world->integrator().predict({}, STEP); }, "CUSTOM_INTEGRATOR");
 
     // The abstraction's components work on their own.

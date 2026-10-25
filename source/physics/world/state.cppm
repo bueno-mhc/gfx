@@ -43,6 +43,7 @@ struct BodyRecording
     std::vector<ColliderHandle> colliders{};
     std::vector<TriggerHandle> triggers{};
     std::vector<JointHandle> joints{};
+    std::vector<ConstraintHandle> constraints{};
 };
 
 /// What a world and its objects share.
@@ -80,6 +81,7 @@ public:
     SlotList rigid_bodies{};
     SlotList colliders{};
     SlotList joints{};
+    SlotList constraints{};
     SlotList triggers{};
     SlotList soft_bodies{};
 
@@ -89,6 +91,7 @@ public:
     std::vector<std::shared_ptr<const Shape>> collider_shape_pointers{};     ///< By collider slot.
     std::vector<RigidBodyHandle> trigger_bodies{};                           ///< By trigger slot (null: fixed in the world).
     std::vector<std::pair<RigidBodyHandle, RigidBodyHandle>> joint_bodies{}; ///< By joint slot.
+    std::vector<std::pair<RigidBodyHandle, RigidBodyHandle>> constraint_bodies{}; ///< By constraint slot.
     std::vector<std::uint32_t> soft_body_particles{};                        ///< By soft body slot.
 
     // ------------------------------------------------------------------------------------------------ published (under published_mutex)
@@ -116,6 +119,7 @@ public:
                                        const ColliderDescription& description,
                                        const MassProperties& unit_mass) -> ColliderHandle;
     [[nodiscard]] auto create_joint(const JointDescription& description) -> JointHandle;
+    [[nodiscard]] auto create_constraint(const ConstraintDescription& description) -> ConstraintHandle;
     [[nodiscard]] auto create_trigger(const TriggerDescription& description) -> TriggerHandle;
     [[nodiscard]] auto create_soft_body(const SoftBodyDescription& description) -> SoftBodyHandle;
 
@@ -123,6 +127,7 @@ public:
     [[nodiscard]] auto is_live(RigidBodyHandle handle) const noexcept -> bool;
     [[nodiscard]] auto is_live(ColliderHandle handle) const noexcept -> bool;
     [[nodiscard]] auto is_live(JointHandle handle) const noexcept -> bool;
+    [[nodiscard]] auto is_live(ConstraintHandle handle) const noexcept -> bool;
     [[nodiscard]] auto is_live(TriggerHandle handle) const noexcept -> bool;
     [[nodiscard]] auto is_live(SoftBodyHandle handle) const noexcept -> bool;
 
@@ -130,6 +135,7 @@ public:
     void release(std::span<const RigidBodyHandle> rigid_bodies_released,
                  std::span<const ColliderHandle> colliders_released,
                  std::span<const JointHandle> joints_released,
+                 std::span<const ConstraintHandle> constraints_released,
                  std::span<const TriggerHandle> triggers_released,
                  std::span<const SoftBodyHandle> soft_bodies_released) noexcept;
 };
@@ -147,6 +153,7 @@ struct SteppedWorld::Implementation
     std::vector<RigidBodyHandle> released_bodies{};
     std::vector<ColliderHandle> released_colliders{};
     std::vector<JointHandle> released_joints{};
+    std::vector<ConstraintHandle> released_constraints{};
     std::vector<TriggerHandle> released_triggers{};
     std::vector<SoftBodyHandle> released_soft_bodies{};
     std::vector<std::uint8_t> mass_changed{};
@@ -254,6 +261,9 @@ private:
 [[nodiscard]] auto make_joint(const std::shared_ptr<WorldShared>& shared,
                               JointHandle handle,
                               const JointDescription& initial) -> std::unique_ptr<Joint>;
+[[nodiscard]] auto make_constraint(const std::shared_ptr<WorldShared>& shared,
+                                   ConstraintHandle handle,
+                                   const ConstraintDescription& initial) -> std::unique_ptr<Constraint>;
 [[nodiscard]] auto make_trigger(const std::shared_ptr<WorldShared>& shared,
                                 TriggerHandle handle,
                                 const TriggerDescription& initial) -> std::unique_ptr<Trigger>;
@@ -309,6 +319,10 @@ void check_material(const SurfaceMaterial& material,
                                        const BackendIdentity& backend,
                                        std::string_view operation,
                                        const PhysicsErrorContext& context) -> JointDescription;
+void check_description(const ConstraintDescription& description,
+                       const BackendIdentity& backend,
+                       std::string_view operation,
+                       const PhysicsErrorContext& context);
 void check_description(const SoftBodyDescription& description,
                        const BackendIdentity& backend,
                        std::string_view operation,

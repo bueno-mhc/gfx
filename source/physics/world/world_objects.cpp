@@ -529,6 +529,80 @@ private:
     JointDescription m_initial{};
 };
 
+// ===================================================================================================== user constraints
+
+class SteppedConstraint final : public Constraint
+{
+public:
+    SteppedConstraint(const std::shared_ptr<WorldShared>& shared,
+                      ConstraintHandle handle,
+                      ConstraintDescription initial)
+        : Constraint{shared->identity}
+        , m_link{shared}
+        , m_handle{handle}
+        , m_bodies{initial.first, initial.second}
+        , m_initial{std::move(initial)}
+    {
+    }
+
+    ~SteppedConstraint() override
+    {
+        m_link.destroy(edits::DestroyConstraint{.constraint = m_handle});
+    }
+
+    [[nodiscard]] auto handle() const noexcept -> ConstraintHandle override
+    {
+        return m_handle;
+    }
+
+    [[nodiscard]] auto bodies() const noexcept -> std::pair<RigidBodyHandle, RigidBodyHandle> override
+    {
+        return m_bodies;
+    }
+
+    [[nodiscard]] auto description() const -> ConstraintDescription override
+    {
+        (void)alive("Constraint::description");
+        return m_initial;
+    }
+
+    [[nodiscard]] auto state() const -> JointState override
+    {
+        const auto shared = alive("Constraint::state");
+        const std::shared_lock lock{shared->published_mutex};
+        const ConstraintRecord* record = find(shared->published, m_handle);
+        return record != nullptr ? record->state : JointState{};
+    }
+
+    void set_enabled(bool enabled) override
+    {
+        m_link.record(edits::SetConstraintEnabled{.constraint = m_handle, .enabled = enabled}, "Constraint::set_enabled");
+    }
+
+private:
+    [[nodiscard]] auto context() const noexcept -> PhysicsErrorContext
+    {
+        return {.world = m_link.world(), .rigid_body = m_bodies.first, .constraint = m_handle};
+    }
+
+    [[nodiscard]] auto alive(std::string_view operation) const -> std::shared_ptr<WorldShared>
+    {
+        std::shared_ptr<WorldShared> shared = m_link.lock(operation);
+        const RigidBodyHandle gone = [&] {
+            const std::scoped_lock lock{shared->mutex};
+            return !shared->is_live(m_bodies.first) ? m_bodies.first : m_bodies.second && !shared->is_live(m_bodies.second) ? m_bodies.second : RigidBodyHandle{};
+        }();
+        require_alive(*shared, m_handle, gone, operation, context());
+        return shared;
+    }
+
+private:
+    WorldLink m_link;
+    ConstraintHandle m_handle{};
+    std::pair<RigidBodyHandle, RigidBodyHandle> m_bodies{};
+    ConstraintDescription m_initial{};
+};
+
 // ===================================================================================================== triggers
 
 class SteppedTrigger final : public Trigger
@@ -795,6 +869,14 @@ make_joint(const std::shared_ptr<WorldShared>& shared,
            const JointDescription& initial) -> std::unique_ptr<Joint>
 {
     return std::make_unique<SteppedJoint>(shared, handle, initial);
+}
+
+auto
+make_constraint(const std::shared_ptr<WorldShared>& shared,
+                ConstraintHandle handle,
+                const ConstraintDescription& initial) -> std::unique_ptr<Constraint>
+{
+    return std::make_unique<SteppedConstraint>(shared, handle, initial);
 }
 
 auto

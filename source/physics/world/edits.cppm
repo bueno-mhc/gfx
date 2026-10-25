@@ -247,6 +247,28 @@ struct SetJointEnabled
     bool enabled = true;
 };
 
+// ===================================================================================================== user constraints
+
+/// @brief PhysicsWorld::create_constraint().
+struct CreateConstraint
+{
+    ConstraintHandle constraint{};
+    ConstraintDescription description{};
+};
+
+/// @brief A user constraint's destruction (with its bodies too: recorded before theirs).
+struct DestroyConstraint
+{
+    ConstraintHandle constraint{};
+};
+
+/// @brief Constraint::set_enabled().
+struct SetConstraintEnabled
+{
+    ConstraintHandle constraint{};
+    bool enabled = true;
+};
+
 // ===================================================================================================== triggers
 
 /// @brief PhysicsWorld::create_trigger().
@@ -364,6 +386,8 @@ using WorldEdit = std::variant<
     edits::CreateTrigger, edits::DestroyTrigger, edits::SetTriggerPose, edits::SetTriggerFilter,
     // Soft bodies.
     edits::CreateSoftBody, edits::DestroySoftBody, edits::PinParticle, edits::UnpinParticle, edits::MoveParticle, edits::SetSoftBodyDamping,
-    edits::SetSoftBodyGravityScale, edits::SetSoftBodySelfCollision, edits::SetSoftBodyFilter>;
+    edits::SetSoftBodyGravityScale, edits::SetSoftBodySelfCollision, edits::SetSoftBodyFilter,
+    // User constraints.
+    edits::CreateConstraint, edits::DestroyConstraint, edits::SetConstraintEnabled>;
 
 } // namespace gfx::physics

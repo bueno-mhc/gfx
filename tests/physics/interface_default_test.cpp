@@ -252,6 +252,40 @@ public:
     }
 };
 
+class BareConstraint final : public Constraint
+{
+public:
+    BareConstraint()
+        : Constraint{PhysicsBackendKind::CUSTOM}
+    {
+    }
+
+    [[nodiscard]] auto handle() const noexcept -> ConstraintHandle override
+    {
+        return {};
+    }
+
+    [[nodiscard]] auto bodies() const noexcept -> std::pair<RigidBodyHandle, RigidBodyHandle> override
+    {
+        return {};
+    }
+
+    [[nodiscard]] auto description() const -> ConstraintDescription override
+    {
+        return Constraint::description();
+    }
+
+    [[nodiscard]] auto state() const -> JointState override
+    {
+        return Constraint::state();
+    }
+
+    void set_enabled(bool enabled) override
+    {
+        Constraint::set_enabled(enabled);
+    }
+};
+
 class BareTrigger final : public Trigger
 {
 public:
@@ -460,6 +494,30 @@ public:
     }
 };
 
+class BareSolver final : public Solver
+{
+public:
+    BareSolver()
+        : Solver{PhysicsBackendKind::CUSTOM}
+    {
+    }
+
+    [[nodiscard]] auto kind() const noexcept -> SolverKind override
+    {
+        return SolverKind::SEQUENTIAL_IMPULSE;
+    }
+
+    [[nodiscard]] auto is_external() const noexcept -> bool override
+    {
+        return true;
+    }
+
+    void solve(const SolverStep& step) override
+    {
+        Solver::solve(step);
+    }
+};
+
 class BareIntegrator final : public Integrator
 {
 public:
@@ -537,6 +595,11 @@ public:
     [[nodiscard]] auto create_joint(const JointDescription& description) -> std::unique_ptr<Joint> override
     {
         return PhysicsWorld::create_joint(description);
+    }
+
+    [[nodiscard]] auto create_constraint(const ConstraintDescription& description) -> std::unique_ptr<Constraint> override
+    {
+        return PhysicsWorld::create_constraint(description);
     }
 
     [[nodiscard]] auto create_trigger(const TriggerDescription& description) -> std::unique_ptr<Trigger> override
@@ -761,6 +824,10 @@ TEST(PhysicsInterfaceTest, EveryOperationABackendDoesNotImplementThrowsADescript
     expect_not_implemented([&] { (void)bare_joint.state(); }, "Joint::state", "WORLD_OBJECTS");
     expect_not_implemented([&] { bare_joint.update(JointDescription{}); }, "Joint::update", "WORLD_OBJECTS");
     expect_not_implemented([&] { bare_joint.set_enabled(bool{}); }, "Joint::set_enabled", "WORLD_OBJECTS");
+    BareConstraint bare_constraint;
+    expect_not_implemented([&] { (void)bare_constraint.description(); }, "Constraint::description", "USER_CONSTRAINTS");
+    expect_not_implemented([&] { (void)bare_constraint.state(); }, "Constraint::state", "USER_CONSTRAINTS");
+    expect_not_implemented([&] { bare_constraint.set_enabled(bool{}); }, "Constraint::set_enabled", "USER_CONSTRAINTS");
     BareTrigger bare_trigger;
     expect_not_implemented([&] { (void)bare_trigger.description(); }, "Trigger::description", "WORLD_OBJECTS");
     expect_not_implemented([&] { (void)bare_trigger.world_bounds(); }, "Trigger::world_bounds", "WORLD_OBJECTS");
@@ -789,6 +856,8 @@ TEST(PhysicsInterfaceTest, EveryOperationABackendDoesNotImplementThrowsADescript
     expect_not_implemented([&] { (void)bare_broad_phase.ended_pairs(); }, "BroadPhase::ended_pairs", "CUSTOM_BROAD_PHASE");
     BareNarrowPhase bare_narrow_phase;
     expect_not_implemented([&] { bare_narrow_phase.collide(ShapeInstance{}, ShapeInstance{}, contacts, CollisionSettings{}); }, "NarrowPhase::collide", "CUSTOM_NARROW_PHASE");
+    BareSolver bare_solver;
+    expect_not_implemented([&] { bare_solver.solve(SolverStep{}); }, "Solver::solve", "CUSTOM_SOLVER");
     BareIntegrator bare_integrator;
     expect_not_implemented([&] { bare_integrator.predict(IntegrationState{}, float{}); }, "Integrator::predict", "CUSTOM_INTEGRATOR");
     expect_not_implemented([&] { bare_integrator.finalize(IntegrationState{}, float{}); }, "Integrator::finalize", "CUSTOM_INTEGRATOR");
@@ -797,6 +866,7 @@ TEST(PhysicsInterfaceTest, EveryOperationABackendDoesNotImplementThrowsADescript
     expect_not_implemented([&] { (void)bare_physics_world.create_rigid_body(RigidBodyDescription{}); }, "PhysicsWorld::create_rigid_body", "WORLD_OBJECTS");
     expect_not_implemented([&] { (void)bare_physics_world.create_soft_body(SoftBodyDescription{}); }, "PhysicsWorld::create_soft_body", "SOFT_BODIES");
     expect_not_implemented([&] { (void)bare_physics_world.create_joint(JointDescription{}); }, "PhysicsWorld::create_joint", "WORLD_OBJECTS");
+    expect_not_implemented([&] { (void)bare_physics_world.create_constraint(ConstraintDescription{}); }, "PhysicsWorld::create_constraint", "USER_CONSTRAINTS");
     expect_not_implemented([&] { (void)bare_physics_world.create_trigger(TriggerDescription{}); }, "PhysicsWorld::create_trigger", "WORLD_OBJECTS");
     expect_not_implemented([&] { bare_physics_world.set_gravity(Vector3{}); }, "PhysicsWorld::set_gravity", "WORLD_OBJECTS");
     expect_not_implemented([&] { bare_physics_world.set_solver_description(SolverDescription{}); }, "PhysicsWorld::set_solver_description", "WORLD_OBJECTS");

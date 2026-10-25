@@ -34,11 +34,13 @@ gfx_add_test(gfx_physics_tests
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 
-# Dynamics: the integrators against analytic motion; soft bodies on their own (presets, models, XPBD steps).
+# Dynamics: the integrators against analytic motion; soft bodies on their own (presets, models, XPBD steps); the
+# sequential-impulse solver and the joints' rows.
 gfx_add_test(gfx_physics_dynamics_tests
     SOURCES
         integrator_test.cpp
         soft_body_test.cpp
+        solver_test.cpp
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 
@@ -51,6 +53,11 @@ if(GFX_PHYSICS_BACKEND_BOX3D)
             box3d_soft_body_test.cpp
         LIBRARIES gfx::physics)
 endif()
+
+# The reference backend: the Box3D scenarios, what only it simulates, its components replaced, its soft bodies.
+gfx_add_test(gfx_physics_reference_tests
+    SOURCES reference_test.cpp
+    LIBRARIES gfx::physics)
 
 # Worlds: the interfaces' error contract, the factory and the null backend, SteppedWorld on a recording backend (deferred
 # edits, publication, destruction, asynchronous steps, the reader handshake, queries, checks).

@@ -135,6 +135,7 @@ target_sources(gfx_physics_components
             dynamics/integrators.cppm
             dynamics/presets.cppm
             dynamics/soft_body_solver.cppm
+            dynamics/sequential_impulses.cppm
             dynamics/xpbd_math.cppm
             world/world.cppm
             world/edits.cppm
@@ -159,6 +160,8 @@ target_sources(gfx_physics_components
         dynamics/presets.cpp
         dynamics/soft_body_model.cpp
         dynamics/soft_body_solver.cpp
+        dynamics/joint_rows.cpp
+        dynamics/sequential_impulses.cpp
         world/stepped_world.cpp
         world/snapshot.cpp
         world/validation.cpp
@@ -171,9 +174,15 @@ target_link_libraries(gfx_physics_components
     PRIVATE gfx::project_options gfx::simde)
 gfx_require_decoupled(gfx_physics_components FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
 
-# The backends: the null one always; Box3D with GFX_PHYSICS_BACKEND_BOX3D (fetched and pinned).
-set(_gfx_physics_backend_modules backends/null/null.cppm)
-set(_gfx_physics_backend_sources backends/null/null_world.cpp)
+# The backends: the null and reference ones always; Box3D with GFX_PHYSICS_BACKEND_BOX3D (fetched and pinned).
+set(_gfx_physics_backend_modules
+    backends/null/null.cppm
+    backends/reference/reference.cppm
+    backends/reference/reference_backend.cppm)
+set(_gfx_physics_backend_sources
+    backends/null/null_world.cpp
+    backends/reference/reference_world.cpp
+    backends/reference/reference_contacts.cpp)
 if(GFX_PHYSICS_BACKEND_BOX3D)
     gfx_require_box3d()
     list(APPEND _gfx_physics_backend_modules

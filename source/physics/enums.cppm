@@ -76,6 +76,7 @@ enum class PhysicsCapability : std::uint8_t
     LARGE_HULLS,                   ///< Hulls of more vertices than the backend holds (Box3D: 128; cylinders and cones of more than 64 sides).
     POSED_HEIGHT_FIELDS,           ///< Height fields at a pose other than their body's frame.
     WIDE_JOINT_LIMITS,             ///< Hinge and twist limits beyond the backend's range (Box3D: ±0.99π).
+    USER_CONSTRAINTS,              ///< Constraints the application defines (UserConstraint).
 };
 
 /// @brief How a rigid body moves.
@@ -128,6 +129,15 @@ enum class ConstraintKind : std::uint8_t
     JOINT,      ///< A joint.
     ATTACHMENT, ///< A soft-body particle pinned to the world or a rigid body.
     USER,       ///< A constraint of the application (reference backend).
+};
+
+/// @brief What a row of a joint or of a user constraint keeps (ConstraintRow).
+enum class ConstraintRowKind : std::uint8_t
+{
+    EQUALITY,   ///< Its error at 0 (a point held, an axis aligned).
+    INEQUALITY, ///< Its error at least 0 (a limit; approaching it is allowed until it is reached).
+    MOTOR,      ///< Its velocity at a target speed, with at most a force (no position).
+    SPRING,     ///< Its error pulled toward 0 softly, at a frequency with a damping ratio.
 };
 
 /// @brief How constraints are solved.
@@ -462,6 +472,27 @@ inline constexpr float DEFAULT_ACTIVE_EDGE_COSINE = 0.996F;
 /// @brief Standard gravity, in meters per second squared (PhysicsWorldDescription::gravity is -STANDARD_GRAVITY along y).
 inline constexpr float STANDARD_GRAVITY = 9.80665F;
 
+/// @brief Rows of a joint or of a user constraint at most (a six-degrees-of-freedom joint: three per axis).
+inline constexpr std::uint32_t MAXIMUM_CONSTRAINT_ROWS = 18;
+
+/// @brief A SolverJoint's second body when it holds to the world.
+inline constexpr std::uint32_t NO_SOLVER_BODY = 0xFFFFFFFFU;
+
+/// @brief The overlap and the joint error, in meters, position correction leaves (contacts rest there without jitter).
+inline constexpr float LINEAR_SLOP = 0.005F;
+
+/// @brief The angular joint error, in radians (2°), position correction leaves.
+inline constexpr float ANGULAR_SLOP = 0.034906585F;
+
+/// @brief How far, in meters, a position correction moves a body at most in one iteration.
+inline constexpr float MAXIMUM_LINEAR_CORRECTION = 0.2F;
+
+/// @brief How far, in radians (8°), a position correction turns a body at most in one iteration.
+inline constexpr float MAXIMUM_ANGULAR_CORRECTION = 0.13962634F;
+
+/// @brief The fraction of a position error a correction iteration removes (non-linear Gauss–Seidel).
+inline constexpr float POSITION_CORRECTION_FACTOR = 0.2F;
+
 } // namespace gfx::physics
 
 export namespace gfx::camera
@@ -589,6 +620,7 @@ struct EnumerationTraits<physics::PhysicsCapability>
         EnumeratorName{physics::PhysicsCapability::LARGE_HULLS, "LARGE_HULLS"},
         EnumeratorName{physics::PhysicsCapability::POSED_HEIGHT_FIELDS, "POSED_HEIGHT_FIELDS"},
         EnumeratorName{physics::PhysicsCapability::WIDE_JOINT_LIMITS, "WIDE_JOINT_LIMITS"},
+        EnumeratorName{physics::PhysicsCapability::USER_CONSTRAINTS, "USER_CONSTRAINTS"},
     };
 };
 
@@ -656,6 +688,18 @@ struct EnumerationTraits<physics::ConstraintKind>
         EnumeratorName{physics::ConstraintKind::JOINT, "JOINT"},
         EnumeratorName{physics::ConstraintKind::ATTACHMENT, "ATTACHMENT"},
         EnumeratorName{physics::ConstraintKind::USER, "USER"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::ConstraintRowKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::ConstraintRowKind::EQUALITY, "EQUALITY"},
+        EnumeratorName{physics::ConstraintRowKind::INEQUALITY, "INEQUALITY"},
+        EnumeratorName{physics::ConstraintRowKind::MOTOR, "MOTOR"},
+        EnumeratorName{physics::ConstraintRowKind::SPRING, "SPRING"},
     };
 };
 
@@ -1095,6 +1139,7 @@ static_assert(verify<physics::ShapeKind>(), "EnumerationTraits<physics::ShapeKin
 static_assert(verify<physics::JointKind>(), "EnumerationTraits<physics::JointKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::DistanceMode>(), "EnumerationTraits<physics::DistanceMode>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::ConstraintKind>(), "EnumerationTraits<physics::ConstraintKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::ConstraintRowKind>(), "EnumerationTraits<physics::ConstraintRowKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::SolverKind>(), "EnumerationTraits<physics::SolverKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::IntegratorKind>(), "EnumerationTraits<physics::IntegratorKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::SpatialStructureKind>(), "EnumerationTraits<physics::SpatialStructureKind>::NAMES is out of sync with the enumeration");

@@ -357,6 +357,26 @@ checked_description(const JointDescription& description,
 }
 
 void
+check_description(const ConstraintDescription& description,
+                  const BackendIdentity& backend,
+                  std::string_view operation,
+                  const PhysicsErrorContext& context)
+{
+    // Two bodies (or one and the world), its rows, when it breaks.
+    check_bodies(description, backend, operation, context);
+    check_breaking(description.breaking, backend, operation, context);
+    if (description.constraint == nullptr)
+    {
+        reject(backend, operation, "the user constraint is null", "give the constraint whose rows the solver keeps", context);
+    }
+    const std::uint32_t rows = description.constraint->row_count();
+    if (rows == 0 || rows > MAXIMUM_CONSTRAINT_ROWS)
+    {
+        reject(backend, operation, std::format("the user constraint has {} rows", rows), std::format("give between 1 and {} rows", MAXIMUM_CONSTRAINT_ROWS), context);
+    }
+}
+
+void
 check_pin(const ParticlePin& pin,
           std::uint32_t particles,
           const BackendIdentity& backend,

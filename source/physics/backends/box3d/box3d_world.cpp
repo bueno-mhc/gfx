@@ -465,9 +465,10 @@ struct EditApplier
         }
     }
 
-    // Soft bodies are the abstraction's (XPBD, stepped by the framework after Box3D's step): nothing for Box3D.
+    // Soft bodies are the abstraction's (XPBD, stepped by the framework after Box3D's step): nothing for Box3D; user
+    // constraints are refused when recorded.
     template<class Change>
-        requires requires(const Change& change) { change.soft_body; }
+        requires requires(const Change& change) { change.soft_body; } || requires(const Change& change) { change.constraint; }
     void operator()(const Change& /*change*/) const
     {
     }
@@ -604,6 +605,11 @@ Box3dBackend::check(const WorldEdit& edit,
     else if (const auto* trigger = std::get_if<edits::CreateTrigger>(&edit))
     {
         check_shape(*trigger->description.shape, trigger->description.pose, BodyKind::STATIC, 16, "PhysicsWorld::create_trigger", {});
+    }
+    else if (std::holds_alternative<edits::CreateConstraint>(edit))
+    {
+        throw_unsupported(identity(), "PhysicsWorld::create_constraint", PhysicsCapability::USER_CONSTRAINTS, "Box3D solves its own joints only",
+                          "use a joint kind Box3D has, or the reference backend (PhysicsBackendKind::REFERENCE)");
     }
 }
 

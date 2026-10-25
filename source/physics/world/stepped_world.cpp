@@ -153,6 +153,17 @@ require_live(const WorldShared& shared,
                         {.world = shared.world, .joint = change.joint});
         }
     }
+    else if constexpr (requires { change.constraint; })
+    {
+        if (!shared.is_live(change.constraint))
+        {
+            const std::uint32_t slot = slot_of(change.constraint);
+            const auto bodies = slot < shared.constraint_bodies.size() ? shared.constraint_bodies[slot] : std::pair<RigidBodyHandle, RigidBodyHandle>{};
+            const RigidBodyHandle gone = bodies.first && !shared.is_live(bodies.first) ? bodies.first : bodies.second && !shared.is_live(bodies.second) ? bodies.second : RigidBodyHandle{};
+            reject_dead(shared, operation, change.constraint, gone ? std::format("was destroyed with its body {}", gone) : "was destroyed",
+                        {.world = shared.world, .constraint = change.constraint});
+        }
+    }
     else if constexpr (requires { change.trigger; })
     {
         if (!shared.is_live(change.trigger))
@@ -312,6 +323,11 @@ public:
     [[nodiscard]] auto is_external() const noexcept -> bool override
     {
         return false;
+    }
+
+    void solve(const SolverStep& /*step*/) override
+    {
+        refuse_backend_component(backend(), "Solver::solve", PhysicsCapability::CUSTOM_SOLVER);
     }
 
 private:
@@ -686,6 +702,30 @@ struct RecordApplier
         }
     }
 
+    // User constraints.
+    void operator()(const edits::CreateConstraint& change) const
+    {
+        grown(pending.constraints, slot_of(change.constraint)) = {.handle = change.constraint, .configuration = change.description, .state = {}, .configuration_changed = true};
+    }
+
+    void operator()(const edits::DestroyConstraint& change) const
+    {
+        if (ConstraintRecord* record = find(pending, change.constraint))
+        {
+            *record = {};
+        }
+        implementation.released_constraints.push_back(change.constraint);
+    }
+
+    void operator()(const edits::SetConstraintEnabled& change) const
+    {
+        if (ConstraintRecord* record = find(pending, change.constraint))
+        {
+            record->state.enabled = change.enabled;
+            record->state.broken = record->state.broken && !change.enabled;
+        }
+    }
+
     // Triggers.
     void operator()(const edits::CreateTrigger& change) const
     {
@@ -882,6 +922,12 @@ WorldShared::is_live(JointHandle handle) const noexcept -> bool
 }
 
 auto
+WorldShared::is_live(ConstraintHandle handle) const noexcept -> bool
+{
+    return live_in(constraints, handle);
+}
+
+auto
 WorldShared::is_live(TriggerHandle handle) const noexcept -> bool
 {
     return live_in(triggers, handle);
@@ -927,7 +973,7 @@ WorldShared::record_destruction(const WorldEdit& edit) noexcept
         }
         if (const auto* body = std::get_if<edits::DestroyRigidBody>(&edit))
         {
-            // A body goes with its colliders, triggers and joints (destroyed first).
+            // A body goes with its colliders, triggers, joints and user constraints (destroyed first).
             if (!is_live(body->body))
             {
                 return;
@@ -955,6 +1001,14 @@ WorldShared::record_destruction(const WorldEdit& edit) noexcept
                 {
                     joints.live[slot_of(joint)] = 0;
                     recorded.push_back(edits::DestroyJoint{.joint = joint});
+                }
+            }
+            for (const ConstraintHandle constraint : recording.constraints)
+            {
+                if (is_live(constraint))
+                {
+                    constraints.live[slot_of(constraint)] = 0;
+                    recorded.push_back(edits::DestroyConstraint{.constraint = constraint});
                 }
             }
             recording = {};
@@ -996,6 +1050,22 @@ WorldShared::record_destruction(const WorldEdit& edit) noexcept
                 if (owner && is_live(owner))
                 {
                     erase_value(body_recordings[slot_of(owner)].joints, joint->joint);
+                }
+            }
+            recorded.push_back(edit);
+        }
+        else if (const auto* constraint = std::get_if<edits::DestroyConstraint>(&edit))
+        {
+            if (!is_live(constraint->constraint))
+            {
+                return;
+            }
+            constraints.live[slot_of(constraint->constraint)] = 0;
+            for (const RigidBodyHandle owner : {constraint_bodies[slot_of(constraint->constraint)].first, constraint_bodies[slot_of(constraint->constraint)].second})
+            {
+                if (owner && is_live(owner))
+                {
+                    erase_value(body_recordings[slot_of(owner)].constraints, constraint->constraint);
                 }
             }
             recorded.push_back(edit);
@@ -1112,6 +1182,42 @@ WorldShared::create_joint(const JointDescription& description) -> JointHandle
 }
 
 auto
+WorldShared::create_constraint(const ConstraintDescription& description) -> ConstraintHandle
+{
+    constexpr std::string_view OPERATION = "PhysicsWorld::create_constraint";
+    const std::scoped_lock lock{mutex};
+    if (backend == nullptr)
+    {
+        reject_destroyed_world(identity, world, OPERATION);
+    }
+    require_body(*this, OPERATION, description.first);
+    if (description.second)
+    {
+        require_body(*this, OPERATION, description.second);
+    }
+    const SlotNumber slot = issue_slot(constraints, identity, OPERATION);
+    const ConstraintHandle constraint = ConstraintHandle::create(key(), slot.index, slot.generation);
+    try
+    {
+        WorldEdit edit = edits::CreateConstraint{.constraint = constraint, .description = description};
+        backend->check(edit, RecordedWorld{*this});
+        grown(constraint_bodies, slot.index) = {description.first, description.second};
+        body_recordings[slot_of(description.first)].constraints.push_back(constraint);
+        if (description.second)
+        {
+            body_recordings[slot_of(description.second)].constraints.push_back(constraint);
+        }
+        recorded.push_back(std::move(edit));
+    }
+    catch (...)
+    {
+        release_slot(constraints, constraint);
+        throw;
+    }
+    return constraint;
+}
+
+auto
 WorldShared::create_trigger(const TriggerDescription& description) -> TriggerHandle
 {
     constexpr std::string_view OPERATION = "PhysicsWorld::create_trigger";
@@ -1182,6 +1288,7 @@ void
 WorldShared::release(std::span<const RigidBodyHandle> rigid_bodies_released,
                      std::span<const ColliderHandle> colliders_released,
                      std::span<const JointHandle> joints_released,
+                     std::span<const ConstraintHandle> constraints_released,
                      std::span<const TriggerHandle> triggers_released,
                      std::span<const SoftBodyHandle> soft_bodies_released) noexcept
 {
@@ -1201,6 +1308,10 @@ WorldShared::release(std::span<const RigidBodyHandle> rigid_bodies_released,
     for (const JointHandle handle : joints_released)
     {
         release_slot(joints, handle);
+    }
+    for (const ConstraintHandle handle : constraints_released)
+    {
+        release_slot(constraints, handle);
     }
     for (const TriggerHandle handle : triggers_released)
     {
@@ -1325,6 +1436,30 @@ SteppedWorldBackend::closest_point(Vector3 /*point*/,
     return std::nullopt;
 }
 
+auto
+SteppedWorldBackend::broad_phase_component() noexcept -> BroadPhase*
+{
+    return nullptr;
+}
+
+auto
+SteppedWorldBackend::narrow_phase_component() noexcept -> NarrowPhase*
+{
+    return nullptr;
+}
+
+auto
+SteppedWorldBackend::solver_component() noexcept -> Solver*
+{
+    return nullptr;
+}
+
+auto
+SteppedWorldBackend::integrator_component() noexcept -> Integrator*
+{
+    return nullptr;
+}
+
 void
 SteppedWorldBackend::replace_broad_phase(std::unique_ptr<BroadPhase> /*broad_phase*/)
 {
@@ -1377,7 +1512,7 @@ SteppedWorldBackend::apply_soft_body_corrections(std::span<const BodyCorrection>
         pose.orientation = normalized(correction.rotation * pose.orientation);
         pose.position = center - rotate(pose.orientation, record->mass.center_of_mass);
         const Matrix3 rotation = Matrix3::from_rotation(pose.orientation);
-        const Matrix3 inverse_inertia = std::abs(determinant(record->mass.inertia)) > 0.0F
+        const Matrix3 inverse_inertia = std::abs(determinant(record->mass.inertia)) > std::numeric_limits<float>::min()
                                             ? rotation * inverse(record->mass.inertia) * transpose(rotation)
                                             : Matrix3{.columns = {Vector3{}, Vector3{}, Vector3{}}};
         const Vector3 turn = inverse_inertia * correction.angular_impulse;
@@ -1475,6 +1610,13 @@ SteppedWorld::create_joint(const JointDescription& description) -> std::unique_p
 {
     const JointDescription checked = checked_description(description, backend(), "PhysicsWorld::create_joint", {.world = handle()});
     return make_joint(m_shared, m_shared->create_joint(checked), checked);
+}
+
+auto
+SteppedWorld::create_constraint(const ConstraintDescription& description) -> std::unique_ptr<Constraint>
+{
+    check_description(description, backend(), "PhysicsWorld::create_constraint", {.world = handle()});
+    return make_constraint(m_shared, m_shared->create_constraint(description), description);
 }
 
 auto
@@ -1616,48 +1758,68 @@ SteppedWorld::statistics() const -> StepStatistics
 auto
 SteppedWorld::broad_phase() -> BroadPhase&
 {
-    return *m_implementation->broad_phase;
+    BroadPhase* component = m_implementation->backend->broad_phase_component();
+    return component != nullptr ? *component : *m_implementation->broad_phase;
 }
 
 auto
 SteppedWorld::narrow_phase() -> NarrowPhase&
 {
-    return *m_implementation->narrow_phase;
+    NarrowPhase* component = m_implementation->backend->narrow_phase_component();
+    return component != nullptr ? *component : *m_implementation->narrow_phase;
 }
 
 auto
 SteppedWorld::solver() -> Solver&
 {
-    return *m_implementation->solver;
+    Solver* component = m_implementation->backend->solver_component();
+    return component != nullptr ? *component : *m_implementation->solver;
 }
 
 auto
 SteppedWorld::integrator() -> Integrator&
 {
-    return *m_implementation->integrator;
+    Integrator* component = m_implementation->backend->integrator_component();
+    return component != nullptr ? *component : *m_implementation->integrator;
 }
 
 void
 SteppedWorld::replace_broad_phase(std::unique_ptr<BroadPhase> broad_phase)
 {
+    if (is_stepping())
+    {
+        reject(backend(), "PhysicsWorld::replace_broad_phase", "a step is in progress", "replace it between steps (after wait_step())", {.world = handle()});
+    }
     m_implementation->backend->replace_broad_phase(std::move(broad_phase));
 }
 
 void
 SteppedWorld::replace_narrow_phase(std::unique_ptr<NarrowPhase> narrow_phase)
 {
+    if (is_stepping())
+    {
+        reject(backend(), "PhysicsWorld::replace_narrow_phase", "a step is in progress", "replace it between steps (after wait_step())", {.world = handle()});
+    }
     m_implementation->backend->replace_narrow_phase(std::move(narrow_phase));
 }
 
 void
 SteppedWorld::replace_solver(std::unique_ptr<Solver> solver)
 {
+    if (is_stepping())
+    {
+        reject(backend(), "PhysicsWorld::replace_solver", "a step is in progress", "replace it between steps (after wait_step())", {.world = handle()});
+    }
     m_implementation->backend->replace_solver(std::move(solver));
 }
 
 void
 SteppedWorld::replace_integrator(std::unique_ptr<Integrator> integrator)
 {
+    if (is_stepping())
+    {
+        reject(backend(), "PhysicsWorld::replace_integrator", "a step is in progress", "replace it between steps (after wait_step())", {.world = handle()});
+    }
     m_implementation->backend->replace_integrator(std::move(integrator));
 }
 
@@ -1964,6 +2126,7 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
         copy_records(published.rigid_bodies, pending.rigid_bodies, [](RigidBodyRecord& to, const RigidBodyRecord& from) { to.state = from.state; });
         copy_records(published.colliders, pending.colliders, [](ColliderRecord& to, const ColliderRecord& from) { to.world_bounds = from.world_bounds; });
         copy_records(published.joints, pending.joints, [](JointRecord& to, const JointRecord& from) { to.state = from.state; });
+        copy_records(published.constraints, pending.constraints, [](ConstraintRecord& to, const ConstraintRecord& from) { to.state = from.state; });
         copy_records(published.triggers, pending.triggers, [](TriggerRecord& to, const TriggerRecord& from) { to.world_bounds = from.world_bounds; });
         copy_records(published.soft_bodies, pending.soft_bodies, [](SoftBodyRecord& to, const SoftBodyRecord& from) {
             to.positions = from.positions;
@@ -1979,10 +2142,11 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
     }
 
     // The slots of the objects destroyed in this step become free; the query tree follows the published colliders.
-    shared.release(released_bodies, released_colliders, released_joints, released_triggers, released_soft_bodies);
+    shared.release(released_bodies, released_colliders, released_joints, released_constraints, released_triggers, released_soft_bodies);
     released_bodies.clear();
     released_colliders.clear();
     released_joints.clear();
+    released_constraints.clear();
     released_triggers.clear();
     released_soft_bodies.clear();
     update_query_tree(shared.published);

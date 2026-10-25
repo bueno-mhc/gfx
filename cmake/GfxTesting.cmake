@@ -46,6 +46,19 @@ function(gfx_add_test name)
     gtest_discover_tests(${name}
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 60)
+    # CMake 4.4 writes no target name into the POST_BUILD discovery script, so the test executables of one directory
+    # list their tests into the same JSON file, and two linked at once clobber each other's listing ("JSON failed
+    # parsing"; it broke a build once six physics test executables linked together). The links of a directory's test
+    # executables, discovery included (a POST_BUILD command is part of the link step), run one at a time in a Ninja job
+    # pool of their own; directories still link in parallel. Detector: CMakeDefect.GoogleTestDiscoveryNamesNoTarget.
+    string(MD5 pool "${CMAKE_CURRENT_BINARY_DIR}")
+    string(SUBSTRING "${pool}" 0 12 pool)
+    set(pool gfx_test_links_${pool})
+    get_property(pools GLOBAL PROPERTY JOB_POOLS)
+    if(NOT "${pool}=1" IN_LIST pools)
+        set_property(GLOBAL APPEND PROPERTY JOB_POOLS ${pool}=1)
+    endif()
+    set_property(TARGET ${name} PROPERTY JOB_POOL_LINK ${pool})
 endfunction()
 
 # gfx_add_compilation_failure_test(<name> SOURCES <file>... EXPECTED_DIAGNOSTIC <regex>

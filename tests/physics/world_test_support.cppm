@@ -238,6 +238,10 @@ private:
         {
             return std::format("{}", change.trigger);
         }
+        else if constexpr (requires { change.constraint; })
+        {
+            return std::format("{}", change.constraint);
+        }
         else if constexpr (requires { change.soft_body; })
         {
             return std::format("{}", change.soft_body);

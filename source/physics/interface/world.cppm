@@ -62,6 +62,12 @@ public:
     /// @throws BackendCapabilityError if the backend lacks the joint's kind (Box3D: SIX_DEGREES_OF_FREEDOM).
     [[nodiscard]] virtual auto create_joint(const JointDescription& description) -> std::unique_ptr<Joint> = 0;
 
+    /// @brief A user constraint (UserConstraint's rows, solved as joints are).
+    /// @throws PhysicsError if a body does not exist, both are the same body, or the constraint is null or has more than
+    ///         MAXIMUM_CONSTRAINT_ROWS rows.
+    /// @throws BackendCapabilityError if the backend has none (USER_CONSTRAINTS).
+    [[nodiscard]] virtual auto create_constraint(const ConstraintDescription& description) -> std::unique_ptr<Constraint> = 0;
+
     /// @brief A trigger, reporting from the next step.
     /// @throws PhysicsError if @p description is invalid (no shape, a body that does not exist).
     [[nodiscard]] virtual auto create_trigger(const TriggerDescription& description) -> std::unique_ptr<Trigger> = 0;

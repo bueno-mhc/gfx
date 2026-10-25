@@ -278,6 +278,26 @@ Joint::set_enabled(bool /*enabled*/)
     throw_not_implemented("Joint::set_enabled", PhysicsCapability::WORLD_OBJECTS);
 }
 
+// ===================================================================================================== Constraint
+
+auto
+Constraint::description() const -> ConstraintDescription
+{
+    throw_not_implemented("Constraint::description", PhysicsCapability::USER_CONSTRAINTS);
+}
+
+auto
+Constraint::state() const -> JointState
+{
+    throw_not_implemented("Constraint::state", PhysicsCapability::USER_CONSTRAINTS);
+}
+
+void
+Constraint::set_enabled(bool /*enabled*/)
+{
+    throw_not_implemented("Constraint::set_enabled", PhysicsCapability::USER_CONSTRAINTS);
+}
+
 // ===================================================================================================== Trigger
 
 auto
@@ -439,6 +459,14 @@ NarrowPhase::collide(const ShapeInstance& /*first*/,
     throw_not_implemented("NarrowPhase::collide", PhysicsCapability::CUSTOM_NARROW_PHASE);
 }
 
+// ===================================================================================================== Solver
+
+void
+Solver::solve(const SolverStep& /*step*/)
+{
+    throw_not_implemented("Solver::solve", PhysicsCapability::CUSTOM_SOLVER);
+}
+
 // ===================================================================================================== Integrator
 
 void
@@ -479,6 +507,12 @@ auto
 PhysicsWorld::create_joint(const JointDescription& /*description*/) -> std::unique_ptr<Joint>
 {
     throw_not_implemented("PhysicsWorld::create_joint", PhysicsCapability::WORLD_OBJECTS);
+}
+
+auto
+PhysicsWorld::create_constraint(const ConstraintDescription& /*description*/) -> std::unique_ptr<Constraint>
+{
+    throw_not_implemented("PhysicsWorld::create_constraint", PhysicsCapability::USER_CONSTRAINTS);
 }
 
 auto
