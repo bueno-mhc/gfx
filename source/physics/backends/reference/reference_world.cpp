@@ -859,6 +859,18 @@ ReferenceBackend::simulate(float seconds,
         }
         m_solver->solve(
             {.seconds = sub_seconds, .settings = world.solver, .bodies = m_solver_bodies, .contacts = m_solver_contacts, .joints = m_solver_joints, .scheduler = m_scheduler});
+
+        // The joints' loads over the whole step: a load one sub-step takes (a landing stopped at once) counts too.
+        if (sub_step == 0)
+        {
+            m_joint_forces.assign(m_solver_joints.size(), Vector3{});
+            m_joint_torques.assign(m_solver_joints.size(), Vector3{});
+        }
+        for (std::size_t index = 0; index < m_solver_joints.size(); ++index)
+        {
+            m_joint_forces[index] += m_solver_joints[index].force;
+            m_joint_torques[index] += m_solver_joints[index].torque;
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ results
@@ -879,7 +891,8 @@ ReferenceBackend::simulate(float seconds,
         record.state.linear_velocity = body.linear_velocity + cross(body.angular_velocity, record.state.pose.position - body.center);
     }
 
-    // The contacts' impulses for the next step; the joints' forces, and those that broke.
+    // The contacts' impulses for the next step; the joints' forces (the step's average: the impulse they gave over the
+    // step, per second, whatever the sub-steps), and those that broke.
     for (std::size_t index = 0; index < m_solver_contacts.size(); ++index)
     {
         m_manifolds[m_contact_manifolds[index]].manifold = m_solver_contacts[index].manifold;
@@ -900,10 +913,10 @@ ReferenceBackend::simulate(float seconds,
                                                   : std::visit([](const auto& description) { return description.breaking; }, pending.joints[record_slot].configuration);
         JointEntry& entry = constraint ? m_constraints[record_slot] : m_joints[record_slot];
         entry.impulses = solved.impulses;
-        state.force = solved.force;
-        state.torque = solved.torque;
-        const float force = length(solved.force);
-        const float torque = length(solved.torque);
+        state.force = m_joint_forces[index] / static_cast<float>(sub_steps);
+        state.torque = m_joint_torques[index] / static_cast<float>(sub_steps);
+        const float force = length(state.force);
+        const float torque = length(state.torque);
         if (force > breaking.force || torque > breaking.torque)
         {
             state.enabled = false;

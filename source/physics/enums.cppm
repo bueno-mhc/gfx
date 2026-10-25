@@ -208,7 +208,7 @@ enum class QueryFailureKind : std::uint8_t
 {
     NO_HIT,            ///< Nothing was hit or found.
     INVALID_HANDLE,    ///< A handle names no live object.
-    STEP_IN_PROGRESS,  ///< The world is stepping: queries wait for the step's end.
+    STEP_IN_PROGRESS,  ///< The world is stepping: the query returns at once; ask again after wait_step().
     UNSUPPORTED,       ///< The backend cannot answer it (QueryFailure::capability names what it lacks).
     CAPACITY_EXCEEDED, ///< More results than the output holds.
 };

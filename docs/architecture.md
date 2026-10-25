@@ -1,18 +1,19 @@
 # gfx — architecture overview (the code as built)
 
-This document describes the code as it is built, on 2026-10-19: the libraries, their modules, the
-objects and how they relate, the paths a frame and an event take, the threads, and how everything is
-built and tested. The decisions behind the platform library and the UI library, with the alternatives
-considered, are in [platform-design.md](platform-design.md) and [ui-design.md](ui-design.md) (which also
-records what each phase built); the atlas file format is in [ui-atlas-format.md](ui-atlas-format.md); how
-to use the libraries is in the [README](../README.md).
+This document describes the code as it is built, on 2026-10-25: the libraries, their modules, the
+objects and how they relate, the paths a frame, an event and a physics step take, the threads, and how
+everything is built and tested. The decisions behind the platform, UI, physics and camera libraries, with
+the alternatives considered, are in [platform-design.md](platform-design.md), [ui-design.md](ui-design.md)
+and [physics-design.md](physics-design.md) (the last two also record what each phase built); the atlas file
+format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the
+[README](../README.md).
 
 Diagrams are [Mermaid](https://mermaid.js.org/) (GitHub renders them). Arrows read "uses" or "depends
 on" unless a diagram says otherwise.
 
 ## 1. Libraries, modules and dependencies
 
-Six libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
+Ten libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
 Backends are modules of a **private** file set: only the factory of their library imports them, so no
 consumer can name a backend type or include a native header through gfx.
 
@@ -21,6 +22,7 @@ flowchart TB
     subgraph app["applications"]
         example["gfx_windowed_example<br/>examples/windowed"]
         editor["gfx_ui_editor_example<br/>examples/ui_editor"]
+        physics_example["gfx_physics_example<br/>examples/physics"]
         tests["tests/*"]
     end
     subgraph ui_platform_lib["gfx::ui_platform"]
@@ -45,6 +47,10 @@ flowchart TB
         sdl3["gfx.platform.backends.sdl3<br/>(private)"]
         glfw["gfx.platform.backends.glfw<br/>(private)"]
     end
+    subgraph physics_libs["gfx::physics, gfx::physics_components,<br/>gfx::camera, gfx::physics_common (§7)"]
+        physics_modules["gfx.physics, gfx.camera<br/>worlds, shapes, collision, solvers,<br/>soft bodies, cameras"]
+        physics_backends["gfx.physics.backends.box3d / reference / null<br/>(private)"]
+    end
     subgraph core_lib["gfx::core"]
         core["gfx.core<br/>enums machinery, errors, handles,<br/>identifiers, types, native_window"]
         tables["gfx.core.slot_table, gfx.core.handle_table<br/>(backend utilities)"]
@@ -55,6 +61,12 @@ flowchart TB
     editor --> ui_platform
     tests --> bridge
     tests --> ui_platform
+    tests --> physics_modules
+    physics_example --> physics_modules
+    physics_modules --> core
+    physics_modules -.->|factory imports| physics_backends
+    physics_backends --> third_box3d["Box3D (static)"]
+    core --> third_math["cglm, SIMDe<br/>(gfx.core.math at run time)"]
     ui_platform --> ui
     ui_platform --> platform_module
     ui --> gfx_module
@@ -88,6 +100,10 @@ flowchart TB
 | ui | `source/ui/` | `gfx.ui` = `gfx.ui.enums`, `.handles`, `.errors`, `.atlas_format`, `.unicode`, `.text` (partitions), `.draw`, `.debug_overlay`, `.renderer`, `.style`, `.input`, `.context` (partitions) | `gfx::ui` |
 | ui platform | `source/ui/platform/` | `gfx.ui.platform` (imports `gfx.ui` and `gfx.platform`) | `gfx::ui` |
 | ui atlas tools | `source/ui/font/`, `source/ui/tools/` | `gfx.ui.atlas_tools` (partitions); the executable `gfx_ui_atlas_builder` that `gfx_add_ui_atlas()` runs | `gfx::ui` |
+| physics common | `source/physics/` | `gfx.physics.enums`, `.handles`, `.errors`, `.primitives` (partitions) | `gfx::physics`, `gfx::camera` |
+| camera | `source/physics/camera/` | `gfx.camera` = `gfx.camera.interface` (partitions), `gfx.camera.factory` | `gfx::camera` |
+| physics components | `source/physics/` | `gfx.physics.shapes`, `.narrow_phase`, `.tasks`, `.spatial`, `.interface`, `.dynamics`, `.world` (each with partitions) | `gfx::physics` |
+| physics | `source/physics/` | `gfx.physics` (re-exports the interface and the world framework), `gfx.physics.factory` | `gfx::physics` |
 
 Rules every library follows:
 
@@ -832,14 +848,347 @@ The main thread builds frame N + 1 while the render thread draws frame N. Only t
 swapchain; the main thread tells it to recreate (`requires_swapchain_recreation()` on the window's events,
 `WindowSwapchain::request_recreation()` on the render thread).
 
-## 7. Build and tests
+## 7. Physics and camera libraries
+
+The physics library (`import gfx.physics;`) and the camera library (`import gfx.camera;`) know nothing of the
+graphics, platform or UI libraries: their link closure is checked at configure time (`gfx_require_decoupled()`) and
+their sources' imports by a CTest scan. The decisions behind them, the phases and what each phase built are in
+[physics-design.md](physics-design.md).
+
+### 7.1 Targets and modules
 
 ```mermaid
 flowchart TB
-    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
-    configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), gfx_add_ui_atlas(), test helpers"]
-    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, examples, tests"]
-    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, atlas tool runs, example runs"]
+    subgraph physics_lib["gfx::physics"]
+        direction TB
+        umbrella["gfx.physics<br/>(the interface, the framework, the factory)"]
+        factory["gfx.physics.factory<br/>create_physics_world(), physics_backend_availability()"]
+        box3d["gfx.physics.backends.box3d<br/>(private)"]
+        reference["gfx.physics.backends.reference<br/>(private)"]
+        null_backend["gfx.physics.backends.null<br/>(private)"]
+    end
+    subgraph components_lib["gfx::physics_components"]
+        direction TB
+        world["gfx.physics.world<br/>SteppedWorld, SteppedWorldBackend,<br/>edits, snapshots, the abstraction's queries"]
+        dynamics["gfx.physics.dynamics<br/>integrators, presets, XPBD soft-body solver,<br/>sequential-impulse solver, joint rows"]
+        interface["gfx.physics.interface<br/>PhysicsWorld, objects, descriptions,<br/>pipeline components"]
+        spatial["gfx.physics.spatial<br/>BVH, loose octree and quadtree, BSP, grid,<br/>sweep and prune, SpatialBroadPhase"]
+        narrow["gfx.physics.narrow_phase<br/>GJK, EPA, separating axes, clipping,<br/>manifolds, shape queries"]
+        shapes["gfx.physics.shapes<br/>convex shapes, hulls, meshes,<br/>height fields, compounds, mass"]
+        tasks["gfx.physics.tasks<br/>TaskScheduler, ThreadTaskScheduler"]
+    end
+    subgraph camera_lib["gfx::camera"]
+        direction TB
+        camera["gfx.camera<br/>projections, Camera, controllers, factory"]
+        standard["gfx.camera.backends.standard<br/>(private)"]
+    end
+    subgraph common_lib["gfx::physics_common"]
+        common["gfx.physics.enums, .handles, .errors,<br/>gfx.physics.primitives<br/>(planes, boxes, rays, hulls, frustums, SIMD culling)"]
+    end
+    core["gfx::core<br/>gfx.core, gfx.core.math<br/>(constexpr; cglm and SIMDe at run time)"]
+    umbrella --> world
+    umbrella --> factory
+    factory -.->|imports| box3d
+    factory -.->|imports| reference
+    factory -.->|imports| null_backend
+    box3d --> third_box3d["Box3D (static)"]
+    physics_lib --> components_lib
+    world --> dynamics
+    dynamics --> interface
+    interface --> spatial
+    interface --> narrow
+    narrow --> shapes
+    spatial --> tasks
+    components_lib --> common_lib
+    camera -.->|factory imports| standard
+    camera_lib --> common_lib
+    common_lib --> core
+```
+
+- **`gfx::physics_common`**: one enumerations file for physics and camera, 17 handle kinds (core's `Handle<Tag>`,
+  explicitly instantiated once: a toolchain workaround, §8), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
+  `QueryResult<T> = std::expected<T, QueryFailure>`, and primitives whose tests are constexpr, with SIMD batches
+  (frustum culling of boxes and spheres) giving the same bits as the scalar code.
+- **`gfx::camera`** depends on the primitives only; **`gfx::physics_components`** never on the camera.
+- **`gfx::physics`** holds the backends behind the factory: Box3D (when `GFX_PHYSICS_BACKEND_BOX3D`), the reference
+  backend (always), the null one, and a custom one named by `GFX_PHYSICS_CUSTOM_BACKEND_TARGET`.
+
+### 7.2 Worlds, objects, backends and components
+
+```mermaid
+classDiagram
+    direction TB
+    class PhysicsWorld {
+        <<interface>>
+        +create_rigid_body() RigidBody
+        +create_joint() Joint
+        +create_constraint() Constraint
+        +create_trigger() Trigger
+        +create_soft_body() SoftBody
+        +step(seconds)
+        +begin_step(seconds)
+        +wait_step()
+        +events() PhysicsEvents
+        +ray_cast() QueryResult
+        +shape_cast() QueryResult
+        +overlap() QueryResult
+        +closest_point() QueryResult
+        +broad_phase() BroadPhase
+        +replace_broad_phase(BroadPhase)
+    }
+    class RigidBody {
+        +add_collider() Collider
+        +state() RigidBodyState
+        +set_pose(Transform)
+        +apply_linear_impulse(Vector3)
+        +move_kinematic(Transform, seconds)
+    }
+    class SteppedWorld {
+        <<final>>
+        records edits, publishes snapshots,
+        runs asynchronous steps, answers queries
+    }
+    class SteppedWorldBackend {
+        <<interface>>
+        +check(edit, RecordedWorld)
+        +apply(edits, pending)
+        +simulate(seconds, pending)
+        +simulates_soft_bodies() bool
+        +apply_soft_body_corrections()
+        +ray_cast() optional
+    }
+    class Box3dBackend {
+        Box3D world, bodies, shapes, joints
+    }
+    class ReferenceBackend {
+        records are the truth
+    }
+    class NullWorld {
+        throws BackendCapabilityError
+    }
+    class BroadPhase {
+        <<interface>>
+    }
+    class NarrowPhase {
+        <<interface>>
+    }
+    class Solver {
+        <<interface>>
+        +solve(SolverStep)
+    }
+    class Integrator {
+        <<interface>>
+        +predict(IntegrationState, seconds)
+    }
+    PhysicsWorld <|.. SteppedWorld
+    PhysicsWorld <|.. NullWorld
+    PhysicsWorld ..> RigidBody : creates
+    RigidBody ..> Collider : creates
+    PhysicsWorld ..> Joint : creates
+    PhysicsWorld ..> Constraint : creates
+    PhysicsWorld ..> Trigger : creates
+    PhysicsWorld ..> SoftBody : creates
+    SteppedWorld *-- SteppedWorldBackend
+    SteppedWorldBackend <|.. Box3dBackend
+    SteppedWorldBackend <|.. ReferenceBackend
+    ReferenceBackend *-- BroadPhase
+    ReferenceBackend *-- NarrowPhase
+    ReferenceBackend *-- Solver
+    ReferenceBackend *-- Integrator
+    BroadPhase <|.. SpatialBroadPhaseComponent
+    NarrowPhase <|.. GjkNarrowPhase
+    Solver <|.. SequentialImpulseSolver
+    Integrator <|.. SemiImplicitEulerIntegrator
+```
+
+- **Objects** are owned by the application (`std::unique_ptr`) and name themselves by handles; destroying one records
+  its destruction (a body's colliders, joints, constraints and pins go with it).
+- **`SteppedWorld`** is the framework every simulating backend runs in. A backend implements three operations — check
+  an edit when it is recorded (capability errors at once, not at the next step), apply a step's edits, simulate — and,
+  if it has them, its own queries; everything else (handles, edits, snapshots, the thread, the reader handshake, the
+  abstraction's queries, soft bodies) is the framework's.
+- **Components** are the reference backend's parts, each replaceable between steps through `replace_*()`:
+  `SpatialBroadPhaseComponent<Structure>` over any spatial structure (BVH, loose octree or quadtree, BSP, uniform grid,
+  sweep and prune), `GjkNarrowPhase`, `SequentialImpulseSolver`, and the integrators (semi-implicit Euler, Verlet,
+  Runge–Kutta 4; XPBD for soft bodies). Box3D refuses replacement (`CUSTOM_BROAD_PHASE` …).
+
+### 7.3 A step
+
+```mermaid
+sequenceDiagram
+    participant A as application thread
+    participant W as SteppedWorld
+    participant T as world thread
+    participant B as backend
+    participant X as XPBD soft-body solver
+    participant Q as query threads
+    A->>W: create, set, destroy (handles at once)
+    W->>W: check, record WorldEdit (mutex)
+    A->>W: begin_step(seconds)
+    W->>W: stepping flag, wait for readers to leave
+    W->>T: the step
+    T->>T: recorded edits into the pending records, masses
+    T->>B: apply(edits, pending)
+    T->>B: simulate(seconds, pending)
+    T->>X: soft bodies (backends without their own)
+    X->>B: apply_soft_body_corrections()
+    T->>T: boxes, statistics
+    Q->>W: ray_cast()
+    W-->>Q: STEP_IN_PROGRESS (no wait)
+    A->>W: wait_step()
+    W->>W: publish the pending snapshot, free the destroyed slots, update the query tree
+    A->>W: getters, events(), queries
+```
+
+- **Edits apply at the start of the next step, in the order recorded**, whenever they are made: a replay of the same
+  edits gives the same world. Getters read the published snapshot of the last completed step (records copied only
+  when their configuration changed).
+- **The reader handshake**: a query increments the readers then reads the stepping flag; `begin_step()` sets the flag
+  then waits for the readers to reach zero (both pairs sequentially consistent). A query never sees a half-applied step.
+- **Queries** through the abstraction (`QueryEngine::ABSTRACTION`): a BVH over the published colliders' boxes, then the
+  narrow phase's shape queries (GJK ray casts, conservative-advancement shape casts, overlaps, closest points), ties to
+  the smaller handle, results into the caller's spans. Through the backend (`BACKEND`): Box3D's own; a backend without
+  queries returns none and the abstraction answers.
+
+### 7.4 The reference backend's step
+
+```mermaid
+flowchart LR
+    subgraph collide["collide (once per step)"]
+        direction TB
+        wake["edits woke bodies; impulses applied"] --> boxes["collider boxes into the broad phase<br/>(continuous bodies' stretched by their motion)"]
+        boxes --> pairs["pairs: different bodies, one dynamic,<br/>not joined, not both at rest"]
+        pairs --> manifolds["narrow phase in chunks of 32 pairs<br/>on the scheduler, merged in order"]
+        manifolds --> cache["manifold cache: returning points<br/>get last step's impulses"]
+    end
+    subgraph islands_group["islands"]
+        direction TB
+        islands["union-find over contacts, joints, constraints"] --> wake_islands["an island wakes as a whole"]
+    end
+    subgraph sub_steps["each sub-step"]
+        direction TB
+        integrate["forces and gravity through the integrator"] --> move_points["contact points moved with their bodies"]
+        move_points --> solve["Solver::solve: warm start, velocity iterations<br/>(joint rows, then contacts with friction),<br/>restitution, positions, non-linear Gauss–Seidel"]
+    end
+    subgraph results["results"]
+        direction TB
+        records["poses and velocities into the records,<br/>impulses into the cache"] --> joints["joints' forces averaged over the sub-steps,<br/>breaking"]
+        joints --> sleep["islands asleep after the sleep time"]
+        sleep --> events["contact BEGIN, HIT, END; trigger ENTER, STAY, EXIT"]
+    end
+    collide --> islands_group --> sub_steps --> results
+```
+
+The number of sub-steps is `SolverDescription::sub_steps` (4 by default). The solver colors joints and contacts by the dynamic bodies they move and runs a color of 128 or more on the task
+scheduler, so any thread count gives the same bits. Runs of equality rows (a point, an orientation: up to six) are solved
+as one system (Cholesky); joint rows have exact Jacobians (`joint_rows()`, public, checked against measured rates).
+
+### 7.5 Collision: shapes, structures, pairs, manifolds
+
+```mermaid
+flowchart TB
+    subgraph broad["broad phase"]
+        direction TB
+        structure["SpatialStructureConcept<br/>BVH, LooseTree (octree, quadtree), Bsp,<br/>UniformGrid, SweepAndPrune"] --> spatial_broad["SpatialBroadPhase#lt;Structure#gt;<br/>fat boxes, CollisionFilter, sorted pairs<br/>(same pairs for any thread count)"]
+    end
+    subgraph narrow_group["narrow phase"]
+        direction TB
+        dispatch["collide(ShapeInstance, ShapeInstance):<br/>compile-time dispatch per shape pair"] --> analytic["analytic: spheres, capsules, boxes;<br/>separating axes box–box, triangle–triangle"]
+        dispatch --> gjk["GJK: distance and closest features"]
+        gjk -->|overlapping| epa["EPA: penetration depth and normal"]
+        gjk --> clipping["face clipping: up to 4 points"]
+        epa --> clipping
+        dispatch --> meshes["compounds and meshes: their leaves<br/>(one-sided triangles, active edges)"]
+        meshes --> dispatch
+    end
+    spatial_broad -->|pairs| dispatch
+    clipping --> manifold["ContactManifold<br/>normal from first to second, features"]
+    analytic --> manifold
+    manifold --> cache2["ManifoldCache<br/>features match last step's points"]
+```
+
+Shapes are a `std::variant` (sphere, capsule, cylinder, cone, box, hull, triangle, triangle mesh, height field,
+compound); `make_shape()` makes one that colliders share. Hulls can be built at compile time (`convex_hull<V, F, I>()`:
+quickhull in a constant expression into a `FixedHull`); meshes and compounds keep a static BVH of their parts. GJK and
+EPA are robust to slivers, origins on a boundary and nearly coplanar points (found by random sweeps).
+
+### 7.6 Soft bodies and their coupling with rigid bodies
+
+```mermaid
+flowchart LR
+    rigid["the backend's step moves the rigid bodies<br/>(start pose to end pose); then<br/>XpbdSoftBodySolver, per soft body"] --> xpbd
+    subgraph xpbd["XPBD, each sub-step"]
+        direction TB
+        predict["predict: velocities, gravity"] --> constraints["constraint colors: stretch, shear, bending,<br/>dihedral, volume (512 or more: on the scheduler)"]
+        constraints --> tethers["tethers, pins (to the world or to bodies)"]
+        tethers --> contacts["contacts with every shape kind, Coulomb friction<br/>(bodies interpolated through the step;<br/>dynamic bodies as proxies that move back)"]
+        contacts --> self["self-collision (hashed grid)"]
+        self --> velocities["velocities from the positions, damping"]
+    end
+    xpbd --> corrections["BodyCorrection per dynamic body:<br/>impulses and displacements"]
+    corrections --> backend_corrections["SteppedWorldBackend::apply_soft_body_corrections()<br/>(Box3D: transforms and impulses; reference: its records)"]
+```
+
+The coupling is two-way on any backend: a rope holds a Box3D body up, a falling cloth pushes what it lands on with the
+momentum it loses. Constraints of one color touch disjoint particles, so the result does not depend on the thread count.
+
+### 7.7 Cameras
+
+```mermaid
+classDiagram
+    direction LR
+    class Camera {
+        <<abstract>>
+        +description() CameraDescription
+        +set_pose(position, orientation)
+        +set_projection(CameraProjection)
+        +view_projection() Matrix4
+        +inverse_view_projection() Matrix4
+        +frustum() Frustum
+        +look_at(target, up)
+        +classify(Aabb or Sphere or Obb) FrustumIntersection
+        +screen_to_world_ray(point, viewport) Ray
+        +world_to_screen(point, viewport) optional Vector3
+    }
+    class StandardCamera {
+        <<final>>
+        recomputes the matrices and the frustum per change
+    }
+    class CameraController {
+        <<abstract>>
+        +update(Camera, CameraControllerInput)
+    }
+    Camera <|-- StandardCamera
+    CameraController <|-- FreeFlyController
+    CameraController <|-- FirstPersonController
+    CameraController <|-- OrbitController
+    CameraController ..> Camera : moves and turns
+    note for Camera "the same math as constexpr functions:\nperspective_matrix, orthographic_matrix,\nview_matrix, look_at_orientation,\ncamera_frustum, screen_to_world_ray,\nworld_to_screen"
+```
+
+`ClipConventions` (depth range `[0, 1]` or `[-1, 1]`, reversed depth, +Y up or down) decide the projection matrix; one
+depth formula covers finite and infinite far planes. The library code (`look_at()`, culling, screen rays) is non-virtual
+on top of the virtual state, so a custom camera (off-axis stereo, jittered projections) overrides only the matrices.
+
+### 7.8 Threads
+
+| Thread | What it does |
+|---|---|
+| Any application thread | creates, changes and destroys objects (recorded under a mutex); queries and getters between steps |
+| The thread that steps | `step()`, or `begin_step()` and `wait_step()`; publication happens in `wait_step()` |
+| The world's thread (`asynchronous_stepping`) | runs the step begun by `begin_step()` |
+| The task scheduler's threads | `parallel_for()` loops of the step (pairs, colors, soft-body constraints) and Box3D's tasks (`start()`/`finish()`); the caller takes part |
+
+Two worlds share nothing (no global state) and step on two threads at once.
+
+## 8. Build and tests
+
+```mermaid
+flowchart TB
+    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_PHYSICS, GFX_PHYSICS_BACKEND_BOX3D,<br/>GFX_SIMD_INSTRUCTION_SET, GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
+    configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), gfx_add_ui_atlas(), gfx_require_decoupled(),<br/>test helpers"]
+    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, gfx_physics_common, gfx_camera,<br/>gfx_physics_components, gfx_physics, examples, tests"]
+    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, decoupling checks,<br/>atlas tool runs, example runs"]
 ```
 
 | Suite | What it covers |
@@ -851,8 +1200,10 @@ flowchart TB
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
 | `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, the UI renderer drawing into the window (with the UI library), resize, minimize, frame latency, unsupported settings |
 | `tests/ui` | the atlas tools (every font format, decoder, generator and packer; reproducible bytes; the command-line tool), embedded atlases, text layout (bidi, fallbacks, shaping, breaking, the cache), the text editor, draw lists, the renderer on every GPU (shapes and text read back, text compared with the field evaluated on the CPU), the context under synthetic input (windows, widgets, tables, docking and layouts, navigation, shortcuts, the accessibility tree; drawn on every GPU), allocation counts (`operator new` replaced: none after the first frames), the platform adapter, a UI in visible windows, a UI Automation client reading the tree through AccessKit |
+| `tests/physics` | the primitives at compile time and against references, SIMD batches against the scalar code, shapes and shape queries against exact answers, GJK/EPA under random sweeps, spatial structures and broad phases against brute force, the cameras, the world framework on a recording backend (edits in order, snapshots, the reader handshake, the error contract of every interface), integrators against analytic orbits, soft bodies with known outcomes, Box3D, the reference backend (stacks, pendulum periods, joints, friction, restitution, continuous bodies, user constraints, each component replaced), the same bits on one and four threads; the decoupling checks (link closures and imports) |
 | `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, UI misuse such as sliders over booleans, ...) and a check that no enumerator collides with a platform macro |
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
+| `PhysicsExample.*` | the physics example on Box3D and on the reference backend: four seconds of the scene on four threads, every check passing (label `example`) |
 | `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 
 Toolchain workarounds the build applies (each with a detector test): `--allow-multiple-definition`
@@ -861,4 +1212,8 @@ Vulkan platform headers in plain translation units; handle-table lookups only in
 brace-initialized members of classes declared in partitions; `STBI_NO_STDIO` before stb_image; no
 capturing lambdas in in-class constructors of classes declared across partitions; FreeType, msdfgen and
 AccessKit behind std-free headers; no block-scope using-declarations of another module's enumerations in
-`consteval` functions of module interfaces. Details are in `.claude/CLAUDE.md` §6.
+`consteval` functions of module interfaces; every physics handle explicitly instantiated once, in the module
+that declares its tag; and, for CMake 4.4.0-rc2, a link job pool per test directory (test discovery scripts
+that name no target shared one listing file) and test lists emptied before each discovery (on Windows,
+`file(REMOVE)` of a file another process holds open fails silently, and the discovery appended its tests to the
+old list). Details are in `.claude/CLAUDE.md` §6.

@@ -178,6 +178,8 @@ public:
     std::vector<std::uint32_t> m_contact_manifolds{}; ///< The manifold of each solver contact.
     std::vector<SolverJoint> m_solver_joints{};
     std::vector<std::uint32_t> m_joint_slots{};      ///< The joint (or 0x80000000 | constraint) slot of each solver joint.
+    std::vector<Vector3> m_joint_forces{};           ///< Of each solver joint: its force summed over the sub-steps.
+    std::vector<Vector3> m_joint_torques{};          ///< Its torque summed over the sub-steps.
     std::vector<Vector3> m_centers{};
     std::vector<Vector3> m_velocities{};
     std::vector<Vector3> m_previous_centers{};

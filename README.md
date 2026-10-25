@@ -14,6 +14,8 @@ to present frames.
 | platform | `import gfx.platform;` | windows, monitors, cursors, events, input devices, action mapping ([Platform library](#platform-library-windows-and-input)) |
 | bridge | `import gfx.platform.graphics;` | swapchains for platform windows ([Presenting](#presenting-to-a-window)) |
 | ui | `import gfx.ui;` | immediate-mode UI over retained state (widgets, tables, docking, navigation, accessibility), every text through SDF/MSDF atlases built at build time ([design](docs/ui-design.md)) |
+| physics | `import gfx.physics;` | physics worlds over Box3D or the abstraction's own replaceable components: rigid bodies, joints, XPBD soft bodies, triggers, queries ([Physics](#physics)) |
+| camera | `import gfx.camera;` | cameras independent of any renderer: projections for any clip conventions, frustums, screen rays, controllers ([Camera](#camera)) |
 
 > **Status:** the graphics interface is complete: objects, typed recording, bindless resources,
 > parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
@@ -29,7 +31,10 @@ to present frames.
 > SDF/MSDF atlases at build time, checked at compile time), [text layout](#ui-text-layout) (bidi, fallback
 > fonts, shaping, line breaking), [drawing](#ui-drawing), the [immediate-mode UI](#ui-immediate-mode) with
 > Dear ImGui's widgets, tables and docking, keyboard and gamepad navigation, shortcuts and an accessibility
-> tree for screen readers; the [UI editor example](#examples) draws it from a render thread.
+> tree for screen readers; the [UI editor example](#examples) draws it from a render thread. The
+> **physics and camera libraries** are complete ([docs/physics-design.md](docs/physics-design.md)):
+> [physics worlds](#physics) on Box3D and on a reference backend of replaceable components, XPBD soft bodies
+> on both, and [cameras](#camera); the [physics example](#examples) checks a scene on both backends.
 
 ```cpp
 import std;
@@ -1077,6 +1082,104 @@ acquire, present and recreation; the main thread reads the window's events and o
 (`requires_swapchain_recreation()` → `WindowSwapchain::request_recreation()`), because a `WindowSwapchain`
 is used by one thread at a time.
 
+## Physics
+
+`import gfx.physics;` (target `gfx::physics`) gives physics worlds behind one interface — rigid bodies,
+colliders, joints and user constraints, XPBD soft bodies, triggers, queries and events — over three
+backends: **Box3D** (Erin Catto's, MIT, fetched and pinned), the **reference** backend, made only of the
+abstraction's own components (a spatial broad phase, GJK/EPA, sequential impulses, integrators), each
+replaceable between steps, and a **null** backend that throws for everything (the template of a custom
+backend). The physics library depends on gfx::core only (and Box3D for its backend): the build checks it.
+The math is constexpr where it can be (a hull, a projection, a frustum test can be constant expressions) and
+uses SIMD at run time (cglm, SIMDe); steps are split over a `TaskScheduler`'s threads with the same results
+on any number of threads.
+
+```cpp
+import std;
+import gfx.physics;
+
+using namespace gfx;
+using namespace gfx::physics;
+
+// A hull built at compile time (quickhull in a constant expression): a wedge.
+constexpr auto WEDGE = convex_hull<6, 5, 18>(std::array{Vector3{}, Vector3{.x = 1}, Vector3{.y = 1}, Vector3{.z = 1},
+                                                        Vector3{.x = 1, .z = 1}, Vector3{.y = 1, .z = 1}});
+
+int main()
+{
+    ThreadTaskScheduler scheduler{4};
+    const std::unique_ptr<PhysicsWorld> world =
+        create_physics_world({.asynchronous_stepping = true, .task_scheduler = &scheduler}, PhysicsBackendKind::BOX3D);
+
+    // A static floor, a dynamic wedge, a lid on a hinge that breaks above 800 N, a cloth pinned at two corners.
+    const auto ground = world->create_rigid_body({.kind = BodyKind::STATIC});
+    const auto floor = ground->add_collider({.shape = make_shape(BoxShape{.half_extents = {.x = 50, .y = 0.5F, .z = 50}}),
+                                             .pose = {.position = {.y = -0.5F}}});
+    const auto crate = world->create_rigid_body({.pose = {.position = {.y = 4}}});
+    const auto crate_collider = crate->add_collider({.shape = make_shape(HullShape(WEDGE)), .density = 500});
+    const auto lid = world->create_rigid_body({.pose = {.position = {.x = 0.5F, .y = 5.05F, .z = 0.5F}}});
+    const auto lid_collider = lid->add_collider({.shape = make_shape(BoxShape{.half_extents = {.x = 0.5F, .y = 0.05F, .z = 0.5F}})});
+    const auto hinge = world->create_joint(hinge_joint({.first = crate->handle(), .second = lid->handle(), .anchor = {.y = 5, .z = 0.5F},
+                                                        .axis = {.z = 1}, .limits = JointLimits{.lower = -1.2F, .upper = 0},
+                                                        .breaking = {.force = 800}}));
+    SoftBodyDescription cloth = cloth_preset({.columns = 24, .rows = 24, .spacing = 0.05F, .origin = {.x = -0.6F, .y = 3, .z = -2}});
+    cloth.pins = {pin_to_world(cloth, 0), pin_to_world(cloth, 23)};
+    const auto flag = world->create_soft_body(cloth);
+    const auto zone = world->create_trigger({.shape = make_shape(SphereShape{.radius = 2}), .pose = {.position = {.y = 1}}});
+
+    // A step on the world's own thread (edits made meanwhile apply at the next one), then a ray cast answered by
+    // the abstraction (a BVH over the colliders, then GJK) instead of Box3D's own queries.
+    world->begin_step(1.0F / 60);
+    world->wait_step();
+    const QueryResult<RayHit> hit = world->ray_cast({.origin = {.y = 10}, .direction = {.y = -1}}, 100, {.engine = QueryEngine::ABSTRACTION});
+    for (const TriggerEvent& event : world->events().triggers)
+    {
+        std::println("{} {}", event.kind, event.collider);   // ENTER, STAY, EXIT
+    }
+    return hit ? 0 : 1;
+}
+```
+
+- **Shapes**: spheres, capsules, cylinders, cones, boxes (rounded or not), hulls (at compile time with
+  `convex_hull<V, F, I>()`, at run time with `HullShape::from_points()`), triangles, triangle meshes, height
+  fields (over a `std::mdspan`) and compounds; `make_shape()` makes one shape that colliders share.
+- **Stepping**: creations and changes are recorded and applied, in order, at the start of the next step,
+  whenever they are made; getters show the last completed step. `step()`, or `begin_step()` and
+  `wait_step()` (on the world's own thread with `asynchronous_stepping`); a query made during a step returns
+  `QueryFailureKind::STEP_IN_PROGRESS` at once (query between steps, from any number of threads).
+- **Queries**: `ray_cast()`, `ray_cast_all()`, `shape_cast()`, `overlap()`, `closest_point()`, `contacts_of()`,
+  through the backend's own queries (`QueryEngine::BACKEND`) or the abstraction's (`ABSTRACTION`); results are
+  `std::expected<T, QueryFailure>`, without allocations.
+- **Events** (`events()`, valid until the next step completes): contacts begun, ended and hit, triggers
+  entered, stayed in and left, joints broken, bodies asleep and awake.
+- **Joints**: distance (rod, rope, spring, stub), hinge, ball and socket, slider, fixed, cone-twist and six
+  degrees of freedom, with limits, motors, springs and breaking; **user constraints** (`UserConstraint`: rows
+  with their Jacobians) on the reference backend.
+- **Soft bodies**: particles with stretch, shear, bending, dihedral, volume and tether constraints (cloth,
+  rope and tetrahedral volume presets), pinned to the world or to bodies, colliding with every shape kind and
+  with themselves; simulated by the abstraction (XPBD) on any backend and coupled both ways with its rigid
+  bodies.
+- **Components** (`broad_phase()`, `narrow_phase()`, `solver()`, `integrator()`, `soft_body_integrator()` and
+  their `replace_*()`): on the reference backend, a broad phase over a BVH, a loose octree or quadtree, a BSP,
+  a hashed grid or sweep and prune; the GJK/EPA narrow phase; the sequential-impulse solver; semi-implicit
+  Euler, Verlet or Runge–Kutta 4 integrators (XPBD for soft bodies).
+
+What a backend cannot do throws `BackendCapabilityError` naming the capability (`PhysicsCapability`), why,
+and what to do instead — never a silent approximation:
+
+| | Box3D | Reference |
+|---|---|---|
+| Meshes and height fields | on static bodies | on any body |
+| Static and dynamic friction | one coefficient | both |
+| Six-degrees-of-freedom joints, user constraints | no | yes |
+| Hulls | up to 128 vertices; cylinders and cones as hulls | any size, exact cylinders and cones |
+| Replacing its components | no | between steps |
+| Continuous collision | Box3D's | speculative contacts |
+
+A custom backend derives from `SteppedWorldBackend` (the framework records edits, publishes snapshots, runs
+asynchronous steps, answers the abstraction's queries and steps soft bodies) and is constructed directly, or
+becomes the factory's `PhysicsBackendKind::CUSTOM` through `GFX_PHYSICS_CUSTOM_BACKEND_TARGET`.
+
 ## Camera
 
 `import gfx.camera;` (target `gfx::camera`) gives cameras that know nothing of a renderer, a window or an input
@@ -1174,6 +1277,23 @@ and in the render thread's whole frames (acquisition, recording, submission, pre
 platform backend with `--frames 600 --warm-up 360 --sweep --check-allocations --validation`: five cycles of
 the path, the last two without any allocation on either thread and without any validation error.
 
+`examples/physics` is the physics library's usage example as a headless program, with the camera library:
+a crate whose hull is built at compile time falls from 4 m into a trigger zone, its lid's hinge breaks when it
+lands, a cloth hangs from two pinned corners, and the world steps asynchronously while a perspective camera
+and an orthographic map camera are set up. It then checks what happened and prints each check: the crate
+entered the zone and rests upright on the floor, the hinge broke at the landing, the cloth hangs from its
+pins, the ray through the screen's center hits the crate's surface (through the abstraction's BVH and GJK,
+and through the backend's own queries), the hit point projects back to the screen's center, the camera
+object's matrices are the ones computed at compile time, and the frustums see what they should.
+
+```bash
+build/debug/examples/physics/gfx_physics_example.exe --backend reference
+```
+
+`--backend box3d|reference` picks the physics backend, `--steps <count>` the steps of 1/60 s (240 by
+default), `--threads <count>` the task scheduler's threads; the exit code is 1 when a check fails. CTest
+runs it on both backends with `--steps 240 --threads 4`.
+
 ## Requirements (Windows)
 
 | Tool | Version verified | Notes |
@@ -1216,11 +1336,11 @@ its version, its license and what of it ends up in a program.
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
 | `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
-| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, `gfx::physics_components` with collision shapes, the narrow phase, spatial structures, the broad phase, the world interface, integrators, XPBD soft bodies coupled both ways with any backend's rigid bodies, the sequential-impulse solver, and the framework backends are built on, and `gfx::physics` with the factory and its backends: Box3D, the reference backend made of the abstraction's replaceable components, and the null one), which depend on the core library only (and Box3D, for its backend) — the build checks it |
+| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries: `gfx::physics_common` (primitives), `gfx::camera`, `gfx::physics_components` (shapes, the narrow phase, spatial structures and the broad phase, the world interface, integrators, the XPBD and sequential-impulse solvers, the framework backends are built on) and `gfx::physics` (the factory and its backends: Box3D, the reference backend, the null one), which depend on the core library only (and Box3D, for its backend) — the build checks it |
 | `GFX_PHYSICS_BACKEND_BOX3D` | `ON` | The Box3D physics backend (Box3D fetched, pinned by SHA-256 and linked statically) |
 | `GFX_PHYSICS_CUSTOM_BACKEND_TARGET` | (empty) | A target whose module `gfx.physics.backends.custom` becomes the factory's `PhysicsBackendKind::CUSTOM` (it links `gfx::physics_components` and exports `gfx::physics::custom_backend::unavailable_reason()` and `create_physics_world(description)`) |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
-| `GFX_BUILD_EXAMPLES` | `ON` | The examples (both need the platform library and Vulkan; the UI editor needs the UI library and its atlas tools) |
+| `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one and the UI editor need the platform library and Vulkan, the UI editor the UI library and its atlas tools too; the physics one needs the physics library) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 
 ## Project layout
@@ -1247,6 +1367,7 @@ gfx/
 │                         physics-design.md (physics and camera: decisions, phases, what each built)
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
+├── examples/physics/     a headless physics scene on Box3D or the reference backend, with two cameras, checked
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,
@@ -1316,7 +1437,7 @@ gfx/
 │   │   │                 (FreeType, stb_truetype), sdf/ (msdfgen, built-in), atlas/ (packers, writer,
 │   │   │                 builder), shaping/ (hb-subset, pair tables)
 │   │   └── tools/atlas_builder/  gfx_ui_atlas_builder, the atlas tool gfx_add_ui_atlas() runs
-│   └── physics/          the physics library (in progress; core only): enums.cppm (physics and camera),
+│   └── physics/          the physics and camera libraries (core only): enums.cppm (physics and camera),
 │                         handles.cppm, errors.cppm; primitives/ (gfx.physics.primitives: planes, boxes,
 │                         spheres, oriented boxes, rays, segments, hulls, frustums, intersection tests,
 │                         SIMD frustum culling); camera/ (gfx.camera); shapes/ (gfx.physics.shapes: convex shapes,
@@ -1405,6 +1526,10 @@ stops at its first failed assertion; select the test's frame in the call stack.
 | `Device::poll_shader_changes` | Once per frame, while no thread records |
 | `UiContext`, `UiFrame`, `UiRenderer` | One thread at a time (the context: the thread that builds frames) |
 | `UiContext::acquire_draw_data`, `UiDrawDataLease` | Any thread: the leased lists are not reused until the lease is released |
+| `PhysicsWorld` creations, changes, destruction of its objects | Any thread: recorded under a mutex, applied in order at the next step |
+| `PhysicsWorld` queries and getters | Any number of threads; during a step, queries return `STEP_IN_PROGRESS` without blocking |
+| `PhysicsWorld::step`, `begin_step`, `wait_step` | One thread at a time; two worlds step on two threads at once |
+| `Camera`, `CameraController` | One thread at a time |
 
 ## Using gfx together with `<windows.h>`
 

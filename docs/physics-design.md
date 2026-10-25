@@ -2,7 +2,7 @@
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
 (636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 committed** (db6ecce); **PH5
-committed** (d2b2c8e); **PH6 committed** (7856f19); **PH7 implemented** (§B "PH7 as built"), awaiting validation. This
+committed** (d2b2c8e); **PH6 committed** (7856f19); **PH7 committed** (92728b6); **PH8 implemented** (§B "PH8 as built"), awaiting validation: every phase is built. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -1086,6 +1086,64 @@ Deviations from the proposal, for validation:
 10. **Fixed in earlier code**: inertia tensors were declared singular below a determinant of 10⁻⁹ — a 2 cm sphere's is
     10⁻¹² — in the soft bodies' coupling (PH6) and the framework's default corrections; the test is now against float's
     smallest normal value.
+
+### PH8 as built (2026-10-25)
+
+**The sample** (`examples/physics/physics_example.cpp`, target `gfx_physics_example`, linking `gfx::physics` and
+`gfx::camera` only): §C4's usage example on the API as built. A static floor; a crate whose hull is built at compile
+time (`convex_hull<16, 10, 48>()` of a box of 1 × 0.8 × 1 m with its vertical edges cut off, an octagonal prism —
+`static_assert`s check its 16 vertices and 10 faces) falls from 4 m; a 30 kg lid on a hinge along the crate's back edge
+(limits [−1.2, 0] radians, breaking above 800 N: more than the lid's weight, far less than stopping it at the landing); a
+24 × 24 cloth pinned at its two top corners (`cloth_preset`, `pin_to_world(description, particle)`); a trigger sphere of
+2 m. The world steps asynchronously on a `ThreadTaskScheduler`; during the first step a perspective camera (whose
+description is also a `constexpr` value: `look_at_orientation()`, `view_projection_matrix()` and `world_to_screen()` are
+checked by a `static_assert`) and an orthographic map camera are made. After the steps it prints and checks: the crate
+entered the zone once and stays (`TriggerEvent`s), rests upright on the floor; the hinge broke in the step the crate
+landed (`ContactEvent` BEGIN, `JointEvent` BROKEN, `JointState`); the cloth's pins hold and the cloth hangs below them;
+the ray through the screen's center hits the crate's surface (through `QueryEngine::ABSTRACTION`: its point on the plane
+of a face of the compile-time hull, its normal that face's) and the backend's own ray cast agrees; the hit point projects
+back to the center; the camera object's run-time matrices equal the compile-time ones; the frustums classify the crate,
+the zone, a box behind the view and one off the map; the map's ray through the crate's pixel falls straight down onto it.
+Options `--backend box3d|reference`, `--steps`, `--threads`; exit code 1 when a check fails. CTest
+`PhysicsExample.{BOX3D,REFERENCE}` (`--steps 240 --threads 4`, label `example`). `examples/` is now added whenever
+`GFX_BUILD_EXAMPLES` is on; each example checks the libraries it needs.
+
+**Found by the sample, fixed**: on the reference backend the hinge never broke. A joint's force was the **last sub-step's**:
+the landing is stopped within one sub-step (rigid contacts, non-linear Gauss–Seidel), so by the last one the hinge carried
+only the lid's weight. A joint's force and torque are now the **step's average** — the impulse it gave over the whole step
+per second, the mean of its sub-steps' forces — for `JointState` and for breaking (16 830 N at the landing; Box3D reports
+6 357 N for the same landing, its soft contacts spreading the stop over several steps). Test
+`ReferenceTest.JointsBreakUnderAShockWhateverTheSubSteps` (1, 4 and 8 sub-steps: the hinge breaks in the step the crate
+lands or the next, not before; a block hanging from a ball joint reports its weight on any number of sub-steps); with the
+old code it fails on 4 and 8 sub-steps.
+
+**Found by the full test run, fixed**: the first Debug run counted 1007 tests for 975 — the Box3D and reference tests were
+registered twice. GoogleTestAddTests.cmake deletes an executable's test list before appending the tests it finds; on
+Windows `file(REMOVE)` of a file another process holds open fails **silently** (checked: a held file survives it without
+an error), so a list being read during the build (VS Code's CMake Tools refreshes its tests after builds; a `ctest -N`)
+got a second copy. `gfx_add_test()` now empties the list (`file(WRITE)`, which works where deleting does not) in a
+POST_BUILD step just before the discovery (`cmake/scripts/GfxEmptyTestLists.cmake`); a relink with the list held open
+writes one copy. Detector `CMakeDefect.FileRemoveIgnoresHeldFiles` (`cmake/scripts/GfxCheckFileRemove.cmake`: a file held
+by `file(LOCK)` survives `file(REMOVE)`; Windows only).
+
+**Documentation**: README — the libraries' table and status, a "Physics" section (a usage example compiled with
+`-Werror` and run in a temporary target, the shapes, stepping, queries, events, joints, soft bodies, components, the
+capability table of Box3D against the reference backend, custom backends), the example in "Examples", the threading
+table, the options and the layout; `docs/architecture.md` §7 "Physics and camera libraries" with seven diagrams (targets
+and modules, worlds/objects/backends/components, a step, the reference backend's step, collision, soft bodies and their
+coupling, cameras) and a threads table, §1 and §8 updated (all 29 diagrams render in Mermaid 10.9.1 and 11.4.1);
+`.vscode/launch.json` "gfx: Physics example" (asks for the backend). THIRD_PARTY_LICENSES.md already listed cglm, SIMDe
+and Box3D (PH0, PH5). The comment of `QueryFailureKind::STEP_IN_PROGRESS` said queries wait for the step's end; they
+return at once (the comment, and the README, now say so).
+
+Deviations from the proposal, for validation:
+
+1. **The scene differs from §C4 where the API differs** (§B "PH1 as built" 1 and 4, "PH6 as built" 6): `near_plane`/
+   `far_plane`, `PerspectiveProjection{…}` instead of `perspective()`, `make_shape()` instead of `world->create_shape()`,
+   `material.friction` with two coefficients, `.breaking = {.force = 800}`, `pin_to_world(description, particle)`;
+   the crate is an octagonal prism rather than a wedge (a lid needs a flat top), and the cloth hangs behind it.
+2. **The reference backend's joint forces are the step's average** (above): a change of PH7's behavior, for breaking and for
+   `JointState::force`/`torque`.
 
 ---
 

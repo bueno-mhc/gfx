@@ -34,6 +34,14 @@ function(gfx_add_test name)
     target_link_libraries(${name} PRIVATE gfx::project_options GTest::gtest_main ${argument_LIBRARIES})
     # Runs before the discovery step below (POST_BUILD commands run in the order they are added).
     gfx_deploy_runtime_dependencies(${name})
+    # The discovery deletes the executable's test list before appending what it finds; on Windows the deletion fails
+    # silently while another process reads the list (VS Code's CMake Tools, a `ctest -N`), and every test was then
+    # registered twice. Emptying the list first works where deleting it does not. Detector:
+    # CMakeDefect.FileRemoveIgnoresHeldFiles.
+    add_custom_command(TARGET ${name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DDIRECTORY=${CMAKE_CURRENT_BINARY_DIR} -DNAME=${name}
+                -P ${PROJECT_SOURCE_DIR}/cmake/scripts/GfxEmptyTestLists.cmake
+        VERBATIM)
     # POST_BUILD discovery registers every test case as a direct call of the test executable.
     # (PRE_TEST discovery wraps each call in a `cmake -P` launcher script, which debuggers such as
     # CMake Tools' "Debug Test" would attach to instead of the test.)

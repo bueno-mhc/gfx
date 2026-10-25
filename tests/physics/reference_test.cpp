@@ -214,6 +214,55 @@ TEST(ReferenceTest, JointsHoldTheirLimitsRopesTheirLengthAndWeldsBreak)
     EXPECT_NEAR(length(wheel.body->state().pose.position - Vector3{.x = 10.0F, .y = 5.0F}), 0.0F, 0.01F);
 }
 
+TEST(ReferenceTest, JointsBreakUnderAShockWhateverTheSubSteps)
+{
+    // A crate falls with a lid on a hinge that holds the lid's weight (294 N) but not its stop when the crate lands,
+    // which happens within one sub-step. A joint's force is the step's average (the impulse it gave over the step, per
+    // second), so the shock counts on any number of sub-steps (the example found the hinge holding when only the last
+    // sub-step's force counted). A steady load gives the same force on any number of sub-steps: a block's weight.
+    for (const std::uint32_t sub_steps : {1U, 4U, 8U})
+    {
+        const std::unique_ptr<PhysicsWorld> world = reference_world({.solver = {.sub_steps = sub_steps}});
+        const Floor floor = make_floor(*world);
+        const Body crate = make_body(*world, {.pose = {.position = {.y = 4.0F}}}, {.shape = box({.x = 0.5F, .y = 0.4F, .z = 0.5F}), .density = 500.0F});
+        const Body lid = make_body(*world, {.pose = {.position = {.y = 4.45F}}}, {.shape = box({.x = 0.5F, .y = 0.05F, .z = 0.5F}), .density = 300.0F});
+        const std::unique_ptr<Joint> hinge = world->create_joint(hinge_joint({.first = crate.body->handle(),
+                                                                              .second = lid.body->handle(),
+                                                                              .anchor = {.y = 4.4F, .z = -0.5F},
+                                                                              .axis = {.x = 1.0F},
+                                                                              .limits = JointLimits{.lower = -1.2F, .upper = 0.0F},
+                                                                              .breaking = {.force = 800.0F}}));
+        const Body block = make_body(*world, {.pose = {.position = {.x = 5.0F, .y = 4.0F}}}, {.shape = box({.x = 0.1F, .y = 0.1F, .z = 0.1F})});
+        const std::unique_ptr<Joint> hook = world->create_joint(ball_and_socket_joint({.first = block.body->handle(), .anchor = {.x = 5.0F, .y = 5.0F}}));
+
+        int landed = 0;
+        int broke = 0;
+        for (int step = 1; step <= 120; ++step)
+        {
+            world->step(STEP);
+            for (const ContactEvent& event : world->events().contacts)
+            {
+                const bool crate_and_floor = (event.first == crate.collider->handle() && event.second == floor.collider->handle())
+                                          || (event.first == floor.collider->handle() && event.second == crate.collider->handle());
+                if (crate_and_floor && event.kind == ContactEventKind::BEGIN && landed == 0)
+                {
+                    landed = step;
+                }
+            }
+            if (std::ranges::any_of(world->events().joints, [&hinge](const JointEvent& event) { return event.joint == hinge->handle(); }))
+            {
+                broke = step;
+            }
+        }
+        ASSERT_GT(landed, 0) << sub_steps << " sub-steps";
+        EXPECT_GE(broke, landed) << sub_steps << " sub-steps: not before the landing";
+        EXPECT_LE(broke, landed + 1) << sub_steps << " sub-steps: at the landing";
+        EXPECT_TRUE(hinge->state().broken) << sub_steps << " sub-steps";
+        EXPECT_NEAR(length(hook->state().force), block.body->mass_properties().mass * STANDARD_GRAVITY, 0.01F * 8.0F * STANDARD_GRAVITY)
+            << sub_steps << " sub-steps: the block's weight";
+    }
+}
+
 TEST(ReferenceTest, ContactAndTriggerEventsAreReported)
 {
     const std::unique_ptr<PhysicsWorld> world = reference_world({.hit_event_speed = 1.0F});
