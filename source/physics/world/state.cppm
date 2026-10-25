@@ -13,6 +13,7 @@ import gfx.physics.enums;
 import gfx.physics.errors;
 import gfx.physics.handles;
 import gfx.physics.interface;
+import gfx.physics.dynamics;
 import :edits;
 import :snapshot;
 import :stepped_world;
@@ -175,6 +176,15 @@ struct SteppedWorld::Implementation
     std::unique_ptr<Solver> solver{};
     std::unique_ptr<Integrator> integrator{};
 
+    // ------------------------------------------------------------------------------------------------ soft bodies (the abstraction's XPBD)
+    XpbdSoftBodySolver soft_body_solver{};
+    std::unique_ptr<Integrator> soft_body_integrator{};
+    std::vector<std::unique_ptr<SoftBodyModel>> soft_body_models{}; ///< By soft body slot (made at the first step that steps them).
+    std::vector<Transform> body_start_poses{};                      ///< By body slot: where the backend's step started.
+    std::vector<CoupledBody> coupled_bodies{};                      ///< By body slot.
+    std::vector<CoupledCollider> coupled_colliders{};
+    std::vector<SimulatedSoftBody> simulated_soft_bodies{};
+
     // ------------------------------------------------------------------------------------------------ (stepped_world.cpp)
 
     /// The stepping thread of an asynchronous world: a step each time one is requested, until @p stop.
@@ -190,6 +200,16 @@ struct SteppedWorld::Implementation
 
     /// The mass properties of the bodies whose colliders or settings changed.
     void update_masses();
+
+    /// Whether the framework steps soft bodies and some are alive.
+    [[nodiscard]] auto steps_soft_bodies() const noexcept -> bool;
+
+    /// The soft bodies' step after the backend's (the abstraction's XPBD), and the impulses they gave bodies handed to
+    /// the backend.
+    void simulate_soft_bodies(float seconds);
+
+    /// Drops the model of the soft body in @p soft_body's slot (made anew when next needed).
+    void forget_soft_body_model(SoftBodyHandle soft_body) noexcept;
 
     /// The colliders', triggers' and soft bodies' world boxes from the pending poses and particles.
     void update_bounds();

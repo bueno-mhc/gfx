@@ -726,12 +726,14 @@ struct RecordApplier
         record.handle = change.soft_body;
         record.configuration = change.description;
         record.positions.clear();
+        record.velocities.clear();
         for (const SoftBodyParticle& particle : change.description.particles)
         {
             record.positions.push_back(particle.position);
+            record.velocities.push_back(particle.velocity);
         }
-        record.velocities.assign(record.positions.size(), Vector3{});
         record.configuration_changed = true;
+        implementation.forget_soft_body_model(change.soft_body);
     }
 
     void operator()(const edits::DestroySoftBody& change) const
@@ -740,6 +742,7 @@ struct RecordApplier
         {
             *record = {};
         }
+        implementation.forget_soft_body_model(change.soft_body);
         implementation.released_soft_bodies.push_back(change.soft_body);
     }
 
@@ -1350,6 +1353,40 @@ SteppedWorldBackend::replace_integrator(std::unique_ptr<Integrator> /*integrator
                       "use a backend that takes components (PhysicsBackendKind::REFERENCE)");
 }
 
+auto
+SteppedWorldBackend::simulates_soft_bodies() const noexcept -> bool
+{
+    return false;
+}
+
+void
+SteppedWorldBackend::apply_soft_body_corrections(std::span<const BodyCorrection> corrections,
+                                                 WorldSnapshot& pending)
+{
+    // Each dynamic body moved about its center of mass, then its velocities changed by the impulses (its frame's origin
+    // moves with the turn about the center); it wakes.
+    for (const BodyCorrection& correction : corrections)
+    {
+        RigidBodyRecord* record = find(pending, correction.body);
+        if (record == nullptr || record->configuration.kind != BodyKind::DYNAMIC || !(record->mass.mass > 0.0F))
+        {
+            continue;
+        }
+        Transform& pose = record->state.pose;
+        const Vector3 center = transform_point(pose, record->mass.center_of_mass) + correction.translation;
+        pose.orientation = normalized(correction.rotation * pose.orientation);
+        pose.position = center - rotate(pose.orientation, record->mass.center_of_mass);
+        const Matrix3 rotation = Matrix3::from_rotation(pose.orientation);
+        const Matrix3 inverse_inertia = std::abs(determinant(record->mass.inertia)) > 0.0F
+                                            ? rotation * inverse(record->mass.inertia) * transpose(rotation)
+                                            : Matrix3{.columns = {Vector3{}, Vector3{}, Vector3{}}};
+        const Vector3 turn = inverse_inertia * correction.angular_impulse;
+        record->state.linear_velocity += correction.linear_impulse / record->mass.mass + cross(turn, pose.position - center);
+        record->state.angular_velocity += turn;
+        record->state.awake = true;
+    }
+}
+
 // ===================================================================================================== SteppedWorld
 
 SteppedWorld::SteppedWorld(const PhysicsWorldDescription& description,
@@ -1371,6 +1408,7 @@ SteppedWorld::SteppedWorld(const PhysicsWorldDescription& description,
     implementation.narrow_phase = std::make_unique<BackendNarrowPhase>(this->backend(), kinds.narrow_phase);
     implementation.solver = std::make_unique<BackendSolver>(this->backend(), kinds.solver);
     implementation.integrator = std::make_unique<BackendIntegrator>(this->backend(), kinds.integrator);
+    implementation.soft_body_integrator = std::make_unique<XpbdIntegrator>();
     implementation.backend = std::move(backend);
     m_shared->backend = implementation.backend.get();
 
@@ -1623,6 +1661,37 @@ SteppedWorld::replace_integrator(std::unique_ptr<Integrator> integrator)
     m_implementation->backend->replace_integrator(std::move(integrator));
 }
 
+auto
+SteppedWorld::soft_body_integrator() -> Integrator&
+{
+    if (m_implementation->backend->simulates_soft_bodies())
+    {
+        physics::throw_unsupported(backend(), "PhysicsWorld::soft_body_integrator", PhysicsCapability::SOFT_BODIES, "the backend simulates its soft bodies itself",
+                                   "leave the backend's soft bodies to it", {.world = handle()});
+    }
+    return *m_implementation->soft_body_integrator;
+}
+
+void
+SteppedWorld::replace_soft_body_integrator(std::unique_ptr<Integrator> integrator)
+{
+    constexpr std::string_view OPERATION = "PhysicsWorld::replace_soft_body_integrator";
+    if (m_implementation->backend->simulates_soft_bodies())
+    {
+        physics::throw_unsupported(backend(), OPERATION, PhysicsCapability::SOFT_BODIES, "the backend simulates its soft bodies itself", "leave the backend's soft bodies to it",
+                                   {.world = handle()});
+    }
+    if (integrator == nullptr)
+    {
+        reject(backend(), OPERATION, "the integrator is null", "give an integrator (make_integrator())", {.world = handle()});
+    }
+    if (is_stepping())
+    {
+        reject(backend(), OPERATION, "a step is in progress", "replace it between steps (after wait_step())", {.world = handle()});
+    }
+    m_implementation->soft_body_integrator = std::move(integrator);
+}
+
 // ===================================================================================================== SteppedWorld::Implementation
 
 void
@@ -1674,11 +1743,23 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     apply_to_records(stepping_edits);
     update_masses();
     backend->apply(stepping_edits, pending);
+    const bool soft_bodies = steps_soft_bodies();
+    if (soft_bodies)
+    {
+        body_start_poses.resize(pending.rigid_bodies.size());
+        std::ranges::transform(pending.rigid_bodies, body_start_poses.begin(), [](const RigidBodyRecord& record) { return record.state.pose; });
+    }
     const Clock::time_point applied = Clock::now();
 
-    // The simulation, then the boxes the new poses make.
+    // The simulation, the soft bodies' (when the framework steps them), then the boxes the new poses make.
     backend->simulate(seconds, pending);
     const Clock::time_point simulated = Clock::now();
+    if (soft_bodies)
+    {
+        simulate_soft_bodies(seconds);
+        pending.statistics.phase_seconds[std::to_underlying(StepPhase::SOFT_BODIES)] = std::chrono::duration<double>(Clock::now() - simulated).count();
+    }
+    const Clock::time_point soft_bodies_simulated = Clock::now();
     update_bounds();
 
     // The statistics the framework knows.
@@ -1687,7 +1768,7 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     statistics.seconds = seconds;
     statistics.edits = static_cast<std::uint32_t>(stepping_edits.size());
     statistics.phase_seconds[std::to_underlying(StepPhase::EDITS)] = std::chrono::duration<double>(applied - start).count();
-    statistics.phase_seconds[std::to_underlying(StepPhase::EVENTS)] += std::chrono::duration<double>(Clock::now() - simulated).count();
+    statistics.phase_seconds[std::to_underlying(StepPhase::EVENTS)] += std::chrono::duration<double>(Clock::now() - soft_bodies_simulated).count();
     statistics.rigid_bodies = 0;
     statistics.awake_bodies = 0;
     for (const RigidBodyRecord& record : pending.rigid_bodies)
@@ -1760,6 +1841,80 @@ SteppedWorld::Implementation::update_masses()
         }
     }
     std::ranges::fill(mass_changed, std::uint8_t{0});
+}
+
+auto
+SteppedWorld::Implementation::steps_soft_bodies() const noexcept -> bool
+{
+    return !backend->simulates_soft_bodies() && std::ranges::any_of(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); });
+}
+
+void
+SteppedWorld::Implementation::simulate_soft_bodies(float seconds)
+{
+    // The bodies by slot, as the backend's step moved them.
+    coupled_bodies.resize(pending.rigid_bodies.size());
+    for (std::size_t slot = 0; slot < pending.rigid_bodies.size(); ++slot)
+    {
+        const RigidBodyRecord& record = pending.rigid_bodies[slot];
+        coupled_bodies[slot] = record.handle ? CoupledBody{.handle = record.handle,
+                                                           .kind = record.configuration.kind,
+                                                           .start_pose = slot < body_start_poses.size() ? body_start_poses[slot] : record.state.pose,
+                                                           .end_pose = record.state.pose,
+                                                           .mass = record.mass,
+                                                           .locks = record.configuration.locks}
+                                             : CoupledBody{};
+    }
+
+    // The colliders on them.
+    coupled_colliders.clear();
+    for (const ColliderRecord& record : pending.colliders)
+    {
+        if (record.handle)
+        {
+            coupled_colliders.push_back({.handle = record.handle,
+                                         .body = slot_of(record.body),
+                                         .shape = record.configuration.shape.get(),
+                                         .pose = record.configuration.pose,
+                                         .friction = record.configuration.material.friction,
+                                         .filter = record.configuration.filter});
+        }
+    }
+
+    // The soft bodies, their models made when first stepped; the step; what it did to the bodies, to the backend.
+    if (soft_body_models.size() < pending.soft_bodies.size())
+    {
+        soft_body_models.resize(pending.soft_bodies.size());
+    }
+    simulated_soft_bodies.clear();
+    for (std::size_t slot = 0; slot < pending.soft_bodies.size(); ++slot)
+    {
+        SoftBodyRecord& record = pending.soft_bodies[slot];
+        if (!record.handle)
+        {
+            continue;
+        }
+        if (soft_body_models[slot] == nullptr)
+        {
+            soft_body_models[slot] = std::make_unique<SoftBodyModel>(record.configuration);
+        }
+        simulated_soft_bodies.push_back({.model = soft_body_models[slot].get(), .settings = &record.configuration, .positions = record.positions, .velocities = record.velocities});
+    }
+    soft_body_solver.step(seconds, pending.configuration.gravity, simulated_soft_bodies, coupled_bodies, coupled_colliders, *soft_body_integrator, scheduler);
+    if (!soft_body_solver.corrections().empty())
+    {
+        backend->apply_soft_body_corrections(soft_body_solver.corrections(), pending);
+    }
+}
+
+void
+SteppedWorld::Implementation::forget_soft_body_model(SoftBodyHandle soft_body) noexcept
+{
+    const std::uint32_t slot = slot_of(soft_body);
+    if (slot < soft_body_models.size())
+    {
+        soft_body_models[slot].reset();
+    }
 }
 
 void

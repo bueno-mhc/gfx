@@ -34,10 +34,21 @@ gfx_add_test(gfx_physics_tests
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 
-# The Box3D backend: simulations with known outcomes, events, determinism, capability errors, queries.
+# Dynamics: the integrators against analytic motion; soft bodies on their own (presets, models, XPBD steps).
+gfx_add_test(gfx_physics_dynamics_tests
+    SOURCES
+        integrator_test.cpp
+        soft_body_test.cpp
+    MODULES physics_test_support.cppm
+    LIBRARIES gfx::physics)
+
+# The Box3D backend: simulations with known outcomes, events, determinism, capability errors, queries; the abstraction's
+# soft bodies coupled with Box3D bodies.
 if(GFX_PHYSICS_BACKEND_BOX3D)
     gfx_add_test(gfx_physics_box3d_tests
-        SOURCES box3d_test.cpp
+        SOURCES
+            box3d_test.cpp
+            box3d_soft_body_test.cpp
         LIBRARIES gfx::physics)
 endif()
 

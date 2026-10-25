@@ -318,7 +318,6 @@ TEST(Box3dTest, WhatBox3dCannotDoIsRefusedWhenRecorded)
     expect_refused([&] { (void)ground->add_collider({.shape = field, .pose = {.position = {.y = 1}}}); }, "POSED_HEIGHT_FIELDS");
     const std::unique_ptr<Collider> terrain = ground->add_collider({.shape = mesh});
     expect_refused([&] { ground->set_kind(BodyKind::DYNAMIC); }, "DYNAMIC_TRIANGLE_MESHES");
-    expect_refused([&] { (void)world->create_soft_body({.particles = {{}}}); }, "SOFT_BODIES");
 }
 
 TEST(Box3dTest, CompoundsMeshesAndHeightFieldsCollide)

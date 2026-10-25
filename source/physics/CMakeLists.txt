@@ -5,7 +5,8 @@
 #   gfx::camera          cameras and camera controllers (`import gfx.camera;`), on gfx::physics_common only
 #   gfx::physics_components  collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`),
 #                        spatial structures and the broad phase (`gfx.physics.spatial`), task schedulers (`gfx.physics.tasks`),
-#                        the world interface (`gfx.physics.interface`) and the framework of backends (`gfx.physics.world`)
+#                        the world interface (`gfx.physics.interface`), integrators and XPBD soft bodies (`gfx.physics.dynamics`)
+#                        and the framework of backends (`gfx.physics.world`)
 #   gfx::physics         the above, the factory and its backends (`import gfx.physics;`)
 # ==============================================================================
 include(GfxDependencies)
@@ -84,8 +85,8 @@ gfx_require_decoupled(gfx_camera FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES}
 
 # ------------------------------------------------------------------------------ physics
 # gfx::physics_components holds everything a backend is composed of: shapes, the narrow phase, task schedulers, spatial
-# structures and the broad phase, the interface (gfx.physics.interface) and the framework backends are built on
-# (gfx.physics.world). gfx::physics adds the factory and the umbrella module, with the backends in a private file set.
+# structures and the broad phase, the interface (gfx.physics.interface), the dynamics components (gfx.physics.dynamics)
+# and the framework backends are built on (gfx.physics.world). gfx::physics adds the factory and the umbrella module, with the backends in a private file set.
 # A custom backend links gfx::physics_components (no cycle) and is named by GFX_PHYSICS_CUSTOM_BACKEND_TARGET.
 set(GFX_PHYSICS_CUSTOM_BACKEND_TARGET "" CACHE STRING
     "A target whose public module gfx.physics.backends.custom is the factory's PhysicsBackendKind::CUSTOM (empty: none)")
@@ -130,6 +131,11 @@ target_sources(gfx_physics_components
             interface/objects.cppm
             interface/pipeline.cppm
             interface/world.cppm
+            dynamics/dynamics.cppm
+            dynamics/integrators.cppm
+            dynamics/presets.cppm
+            dynamics/soft_body_solver.cppm
+            dynamics/xpbd_math.cppm
             world/world.cppm
             world/edits.cppm
             world/snapshot.cppm
@@ -149,6 +155,10 @@ target_sources(gfx_physics_components
         shapes/shape.cpp
         shapes/shape_kernels.cpp   # plain translation unit: SIMDe's headers cannot share one with import std
         interface/interface.cpp
+        dynamics/integrators.cpp
+        dynamics/presets.cpp
+        dynamics/soft_body_model.cpp
+        dynamics/soft_body_solver.cpp
         world/stepped_world.cpp
         world/snapshot.cpp
         world/validation.cpp

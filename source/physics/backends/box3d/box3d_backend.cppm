@@ -195,6 +195,9 @@ public:
     void simulate(float seconds,
                   WorldSnapshot& pending) override;
 
+    void apply_soft_body_corrections(std::span<const BodyCorrection> corrections,
+                                     WorldSnapshot& pending) override;
+
     [[nodiscard]] auto ray_cast(const Ray& ray,
                                 float maximum,
                                 const QueryOptions& options) const noexcept -> std::optional<QueryResult<RayHit>> override;

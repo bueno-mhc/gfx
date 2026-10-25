@@ -386,22 +386,41 @@ check_description(const SoftBodyDescription& description,
     for (const SoftBodyParticle& particle : description.particles)
     {
         check_vector(particle.position, "a particle's position", backend, operation, context);
+        check_vector(particle.velocity, "a particle's velocity", backend, operation, context);
         check_non_negative(particle.inverse_mass, "a particle's inverse mass", backend, operation, context);
     }
     for (std::size_t index = 0; index < description.constraints.size(); ++index)
     {
         const SoftBodyConstraint& constraint = description.constraints[index];
-        const std::size_t used = constraint.kind == SoftBodyConstraintKind::VOLUME ? 4 : 2;
-        for (std::size_t corner = 0; corner < used; ++corner)
+        const std::uint32_t used = soft_body_constraint_particles(constraint.kind);
+        for (std::uint32_t corner = 0; corner < used; ++corner)
         {
             if (constraint.particles[corner] >= count)
             {
                 reject(backend, operation, std::format("constraint {} ({}) names particle {} of {}", index, constraint.kind, constraint.particles[corner], count),
                        "name particles of the soft body", context);
             }
+            for (std::uint32_t other = 0; other < corner; ++other)
+            {
+                if (constraint.particles[other] == constraint.particles[corner])
+                {
+                    reject(backend, operation, std::format("constraint {} ({}) names particle {} twice", index, constraint.kind, constraint.particles[corner]),
+                           "name different particles", context);
+                }
+            }
         }
         check_non_negative(constraint.compliance, "a constraint's compliance", backend, operation, context);
-        check_finite(constraint.rest_value, "a constraint's rest value", backend, operation, context);
+        if (constraint.rest_value)
+        {
+            if (constraint.kind == SoftBodyConstraintKind::DIHEDRAL)
+            {
+                check_finite(*constraint.rest_value, "a constraint's rest angle", backend, operation, context);
+            }
+            else
+            {
+                check_non_negative(*constraint.rest_value, "a constraint's rest value", backend, operation, context);
+            }
+        }
     }
     for (const ParticlePin& pin : description.pins)
     {

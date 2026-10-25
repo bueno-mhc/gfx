@@ -674,7 +674,7 @@ public:
         }
         else
         {
-            std::ranges::fill(output.first(particle_count()), Vector3{});
+            std::ranges::transform(m_initial.particles, output.begin(), &SoftBodyParticle::velocity);
         }
         return output.first(particle_count());
     }

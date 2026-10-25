@@ -641,4 +641,16 @@ PhysicsWorld::replace_integrator(std::unique_ptr<Integrator> /*integrator*/)
     throw_not_implemented("PhysicsWorld::replace_integrator", PhysicsCapability::CUSTOM_INTEGRATOR);
 }
 
+auto
+PhysicsWorld::soft_body_integrator() -> Integrator&
+{
+    throw_not_implemented("PhysicsWorld::soft_body_integrator", PhysicsCapability::SOFT_BODIES);
+}
+
+void
+PhysicsWorld::replace_soft_body_integrator(std::unique_ptr<Integrator> /*integrator*/)
+{
+    throw_not_implemented("PhysicsWorld::replace_soft_body_integrator", PhysicsCapability::SOFT_BODIES);
+}
+
 } // namespace gfx::physics

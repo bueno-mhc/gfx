@@ -152,7 +152,8 @@
                 { "label": "camera     - CameraProjectionTest.*, CameraTest.*, CameraControllerTest.*", "value": "physics/gfx_camera_tests.exe" },
                 { "label": "physics shapes - ShapeTest.*, GjkEpaTest.*, ContactTest.*, CollideTest.*, ManifoldCacheTest.*, ShapeQueryTest.*, SpatialStructureTest*, BroadPhaseTest.*, TaskSchedulerTest.*", "value": "physics/gfx_physics_tests.exe" },
                 { "label": "physics world - PhysicsInterfaceTest.*, PhysicsFactoryTest.*, NullBackendTest.*, SteppedWorldTest.*", "value": "physics/gfx_physics_world_tests.exe" },
-                { "label": "physics Box3D - Box3dTest.*", "value": "physics/gfx_physics_box3d_tests.exe" },
+                { "label": "physics dynamics - IntegratorTest.*, SoftBodyPresetTest.*, SoftBodyModelTest.*, XpbdSolverTest.*", "value": "physics/gfx_physics_dynamics_tests.exe" },
+                { "label": "physics Box3D - Box3dTest.*, Box3dSoftBodyTest.*", "value": "physics/gfx_physics_box3d_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
             "default": "graphics/handles/gfx_handles_tests.exe"

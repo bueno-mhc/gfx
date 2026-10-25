@@ -9,7 +9,9 @@
 /// refuses queries during steps (the reader handshake) and answers queries itself (QueryEngine::ABSTRACTION: a BVH over
 /// the colliders' boxes, then the narrow phase's queries) — the backend's own queries answer QueryEngine::BACKEND when it
 /// has them. A backend applies the edits to its own world, advances it and writes the results into the pending
-/// snapshot.
+/// snapshot. Soft bodies are the abstraction's (XPBD, gfx.physics.dynamics) unless the backend simulates them itself:
+/// after the backend's step, the framework steps them against the colliders as the step moved them and hands what they
+/// did to dynamic bodies (impulses, displacements) to the backend.
 export module gfx.physics.world:stepped_world;
 
 import std;
@@ -18,6 +20,7 @@ import gfx.core.math;
 import gfx.physics.enums;
 import gfx.physics.handles;
 import gfx.physics.interface;
+import gfx.physics.dynamics;
 import :edits;
 import :snapshot;
 
@@ -91,9 +94,21 @@ public:
                        WorldSnapshot& pending) = 0;
 
     /// @brief Advances its world by @p seconds and writes the results into @p pending: body states, joint states,
-    ///        soft-body particles, events, contacts, and the statistics it knows (phase times, pairs, contact points).
+    ///        soft-body particles (when it simulates them), events, contacts, and the statistics it knows (phase times,
+    ///        pairs, contact points).
     virtual void simulate(float seconds,
                           WorldSnapshot& pending) = 0;
+
+    /// @brief Whether it simulates soft bodies itself (in simulate()); false by default: the framework steps them with
+    ///        the abstraction's XPBD after simulate().
+    [[nodiscard]] virtual auto simulates_soft_bodies() const noexcept -> bool;
+
+    /// @brief Applies what the abstraction's soft bodies did to its dynamic bodies in the step just simulated (called
+    ///        right after it, when there were soft bodies): each body moved by the correction's translation and rotation
+    ///        about its center of mass, then given its impulses; their new poses and velocities into @p pending. By
+    ///        default the records change (backends whose bodies are the records).
+    virtual void apply_soft_body_corrections(std::span<const BodyCorrection> corrections,
+                                             WorldSnapshot& pending);
 
     /// @brief Its own ray cast (QueryEngine::BACKEND); nothing: the abstraction answers.
     [[nodiscard]] virtual auto ray_cast(const Ray& ray,
@@ -227,6 +242,8 @@ public:
     void replace_narrow_phase(std::unique_ptr<NarrowPhase> narrow_phase) override;
     void replace_solver(std::unique_ptr<Solver> solver) override;
     void replace_integrator(std::unique_ptr<Integrator> integrator) override;
+    [[nodiscard]] auto soft_body_integrator() -> Integrator& override;
+    void replace_soft_body_integrator(std::unique_ptr<Integrator> integrator) override;
 
     /// @brief What only the stepping side touches (defined in the module's internal partition: opaque elsewhere).
     struct Implementation;

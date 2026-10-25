@@ -194,6 +194,16 @@ public:
         refuse("PhysicsWorld::replace_integrator");
     }
 
+    [[nodiscard]] auto soft_body_integrator() -> Integrator& override
+    {
+        refuse("PhysicsWorld::soft_body_integrator");
+    }
+
+    void replace_soft_body_integrator(std::unique_ptr<Integrator> /*integrator*/) override
+    {
+        refuse("PhysicsWorld::replace_soft_body_integrator");
+    }
+
 private:
     [[noreturn]] void refuse(std::string_view operation) const
     {

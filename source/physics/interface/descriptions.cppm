@@ -349,16 +349,26 @@ struct SoftBodyParticle
 {
     Vector3 position{};        ///< Where it starts.
     float inverse_mass = 1.0F; ///< 1 / its mass (0: it does not move).
+    Vector3 velocity{};        ///< How it moves at the start.
 };
 
 /// @brief A constraint between particles (XPBD: its compliance is the inverse of its stiffness; 0: rigid).
 struct SoftBodyConstraint
 {
     SoftBodyConstraintKind kind = SoftBodyConstraintKind::STRETCH; ///< What it keeps.
-    std::array<std::uint32_t, 4> particles{};                      ///< Two for distances, four for bending and volumes.
+    std::array<std::uint32_t, 4> particles{};                      ///< Two (distinct), or four for VOLUME and DIHEDRAL (soft_body_constraint_particles()).
     float compliance = 0.0F;                                       ///< At least 0.
-    float rest_value = -1.0F;                                      ///< Its rest length or volume; negative: from the starting positions.
+    std::optional<float> rest_value{};                             ///< Its rest length, volume or angle (radians); empty: from the starting positions.
 };
+
+/// @brief How many particles a constraint of @p kind names: four for VOLUME (a tetrahedron) and DIHEDRAL (the shared
+///        edge's two, then the two other corners of its triangles), two otherwise (TETHER: the particle held, then its
+///        anchor).
+[[nodiscard]] constexpr auto
+soft_body_constraint_particles(SoftBodyConstraintKind kind) noexcept -> std::uint32_t
+{
+    return kind == SoftBodyConstraintKind::VOLUME || kind == SoftBodyConstraintKind::DIHEDRAL ? 4U : 2U;
+}
 
 /// @brief A particle held to a point of the world or of a rigid body.
 struct ParticlePin

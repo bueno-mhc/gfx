@@ -624,6 +624,16 @@ public:
         PhysicsWorld::replace_integrator(std::move(integrator));
     }
 
+    [[nodiscard]] auto soft_body_integrator() -> Integrator& override
+    {
+        return PhysicsWorld::soft_body_integrator();
+    }
+
+    void replace_soft_body_integrator(std::unique_ptr<Integrator> integrator) override
+    {
+        PhysicsWorld::replace_soft_body_integrator(std::move(integrator));
+    }
+
     [[nodiscard]] auto ray_cast(const Ray& ray,
                                 float maximum,
                                 const QueryOptions& options) const noexcept -> QueryResult<RayHit> override
@@ -804,6 +814,8 @@ TEST(PhysicsInterfaceTest, EveryOperationABackendDoesNotImplementThrowsADescript
     expect_not_implemented([&] { bare_physics_world.replace_narrow_phase(std::unique_ptr<NarrowPhase>{}); }, "PhysicsWorld::replace_narrow_phase", "CUSTOM_NARROW_PHASE");
     expect_not_implemented([&] { bare_physics_world.replace_solver(std::unique_ptr<Solver>{}); }, "PhysicsWorld::replace_solver", "CUSTOM_SOLVER");
     expect_not_implemented([&] { bare_physics_world.replace_integrator(std::unique_ptr<Integrator>{}); }, "PhysicsWorld::replace_integrator", "CUSTOM_INTEGRATOR");
+    expect_not_implemented([&] { (void)bare_physics_world.soft_body_integrator(); }, "PhysicsWorld::soft_body_integrator", "SOFT_BODIES");
+    expect_not_implemented([&] { bare_physics_world.replace_soft_body_integrator(std::unique_ptr<Integrator>{}); }, "PhysicsWorld::replace_soft_body_integrator", "SOFT_BODIES");
     expect_unsupported_query(bare_physics_world.ray_cast(Ray{}, float{}, QueryOptions{}), "PhysicsWorld::ray_cast");
     expect_unsupported_query(bare_physics_world.ray_cast_all(Ray{}, float{}, std::span<RayHit>{}, QueryOptions{}), "PhysicsWorld::ray_cast_all");
     expect_unsupported_query(bare_physics_world.shape_cast(Shape{SphereShape{}}, Transform{}, Vector3{}, QueryOptions{}), "PhysicsWorld::shape_cast");

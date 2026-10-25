@@ -2,7 +2,7 @@
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
 (636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 committed** (db6ecce); **PH5
-implemented** (§B "PH5 as built"), awaiting validation. This
+committed** (d2b2c8e); **PH6 implemented** (§B "PH6 as built"), awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -907,6 +907,90 @@ Deviations from the proposal, for validation:
 8. **Solver and sleep settings Box3D has no counterpart for are hints it ignores**: velocity and position iterations, the
    static friction speed, the angular sleep threshold and sleep time, the collision settings (Box3D's own constants).
 9. **The task scheduler gained `start()` / `finish()`**, and its PH3 race was fixed.
+
+### PH6 as built (2026-10-25)
+
+**`gfx.physics.dynamics`** (`source/physics/dynamics/`, in `gfx::physics_components`; re-exported by `gfx.physics.world`,
+hence by `gfx.physics`):
+
+| Partition | Content |
+|---|---|
+| `:integrators` | `SemiImplicitEulerIntegrator`, `VerletIntegrator` (position Verlet: previous positions required, velocities the last displacement over h), `RungeKutta4Integrator` (the force field evaluated four times per step), `XpbdIntegrator` (prediction, then velocities from the positions); `make_integrator(kind)`. Only states with a non-zero inverse mass move; a = gravity + inverse mass × (forces + the field's); `predict()` leaves the step's start positions in `previous_positions` when given; positions advance in one SIMD batch (`multiply_add`) when every state moves; scratch storage reused (no allocation after the first step) |
+| `:presets` | `cloth_preset()` (a grid: STRETCH along its edges, SHEAR along the cells' diagonals, BENDING distances two particles apart — or DIHEDRAL angles between the cells' triangles), `cloth_particle()`; `rope_preset()` (STRETCH, BENDING every other particle); `tetrahedral_box()` (six positive tetrahedra per cell around its diagonal: neighbors share faces), `volume_preset()` (each tetrahedron's mass to its corners, STRETCH per edge once, VOLUME per tetrahedron); `pin_to_world(description, particle)` (where it starts), `pin_to_world(particle, point)`, `pin_to_body()`; `add_long_range_attachments()` (a TETHER from every free particle to every particle pinned to the world) |
+| `:soft_body_solver` | `SoftBodyModel` (inverse masses, rest positions, constraints with their rest values, greedily colored 64 colors at a time, tethers apart), `CoupledBody`, `CoupledCollider`, `SimulatedSoftBody`, `BodyCorrection`, `XpbdSoftBodySolver` |
+| `:xpbd_math` (internal) | six times a tetrahedron's volume; the dihedral angle at an edge and its gradients (Bridson et al. 2003); angles wrapped into (−π, π] |
+
+**The XPBD step** of a soft body, over its sub-steps, one iteration per sub-step (Macklin et al. 2019, "small steps"):
+prediction by the world's soft-body integrator (previous positions given as x − v h, for Verlet); rigid pins hold their
+particles (a pin of compliance 0 to the world, or to a body corrections do not move, makes the particle kinematic); the
+model's colors in order, a color of at least 512 constraints split over the task scheduler (ranges of 128; no two
+constraints of a color move one particle, so any thread count gives the same bits); tethers (they move their first
+particle only); the other pins; contacts with the colliders — spheres, capsules and boxes (rounded too) analytically,
+cylinders, cones and hulls through `closest_point_on_shape()`, meshes and height fields through their nearest triangle
+(behind a one-sided one is inside), compounds' leaves each — with Coulomb friction (static while the sliding stays under
+the static coefficient times the normal correction, Müller et al. 2020; coefficients the geometric mean of the soft body's
+and the collider's); an overlap the sub-step started with is undone without becoming velocity (pre-stabilization, Macklin
+et al. 2014: a particle starting inside a shape is moved out, not launched); self-collision (a hashed grid over the
+particles at the step's start, pairs within two radii plus twice the step's reach, not pairs that start within two
+radii); velocities from the positions' change, damped by (1 − damping)^h.
+
+**Coupling with rigid bodies, both ways**: soft bodies step after the backend's step. Each body moves, as a soft body sees
+it, from its pose before the rigid step to its pose after (interpolated per sub-step); a dynamic body with mass is a
+proxy that takes part of every correction made at one of its points — pins to it, contacts with its colliders, their
+friction — by its inverse mass there (mass, inertia, motion locks), which moves it within the step and accumulates its
+impulse. At the end the solver hands each body a `BodyCorrection` (impulses through and about its center of mass, and
+the translation and rotation the corrections gave it); the backend moves the body and applies the impulses. Momentum is
+exchanged exactly (a soft cube thrown at a floating box: the test's total stays within 0.1 %, Box3D's within 2 %).
+
+**The framework** steps soft bodies after `simulate()` when `SteppedWorldBackend::simulates_soft_bodies()` is false (the
+default): models are made at the first step that needs them (and dropped when the soft body is destroyed or its slot
+reused), the bodies' poses are kept before the backend's step, `StepPhase::SOFT_BODIES` is timed, and the corrections go
+to `SteppedWorldBackend::apply_soft_body_corrections()` (by default on the records). `PhysicsWorld::soft_body_integrator()`
+/ `replace_soft_body_integrator()` (an `XpbdIntegrator` by default; replaced between steps). **Box3D** accepts soft bodies:
+corrections through `b3Body_SetTransform` and impulses to the center of mass; a sleeping body is woken only by a
+correction whose impulse would move it faster than its sleep speed (a cloth resting on a sleeping box lets it sleep).
+
+Interface changes: `SoftBodyConstraintKind` gains `DIHEDRAL` and `TETHER` (`BENDING` is now a distance only);
+`SoftBodyConstraint::rest_value` is a `std::optional<float>` (a dihedral rest angle may be negative, so "negative means
+from the start" could not stay); `soft_body_constraint_particles(kind)`; `SoftBodyParticle::velocity`; constraints naming
+a particle twice are refused when recorded.
+
+Tests (+ 22): `gfx_physics_dynamics_tests` (17: a spring's energy within each scheme's bound and without drift, Runge–Kutta
+4 on the exact trajectory; a circular orbit's radius, energy and angular momentum; immovable states and invalid states;
+Runge–Kutta's four evaluations and exactness under constant forces; the presets' particles, constraints and masses;
+colors that never share a particle; a rope's length held with and without tethers; a cloth hanging from two pins settles,
+with distance and dihedral bending; a bent hinge returns to its rest angle (0 and 1 radian); a tetrahedral volume rests on
+a floor with its volume; a particle rests on every kind of shape, comes out of a one-sided mesh it starts behind and stays
+behind a two-sided one; friction holds on a 30° slope at 0.8 and lets slide at 0.2 with the analytic distance; self-
+collision; momentum exchanged with a dynamic body; every integrator predicts; the same bits on one and four threads;
+invalid steps), `Box3dSoftBodyTest.*` (4: a cloth falls onto Box3D colliders and rests; a rope holds a 4 kg Box3D box up
+— it falls when unpinned; a soft cube pushes a Box3D body with the momentum it loses; the same bits on one and four
+threads), `SteppedWorldTest.TheFrameworkStepsSoftBodiesForBackendsWithoutTheirOwn`.
+
+Deviations from the proposal, for validation:
+
+1. **Soft bodies step after the backend's step** (partitioned coupling, the bodies' motion interpolated), not inside one
+   solver with the rigid bodies, and the backend receives **`BodyCorrection`s — impulses and displacements**: handing over
+   impulses only (the first version) lost each step the motion the rope had given a body, and a 4 kg box hanging from a
+   0.2 kg rope gained energy until it rose at 3.9 m/s.
+2. **New interface**: `PhysicsWorld::soft_body_integrator()` / `replace_soft_body_integrator()`;
+   `SteppedWorldBackend::simulates_soft_bodies()` / `apply_soft_body_corrections()`; `SoftBodyParticle::velocity`; an
+   optional rest value; constraint kinds `DIHEDRAL` and `TETHER`.
+3. **Long-range attachments are `TETHER` constraints** added by `add_long_range_attachments()` after the pins (anchors: the
+   particles pinned to the world), not a setting of the soft body.
+4. **Soft bodies do not collide with each other** (only with colliders and, when enabled, with themselves); self-collision
+   has no friction.
+5. **Soft bodies step one after the other**; the threads split a soft body's large colors (an integrator keeps scratch
+   storage: one state at a time).
+6. **`pin_to_world(description, particle)`** pins a particle where it starts (§C4's `pin_to_world(0)` cannot know where that
+   is); `pin_to_world(particle, point)` takes a point.
+7. **Integrators' contract made explicit**: `predict()` leaves the start positions in `previous_positions`; soft bodies
+   make their velocities from their positions themselves, so any integrator (custom ones too) predicts them.
+8. **Contact pre-stabilization**: an overlap a sub-step starts with is undone without velocity.
+9. **Box3D's sleeping bodies** wake only for a correction whose impulse exceeds their sleep speed.
+
+Known limits: a body much heavier than the particles it hangs from stretches them (XPBD's mass ratios: more sub-steps or
+long-range attachments help); a tether moves only its first particle.
 ---
 
 ## C. The API as proposed (for validation, not final code)

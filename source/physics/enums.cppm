@@ -327,10 +327,12 @@ enum class StepPhase : std::uint8_t
 /// @brief A constraint between soft-body particles.
 enum class SoftBodyConstraintKind : std::uint8_t
 {
-    STRETCH, ///< Keeps two particles at their rest distance (cloth's structural edges, a rope's segments).
-    SHEAR,   ///< A distance across a cloth's cells.
-    BENDING, ///< A distance (or dihedral angle) across neighboring triangles or segments.
-    VOLUME,  ///< Keeps a tetrahedron's volume.
+    STRETCH,  ///< Keeps two particles at their rest distance (cloth's structural edges, a rope's segments).
+    SHEAR,    ///< A distance across a cloth's cells.
+    BENDING,  ///< A distance across neighboring segments or cells (a rope's every other particle, a cloth's).
+    VOLUME,   ///< Keeps a tetrahedron's volume (four particles).
+    DIHEDRAL, ///< Keeps the angle between two triangles sharing an edge (four particles: the edge's, then the two others).
+    TETHER,   ///< Keeps a particle within its rest distance of another (a long-range attachment to a pinned particle).
 };
 
 /// @brief A plane of two coordinate axes (a quadtree's).
@@ -926,6 +928,8 @@ struct EnumerationTraits<physics::SoftBodyConstraintKind>
         EnumeratorName{physics::SoftBodyConstraintKind::SHEAR, "SHEAR"},
         EnumeratorName{physics::SoftBodyConstraintKind::BENDING, "BENDING"},
         EnumeratorName{physics::SoftBodyConstraintKind::VOLUME, "VOLUME"},
+        EnumeratorName{physics::SoftBodyConstraintKind::DIHEDRAL, "DIHEDRAL"},
+        EnumeratorName{physics::SoftBodyConstraintKind::TETHER, "TETHER"},
     };
 };
 

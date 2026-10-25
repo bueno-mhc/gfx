@@ -1216,7 +1216,7 @@ its version, its license and what of it ends up in a program.
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
 | `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
-| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, `gfx::physics_components` with collision shapes, the narrow phase, spatial structures, the broad phase, the world interface and the framework backends are built on, and `gfx::physics` with the factory and its backends: Box3D and the null one), which depend on the core library only (and Box3D, for its backend) — the build checks it |
+| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, `gfx::physics_components` with collision shapes, the narrow phase, spatial structures, the broad phase, the world interface, integrators and XPBD soft bodies coupled both ways with any backend's rigid bodies, and the framework backends are built on, and `gfx::physics` with the factory and its backends: Box3D and the null one), which depend on the core library only (and Box3D, for its backend) — the build checks it |
 | `GFX_PHYSICS_BACKEND_BOX3D` | `ON` | The Box3D physics backend (Box3D fetched, pinned by SHA-256 and linked statically) |
 | `GFX_PHYSICS_CUSTOM_BACKEND_TARGET` | (empty) | A target whose module `gfx.physics.backends.custom` becomes the factory's `PhysicsBackendKind::CUSTOM` (it links `gfx::physics_components` and exports `gfx::physics::custom_backend::unavailable_reason()` and `create_physics_world(description)`) |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
@@ -1324,8 +1324,10 @@ gfx/
 │                         separating axes, contact manifolds, the manifold cache); spatial/ (gfx.physics.spatial:
 │                         BVH, loose octree and quadtree, BSP, uniform grid, sweep and prune, the broad phase);
 │                         tasks/ (gfx.physics.tasks: task schedulers); interface/ (gfx.physics.interface: worlds,
-│                         bodies, colliders, joints, triggers, soft bodies, queries, events, pipeline); world/
-│                         (gfx.physics.world: SteppedWorld, deferred edits, snapshots, stepping, queries);
+│                         bodies, colliders, joints, triggers, soft bodies, queries, events, pipeline); dynamics/
+│                         (gfx.physics.dynamics: integrators, cloth/rope/volume presets, the XPBD soft-body
+│                         solver); world/ (gfx.physics.world: SteppedWorld, deferred edits, snapshots, stepping,
+│                         queries, the soft bodies' step);
 │                         backends/box3d/ (the Box3D backend), backends/null/; physics.cppm (gfx.physics),
 │                         physics_factory (create_physics_world())
 └── tests/
@@ -1333,7 +1335,8 @@ gfx/
     ├── core/             gfx.core (imports gfx.core only), its math and the slot table
     ├── physics/          the physics library (primitives at compile time and against references, SIMD batches
     │                     against the scalar code, shapes and queries against exact answers, spatial structures
-    │                     against brute force, worlds on a recording backend) and the decoupling checks
+    │                     against brute force, integrators against analytic orbits, soft bodies with known
+    │                     outcomes, worlds on a recording backend, Box3D) and the decoupling checks
     ├── graphics/<area>/  GoogleTest unit tests of the graphics library, one subfolder per area;
     │                     graphics/vulkan: the Vulkan backend on the machine's real GPUs
     ├── platform/         the platform library, through a test-only fake platform; platform/backends:

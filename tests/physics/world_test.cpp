@@ -127,6 +127,8 @@ TEST(NullBackendTest, EveryOperationThrowsAndEveryQueryIsUnsupported)
     expect_capability_error([&] { world->replace_narrow_phase(nullptr); }, CAPABILITY);
     expect_capability_error([&] { world->replace_solver(nullptr); }, CAPABILITY);
     expect_capability_error([&] { world->replace_integrator(nullptr); }, CAPABILITY);
+    expect_capability_error([&] { (void)world->soft_body_integrator(); }, CAPABILITY);
+    expect_capability_error([&] { world->replace_soft_body_integrator(nullptr); }, CAPABILITY);
 
     // Queries never throw: they fail as UNSUPPORTED, which raise() turns into the capability error.
     const Shape ball{SphereShape{}};
@@ -539,6 +541,51 @@ TEST(SteppedWorldTest, JointsTriggersAndSoftBodiesKeepTheirDescriptionsAndStates
     std::array<Vector3, 2> short_output{};
     expect_physics_error([&] { (void)rope->positions(short_output); }, "holds 2 values for 3 particles");
     expect_physics_error([&] { rope->move_particle(3, {}); }, "particle 3 of 3");
+}
+
+TEST(SteppedWorldTest, TheFrameworkStepsSoftBodiesForBackendsWithoutTheirOwn)
+{
+    // A backend that keeps its soft bodies has no soft-body integrator to give.
+    {
+        auto [world, backend] = make_recording_world();
+        expect_capability_error([&] { (void)world->soft_body_integrator(); }, "SOFT_BODIES");
+        expect_capability_error([&] { world->replace_soft_body_integrator(make_integrator(IntegratorKind::VERLET)); }, "SOFT_BODIES");
+    }
+
+    // One that lets the framework step them: a rope from a pin to a dynamic body holds the body up (the impulses reach
+    // the backend's records), whatever integrator predicts the rope.
+    auto [world, backend] = make_recording_world({}, true);
+    EXPECT_EQ(world->soft_body_integrator().kind(), IntegratorKind::XPBD);
+    const std::unique_ptr<RigidBody> weight = world->create_rigid_body({.pose = {.position = {.x = 1, .y = 2}}});
+    const std::unique_ptr<Collider> weight_collider = weight->add_collider({.shape = sphere(0.05F), .filter = {.group = -1}});
+    SoftBodyDescription description = rope_preset({.segments = 10, .length = 1.0F, .origin = {.y = 2}, .direction = {.x = 1}, .mass = 0.2F});
+    description.pins = {pin_to_world(description, 0), pin_to_body(10, weight->handle(), {})};
+    description.filter = {.group = -1};
+    description.damping = 0.5F;
+    add_long_range_attachments(description);
+    const std::unique_ptr<SoftBody> rope = world->create_soft_body(description);
+    float farthest = 0.0F;
+    for (std::uint32_t step = 0; step < 120; ++step)
+    {
+        if (step == 60)
+        {
+            world->replace_soft_body_integrator(make_integrator(IntegratorKind::VERLET));
+            EXPECT_EQ(world->soft_body_integrator().kind(), IntegratorKind::VERLET);
+        }
+        world->step(STEP);
+        farthest = std::max(farthest, length(weight->state().pose.position - Vector3{.y = 2}));
+    }
+    EXPECT_LT(weight->state().pose.position.y, 1.9F) << "it swung down";
+    EXPECT_LT(farthest, 1.03F) << "held by the rope";
+    std::array<Vector3, 11> positions{};
+    EXPECT_LT(rope->positions(positions)[5].y, 2.0F);
+    EXPECT_EQ(positions[0], (Vector3{.y = 2}));
+    EXPECT_EQ(world->statistics().soft_bodies, 1U);
+    EXPECT_GT(world->statistics().phase_seconds[std::to_underlying(StepPhase::SOFT_BODIES)], 0.0);
+
+    // Replacing needs an integrator; constraints naming a particle twice are refused when recorded.
+    expect_physics_error([&] { world->replace_soft_body_integrator(nullptr); }, "null");
+    expect_physics_error([&] { (void)world->create_soft_body({.particles = {{}, {}}, .constraints = {{.particles = {1, 1}}}}); }, "particle 1 twice");
 }
 
 TEST(SteppedWorldTest, ThePipelineIsTheBackendsOwn)

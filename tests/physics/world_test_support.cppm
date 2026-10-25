@@ -2,7 +2,8 @@
 // it), integrates dynamic and kinematic bodies with semi-implicit Euler (gravity, forces, impulses, damping), breaks every
 // joint with finite thresholds at its first step, reports the colliders whose boxes overlap as contacts, refuses six-DOF
 // joints and meshes on moving bodies (capability checks when edits are recorded), and can hold a step until released or
-// fail one.
+// fail one. Its soft bodies stay where the edits put them, unless it lets the framework step them (the abstraction's
+// XPBD).
 export module gfx.tests.physics_world_support;
 
 import std;
@@ -32,6 +33,13 @@ edit_kind() -> std::size_t
 class RecordingBackend final : public physics::SteppedWorldBackend
 {
 public:
+    /// @param simulates_soft_bodies Whether it keeps its soft bodies itself (they do not move), or lets the framework
+    ///        step them.
+    explicit RecordingBackend(bool simulates_soft_bodies = true) noexcept
+        : m_simulates_soft_bodies{simulates_soft_bodies}
+    {
+    }
+
     [[nodiscard]] auto identity() const noexcept -> BackendIdentity override
     {
         return physics::PhysicsBackendKind::CUSTOM;
@@ -40,6 +48,11 @@ public:
     [[nodiscard]] auto pipeline() const noexcept -> physics::PipelineKinds override
     {
         return {};
+    }
+
+    [[nodiscard]] auto simulates_soft_bodies() const noexcept -> bool override
+    {
+        return m_simulates_soft_bodies;
     }
 
     void check(const physics::WorldEdit& edit,
@@ -240,6 +253,7 @@ private:
     }
 
 private:
+    bool m_simulates_soft_bodies = true;
     mutable std::mutex m_mutex{};
     std::condition_variable m_condition{};
     bool m_holding = false;
@@ -258,11 +272,13 @@ struct RecordingWorld
     RecordingBackend* backend = nullptr;
 };
 
-/// A world of a new recording backend as @p description says.
+/// A world of a new recording backend as @p description says (its soft bodies stepped by the framework when
+/// @p framework_soft_bodies).
 [[nodiscard]] inline auto
-make_recording_world(const physics::PhysicsWorldDescription& description = {}) -> RecordingWorld
+make_recording_world(const physics::PhysicsWorldDescription& description = {},
+                     bool framework_soft_bodies = false) -> RecordingWorld
 {
-    auto backend = std::make_unique<RecordingBackend>();
+    auto backend = std::make_unique<RecordingBackend>(!framework_soft_bodies);
     RecordingBackend* raw = backend.get();
     return {.world = std::make_unique<physics::SteppedWorld>(description, std::move(backend)), .backend = raw};
 }

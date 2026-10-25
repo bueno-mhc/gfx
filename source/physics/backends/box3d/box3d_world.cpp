@@ -465,7 +465,7 @@ struct EditApplier
         }
     }
 
-    // Soft bodies are refused when recorded (they come with the abstraction's XPBD).
+    // Soft bodies are the abstraction's (XPBD, stepped by the framework after Box3D's step): nothing for Box3D.
     template<class Change>
         requires requires(const Change& change) { change.soft_body; }
     void operator()(const Change& /*change*/) const
@@ -605,11 +605,6 @@ Box3dBackend::check(const WorldEdit& edit,
     {
         check_shape(*trigger->description.shape, trigger->description.pose, BodyKind::STATIC, 16, "PhysicsWorld::create_trigger", {});
     }
-    else if (std::holds_alternative<edits::CreateSoftBody>(edit))
-    {
-        throw_unsupported(identity(), "PhysicsWorld::create_soft_body", PhysicsCapability::SOFT_BODIES, "Box3D has no soft bodies",
-                          "the abstraction's XPBD soft bodies come with the next physics step (PH6); until then use rigid bodies and joints");
-    }
 }
 
 void
@@ -685,6 +680,44 @@ Box3dBackend::simulate(float seconds,
     for (const ContactInfo& contact : pending.contacts)
     {
         statistics.contacts += contact.manifold.point_count;
+    }
+}
+
+void
+Box3dBackend::apply_soft_body_corrections(std::span<const BodyCorrection> corrections,
+                                          WorldSnapshot& pending)
+{
+    // A sleeping body wakes only for an impulse that would move it faster than its sleep speed (a cloth resting on a
+    // sleeping box lets it sleep). An awake one moves where the soft bodies left it (about its center of mass), then
+    // takes the impulses through its center; its pose and velocities read back.
+    for (const BodyCorrection& correction : corrections)
+    {
+        RigidBodyRecord* record = find(pending, correction.body);
+        const std::uint32_t body_slot = slot(correction.body);
+        if (record == nullptr || body_slot >= m_bodies.size() || !(record->mass.mass > 0.0F))
+        {
+            continue;
+        }
+        const b3BodyId id = m_bodies[body_slot].id;
+        if (!b3Body_IsAwake(id) && !(length(correction.linear_impulse) / record->mass.mass > m_sleep_threshold))
+        {
+            continue;
+        }
+        Transform pose = record->state.pose;
+        const Vector3 center = transform_point(pose, record->mass.center_of_mass) + correction.translation;
+        pose.orientation = normalized(correction.rotation * pose.orientation);
+        pose.position = center - rotate(pose.orientation, record->mass.center_of_mass);
+        b3Body_SetTransform(id, to_box3d(pose.position), to_box3d(pose.orientation));
+        b3Body_ApplyLinearImpulseToCenter(id, to_box3d(correction.linear_impulse), true);
+        b3Body_ApplyAngularImpulse(id, to_box3d(correction.angular_impulse), true);
+        record->state.pose = pose;
+        record->state.linear_velocity = from_box3d(b3Body_GetLinearVelocity(id));
+        record->state.angular_velocity = from_box3d(b3Body_GetAngularVelocity(id));
+        if (!record->state.awake)
+        {
+            record->state.awake = true;
+            pending.sleep_events.push_back({.kind = SleepEventKind::WOKE_UP, .body = correction.body});
+        }
     }
 }
 

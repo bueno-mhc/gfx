@@ -181,6 +181,17 @@ public:
     /// @throws BackendCapabilityError if the backend integrates its bodies itself (CUSTOM_INTEGRATOR).
     virtual void replace_integrator(std::unique_ptr<Integrator> integrator) = 0;
 
+    /// @brief What predicts its soft bodies' particles (the abstraction's XPBD soft bodies: an XpbdIntegrator unless
+    ///        replaced).
+    /// @throws BackendCapabilityError if the backend has no soft bodies, or simulates them itself (SOFT_BODIES).
+    [[nodiscard]] virtual auto soft_body_integrator() -> Integrator& = 0;
+
+    /// @brief Replaces what predicts its soft bodies' particles, between steps (any integrator: soft bodies give it
+    ///        previous positions and no force field, and make the velocities from the positions themselves).
+    /// @throws PhysicsError if @p integrator is null or a step is in progress.
+    /// @throws BackendCapabilityError if the backend has no soft bodies, or simulates them itself (SOFT_BODIES).
+    virtual void replace_soft_body_integrator(std::unique_ptr<Integrator> integrator) = 0;
+
 protected:
     using PhysicsObject::PhysicsObject;
 
