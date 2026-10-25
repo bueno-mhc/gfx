@@ -20,17 +20,27 @@ gfx_add_test(gfx_camera_tests
     MODULES physics_test_support.cppm
     LIBRARIES gfx::camera)
 
-# Shapes and the narrow phase: hulls, mass properties, meshes, GJK and EPA, manifolds, collision of any two shapes;
-# spatial structures against brute force, the broad phase, the task schedulers.
+# Shapes and the narrow phase: hulls, mass properties, meshes, GJK and EPA, manifolds, collision of any two shapes,
+# queries against one shape; spatial structures against brute force, the broad phase, the task schedulers.
 gfx_add_test(gfx_physics_tests
     SOURCES
         shape_test.cpp
         gjk_epa_test.cpp
         contact_test.cpp
         collide_test.cpp
+        shape_query_test.cpp
         spatial_test.cpp
         broad_phase_test.cpp
     MODULES physics_test_support.cppm
+    LIBRARIES gfx::physics)
+
+# Worlds: the interfaces' error contract, the factory and the null backend, SteppedWorld on a recording backend (deferred
+# edits, publication, destruction, asynchronous steps, the reader handshake, queries, checks).
+gfx_add_test(gfx_physics_world_tests
+    SOURCES
+        interface_default_test.cpp
+        world_test.cpp
+    MODULES world_test_support.cppm
     LIBRARIES gfx::physics)
 
 # The physics and camera sources import only core, physics and camera modules, and the camera's only the physics

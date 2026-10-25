@@ -2,7 +2,8 @@
 /// @brief `import gfx.physics.spatial;`: spatial structures written against the geometric primitives only — the
 ///        dynamic BVH (:bvh), loose octrees and quadtrees (:loose_tree), the BSP tree (:bsp), the hashed uniform grid
 ///        (:uniform_grid), sweep and prune (:sweep_and_prune), what they share (:structure: SpatialStructureConcept,
-///        proxies, cell maps) — and the broad phase on any of them (:broad_phase: SpatialBroadPhase, CollisionFilter).
+///        proxies, cell maps), any of them chosen at run time (:spatial_structure: SpatialStructure) — and the broad phase
+///        on any of them (:broad_phase: SpatialBroadPhase, CollisionFilter).
 ///        The same structures serve the physics world, culling and game queries.
 export module gfx.physics.spatial;
 
@@ -17,6 +18,7 @@ export import :bsp;
 export import :uniform_grid;
 export import :sweep_and_prune;
 export import :broad_phase;
+export import :spatial_structure;
 
 export namespace gfx::physics
 {

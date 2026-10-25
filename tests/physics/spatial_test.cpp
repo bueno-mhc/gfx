@@ -223,4 +223,61 @@ TEST(SpatialStructureTest, TreesStayBalancedAndShallow)
     EXPECT_THROW(Octree<8>{Aabb{}}, PhysicsError);
 }
 
+TEST(SpatialStructureTest, StructuresChosenAtRunTimeAnswerAsTheStructuresThemselves)
+{
+    // The same boxes in each kind of structure behind the virtual interface, and in a BVH used directly.
+    Generator generator{31};
+    Bvh direct;
+    std::vector<std::pair<ColliderHandle, Aabb>> boxes;
+    for (std::uint32_t index = 0; index < 300; ++index)
+    {
+        boxes.emplace_back(PhysicsHandles::make<ColliderTag>(index + 1), random_box(generator));
+        direct.insert(boxes.back().first, boxes.back().second);
+    }
+    const auto sorted_pairs = [](const auto& structure) {
+        std::set<std::pair<ColliderHandle, ColliderHandle>> pairs;
+        structure.pairs([&pairs](ColliderHandle first, ColliderHandle second) { pairs.insert(first < second ? std::pair{first, second} : std::pair{second, first}); });
+        return pairs;
+    };
+    const Aabb region = Aabb::from_center({}, {.x = 40, .y = 40, .z = 40});
+    const Ray ray{.origin = {.x = -150}, .direction = normalized(Vector3{.x = 1, .y = 0.1F, .z = 0.05F})};
+    std::set<ColliderHandle> expected_box;
+    direct.query(region, [&expected_box](ColliderHandle key) { return expected_box.insert(key), true; });
+    std::set<ColliderHandle> expected_ray;
+    direct.query(ray, 300.0F, [&expected_ray](ColliderHandle key, float /*distance*/) { return expected_ray.insert(key), true; });
+    for (const SpatialStructureKind kind : {SpatialStructureKind::BVH, SpatialStructureKind::OCTREE, SpatialStructureKind::QUADTREE, SpatialStructureKind::BSP,
+                                            SpatialStructureKind::UNIFORM_GRID, SpatialStructureKind::SWEEP_AND_PRUNE})
+    {
+        const std::unique_ptr<SpatialStructure> structure = make_spatial_structure(kind);
+        EXPECT_EQ(structure->kind(), kind);
+        std::vector<SpatialProxyHandle> proxies;
+        for (const auto& [key, box] : boxes)
+        {
+            proxies.push_back(structure->insert(key, box));
+        }
+        EXPECT_EQ(structure->size(), boxes.size()) << to_string(kind);
+        EXPECT_EQ(sorted_pairs(*structure), sorted_pairs(direct)) << to_string(kind);
+        std::set<ColliderHandle> found;
+        structure->query(region, [&found](ColliderHandle key) { return found.insert(key), true; });
+        EXPECT_EQ(found, expected_box) << to_string(kind);
+        found.clear();
+        structure->query(ray, 300.0F, [&found](ColliderHandle key, float /*distance*/) { return found.insert(key), true; });
+        EXPECT_EQ(found, expected_ray) << to_string(kind);
+
+        // The proxies hold what they were given; removed ones are refused; clear() forgets everything.
+        EXPECT_EQ(structure->key(proxies[7]), boxes[7].first);
+        EXPECT_EQ(structure->box(proxies[7]), boxes[7].second);
+        structure->remove(proxies[7]);
+        EXPECT_THROW(structure->remove(proxies[7]), PhysicsError) << to_string(kind);
+        structure->clear();
+        EXPECT_EQ(structure->size(), 0U);
+    }
+
+    // The adapter keeps the structure reachable.
+    SpatialStructureAdapter<SweepAndPrune<3>> adapter;
+    adapter.insert(PhysicsHandles::make<ColliderTag>(1), Aabb::from_center({}, {.x = 1, .y = 1, .z = 1}));
+    EXPECT_EQ(adapter.structure().size(), 1U);
+    EXPECT_EQ(adapter.kind(), SpatialStructureKind::SWEEP_AND_PRUNE);
+}
+
 } // namespace

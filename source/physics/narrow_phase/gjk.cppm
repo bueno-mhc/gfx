@@ -217,6 +217,45 @@ solve_tetrahedron(Simplex& simplex) noexcept -> bool
     return true;
 }
 
+/// Whether the tetrahedron of @p points is a sliver: three corners almost together or all four almost in a plane (its
+/// volume under 1e-4 of the cube of its longest edge), so that the signs solve_tetrahedron() tests are noise.
+[[nodiscard]] constexpr auto
+is_sliver(const std::array<SupportPoint, 4>& points) noexcept -> bool
+{
+    const std::array<Vector3, 4> corners{points[0].difference, points[1].difference, points[2].difference, points[3].difference};
+    float longest = 0.0F;
+    for (std::size_t first = 0; first < 4; ++first)
+    {
+        for (std::size_t second = first + 1; second < 4; ++second)
+        {
+            longest = std::max(longest, length_squared(corners[second] - corners[first]));
+        }
+    }
+    const float volume = dot(corners[1] - corners[0], cross(corners[2] - corners[0], corners[3] - corners[0]));
+    const float size = longest * square_root(longest);
+    return (volume < 0.0F ? -volume : volume) <= 1e-4F * size;
+}
+
+/// The face of the tetrahedron of @p simplex closest to the origin.
+[[nodiscard]] constexpr auto
+closest_face(const Simplex& simplex) noexcept -> Simplex
+{
+    constexpr std::array<std::array<std::uint32_t, 3>, 4> FACES{{{0, 1, 2}, {0, 2, 3}, {0, 3, 1}, {1, 3, 2}}};
+    Simplex best{};
+    float nearest = std::numeric_limits<float>::max();
+    for (const auto& face : FACES)
+    {
+        Simplex triangle{.points = {simplex.points[face[0]], simplex.points[face[1]], simplex.points[face[2]]}, .size = 3};
+        solve_triangle(triangle);
+        if (length_squared(triangle.closest) < nearest)
+        {
+            nearest = length_squared(triangle.closest);
+            best = triangle;
+        }
+    }
+    return best;
+}
+
 } // namespace gjk_detail
 
 /// @brief GJK between the cores of @p first at @p first_pose and @p second at @p second_pose.
@@ -281,6 +320,17 @@ gjk(const First& first,
         }
         else if (!gjk_detail::solve_tetrahedron(grown))
         {
+            // A sliver cannot tell whether it holds the origin: its nearest face decides (far from the origin, the shapes are
+            // apart; a curved support function, such as a cylinder's rim, makes slivers of nearly repeated points).
+            if (gjk_detail::is_sliver(grown.points))
+            {
+                const gjk_detail::Simplex face = gjk_detail::closest_face(grown);
+                if (length_squared(face.closest) > touching * touching)
+                {
+                    simplex = length_squared(face.closest) < squared ? face : simplex;
+                    break;
+                }
+            }
             simplex = grown;
             overlapping = true;
             break;

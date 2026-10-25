@@ -172,4 +172,22 @@ TEST(GjkEpaTest, CurvedShapesAndTouchingShapes)
     EXPECT_TRUE(approximately_equal(touching.normal, {.x = 1}, 1e-4F)) << describe(touching.normal);
 }
 
+TEST(GjkEpaTest, SliversOfNearlyRepeatedPointsDoNotMakeSeparatedShapesOverlap)
+{
+    // A hull 0.436 away from a cylinder (found by the shape-cast test): the cylinder's rim gave GJK three support points
+    // almost together, and the tetrahedron they made with a fourth "held" the origin. The poses are exact (hex floats).
+    const std::array<Vector3, 7> points{Vector3{.x = 1, .y = 0, .z = 0}, {.x = -1, .y = 0.2F, .z = 0.1F}, {.x = 0, .y = 1.3F, .z = 0},
+                                        {.x = 0.1F, .y = -0.9F, .z = 0.2F}, {.x = 0, .y = 0, .z = 1.1F}, {.x = 0.2F, .y = 0.1F, .z = -1},
+                                        {.x = 0.6F, .y = 0.6F, .z = 0.6F}};
+    const HullShape hull = HullShape::from_points(points);
+    const CylinderShape cylinder{.half_height = 0.7F, .radius = 0.9F};
+    const Transform hull_pose{.position = {.x = 0x1.2ae9cep+0F, .y = 0x1.337b1p-2F, .z = 0x1.093fp-4F},
+                              .orientation = {.x = -0x1.5629ecp-1F, .y = 0x1.8172f8p-5F, .z = 0x1.735a92p-3F, .w = 0x1.709a86p-1F}};
+    const Transform cylinder_pose{.position = {.x = -0x1.0333fcp-1F, .y = -0x1.bc0f02p-1F, .z = 0x1.c7a28cp-1F},
+                                  .orientation = {.x = -0x1.12ff6ep-3F, .y = -0x1.d078e2p-3F, .z = 0x1.262904p-11F, .w = 0x1.ede592p-1F}};
+    const GjkResult result = gjk(hull, hull_pose, cylinder, cylinder_pose);
+    EXPECT_EQ(result.status, GjkStatus::SEPARATED);
+    EXPECT_NEAR(convex_distance(hull, hull_pose, cylinder, cylinder_pose).distance, 0.436F, 2e-3F);
+}
+
 } // namespace

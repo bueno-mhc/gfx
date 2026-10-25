@@ -1216,7 +1216,8 @@ its version, its license and what of it ends up in a program.
 | `GFX_BUILD_PLATFORM` | `ON` | The platform library and its bridge to the graphics library |
 | `GFX_BUILD_UI` | `ON` | The UI library |
 | `GFX_BUILD_UI_ATLAS_TOOLS` | `ON` | The atlas tools (`gfx::ui_atlas_tools`, `gfx_ui_atlas_builder`, `gfx_add_ui_atlas()`) and their font pipeline |
-| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, and `gfx::physics` with collision shapes, the narrow phase, spatial structures and the broad phase), which depend on the core library only — the build checks it |
+| `GFX_BUILD_PHYSICS` | `ON` | The physics and camera libraries (in progress: foundations `gfx::physics_common`, `gfx::camera`, `gfx::physics_components` with collision shapes, the narrow phase, spatial structures, the broad phase, the world interface and the framework backends are built on, and `gfx::physics` with the factory and its backends — the null one so far), which depend on the core library only — the build checks it |
+| `GFX_PHYSICS_CUSTOM_BACKEND_TARGET` | (empty) | A target whose module `gfx.physics.backends.custom` becomes the factory's `PhysicsBackendKind::CUSTOM` (it links `gfx::physics_components` and exports `gfx::physics::custom_backend::unavailable_reason()` and `create_physics_world(description)`) |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (both need the platform library and Vulkan; the UI editor needs the UI library and its atlas tools) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
@@ -1321,12 +1322,16 @@ gfx/
 │                         quickhull, mass properties, meshes, height fields, compounds); narrow_phase/ (GJK, EPA,
 │                         separating axes, contact manifolds, the manifold cache); spatial/ (gfx.physics.spatial:
 │                         BVH, loose octree and quadtree, BSP, uniform grid, sweep and prune, the broad phase);
-│                         tasks/ (gfx.physics.tasks: task schedulers)
+│                         tasks/ (gfx.physics.tasks: task schedulers); interface/ (gfx.physics.interface: worlds,
+│                         bodies, colliders, joints, triggers, soft bodies, queries, events, pipeline); world/
+│                         (gfx.physics.world: SteppedWorld, deferred edits, snapshots, stepping, queries);
+│                         backends/null/; physics.cppm (gfx.physics), physics_factory (create_physics_world())
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
     ├── core/             gfx.core (imports gfx.core only), its math and the slot table
-    ├── physics/          the physics foundations (primitives at compile time and against references, the
-    │                     SIMD batches against the scalar code) and the decoupling checks
+    ├── physics/          the physics library (primitives at compile time and against references, SIMD batches
+    │                     against the scalar code, shapes and queries against exact answers, spatial structures
+    │                     against brute force, worlds on a recording backend) and the decoupling checks
     ├── graphics/<area>/  GoogleTest unit tests of the graphics library, one subfolder per area;
     │                     graphics/vulkan: the Vulkan backend on the machine's real GPUs
     ├── platform/         the platform library, through a test-only fake platform; platform/backends:

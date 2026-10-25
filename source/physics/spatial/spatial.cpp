@@ -1,4 +1,4 @@
-// The spatial structures' errors.
+// The spatial structures' errors, and structures of each kind behind the virtual interface.
 module gfx.physics.spatial;
 
 import std;
@@ -55,3 +55,33 @@ reject_null_collider(std::string_view operation)
 }
 
 } // namespace gfx::physics::spatial_detail
+
+namespace gfx::physics
+{
+
+auto
+make_spatial_structure(SpatialStructureKind kind) -> std::unique_ptr<SpatialStructure>
+{
+    switch (kind)
+    {
+        case SpatialStructureKind::BVH:
+            return std::make_unique<SpatialStructureAdapter<Bvh>>();
+        case SpatialStructureKind::OCTREE:
+            return std::make_unique<SpatialStructureAdapter<Octree<>>>();
+        case SpatialStructureKind::QUADTREE:
+            return std::make_unique<SpatialStructureAdapter<Quadtree<>>>();
+        case SpatialStructureKind::BSP:
+            return std::make_unique<SpatialStructureAdapter<Bsp>>();
+        case SpatialStructureKind::UNIFORM_GRID:
+            return std::make_unique<SpatialStructureAdapter<UniformGrid<>>>();
+        case SpatialStructureKind::SWEEP_AND_PRUNE:
+            return std::make_unique<SpatialStructureAdapter<SweepAndPrune<>>>();
+    }
+    throw PhysicsError({.backend = PhysicsSubsystem::SPATIAL,
+                        .operation = "make_spatial_structure",
+                        .problem = std::format("{} is not a spatial structure kind", std::to_underlying(kind)),
+                        .suggestion = "pass an enumerator of SpatialStructureKind",
+                        .context = {}});
+}
+
+} // namespace gfx::physics

@@ -3,9 +3,10 @@
 # gfx::core only, which the build checks (gfx_require_decoupled) along with the modules their sources import.
 #   gfx::physics_common  enumerations, handles, errors, geometric primitives (`import gfx.physics.primitives;`)
 #   gfx::camera          cameras and camera controllers (`import gfx.camera;`), on gfx::physics_common only
-#   gfx::physics         collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`),
-#                        spatial structures and the broad phase (`gfx.physics.spatial`), task schedulers (`gfx.physics.tasks`);
-#                        later the world interface, spatial structures, dynamics and the backends
+#   gfx::physics_components  collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`),
+#                        spatial structures and the broad phase (`gfx.physics.spatial`), task schedulers (`gfx.physics.tasks`),
+#                        the world interface (`gfx.physics.interface`) and the framework of backends (`gfx.physics.world`)
+#   gfx::physics         the above, the factory and its backends (`import gfx.physics;`)
 # ==============================================================================
 include(GfxDependencies)
 include(GfxDecoupling)
@@ -82,9 +83,16 @@ target_link_libraries(gfx_camera
 gfx_require_decoupled(gfx_camera FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_physics)
 
 # ------------------------------------------------------------------------------ physics
-add_library(gfx_physics)
-add_library(gfx::physics ALIAS gfx_physics)
-target_sources(gfx_physics
+# gfx::physics_components holds everything a backend is composed of: shapes, the narrow phase, task schedulers, spatial
+# structures and the broad phase, the interface (gfx.physics.interface) and the framework backends are built on
+# (gfx.physics.world). gfx::physics adds the factory and the umbrella module, with the backends in a private file set.
+# A custom backend links gfx::physics_components (no cycle) and is named by GFX_PHYSICS_CUSTOM_BACKEND_TARGET.
+set(GFX_PHYSICS_CUSTOM_BACKEND_TARGET "" CACHE STRING
+    "A target whose public module gfx.physics.backends.custom is the factory's PhysicsBackendKind::CUSTOM (empty: none)")
+
+add_library(gfx_physics_components)
+add_library(gfx::physics_components ALIAS gfx_physics_components)
+target_sources(gfx_physics_components
     PUBLIC
         FILE_SET public_modules TYPE CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
@@ -105,6 +113,7 @@ target_sources(gfx_physics
             narrow_phase/convex.cppm
             narrow_phase/collide.cppm
             narrow_phase/manifold_cache.cppm
+            narrow_phase/queries.cppm
             tasks/tasks.cppm
             spatial/spatial.cppm
             spatial/structure.cppm
@@ -114,6 +123,18 @@ target_sources(gfx_physics
             spatial/uniform_grid.cppm
             spatial/sweep_and_prune.cppm
             spatial/broad_phase.cppm
+            spatial/spatial_structure.cppm
+            interface/interface.cppm
+            interface/descriptions.cppm
+            interface/object.cppm
+            interface/objects.cppm
+            interface/pipeline.cppm
+            interface/world.cppm
+            world/world.cppm
+            world/edits.cppm
+            world/snapshot.cppm
+            world/stepped_world.cppm
+            world/state.cppm
     PRIVATE
         tasks/tasks.cpp
         spatial/spatial.cpp
@@ -121,14 +142,49 @@ target_sources(gfx_physics
         spatial/bsp.cpp
         narrow_phase/collide.cpp
         narrow_phase/manifold_cache.cpp
+        narrow_phase/queries.cpp
         shapes/hull.cpp
         shapes/static_bvh.cpp
         shapes/mesh.cpp
         shapes/shape.cpp
-        shapes/shape_kernels.cpp)   # plain translation unit: SIMDe's headers cannot share one with import std
+        shapes/shape_kernels.cpp   # plain translation unit: SIMDe's headers cannot share one with import std
+        interface/interface.cpp
+        world/stepped_world.cpp
+        world/snapshot.cpp
+        world/validation.cpp
+        world/world_objects.cpp
+        world/world_queries.cpp)
+
+target_compile_features(gfx_physics_components PUBLIC cxx_std_23)
+target_link_libraries(gfx_physics_components
+    PUBLIC gfx::physics_common
+    PRIVATE gfx::project_options gfx::simde)
+gfx_require_decoupled(gfx_physics_components FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
+
+add_library(gfx_physics)
+add_library(gfx::physics ALIAS gfx_physics)
+target_sources(gfx_physics
+    PUBLIC
+        FILE_SET public_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            physics.cppm
+            physics_factory.cppm
+    PRIVATE
+        FILE_SET backend_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            backends/null/null.cppm
+    PRIVATE
+        backends/null/null_world.cpp
+        physics_factory.cpp)
 
 target_compile_features(gfx_physics PUBLIC cxx_std_23)
 target_link_libraries(gfx_physics
-    PUBLIC gfx::physics_common
-    PRIVATE gfx::project_options gfx::simde)
+    PUBLIC gfx::physics_components
+    PRIVATE gfx::project_options)
+if(GFX_PHYSICS_CUSTOM_BACKEND_TARGET)
+    target_link_libraries(gfx_physics PRIVATE ${GFX_PHYSICS_CUSTOM_BACKEND_TARGET})
+    target_compile_definitions(gfx_physics PRIVATE GFX_WITH_PHYSICS_CUSTOM_BACKEND)
+endif()
 gfx_require_decoupled(gfx_physics FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)

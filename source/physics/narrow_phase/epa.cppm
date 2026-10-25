@@ -111,6 +111,56 @@ barycentric(Vector3 point,
     return {1.0F - v - w, v, w};
 }
 
+/// Replaces @p polytope with the octahedron of @p difference's support points along the six axes, if that holds the
+/// origin strictly inside and is convex: a start for EPA when GJK's simplex leaves the origin on the start's boundary
+/// (expansions through an edge that holds the origin keep making faces through it).
+template<class Difference>
+constexpr auto
+start_from_axes(const Difference& difference,
+                Polytope& polytope) noexcept -> bool
+{
+    constexpr std::array<Vector3, 6> AXES{Vector3{.x = 1}, Vector3{.x = -1}, Vector3{.y = 1}, Vector3{.y = -1}, Vector3{.z = 1}, Vector3{.z = -1}};
+    constexpr std::array<std::array<std::uint16_t, 3>, 8> FACES{{{0, 2, 4}, {2, 1, 4}, {1, 3, 4}, {3, 0, 4}, {2, 0, 5}, {1, 2, 5}, {3, 1, 5}, {0, 3, 5}}};
+
+    // The six points, the faces wound outward (seen from their centroid).
+    Polytope candidate{};
+    Vector3 centroid{};
+    float scale = 0.0F;
+    for (const Vector3 axis : AXES)
+    {
+        const SupportPoint point = difference.support(axis);
+        candidate.vertices[candidate.vertex_count++] = point;
+        centroid += point.difference / 6.0F;
+        scale = std::max(scale, length(point.difference));
+    }
+    for (const auto& face : FACES)
+    {
+        const Vector3 a = candidate.vertices[face[0]].difference;
+        const bool inward = dot(cross(candidate.vertices[face[1]].difference - a, candidate.vertices[face[2]].difference - a), centroid - a) > 0.0F;
+        candidate.add_face(face[0], inward ? face[2] : face[1], inward ? face[1] : face[2]);
+    }
+
+    // Usable when the origin is inside every face and no point is in front of a face.
+    const float tolerance = 1e-5F * scale;
+    for (std::uint32_t index = 0; index < candidate.face_count; ++index)
+    {
+        const Face& face = candidate.faces[index];
+        if (!face.alive || face.distance <= tolerance)
+        {
+            return false;
+        }
+        for (std::uint32_t vertex = 0; vertex < candidate.vertex_count; ++vertex)
+        {
+            if (dot(face.normal, candidate.vertices[vertex].difference - candidate.vertices[face.vertex[0]].difference) > tolerance)
+            {
+                return false;
+            }
+        }
+    }
+    polytope = candidate;
+    return true;
+}
+
 } // namespace epa_detail
 
 /// @brief EPA for the cores of @p first and @p second, which GJK (@p start) found overlapping.
@@ -132,6 +182,11 @@ epa(const First& first,
     for (std::uint32_t index = 0; index < start.simplex_size; ++index)
     {
         tetrahedron[count++] = start.simplex[index];
+    }
+    if (count == 4 && gjk_detail::is_sliver(tetrahedron))
+    {
+        // A sliver from GJK would start a polytope with no volume: grow one again from its first point.
+        count = 1;
     }
     const auto add_distinct = [&](Vector3 direction) {
         const SupportPoint point = difference.support(direction);
@@ -212,16 +267,42 @@ epa(const First& first,
     polytope.add_face(b, 3, c);
     polytope.add_face(c, 3, 0);
 
+    // The origin on the start's boundary (GJK stops as soon as its simplex reaches the origin): the octahedron of the
+    // axes' support points starts instead when it holds the origin.
+    float extent = 0.0F;
+    for (const SupportPoint& point : tetrahedron)
+    {
+        extent = std::max(extent, length(point.difference));
+    }
+    if (const std::uint32_t closest_face = polytope.nearest(); closest_face < MAXIMUM_EPA_FACES && polytope.faces[closest_face].distance <= 1e-5F * extent)
+    {
+        epa_detail::start_from_axes(difference, polytope);
+    }
+
     // Expand: the nearest face's support point; stop when it adds (almost) nothing.
     std::array<std::pair<std::uint16_t, std::uint16_t>, MAXIMUM_EPA_FACES * 3> edges{};
     std::uint32_t nearest = polytope.nearest();
     result.status = EpaStatus::ITERATION_LIMIT;
+
+    // The best face so far (the nearest face's distance only grows on a convex polytope: should it drop, near-coplanar
+    // support points broke the polytope, and the face before stands).
+    epa_detail::Face best{};
+    std::array<SupportPoint, 3> best_corners{};
+    const auto keep_best = [&] {
+        best = polytope.faces[nearest];
+        best_corners = {polytope.vertices[best.vertex[0]], polytope.vertices[best.vertex[1]], polytope.vertices[best.vertex[2]]};
+    };
+    if (nearest < MAXIMUM_EPA_FACES)
+    {
+        keep_best();
+    }
     for (result.iterations = 0; result.iterations < MAXIMUM_EPA_VERTICES && nearest < MAXIMUM_EPA_FACES; ++result.iterations)
     {
         const epa_detail::Face face = polytope.faces[nearest];
         const SupportPoint point = difference.support(face.normal);
         const float reach = dot(point.difference, face.normal);
-        if (reach - face.distance <= std::max(1e-4F * std::abs(reach), 1e-6F))
+        const float tolerance = std::max(1e-4F * std::abs(reach), 1e-6F);
+        if (reach - face.distance <= tolerance)
         {
             result.status = EpaStatus::CONVERGED;
             break;
@@ -234,12 +315,14 @@ epa(const First& first,
         const auto added = static_cast<std::uint16_t>(polytope.vertex_count);
         polytope.vertices[polytope.vertex_count++] = point;
 
-        // The faces the new point sees go; their edges seen once form the horizon.
+        // The faces the new point sees go (the expanded one always; the others clearly in front of it, so that faces it is
+        // almost in the plane of do not make the visible region ragged); their edges seen once form the horizon.
+        const float visibility = 1e-5F * std::max(1.0F, std::abs(reach));
         std::uint32_t edge_count = 0;
         for (std::uint32_t index = 0; index < polytope.face_count; ++index)
         {
             epa_detail::Face& visible = polytope.faces[index];
-            if (!visible.alive || dot(visible.normal, point.difference - polytope.vertices[visible.vertex[0]].difference) <= 0.0F)
+            if (!visible.alive || (index != nearest && dot(visible.normal, point.difference - polytope.vertices[visible.vertex[0]].difference) <= visibility))
             {
                 continue;
             }
@@ -275,8 +358,13 @@ epa(const First& first,
             result.status = EpaStatus::CAPACITY_REACHED;
             break;
         }
+        if (nearest >= MAXIMUM_EPA_FACES || polytope.faces[nearest].distance < best.distance - tolerance)
+        {
+            break;
+        }
+        keep_best();
     }
-    if (nearest >= MAXIMUM_EPA_FACES)
+    if (!best.alive)
     {
         result.status = EpaStatus::DEGENERATE;
         result.point_first = start.point_first;
@@ -284,16 +372,13 @@ epa(const First& first,
         return result;
     }
 
-    // The nearest face's point closest to the origin, in barycentric coordinates: the cores' deepest points.
-    const epa_detail::Face face = polytope.faces[nearest];
-    const SupportPoint& a = polytope.vertices[face.vertex[0]];
-    const SupportPoint& b_point = polytope.vertices[face.vertex[1]];
-    const SupportPoint& c_point = polytope.vertices[face.vertex[2]];
-    const std::array<float, 3> weights = epa_detail::barycentric(face.normal * face.distance, a.difference, b_point.difference, c_point.difference);
-    result.normal = face.normal;
-    result.depth = std::max(face.distance, 0.0F);
-    result.point_first = a.first * weights[0] + b_point.first * weights[1] + c_point.first * weights[2];
-    result.point_second = a.second * weights[0] + b_point.second * weights[1] + c_point.second * weights[2];
+    // The best face's point closest to the origin, in barycentric coordinates: the cores' deepest points.
+    const std::array<float, 3> weights = epa_detail::barycentric(best.normal * best.distance, best_corners[0].difference, best_corners[1].difference,
+                                                                 best_corners[2].difference);
+    result.normal = best.normal;
+    result.depth = std::max(best.distance, 0.0F);
+    result.point_first = best_corners[0].first * weights[0] + best_corners[1].first * weights[1] + best_corners[2].first * weights[2];
+    result.point_second = best_corners[0].second * weights[0] + best_corners[1].second * weights[1] + best_corners[2].second * weights[2];
     return result;
 }
 

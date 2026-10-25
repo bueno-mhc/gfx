@@ -1,8 +1,8 @@
 # gfx physics and camera: a decoupled physics abstraction over Box3D, and a camera module — architecture, decisions and plan
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
-(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 implemented** (§B "PH3 as built"),
-awaiting validation. This
+(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 implemented** (§B "PH4 as
+built"), awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -736,6 +736,107 @@ Deviations from the proposal, for validation:
 5. **The virtual `SpatialStructure`** (run-time choice of a structure, §A7) comes with the interfaces in PH4.
 6. **The broad phase indexes filters by the collider handle's slot**: colliders must not be null, one proxy per collider; a
    custom filter must be thread-safe when a scheduler is given.
+
+### PH4 as built (2026-10-25)
+
+Two targets now: **`gfx::physics_components`** (everything a backend is composed of: shapes, narrow phase, task schedulers,
+spatial structures, the interface, the framework) and **`gfx::physics`** (the factory, the umbrella module `gfx.physics`, the
+backends in a private file set). A custom backend links `gfx::physics_components` (no cycle) and is named by the CMake cache
+variable `GFX_PHYSICS_CUSTOM_BACKEND_TARGET`: its public module `gfx.physics.backends.custom` exports
+`gfx::physics::custom_backend::unavailable_reason()` and `create_physics_world(description)`, and the factory then serves
+`PhysicsBackendKind::CUSTOM` (checked in a separate build directory with a scratch backend).
+
+**`gfx.physics.interface`** (`source/physics/interface/`), every operation pure virtual with a definition that throws a
+`BackendCapabilityError` naming the operation and the capability (queries: a `QueryFailure` of kind UNSUPPORTED):
+
+| Partition | Content |
+|---|---|
+| `:descriptions` | `Friction`, `SurfaceMaterial`, `SolverDescription`, `SleepDescription`, `PhysicsWorldDescription` (gravity −9.80665 y, asynchronous_stepping, task_scheduler, solver, sleep, collision, hit_event_speed, debug_name); `RigidBodyDescription`, `RigidBodyState`, `ColliderDescription` (`std::shared_ptr<const Shape>`, pose, material, density, filter, contact_events, round_shape_segments), `TriggerDescription`; joints: `JointLimits`, `JointMotor`, `JointSpring`, `JointBreaking`, seven descriptions in `JointDescription` (a variant in `JointKind`'s order), `JointState`, `joint_kind()`, `joint_bodies()`, `hinge_joint()` …; soft bodies: `SoftBodyParticle`, `SoftBodyConstraint`, `ParticlePin`, `SoftBodyDescription`; queries: `QueryOptions` {filter, engine}, `RayHit`, `ShapeCastHit`, `ClosestPointHit`, `ContactInfo`; events: `ContactEvent`, `TriggerEvent`, `JointEvent`, `SleepEvent`, `PhysicsEvents` (spans), `StepStatistics` |
+| `:object` | `PhysicsObject : HandleIssuer` (backend(), protected throw_unsupported / throw_not_implemented) |
+| `:objects` | `Collider`, `RigidBody` (state, mass properties, add_collider, motion, forces and impulses, configuration, sleep), `Joint` (description, state, update, set_enabled), `Trigger`, `SoftBody` (positions/velocities into caller storage, pins, particles, settings) |
+| `:pipeline` | `BroadPhase`, `SpatialBroadPhaseComponent<Structure>`, `NarrowPhase`, `GjkNarrowPhase`, `Solver` (kind only until PH7), `Integrator` + `IntegrationState` + `IntegratorRequirements` + `ForceField` (implementations in PH6) |
+| `:world` | `PhysicsWorld`: objects, settings, step / begin_step / wait_step / is_stepping / step_count, events, statistics, the seven queries (noexcept, `QueryResult`), the pipeline and its replacement |
+
+**`gfx.physics.world`** (`source/physics/world/`): the framework every library backend is built on. `SteppedWorld` (final,
+a `PhysicsWorld`) composes a **`SteppedWorldBackend`**, which implements `identity()`, `pipeline()`, `check(edit,
+RecordedWorld)` (capability errors when an edit is recorded), `apply(edits, pending)`, `simulate(seconds, pending)` and, if
+it has them, its own queries (optional results: none means the abstraction answers) and pipeline replacements. The framework:
+
+- **issues handles at once** (slot lists with 8-bit generations; a slot freed only when the step that applied the
+  destruction is published), checks every value when it is recorded (descriptions, finite poses, orientations and axes
+  normalized, bodies alive, a joint's bodies distinct, limits ordered, soft-body indices …: `PhysicsError` naming the
+  backend, the operation and the objects), records **`WorldEdit`** (a variant of 45 edit kinds, `:edits`) under one mutex,
+  from any thread;
+- **applies the edits at the start of the next step in the order recorded**: first to the pending records (`:snapshot`:
+  one record per object — its configuration and its state —, events, contacts, statistics; mass properties of dynamic bodies
+  from their colliders' shapes at density 1 scaled and moved, `move_kinematic` as velocities), then hands them to the
+  backend, which simulates and writes its results into the pending snapshot; the framework then computes the colliders',
+  triggers' and soft bodies' world boxes;
+- **destroys by edits**: an object's destructor records its destruction; a body's records its colliders', triggers' and
+  joints' first (their objects then throw "destroyed with its body"); pins to a destroyed body are released;
+- **publishes in `wait_step()`**: pending → published (whole records whose configuration changed, otherwise the state), slots
+  released, the query tree updated; getters read the published snapshot under a shared lock (an object created since shows
+  its creation values) — **getters work during steps**, only queries are refused;
+- **steps** on the caller, or on one `std::jthread` with `asynchronous_stepping`; a step's exception is rethrown by
+  `wait_step()` (nothing published; the edits it applied stay in the pending records);
+- **the reader handshake** (§A14): a query increments the readers then reads the stepping flag; `begin_step` sets the flag
+  then waits (atomic wait) for no reader; both `seq_cst`; publication happens while the flag is still set;
+- **the abstraction's queries** (`QueryEngine::ABSTRACTION`, and `BACKEND` for backends without their own): a dynamic BVH
+  over the published colliders' world boxes, then the narrow phase's new queries against each candidate; ties go to the
+  smaller handle; nothing allocates (results into caller spans, capacity exceeded = the nearest or smallest kept);
+- objects of a destroyed world throw "the world was destroyed" (weak link to the shared state).
+
+**Narrow phase** (`:queries`): `ray_cast_shape`, `cast_shape` (convex moving shape), `shapes_overlap`, `closest_point_on_shape`
+— conservative advancement over GJK distances for convex shapes (each step stops half the touching distance 1e-4 short of the
+plane through the closest point, so GJK's normals stay exact; within GJK's accuracy, 1.6e-3, a normal that turns away is
+checked by a probe further along the motion), spheres and triangles exactly, meshes through their hierarchy, height fields
+by pieces of the ray in order, compounds through their children. **Spatial** (`:spatial_structure`): `SpatialStructure`
+(virtual, `std::function` visitors), `SpatialStructureAdapter<S>`, `make_spatial_structure(kind)`.
+
+**Null backend** (`gfx.physics.backends.null`): everything that would make or change something throws
+`BackendCapabilityError` (WORLD_OBJECTS); queries fail as UNSUPPORTED; `description()` returns what it was given, events and
+statistics are empty, `wait_step()` does nothing. **Factory** (`gfx.physics.factory`): `physics_backend_availability()`,
+`available_physics_backends()` (simulating backends first), `create_physics_world(description, kind)`; BOX3D (PH5) and
+REFERENCE (PH7) report that they are not built yet.
+
+**Robustness fixes in the PH2 narrow phase**, found by the new tests' samples and kept as regression tests:
+
+1. **GJK slivers**: a cylinder's rim gave three nearly equal support points, and the needle tetrahedron they made with a
+   fourth "held" the origin (shapes 0.436 apart reported overlapping). A tetrahedron whose volume is under 1e-4 of the cube
+   of its longest edge no longer decides: its nearest face does (`GjkEpaTest.SliversOfNearlyRepeatedPointsDoNotMakeSeparatedShapesOverlap`, exact poses in hex floats).
+2. **EPA's start**: a sliver from GJK is regrown from one point; when GJK's simplex leaves the origin on the start's boundary,
+   the octahedron of the six axes' support points starts instead when it holds the origin and is convex.
+3. **EPA's expansion**: faces the new point is almost in the plane of (cylinder caps and rims) are not removed (a visibility
+   tolerance; the expanded face always is), and the nearest distance — a lower bound that only grows on a convex polytope —
+   is watched: should it drop, the best face before stands. Points inside a cylinder had come out at depth 0.
+
+Tests (+ 18): `gfx_physics_world_tests` (new, 15: the error contract of every default definition — classes generated from the
+same list of operations as interface.cpp's definitions —, factory, null backend, edits applied in order, edits from six
+threads each in its order, deferred and cascading destruction with slot reuse, objects of a destroyed world, asynchronous held
+and failing steps, 4 reader threads during 200 steps never seeing a torn state, the abstraction's queries, joints/triggers/
+soft bodies, the pipeline, capability checks at record time, invalid values, kinematic targets) on a recording backend
+(module `gfx.tests.physics_world_support`); in `gfx_physics_tests`: `ShapeQueryTest.*` (5: convex ray casts against exact
+signed distance functions sampled along each ray, meshes and height fields against brute force, compounds, shape casts against
+the distance along the motion, overlaps and closest points), the run-time spatial structures, the GJK regression test. The
+random tests were also run with ten times the samples and with other seeds (Release) before being kept at their sizes.
+
+Deviations from the proposal, for validation:
+
+1. **Colliders take `std::shared_ptr<const Shape>`** (`make_shape()`); there is no `PhysicsWorld::create_shape()` returning a
+   `ShapeHandle`-named world object (§A2, §C4). A backend converts a shape once and caches it by its pointer (the shared
+   pointer keeps it alive).
+2. **Backends implement `SteppedWorldBackend` hooks, not the object interfaces**: one framework gives every backend the same
+   deferred edits, checks, objects, threading and queries (the interfaces remain for a world written from scratch).
+3. **Getters work during a step** (they read the published snapshot); only queries return `STEP_IN_PROGRESS`.
+4. **Queries find colliders only** (`QueryOptions` has no "include triggers"): triggers report through `TriggerEvent`s.
+5. **User constraints** (`ConstraintHandle` objects) and the solver's operations come with the reference backend (PH7);
+   `Solver` has its kind only. The integrators' implementations come with PH6.
+6. **A joint changes by `update(description)`** (same kind and bodies) and `set_enabled()`, not by one setter per property.
+7. **The null backend's getters report an empty world** (and `wait_step()` does nothing) instead of throwing; every operation
+   that would make or change something throws.
+8. **World handles are numbered by a process-wide atomic counter** (the one piece of state outside a world: names in
+   errors, not behavior).
+9. **Narrow-phase fixes** to GJK and EPA (above) changed PH2 code.
 ---
 
 ## C. The API as proposed (for validation, not final code)

@@ -262,12 +262,91 @@ enum class ContactAlgorithm : std::uint8_t
     EPA,               ///< Any two convex shapes whose cores overlap: GJK then EPA, face clipping.
 };
 
+/// @brief An axis of a joint's relative motion (the joint's frame): its translations, then its rotations.
+enum class JointAxis : std::uint8_t
+{
+    LINEAR_X,  ///< Translation along x.
+    LINEAR_Y,  ///< Translation along y.
+    LINEAR_Z,  ///< Translation along z.
+    ANGULAR_X, ///< Rotation about x (twist, for cone-twist joints).
+    ANGULAR_Y, ///< Rotation about y.
+    ANGULAR_Z, ///< Rotation about z.
+};
+
+/// @brief How a joint lets an axis move.
+enum class AxisMotion : std::uint8_t
+{
+    FREE,    ///< Freely.
+    LIMITED, ///< Between limits.
+    LOCKED,  ///< Not at all.
+};
+
+/// @brief Who answers a world query.
+enum class QueryEngine : std::uint8_t
+{
+    BACKEND,     ///< The backend's own queries (Box3D's).
+    ABSTRACTION, ///< The abstraction's: its spatial structure and narrow phase (GJK).
+};
+
+/// @brief What a contact event reports.
+enum class ContactEventKind : std::uint8_t
+{
+    BEGIN, ///< Two colliders started touching.
+    END,   ///< They stopped touching (or one was destroyed).
+    HIT,   ///< They hit each other faster than the world's hit threshold.
+};
+
+/// @brief What a joint event reports.
+enum class JointEventKind : std::uint8_t
+{
+    BROKEN, ///< Its force or torque passed its threshold: the joint is disabled (its object stays valid).
+};
+
+/// @brief What a sleep event reports.
+enum class SleepEventKind : std::uint8_t
+{
+    FELL_ASLEEP, ///< The body (with its island) stopped moving and sleeps.
+    WOKE_UP,     ///< The body moves again.
+};
+
+/// @brief A phase of a world step (StepStatistics times each).
+enum class StepPhase : std::uint8_t
+{
+    EDITS,        ///< Applying the edits recorded since the last step.
+    BROAD_PHASE,  ///< Finding candidate pairs.
+    NARROW_PHASE, ///< Computing contacts.
+    SOLVER,       ///< Solving constraints and integrating rigid bodies.
+    SOFT_BODIES,  ///< Simulating soft bodies.
+    EVENTS,       ///< Gathering events and the state getters show.
+};
+
+/// @brief A constraint between soft-body particles.
+enum class SoftBodyConstraintKind : std::uint8_t
+{
+    STRETCH, ///< Keeps two particles at their rest distance (cloth's structural edges, a rope's segments).
+    SHEAR,   ///< A distance across a cloth's cells.
+    BENDING, ///< A distance (or dihedral angle) across neighboring triangles or segments.
+    VOLUME,  ///< Keeps a tetrahedron's volume.
+};
+
 /// @brief A plane of two coordinate axes (a quadtree's).
 enum class AxisPlane : std::uint8_t
 {
     XY, ///< X and Y (Z ignored).
     XZ, ///< X and Z (Y ignored): flat worlds with +Y up.
     YZ, ///< Y and Z (X ignored).
+};
+
+/// @brief The axes along or about which a rigid body may not move (world axes).
+enum class MotionLock : std::uint8_t
+{
+    NONE = 0, ///< No bit.
+    LINEAR_X  = 1U << 0, ///< No translation along x.
+    LINEAR_Y  = 1U << 1, ///< No translation along y.
+    LINEAR_Z  = 1U << 2, ///< No translation along z.
+    ANGULAR_X = 1U << 3, ///< No rotation about x.
+    ANGULAR_Y = 1U << 4, ///< No rotation about y.
+    ANGULAR_Z = 1U << 5, ///< No rotation about z.
 };
 
 /// @brief Collision layers (64 bits): what a collider belongs to and what it collides with (CollisionFilter).
@@ -373,6 +452,9 @@ inline constexpr std::uint32_t MAXIMUM_EPA_FACES = 128;
 
 /// @brief Mesh triangles that meet within about 5° are flat for active edges (TriangleMeshDescription::active_edge_cosine).
 inline constexpr float DEFAULT_ACTIVE_EDGE_COSINE = 0.996F;
+
+/// @brief Standard gravity, in meters per second squared (PhysicsWorldDescription::gravity is -STANDARD_GRAVITY along y).
+inline constexpr float STANDARD_GRAVITY = 9.80665F;
 
 } // namespace gfx::physics
 
@@ -749,6 +831,97 @@ struct EnumerationTraits<physics::ContactAlgorithm>
 };
 
 template<>
+struct EnumerationTraits<physics::JointAxis>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::JointAxis::LINEAR_X, "LINEAR_X"},
+        EnumeratorName{physics::JointAxis::LINEAR_Y, "LINEAR_Y"},
+        EnumeratorName{physics::JointAxis::LINEAR_Z, "LINEAR_Z"},
+        EnumeratorName{physics::JointAxis::ANGULAR_X, "ANGULAR_X"},
+        EnumeratorName{physics::JointAxis::ANGULAR_Y, "ANGULAR_Y"},
+        EnumeratorName{physics::JointAxis::ANGULAR_Z, "ANGULAR_Z"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::AxisMotion>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::AxisMotion::FREE, "FREE"},
+        EnumeratorName{physics::AxisMotion::LIMITED, "LIMITED"},
+        EnumeratorName{physics::AxisMotion::LOCKED, "LOCKED"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::QueryEngine>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::QueryEngine::BACKEND, "BACKEND"},
+        EnumeratorName{physics::QueryEngine::ABSTRACTION, "ABSTRACTION"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::ContactEventKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::ContactEventKind::BEGIN, "BEGIN"},
+        EnumeratorName{physics::ContactEventKind::END, "END"},
+        EnumeratorName{physics::ContactEventKind::HIT, "HIT"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::JointEventKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::JointEventKind::BROKEN, "BROKEN"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::SleepEventKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::SleepEventKind::FELL_ASLEEP, "FELL_ASLEEP"},
+        EnumeratorName{physics::SleepEventKind::WOKE_UP, "WOKE_UP"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::StepPhase>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::StepPhase::EDITS, "EDITS"},
+        EnumeratorName{physics::StepPhase::BROAD_PHASE, "BROAD_PHASE"},
+        EnumeratorName{physics::StepPhase::NARROW_PHASE, "NARROW_PHASE"},
+        EnumeratorName{physics::StepPhase::SOLVER, "SOLVER"},
+        EnumeratorName{physics::StepPhase::SOFT_BODIES, "SOFT_BODIES"},
+        EnumeratorName{physics::StepPhase::EVENTS, "EVENTS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::SoftBodyConstraintKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::SoftBodyConstraintKind::STRETCH, "STRETCH"},
+        EnumeratorName{physics::SoftBodyConstraintKind::SHEAR, "SHEAR"},
+        EnumeratorName{physics::SoftBodyConstraintKind::BENDING, "BENDING"},
+        EnumeratorName{physics::SoftBodyConstraintKind::VOLUME, "VOLUME"},
+    };
+};
+
+template<>
 struct EnumerationTraits<physics::AxisPlane>
 {
     static constexpr bool IS_BITMASK = false;
@@ -756,6 +929,20 @@ struct EnumerationTraits<physics::AxisPlane>
         EnumeratorName{physics::AxisPlane::XY, "XY"},
         EnumeratorName{physics::AxisPlane::XZ, "XZ"},
         EnumeratorName{physics::AxisPlane::YZ, "YZ"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::MotionLock>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::MotionLock::LINEAR_X, "LINEAR_X"},
+        EnumeratorName{physics::MotionLock::LINEAR_Y, "LINEAR_Y"},
+        EnumeratorName{physics::MotionLock::LINEAR_Z, "LINEAR_Z"},
+        EnumeratorName{physics::MotionLock::ANGULAR_X, "ANGULAR_X"},
+        EnumeratorName{physics::MotionLock::ANGULAR_Y, "ANGULAR_Y"},
+        EnumeratorName{physics::MotionLock::ANGULAR_Z, "ANGULAR_Z"},
     };
 };
 
@@ -911,7 +1098,16 @@ static_assert(verify<physics::DepthRange>(), "EnumerationTraits<physics::DepthRa
 static_assert(verify<physics::GjkStatus>(), "EnumerationTraits<physics::GjkStatus>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::EpaStatus>(), "EnumerationTraits<physics::EpaStatus>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::ContactAlgorithm>(), "EnumerationTraits<physics::ContactAlgorithm>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::JointAxis>(), "EnumerationTraits<physics::JointAxis>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::AxisMotion>(), "EnumerationTraits<physics::AxisMotion>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::QueryEngine>(), "EnumerationTraits<physics::QueryEngine>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::ContactEventKind>(), "EnumerationTraits<physics::ContactEventKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::JointEventKind>(), "EnumerationTraits<physics::JointEventKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::SleepEventKind>(), "EnumerationTraits<physics::SleepEventKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::StepPhase>(), "EnumerationTraits<physics::StepPhase>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::SoftBodyConstraintKind>(), "EnumerationTraits<physics::SoftBodyConstraintKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::AxisPlane>(), "EnumerationTraits<physics::AxisPlane>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::MotionLock>(), "EnumerationTraits<physics::MotionLock>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::LayerMask>(), "EnumerationTraits<physics::LayerMask>::NAMES is out of sync with the enumeration");
 static_assert(verify<camera::CameraBackendKind>(), "EnumerationTraits<camera::CameraBackendKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<camera::CameraProjectionKind>(), "EnumerationTraits<camera::CameraProjectionKind>::NAMES is out of sync with the enumeration");
