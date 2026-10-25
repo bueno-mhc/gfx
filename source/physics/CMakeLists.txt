@@ -3,6 +3,8 @@
 # gfx::core only, which the build checks (gfx_require_decoupled) along with the modules their sources import.
 #   gfx::physics_common  enumerations, handles, errors, geometric primitives (`import gfx.physics.primitives;`)
 #   gfx::camera          cameras and camera controllers (`import gfx.camera;`), on gfx::physics_common only
+#   gfx::physics         collision shapes and the narrow phase (`import gfx.physics.shapes;`, `gfx.physics.narrow_phase`);
+#                        later the world interface, spatial structures, dynamics and the backends
 # ==============================================================================
 include(GfxDependencies)
 include(GfxDecoupling)
@@ -77,3 +79,42 @@ target_link_libraries(gfx_camera
     PUBLIC gfx::physics_common
     PRIVATE gfx::project_options)
 gfx_require_decoupled(gfx_camera FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_physics)
+
+# ------------------------------------------------------------------------------ physics
+add_library(gfx_physics)
+add_library(gfx::physics ALIAS gfx_physics)
+target_sources(gfx_physics
+    PUBLIC
+        FILE_SET public_modules TYPE CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            shapes/shapes.cppm
+            shapes/convex.cppm
+            shapes/hull.cppm
+            shapes/mass.cppm
+            shapes/static_bvh.cppm
+            shapes/mesh.cppm
+            shapes/shape.cppm
+            narrow_phase/narrow_phase.cppm
+            narrow_phase/contact.cppm
+            narrow_phase/gjk.cppm
+            narrow_phase/epa.cppm
+            narrow_phase/clipping.cppm
+            narrow_phase/analytic.cppm
+            narrow_phase/convex.cppm
+            narrow_phase/collide.cppm
+            narrow_phase/manifold_cache.cppm
+    PRIVATE
+        narrow_phase/collide.cpp
+        narrow_phase/manifold_cache.cpp
+        shapes/hull.cpp
+        shapes/static_bvh.cpp
+        shapes/mesh.cpp
+        shapes/shape.cpp
+        shapes/shape_kernels.cpp)   # plain translation unit: SIMDe's headers cannot share one with import std
+
+target_compile_features(gfx_physics PUBLIC cxx_std_23)
+target_link_libraries(gfx_physics
+    PUBLIC gfx::physics_common
+    PRIVATE gfx::project_options gfx::simde)
+gfx_require_decoupled(gfx_physics FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)

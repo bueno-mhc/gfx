@@ -1,7 +1,8 @@
 # gfx physics and camera: a decoupled physics abstraction over Box3D, and a camera module — architecture, decisions and plan
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
-(636478b, §B "PH0 as built", deviations accepted); **PH1 implemented** (§B "PH1 as built"), awaiting validation. This
+(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 implemented** (§B "PH2 as built"),
+awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -574,6 +575,116 @@ Deviations from the proposal, for validation:
 7. **Added beyond §A13**: `world_to_screen()` (projection to pixels and clip depth: round trips, labels, picking),
    `set_pose()` (one recomputation for a controller's move and turn), `translate()`, `set_aspect_ratio()`,
    `camera_problem()` usable in constant expressions, an orthographic near plane that may be negative (behind the camera).
+
+### PH2 as built (2026-10-24)
+
+Target **`gfx::physics`** (`gfx_physics`: PUBLIC `gfx::physics_common`, PRIVATE SIMDe; it never links the camera), which
+the later phases grow. Two modules:
+
+**`gfx.physics.shapes`** (`source/physics/shapes/`):
+
+- `:convex` — `SphereShape`, `CapsuleShape` (axis +Y), `CylinderShape`, `ConeShape` (apex +Y), `BoxShape` (with a rounding
+  `radius`), `TriangleShape`: constexpr values, each a `ConvexShape` (support of the margin-free core, `margin()`, `bounds()`)
+  and a **`FacedConvexShape`** with `supporting_face(direction)` → `SupportingFace` (a polygon counter-clockwise around its
+  outward normal, a segment or a point, with a stable `face` index for feature ids). Curved shapes switch to a face within
+  about 5.7°: a cylinder's cap or a cone's base as an octagon, a cylinder's side line, a cone's slant, a capsule's segment.
+- `:hull` — `HullView` (vertices, face planes, face polygons as `HullFace` ranges of uint16 indices, radius),
+  `FixedHull<V, F, I>` and **`convex_hull<V, F, I>(points)`** (consteval quickhull: a hull known at compile time is built by
+  the compiler; a call to `convex_hull_rejected_the_points()` or `convex_hull_capacity_is_too_small()` in the diagnostic
+  names the problem), `HullShape` (owning; `from_points()` runs the same quickhull at run time; descriptive PhysicsErrors
+  for fewer than 4, coincident, collinear, coplanar or infinite points). Quickhull computes in double precision with the
+  tolerance 3 · FLT_EPSILON · (largest |x| + |y| + |z|), finds horizons by depth-first search over triangle neighbors, and
+  merges coplanar adjacent triangles (normals within 0.00001, vertices within 8 tolerances) into polygons whose planes keep
+  every vertex behind them.
+- `:mass` — `MassProperties` {mass, center of mass, inertia about it}: closed forms for sphere, box, capsule, cylinder and
+  cone (rounding not counted), the covariance method for hulls and closed meshes (`surface_mass_properties()` over any range
+  of triangles), `transformed()`, `combined()` (parallel axis theorem), `principal_axes()` (cyclic Jacobi, right-handed
+  frame) — all constexpr.
+- `:static_bvh` — `StaticBvh`: built once (binned SAH, 16 bins, leaves of 4, median splits below depth 32 so a stack of 64
+  holds the traversal), queries by box, by segment and of item pairs between two hierarchies (the second posed), testing each
+  item's own box.
+- `:mesh` — `TriangleMeshShape` (`TriangleMeshDescription`: vertices, index triples, `two_sided`, `active_edge_cosine`;
+  triangles' BVH; **active edges** from edges sorted by their vertices: an edge between triangles that meet flat or folded
+  inward is inactive; `closed()`), `HeightFieldShape` (`HeightFieldDescription`: a `std::mdspan` of heights rows × columns,
+  scale; two triangles per cell facing +Y; active edges from the grid on demand; cell-range queries).
+- `:shape` — **`Shape`**: immutable geometry, `ShapeGeometry = std::variant<SphereShape, CapsuleShape, CylinderShape,
+  ConeShape, BoxShape, HullShape, TriangleMeshShape, HeightFieldShape, CompoundShape>` in `ShapeKind`'s order, sizes checked
+  when made, `kind()`, `is_convex()`, `get_if<>()`, local and posed `bounds()` (tight for convex shapes, from six supports),
+  `mass_properties(density)`; `make_shape()` → `std::shared_ptr<const Shape>`; `CompoundShape` (children: shared shapes at
+  poses, a BVH over their boxes); `convex_bounds()`.
+- SIMD: `HullShape::support()` runs a SIMDe kernel from 16 vertices on (`shape_kernels.cpp`: four vertices per step, per-lane
+  first maximum, lanes reduced to the smallest index among equals) — the same vertex as the scalar loop.
+
+**`gfx.physics.narrow_phase`** (`source/physics/narrow_phase/`):
+
+- `:contact` — `ContactFeature` {sub-shape of each side, 32-bit local id: reference face, incident face, incident vertex or
+  (incident edge × reference side) or reference corner, and which side is the reference; or a point contact's two features},
+  `ContactPoint` {position midway between the surfaces, separation along the normal, feature, normal and tangent impulses},
+  `ContactManifold` {normal from the first shape to the second, up to 4 points, sub-shapes, `ContactAlgorithm`},
+  `CollisionSettings` {speculative_distance 0.02, merge_cosine 0.999, maximum_manifolds 8}, `flipped()`,
+  `reduce_contact_points()` (deepest, farthest from it, widest triangle, farthest on the other side).
+- `:gjk` — `MinkowskiDifference`, `gjk()` (Ericson's Voronoi-region closest points on the simplex, barycentric witness
+  points, relative tolerance 1e-5, at most MAXIMUM_GJK_ITERATIONS), `GjkResult` with the final simplex.
+- `:epa` — `epa()` from GJK's simplex (grown to a tetrahedron along directions that give volume), fixed storage
+  (MAXIMUM_EPA_VERTICES, MAXIMUM_EPA_FACES), horizon by edges seen once, `EpaResult` {status, normal, depth, deepest points}.
+- `:clipping` — `posed_face()`, `face_manifold()` (reference = the polygon better aligned with the normal, the first's on a
+  tie; Sutherland–Hodgman against its side planes with feature tags; a segment clipped parametrically; points up to the
+  speculative distance), `point_manifold()`, `contact_manifold()` (faces, else one point).
+- `:analytic` — sphere–sphere, sphere–capsule, capsule–capsule (two points when parallel and overlapping), sphere–box
+  (27 regions as features), and the separating axis test for box–box and triangle–triangle (face axes kept unless an edge
+  axis separates by 5 % more, edge contacts at the edges' closest points).
+- `:convex` — **`collide_convex(first, pose, second, pose, settings)`**: the analytic pairs in either order at compile time,
+  else `collide_convex_general()` (GJK on the cores; separated within the speculative distance: GJK's normal; overlapping:
+  EPA; then the manifold); `convex_distance()` → `ShapeDistance`. constexpr: the tests collide two boxes at compile time.
+- `:collide` — **`collide(ShapeInstance, ShapeInstance, ContactCollector&, settings)`** for any two shapes: compounds recurse
+  into the children under the other's box (manifolds name the child); a convex shape against a mesh or height field
+  collides with each triangle under its box in the triangles' frame (one-sided unless two-sided; a manifold whose every
+  point is on the face or on inactive edges takes the face's normal); two meshes or height fields collide triangle by
+  triangle; manifolds whose normals agree merge (points reduced to 4), at most maximum_manifolds kept, the deepest.
+  `ContactCollector` keeps its vectors between calls; `collide()` is pure (one collector per thread). `shape_distance()` for
+  convex shapes.
+- `:manifold_cache` — `ManifoldKey` {two `ColliderHandle`s, two sub-shapes}, `ManifoldCache` (pimpl: open addressing,
+  doubling past half full, end_step() keeping the step's entries without tombstones): each step `update()` the fresh
+  manifolds (impulses copied by feature id), solve, `store()` the solved manifolds, `end_step()` (unused pairs forgotten).
+
+**Toolchain defect found** (§6.13 of the project memory): a handle whose tag one module declares, instantiated by a second
+module (`std::optional` members of `PhysicsErrorContext`) and by a partition of a third (a braced default initializer or a
+defaulted comparison of a struct holding one), makes the partition's module file unreadable ("failed to read compiled module
+cluster N: Bad file data"), and reading on, crashes GCC in an implementation unit. Workaround: every physics handle is
+explicitly instantiated at the end of `handles.cppm`, so importers share one instantiation. Detector:
+`CompilationFailure.HandleInstantiatedInSeveralModulesCorruptsModuleFile` (`tests/toolchain/defects/handle_instantiation_*`).
+
+Tests: **`gfx_physics_tests`** (22): supporting faces, the compile-time cube and wedge hulls, mass properties of hulls and
+formulas (all `static_assert`ed); random hulls holding their points, every vertex on its faces, Euler's formula, the SIMD
+support against the scalar one; hulls rejected; a 256-sided hull against the cylinder, capsule and sphere formulas,
+principal axes of a turned box, two boxes against one; a flat grid's and a closed cube mesh's active edges and the cube's
+mass; a height field's triangles, active edges, queries; shapes' checks; a compound's bounds, mass, children; the BVH against
+brute force (box, segment and pair queries). GJK and EPA: sphere–box distances against the box's closest point, capsule–box
+against sampling (500 random poses), box–box penetrations against the separating-axis minimum (1000 poses; the normal
+separates them by the depth), curved and touching shapes; at compile time too. Manifolds: points per resting pair (box 4,
+sphere 1, capsule lying 2 and standing 1, cylinder standing 4 and lying 2, cone 4, hull cube 4, rounded box 4, all at the
+right depth, midway), feature ids through 100 nudged steps, speculative contacts, reversed orders, analytic against general
+paths, the reduction of 9 points, a manifold at compile time. Collision of shapes: a box sliding over a triangulated floor
+(one manifold of four points, the floor's normal at every seam — the test fails with the active-edge correction disabled),
+one- and two-sided meshes, a height-field ridge (two normals; the deepest kept with one manifold), a table compound on the
+ground (16 leg contacts merged into 4, a leg named), mesh against mesh, checked inputs, a collector that keeps its storage;
+the manifold cache (impulses by feature, end of steps, growth). Plus the detector and the new enumerations' round trips.
+
+Deviations from the proposal, for validation:
+
+1. **Shapes are values** (`SphereShape` … `CompoundShape`) inside an immutable `Shape` shared through
+   `std::shared_ptr<const Shape>`; the world's `ShapeHandle`-named shape objects (§A2) come with the interfaces (PH4) and
+   will wrap these.
+2. **Rounded boxes and hulls** (`radius`, the margin) are supported in collision; mass properties count the core only.
+3. **Curved faces as octagons**: a cylinder standing or a cone on its base touches through an octagon of its cap or base
+   (reduced to 4 points); the hull approximations for Box3D (§A6) are PH5's.
+4. **Mesh contacts are one-sided by default** (`TriangleMeshDescription::two_sided`); triangle–triangle contacts (mesh against
+   mesh) use neither one-sidedness nor active edges.
+5. **The narrow phase is not yet behind an interface**: `collide()` and `collide_convex()` are the reference implementation;
+   the `NarrowPhase` interface (§A6) arrives with the other interfaces in PH4. Ray and shape casts against shapes come with
+   the queries (PH3, PH4).
+6. **Manifold cache API**: update (warm start) → solve → `store()` → `end_step()`, keyed by colliders and sub-shapes;
+   single-threaded (the narrow phase itself is pure and can run in parallel).
 
 ---
 

@@ -63,3 +63,18 @@ gfx_add_compilation_failure_test(UsingDeclarationOfImportedEnumerationCrashesCom
     MODULES using_declaration_enumerations.cppm using_declaration_function.cppm
     EXPECTED_DIAGNOSTIC "internal compiler error"
     WITHOUT_PROJECT_OPTIONS)
+
+# A handle (gfx::Handle<Tag>) whose tag a module declares, instantiated by a second module (std::optional members)
+# and by a partition of a third (a braced default initializer and a defaulted comparison of a struct holding one),
+# makes the partition's module file unreadable for its primary interface ("failed to read compiled module cluster
+# N: Bad file data"); reading on, an implementation unit of that module may crash GCC (internal compiler error in
+# finish_member_declaration).
+# Workaround: every handle explicitly instantiated in the module that declares its tag (the end of
+# source/physics/handles.cppm), so that importers share one instantiation.
+gfx_add_compilation_failure_test(HandleInstantiatedInSeveralModulesCorruptsModuleFile
+    SOURCES handle_instantiation_importer.cpp
+    MODULES handle_instantiation_primary.cppm handle_instantiation_key.cppm handle_instantiation_context.cppm
+            handle_instantiation_handles.cppm
+    EXPECTED_DIAGNOSTIC "failed to read compiled module"
+    LIBRARIES gfx::core
+    WITHOUT_PROJECT_OPTIONS)

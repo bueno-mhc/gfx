@@ -233,6 +233,35 @@ enum class DepthRange : std::uint8_t
     NEGATIVE_ONE_TO_ONE, ///< OpenGL.
 };
 
+/// @brief What GJK found about two convex cores.
+enum class GjkStatus : std::uint8_t
+{
+    SEPARATED,   ///< The cores are apart: GjkResult::distance and the closest points hold.
+    OVERLAPPING, ///< The cores touch or overlap: EPA gives the penetration.
+};
+
+/// @brief How EPA ended.
+enum class EpaStatus : std::uint8_t
+{
+    CONVERGED,        ///< The penetration depth is within the tolerance.
+    ITERATION_LIMIT,  ///< The iterations ran out: the best face found so far.
+    CAPACITY_REACHED, ///< The polytope filled its fixed storage: the best face found so far.
+    DEGENERATE,       ///< The cores only touch, or the polytope collapsed: depth 0 along the best normal known.
+};
+
+/// @brief What computed a contact manifold.
+enum class ContactAlgorithm : std::uint8_t
+{
+    SPHERE_SPHERE,     ///< Two spheres (analytic).
+    SPHERE_CAPSULE,    ///< A sphere and a capsule (analytic).
+    CAPSULE_CAPSULE,   ///< Two capsules (analytic: closest points of their segments).
+    SPHERE_BOX,        ///< A sphere and a box (analytic).
+    BOX_BOX,           ///< Two boxes (separating axis test, face clipping).
+    TRIANGLE_TRIANGLE, ///< Two triangles of meshes or height fields (separating axis test).
+    GJK,               ///< Any two convex shapes apart or touching: GJK distance, face clipping.
+    EPA,               ///< Any two convex shapes whose cores overlap: GJK then EPA, face clipping.
+};
+
 /// @brief A plane of two coordinate axes (a quadtree's).
 enum class AxisPlane : std::uint8_t
 {
@@ -326,6 +355,24 @@ inline constexpr float DEFAULT_RESTITUTION_THRESHOLD = 1.0F;
 
 /// @brief Tolerance of geometric tests (parallel directions, degenerate segments, plane distances), in units.
 inline constexpr float GEOMETRIC_TOLERANCE = 1.0e-6F;
+
+/// @brief Vertices a supporting face (a polygon used to build contact manifolds) holds at most.
+inline constexpr std::uint32_t MAXIMUM_FACE_VERTICES = 32;
+
+/// @brief The sub-shape of a shape that has none (a convex shape): ContactManifold::sub_shape_first and _second.
+inline constexpr std::uint32_t NO_SUB_SHAPE = 0xFFFFFFFFU;
+
+/// @brief GJK iterations at most (smooth shapes converge linearly; polytopes in a few iterations).
+inline constexpr std::uint32_t MAXIMUM_GJK_ITERATIONS = 64;
+
+/// @brief Vertices an EPA polytope holds at most.
+inline constexpr std::uint32_t MAXIMUM_EPA_VERTICES = 64;
+
+/// @brief Faces an EPA polytope holds at most.
+inline constexpr std::uint32_t MAXIMUM_EPA_FACES = 128;
+
+/// @brief Mesh triangles that meet within about 5° are flat for active edges (TriangleMeshDescription::active_edge_cosine).
+inline constexpr float DEFAULT_ACTIVE_EDGE_COSINE = 0.996F;
 
 } // namespace gfx::physics
 
@@ -664,6 +711,44 @@ struct EnumerationTraits<physics::DepthRange>
 };
 
 template<>
+struct EnumerationTraits<physics::GjkStatus>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GjkStatus::SEPARATED, "SEPARATED"},
+        EnumeratorName{physics::GjkStatus::OVERLAPPING, "OVERLAPPING"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::EpaStatus>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::EpaStatus::CONVERGED, "CONVERGED"},
+        EnumeratorName{physics::EpaStatus::ITERATION_LIMIT, "ITERATION_LIMIT"},
+        EnumeratorName{physics::EpaStatus::CAPACITY_REACHED, "CAPACITY_REACHED"},
+        EnumeratorName{physics::EpaStatus::DEGENERATE, "DEGENERATE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::ContactAlgorithm>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::ContactAlgorithm::SPHERE_SPHERE, "SPHERE_SPHERE"},
+        EnumeratorName{physics::ContactAlgorithm::SPHERE_CAPSULE, "SPHERE_CAPSULE"},
+        EnumeratorName{physics::ContactAlgorithm::CAPSULE_CAPSULE, "CAPSULE_CAPSULE"},
+        EnumeratorName{physics::ContactAlgorithm::SPHERE_BOX, "SPHERE_BOX"},
+        EnumeratorName{physics::ContactAlgorithm::BOX_BOX, "BOX_BOX"},
+        EnumeratorName{physics::ContactAlgorithm::TRIANGLE_TRIANGLE, "TRIANGLE_TRIANGLE"},
+        EnumeratorName{physics::ContactAlgorithm::GJK, "GJK"},
+        EnumeratorName{physics::ContactAlgorithm::EPA, "EPA"},
+    };
+};
+
+template<>
 struct EnumerationTraits<physics::AxisPlane>
 {
     static constexpr bool IS_BITMASK = false;
@@ -823,6 +908,9 @@ static_assert(verify<physics::FrustumIntersection>(), "EnumerationTraits<physics
 static_assert(verify<physics::FrustumPlane>(), "EnumerationTraits<physics::FrustumPlane>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PlaneSide>(), "EnumerationTraits<physics::PlaneSide>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::DepthRange>(), "EnumerationTraits<physics::DepthRange>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GjkStatus>(), "EnumerationTraits<physics::GjkStatus>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::EpaStatus>(), "EnumerationTraits<physics::EpaStatus>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::ContactAlgorithm>(), "EnumerationTraits<physics::ContactAlgorithm>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::AxisPlane>(), "EnumerationTraits<physics::AxisPlane>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::LayerMask>(), "EnumerationTraits<physics::LayerMask>::NAMES is out of sync with the enumeration");
 static_assert(verify<camera::CameraBackendKind>(), "EnumerationTraits<camera::CameraBackendKind>::NAMES is out of sync with the enumeration");

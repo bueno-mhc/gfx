@@ -170,3 +170,24 @@ template<class Type>
 concept CameraObjectHandle = std::same_as<Type, CameraHandle> || std::same_as<Type, CameraControllerHandle>;
 
 } // namespace gfx::physics
+
+// Every physics handle instantiated here, once: the modules that use them (errors, the narrow phase, …) then share these
+// instantiations instead of each making its own, which GCC 16 fails to merge (a module file it cannot read back, or an
+// internal compiler error in the importer: §6.13 of the project memory).
+template class gfx::Handle<gfx::physics::WorldTag>;
+template class gfx::Handle<gfx::physics::RigidBodyTag>;
+template class gfx::Handle<gfx::physics::SoftBodyTag>;
+template class gfx::Handle<gfx::physics::ColliderTag>;
+template class gfx::Handle<gfx::physics::ShapeTag>;
+template class gfx::Handle<gfx::physics::ConstraintTag>;
+template class gfx::Handle<gfx::physics::JointTag>;
+template class gfx::Handle<gfx::physics::TriggerTag>;
+template class gfx::Handle<gfx::physics::SpatialStructureTag>;
+template class gfx::Handle<gfx::physics::SpatialProxyTag>;
+template class gfx::Handle<gfx::physics::BroadPhaseTag>;
+template class gfx::Handle<gfx::physics::NarrowPhaseTag>;
+template class gfx::Handle<gfx::physics::SolverTag>;
+template class gfx::Handle<gfx::physics::IntegratorTag>;
+template class gfx::Handle<gfx::physics::ContactManifoldTag>;
+template class gfx::Handle<gfx::physics::CameraTag>;
+template class gfx::Handle<gfx::physics::CameraControllerTag>;

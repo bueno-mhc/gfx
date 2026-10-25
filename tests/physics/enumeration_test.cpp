@@ -45,6 +45,9 @@ TEST(PhysicsEnumerationsTest, EveryEnumeratorIsSpelledAndParsed)
     EXPECT_TRUE(round_trips<PlaneSide>());
     EXPECT_TRUE(round_trips<DepthRange>());
     EXPECT_TRUE(round_trips<AxisPlane>());
+    EXPECT_TRUE(round_trips<GjkStatus>());
+    EXPECT_TRUE(round_trips<EpaStatus>());
+    EXPECT_TRUE(round_trips<ContactAlgorithm>());
     EXPECT_TRUE(round_trips<LayerMask>());
     EXPECT_TRUE(round_trips<gfx::camera::CameraBackendKind>());
     EXPECT_TRUE(round_trips<gfx::camera::CameraProjectionKind>());

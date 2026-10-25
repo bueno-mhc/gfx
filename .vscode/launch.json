@@ -150,6 +150,7 @@
                 { "label": "ui platform - Backends/UiPlatformInputTest.*, Backends/UiWindowTest.* (platform adapter, visible windows)", "value": "ui/gfx_ui_platform_tests.exe" },
                 { "label": "physics    - PhysicsEnumerationsTest.*, PhysicsHandlesTest.*, PhysicsErrorsTest.*, PrimitivesTest.*, IntersectionTest.*, BatchTest.*", "value": "physics/gfx_physics_common_tests.exe" },
                 { "label": "camera     - CameraProjectionTest.*, CameraTest.*, CameraControllerTest.*", "value": "physics/gfx_camera_tests.exe" },
+                { "label": "physics shapes - ShapeTest.*, GjkEpaTest.*, ContactTest.*, CollideTest.*, ManifoldCacheTest.*", "value": "physics/gfx_physics_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
             "default": "graphics/handles/gfx_handles_tests.exe"

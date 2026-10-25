@@ -470,6 +470,26 @@ Original hard requirements (from the user's initial specification):
   physics::classify, camera::projection_matrix). GfxCheckModuleImports.cmake fixed (a prefix longer than the module broke
   SUBSTRING). Tests: gfx_camera_tests (16), PhysicsDecoupling.CameraImportsNoPhysicsInterface,
   PhysicsDecoupling.CameraImportsOfThePhysicsInterfaceAreFound (fixture decoupling_fixture/camera).
+- **Shapes and narrow phase (PH2 as built, 2026-10-24)** — docs/physics-design.md §B "PH2 as built" (6 deviations). Target
+  `gfx::physics` (source/physics; forbids gfx_camera too). `gfx.physics.shapes`: :convex (Sphere/Capsule/Cylinder/Cone/Box
+  (+radius)/TriangleShape, supporting_face → SupportingFace polygons CCW, concept FacedConvexShape), :hull (HullView,
+  FixedHull, consteval convex_hull<V,F,I>(points) = constexpr quickhull in double with transient std::vectors, HullShape::
+  from_points; SIMD support kernel shape_kernels.cpp ≥ 16 vertices), :mass (MassProperties, covariance method, transformed,
+  combined, principal_axes Jacobi), :static_bvh (StaticBvh, item boxes tested, stack 64), :mesh (TriangleMeshShape with active
+  edges + two_sided; HeightFieldShape over std::mdspan, active edges on demand), :shape (Shape = variant in ShapeKind order,
+  CompoundShape with shared_ptr<const Shape> children, make_shape, convex_bounds). `gfx.physics.narrow_phase`: :contact
+  (ContactFeature 3×u32, ContactPoint, ContactManifold normal first→second, CollisionSettings, reduce_contact_points,
+  contact_features packing), :gjk, :epa (fixed storage), :clipping (face_manifold, point_manifold, contact_manifold), :analytic
+  (sphere/capsule/box pairs, SAT box–box and triangle–triangle), :convex (collide_convex compile-time dispatch,
+  collide_convex_general, convex_distance), :collide (collide(ShapeInstance…) with compounds, convex vs triangles one-sided +
+  active-edge correction, triangle pairs, normal merging; ContactCollector; shape_distance), :manifold_cache (ManifoldKey,
+  ManifoldCache pimpl: update → solve → store → end_step). Enumerations added: GjkStatus, EpaStatus, ContactAlgorithm;
+  constants MAXIMUM_FACE_VERTICES, NO_SUB_SHAPE, MAXIMUM_GJK_ITERATIONS, MAXIMUM_EPA_VERTICES/FACES, DEFAULT_ACTIVE_EDGE_COSINE
+  (generator scratchpad physics_enums_ph2.py; convert its output to CRLF). Tests gfx_physics_tests (22; the seam test fails
+  with the active-edge correction disabled — checked). Gotchas: gtest macros split on commas inside braces (wrap the
+  statement in parentheses); a join_view of prvalue ranges is not const-iterable (take ranges by forwarding reference);
+  inf - inf is not constant (compare with ±FLT_MAX); Move-Item keeps old timestamps (ninja then skips a restored file: touch
+  it).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -797,6 +817,15 @@ Original hard requirements (from the user's initial specification):
    Workaround: name the enumeration in full (gfx.ui.platform's navigation_bindings::gamepad()). Detector:
    `CompilationFailure.UsingDeclarationOfImportedEnumerationCrashesCompiler` (tests/toolchain/defects/using_declaration_*).
 
+13. **A handle (`gfx::Handle<Tag>`) whose tag one module declares, instantiated by a second module (`std::optional` members) and
+   by a partition of a third** (a braced default initializer `ColliderHandle first{};` or a defaulted `operator==` of a struct
+   holding one) makes the partition's module file unreadable ("failed to read compiled module cluster N: Bad file data"), and
+   reading on, an implementation unit of that module may hit an internal compiler error in finish_member_declaration.
+   Workaround: every physics handle explicitly instantiated at the end of source/physics/handles.cppm (`template class
+   gfx::Handle<gfx::physics::WorldTag>;` …) so importers share one instantiation (defect 10 may have the same root cause).
+   Detector: `CompilationFailure.HandleInstantiatedInSeveralModulesCorruptsModuleFile` (tests/toolchain/defects/
+   handle_instantiation_*: handles, context, key partition, primary, importer). Found by bisecting manifold_cache.cppm.
+
 ## 7. Repository layout (current)
 
 ```
@@ -846,9 +875,11 @@ gfx/
 │                  errors.cppm/.cpp, primitives/ (gfx.physics.primitives: primitives.cppm + partitions, convex_hull.cpp,
 │                  primitive_kernels.hpp/.cpp SIMDe plain TU); camera/ (PH1: camera.cppm, camera_factory.cppm/.cpp,
 │                  interface/ {interface, projection, camera_object, controller}.cppm + camera.cpp, controller.cpp,
-│                  backends/standard/ standard.cppm + standard_camera.cpp, standard_controllers.cpp)
+│                  backends/standard/ standard.cppm + standard_camera.cpp, standard_controllers.cpp); PH2: shapes/ (gfx.physics.shapes:
+│                  shapes.cppm + convex/hull/mass/static_bvh/mesh/shape partitions, .cpp units, shape_kernels SIMDe plain TU),
+│                  narrow_phase/ (gfx.physics.narrow_phase: contact/gjk/epa/clipping/analytic/convex/collide/manifold_cache)
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests incl. math_test.cpp + slot_table/), physics/ (PH0:
-            gfx_physics_common_tests, PH1 gfx_camera_tests (camera_projection/camera/controller_test.cpp), physics_test_support.cppm,
+            gfx_physics_common_tests, PH1 gfx_camera_tests (camera_projection/camera/controller_test.cpp), PH2 gfx_physics_tests (shape/gjk_epa/contact/collide_test.cpp), physics_test_support.cppm,
             decoupling_fixture/ (+ camera/)), compilation/physics/, platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
             sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
@@ -915,11 +946,11 @@ gfx/
 | 4 | Shader toolchain: `gfx_add_shaders()`, SPIRV-Cross reflection, Debug run-time GLSL/HLSL compile + hot reload | **done with step 3b** except DXC (HLSL through glslang) and a shipped shader header declaring the bindless arrays (tests have their own `bindless.glsl`) |
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
 | UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
-| PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) implemented, awaiting validation** (§5 'Camera', docs/physics-design.md §B 'PH1 as built', 7 deviations; README '## Camera' section compile-checked). Next: PH2 shapes and narrow phase. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
+| PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) implemented, awaiting validation** (§5 'Shapes and narrow phase', docs/physics-design.md §B 'PH2 as built', 6 deviations; new toolchain defect 13 + detector). Next: PH3 spatial structures and broad phase. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`); a headless sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **860**, all passing in Debug and Release, 2026-10-24 (after PH1: + 16 gfx_camera_tests, + 2 camera decoupling tests; skips Debug 4, Release 19; run from PowerShell). Before: 842 (after PH0: + 20 gfx_physics_common_tests, + 8 MathTest in gfx_core_tests, + 2 PhysicsDecoupling, + 2 physics compile-failure tests; skips Debug 4, Release 19; run from PowerShell). Before: 810 (after the follow-up on submissions: + 1
+Test count at last report: **883**, all passing in Debug and Release, 2026-10-24 (after PH2: + 22 gfx_physics_tests, + 1 defect detector HandleInstantiatedInSeveralModulesCorruptsModuleFile; skips Debug 4, Release 19; run from PowerShell). Before: 860 (after PH1: + 16 gfx_camera_tests, + 2 camera decoupling tests; skips Debug 4, Release 19; run from PowerShell). Before: 842 (after PH0: + 20 gfx_physics_common_tests, + 8 MathTest in gfx_core_tests, + 2 PhysicsDecoupling, + 2 physics compile-failure tests; skips Debug 4, Release 19; run from PowerShell). Before: 810 (after the follow-up on submissions: + 1
 submission allocation test, + 1 CTest run of gfx_vulkan_allocation_tests on physical device 0; skips Debug 4, Release 19; run
 from PowerShell). Before: 808 (after the fix after U10: + 1 caret/hit-test reference test). Before: 807 (after the follow-up after U10: + 2
 gfx_vulkan_allocation_tests; skips Debug 4, Release 19; run from PowerShell). Before: 805 (after U10: + 1 context test (slots in turn),
