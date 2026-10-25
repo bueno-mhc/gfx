@@ -20,3 +20,9 @@ endif()
 if(TARGET gfx_physics AND TARGET gfx_camera)
     add_subdirectory(physics)
 endif()
+
+# The physics sandbox: a physics world (Box3D or the reference backend) drawn as lit meshes with Vulkan, seen through an
+# orbit camera, with UI panels (physics + camera + graphics + platform + UI, with the UI's atlas tool for its font).
+if(GFX_BACKEND_VULKAN AND TARGET gfx_ui_platform AND TARGET gfx_ui_atlas_builder AND TARGET gfx_physics AND TARGET gfx_camera)
+    add_subdirectory(physics_sandbox)
+endif()

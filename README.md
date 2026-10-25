@@ -1298,6 +1298,22 @@ build/debug/examples/physics/gfx_physics_example.exe --backend reference
 default), `--threads <count>` the task scheduler's threads; the exit code is 1 when a check fails. CTest
 runs it on both backends with `--steps 240 --threads 4`.
 
+`examples/physics_sandbox` puts every library in one window (in progress: [design](docs/physics-sandbox-design.md)): a
+physics world (Box3D or the reference backend) stepped at 60 Hz on its own thread while the main thread reads the
+window's events, moves an orbit camera, builds the UI and draws the bodies as lit, instanced meshes with Vulkan
+(4x multisampling, reversed depth), interpolated between the last two steps. Every shape is tessellated once by
+`gfx.physics.debug_draw`; a statistics panel shows the step's phases and the frame. Right drag orbits, middle drag
+pans, the wheel zooms.
+
+```bash
+build/debug/examples/physics_sandbox/gfx_physics_sandbox.exe --backend sdl3 --physics reference
+```
+
+`--backend`, `--device`, `--frames` (one physics step per frame) and `--validation` work as for the windowed
+example; `--physics box3d|reference` picks the physics backend, `--threads` the physics task scheduler's threads,
+`--capture <file.ppm>` writes the last frame. CTest runs it on every platform backend with `--frames 240
+--validation`.
+
 ## Requirements (Windows)
 
 | Tool | Version verified | Notes |
@@ -1372,6 +1388,7 @@ gfx/
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
 ├── examples/physics/     a headless physics scene on Box3D or the reference backend, with two cameras, checked
+├── examples/physics_sandbox/  a physics world drawn with Vulkan under an orbit camera, with UI panels
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,

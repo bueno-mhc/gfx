@@ -1,6 +1,6 @@
 # gfx physics sandbox: an interactive application over every library — decisions and plan
 
-Status: **answers given 2026-10-25** (below); **S1 implemented** (§C "S1 as built"), awaiting validation.
+Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 implemented** (§C "S2 as built"), awaiting validation.
 
 The request (2026-10-25): *a visual test combining all abstractions, for the physics simulation — an application where I
 can interact and see the physics being calculated and executed, with graphics.* It is `examples/physics_sandbox`: a window
@@ -68,3 +68,53 @@ formula for the rounded box and hull) and converging; an unrounded box is 12 tri
 height fields keep their triangles, order and heights; compounds are their children (vertices on the compound's surface,
 volumes adding up); too few segments are refused; every line helper. Checked: without the corner patches, the closedness
 and volume tests fail for both rounded shapes.
+
+### S2 as built (2026-10-25)
+
+`examples/physics_sandbox` (target `gfx_physics_sandbox`; links the platform bridge, the UI and its platform adapter, the
+physics and camera libraries): three units of its own and four shaders.
+
+- **`physics_sandbox.renderer`** (`renderer.cppm`/`.cpp`): `SceneRenderer` — every shape tessellated once
+  (`gfx.physics.debug_draw`, 32 segments) when an instance first names it, its vertices (six words: position, normal) and
+  indices copied by the graphics library's `Uploader` into two device-local buffers every mesh shares (32 MiB / 16 MiB; a
+  mesh waits a frame when a frame's 16 MiB of staging is used up); a frame's instances (nine words: translation,
+  orientation, packed color, flags) and debug lines (four words) in a host-visible `TransientBufferAllocator` region;
+  `render()` records one pass — a 4x multisampled color target (when the device has 4 samples for color and depth)
+  resolved into the frame's image, a D32 depth target cleared to 0 for reversed depth (GREATER_OR_EQUAL), both transient
+  and made again when the window's size changes — with one instanced `draw_indexed()` per mesh (instances sorted by mesh,
+  one-sided meshes with back faces culled, two-sided ones without) and the lines last (depth tested, not written).
+  Shaders (`gfx_add_shaders()`, module `physics_sandbox.shaders`): `mesh.vert` pulls vertices and instances from the
+  bindless storage buffers (no vertex input), turns positions and normals by the instance's quaternion, converts sRGB
+  colors to linear; `mesh.frag` lights them (a directional light, a sky/ground ambient), draws the floor's grid (flag 1:
+  lines every meter and stronger every five, antialiased with `fwidth`) and a highlight tint (flag 2, for S3);
+  `line.vert`/`line.frag` for the lines.
+- **`physics_sandbox.scene`** (`scene.cppm`/`.cpp`): `Scene` — the world (`asynchronous_stepping`, on a
+  `ThreadTaskScheduler`) and `SceneBody`s (the body, its colliders with their shapes and poses, kind, color, flags, the
+  poses of the last two completed steps, awake). `advance(seconds)`: completes the step begun by the previous call, runs
+  the steps due beyond one at once (a frame longer than 0.25 s is not caught up), begins the next on the world's thread —
+  it runs while the frame is drawn —; `drawn_pose()` interpolates the last two completed poses (core math's
+  `interpolate(Transform, Transform, fraction)`). `build_showcase()`: a 80 × 80 m floor with the grid, a pyramid of 21
+  crates, three of each convex kind (sphere, capsule, cylinder, cone, a hull built at compile time — a plinth —, a
+  compound dumbbell) falling from staggered heights, a static ramp with three balls, a static height-field mound.
+- **`physics_sandbox.cpp`**: platform and window, Vulkan device and `WindowSwapchain`, `FrameTimeline` and
+  `FrameCommandPools`, the input system (right drag orbits, middle drag pans, the wheel zooms, Escape quits; ignored while
+  the UI wants the mouse), a perspective camera (vertical field of view 0.9, near 0.05 m, no far plane, reversed depth,
+  +Y down in normalized device coordinates for Vulkan) turned by the camera library's orbit controller, the UI (Noto Sans
+  atlas built by `gfx_add_ui_atlas()`, 15 points) with a statistics panel (backend, threads, step, bodies awake, pairs,
+  contact points, each step phase's time, a plot of the last 180 steps' times, the frame time and rate, instances, draws,
+  lines, meshes). A frame: events → actions → camera → `Scene::advance()` → the scene's instances (sleeping bodies
+  darker) and the world's axes → the UI → the scene's pass, then the UI's pass over the resolved image (loaded) → present.
+  Options `--backend`, `--physics`, `--device`, `--threads`, `--frames` (one step per frame: the same frames on any
+  machine), `--validation`, `--capture <file.ppm>` (the last frame read back; swapchain images made copyable for it).
+
+CTest: `PhysicsSandbox.{SDL3,GLFW}` (`--frames 240 --validation`, label `example`). Checked by hand: Box3D on NVIDIA with
+SDL3, the reference backend on Intel with GLFW, Box3D on Intel with SDL3 — no validation message; the captures show the
+lit shapes, the grid, the panel.
+
+Deviations from the plan, for validation:
+
+1. **Two passes**: the UI renderer's pipeline has no depth format, and a pipeline drawing in a pass must match the pass's
+   depth attachment, so the scene's pass (multisampled, depth) is resolved into the frame's image and the UI draws in a
+   second pass that loads it (the UI's text is antialiased by its own distance fields).
+2. **`--capture`** (not planned): the last frame written to a PPM file, used to check the rendering here and, in S3, by the
+   scripted run.
