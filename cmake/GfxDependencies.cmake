@@ -783,3 +783,25 @@ function(gfx_require_simde)
     target_include_directories(gfx_simde SYSTEM INTERFACE ${gfx_simde_SOURCE_DIR})
     message(STATUS "gfx: SIMDe 0.8.2 fetched (amalgamated headers)")
 endfunction()
+
+# gfx_require_box3d()
+#   Provides gfx::box3d: Box3D (Erin Catto, MIT; alpha: "the API will change"), the 3D physics engine of the physics
+#   library's BOX3D backend, at main f36d061b (2026-10-20, 41 commits after the v0.1.0 release: fixes to sensors, joint
+#   limits and continuous collision), from GitHub's source archive pinned by SHA-256. Built static as a subproject (its
+#   samples, tests and benchmarks are top-level only), in single precision with its default SIMD (SSE2 on x86-64).
+function(gfx_require_box3d)
+    if(TARGET gfx::box3d)
+        return()
+    endif()
+    set(BUILD_SHARED_LIBS OFF)
+    set(BOX3D_DOUBLE_PRECISION OFF CACHE BOOL "Box3D large worlds (the gfx backend is single precision)" FORCE)
+    FetchContent_Declare(gfx_box3d
+        URL https://github.com/erincatto/box3d/archive/f36d061ba26998c87cb7dc593a4065aaa03fb7eb.tar.gz
+        URL_HASH SHA256=b035dce6997edccc89e17b74ffc18cadc0c2318ecdacfcf5fa5173b824df17ed
+        SYSTEM
+        EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(gfx_box3d)
+    _gfx_exclude_from_modules(box3d)
+    add_library(gfx::box3d ALIAS box3d)
+    message(STATUS "gfx: Box3D f36d061b fetched (static)")
+endfunction()

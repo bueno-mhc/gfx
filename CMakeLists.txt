@@ -42,6 +42,8 @@ cmake_dependent_option(GFX_PLATFORM_BACKEND_GLFW "Build the GLFW platform backen
                        "GFX_BUILD_PLATFORM" OFF)
 # The physics and camera libraries (docs/physics-design.md): they depend on gfx::core only.
 option(GFX_BUILD_PHYSICS "Build the physics and camera libraries (decoupled from graphics, platform and UI)" ON)
+cmake_dependent_option(GFX_PHYSICS_BACKEND_BOX3D "Build the Box3D physics backend (Box3D fetched, pinned and linked statically)" ON
+                       "GFX_BUILD_PHYSICS" OFF)
 
 # The SIMD instruction set the math (gfx.core.math) and everything built on it compile for: SSE2 (every
 # x86-64 processor; NEON on 64-bit ARM, WASM SIMD on WebAssembly), AVX2 (with FMA: Intel Haswell, AMD

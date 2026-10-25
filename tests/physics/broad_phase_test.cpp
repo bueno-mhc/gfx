@@ -171,4 +171,49 @@ TEST(TaskSchedulerTest, EveryIndexRunsOnceAndFailuresReachTheCaller)
     EXPECT_EQ(inline_total, 10U);
 }
 
+TEST(TaskSchedulerTest, StartedWorkRunsOnceAndFinishWaitsForIt)
+{
+    // Work started from the caller and from a parallel loop, waited for in any order; failures reach finish().
+    ThreadTaskScheduler scheduler{4};
+    for (int round = 0; round < 50; ++round)
+    {
+        std::array<std::atomic<int>, 64> runs{};
+        std::vector<TaskTicket> tickets;
+        for (std::size_t index = 0; index < runs.size(); ++index)
+        {
+            tickets.push_back(scheduler.start([&runs, index] { runs[index].fetch_add(1); }));
+        }
+        std::atomic<int> looped{0};
+        scheduler.parallel_for(100, 1, [&looped](std::uint32_t begin, std::uint32_t end) { looped.fetch_add(static_cast<int>(end - begin)); });
+        for (std::size_t index = tickets.size(); index-- > 0;)
+        {
+            scheduler.finish(tickets[index]);
+        }
+        EXPECT_EQ(looped.load(), 100);
+        for (const std::atomic<int>& count : runs)
+        {
+            ASSERT_EQ(count.load(), 1) << "round " << round;
+        }
+    }
+
+    // A started piece that waits for another started piece (Box3D's tasks wait for each other through finish()).
+    std::atomic<bool> inner_done{false};
+    const TaskTicket outer = scheduler.start([&] {
+        const TaskTicket inner = scheduler.start([&inner_done] { inner_done.store(true); });
+        scheduler.finish(inner);
+    });
+    scheduler.finish(outer);
+    EXPECT_TRUE(inner_done.load());
+    const TaskTicket failing = scheduler.start([] { throw std::runtime_error("started work failed"); });
+    EXPECT_THROW(scheduler.finish(failing), std::runtime_error);
+
+    // The default (inline) runs at once and has nothing to wait for.
+    int ran = 0;
+    InlineTaskScheduler inline_scheduler;
+    const TaskTicket at_once = inline_scheduler.start([&ran] { ++ran; });
+    EXPECT_EQ(ran, 1);
+    EXPECT_EQ(at_once.generation, 0U);
+    inline_scheduler.finish(at_once);
+}
+
 } // namespace

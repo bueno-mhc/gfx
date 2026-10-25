@@ -1059,6 +1059,7 @@ WorldShared::create_collider(RigidBodyHandle body,
         backend->check(edit, RecordedWorld{*this});
         grown(collider_bodies, slot.index) = body;
         grown(collider_shapes, slot.index) = description.shape->kind();
+        grown(collider_shape_pointers, slot.index) = description.shape;
         body_recordings[slot_of(body)].colliders.push_back(collider);
         recorded.push_back(std::move(edit));
     }
@@ -1189,6 +1190,10 @@ WorldShared::release(std::span<const RigidBodyHandle> rigid_bodies_released,
     for (const ColliderHandle handle : colliders_released)
     {
         release_slot(colliders, handle);
+        if (slot_of(handle) < collider_shape_pointers.size())
+        {
+            collider_shape_pointers[slot_of(handle)] = nullptr;
+        }
     }
     for (const JointHandle handle : joints_released)
     {
@@ -1233,6 +1238,29 @@ auto
 RecordedWorld::collider_body(ColliderHandle collider) const noexcept -> std::optional<RigidBodyHandle>
 {
     return m_shared->is_live(collider) ? std::optional{m_shared->collider_bodies[slot_of(collider)]} : std::nullopt;
+}
+
+auto
+RecordedWorld::body_colliders(RigidBodyHandle body) const -> std::vector<ColliderHandle>
+{
+    std::vector<ColliderHandle> colliders;
+    if (m_shared->is_live(body))
+    {
+        for (const ColliderHandle collider : m_shared->body_recordings[slot_of(body)].colliders)
+        {
+            if (m_shared->is_live(collider))
+            {
+                colliders.push_back(collider);
+            }
+        }
+    }
+    return colliders;
+}
+
+auto
+RecordedWorld::collider_shape(ColliderHandle collider) const -> std::shared_ptr<const Shape>
+{
+    return m_shared->is_live(collider) ? m_shared->collider_shape_pointers[slot_of(collider)] : nullptr;
 }
 
 // ===================================================================================================== SteppedWorldBackend defaults

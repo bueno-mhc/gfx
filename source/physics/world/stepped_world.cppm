@@ -54,6 +54,12 @@ public:
     /// @brief The body @p collider is attached to, or nothing if it names no live collider.
     [[nodiscard]] auto collider_body(ColliderHandle collider) const noexcept -> std::optional<RigidBodyHandle>;
 
+    /// @brief The live colliders of @p body.
+    [[nodiscard]] auto body_colliders(RigidBodyHandle body) const -> std::vector<ColliderHandle>;
+
+    /// @brief The shape of @p collider (null if it names no live collider).
+    [[nodiscard]] auto collider_shape(ColliderHandle collider) const -> std::shared_ptr<const Shape>;
+
 private:
     const WorldShared* m_shared;
 };
@@ -143,6 +149,11 @@ protected:
     SteppedWorldBackend(const SteppedWorldBackend&) = default;
     auto operator=(const SteppedWorldBackend&) -> SteppedWorldBackend& = default;
 };
+
+/// @brief Throws the PhysicsError of an invalid world description, naming @p backend (what SteppedWorld's constructor
+///        checks): for backends that make their own world from the description before the SteppedWorld exists.
+void check_world_description(const PhysicsWorldDescription& description,
+                             const BackendIdentity& backend);
 
 /// @brief A world of a SteppedWorldBackend.
 class SteppedWorld final : public PhysicsWorld

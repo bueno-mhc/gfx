@@ -72,6 +72,10 @@ enum class PhysicsCapability : std::uint8_t
     CONTINUOUS_COLLISION,          ///< Continuous collision detection for fast bodies.
     LARGE_WORLDS,                  ///< Positions in double precision.
     WORLD_OBJECTS,                 ///< Anything a world does: worlds of the null backend have none.
+    ROUNDED_HULLS,                 ///< Boxes and hulls rounded by a radius.
+    LARGE_HULLS,                   ///< Hulls of more vertices than the backend holds (Box3D: 128; cylinders and cones of more than 64 sides).
+    POSED_HEIGHT_FIELDS,           ///< Height fields at a pose other than their body's frame.
+    WIDE_JOINT_LIMITS,             ///< Hinge and twist limits beyond the backend's range (Box3D: ±0.99π).
 };
 
 /// @brief How a rigid body moves.
@@ -579,6 +583,10 @@ struct EnumerationTraits<physics::PhysicsCapability>
         EnumeratorName{physics::PhysicsCapability::CONTINUOUS_COLLISION, "CONTINUOUS_COLLISION"},
         EnumeratorName{physics::PhysicsCapability::LARGE_WORLDS, "LARGE_WORLDS"},
         EnumeratorName{physics::PhysicsCapability::WORLD_OBJECTS, "WORLD_OBJECTS"},
+        EnumeratorName{physics::PhysicsCapability::ROUNDED_HULLS, "ROUNDED_HULLS"},
+        EnumeratorName{physics::PhysicsCapability::LARGE_HULLS, "LARGE_HULLS"},
+        EnumeratorName{physics::PhysicsCapability::POSED_HEIGHT_FIELDS, "POSED_HEIGHT_FIELDS"},
+        EnumeratorName{physics::PhysicsCapability::WIDE_JOINT_LIMITS, "WIDE_JOINT_LIMITS"},
     };
 };
 

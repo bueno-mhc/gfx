@@ -6,6 +6,9 @@ import std;
 import gfx.core.errors;
 import gfx.physics.interface;
 import gfx.physics.backends.null;
+#if defined(GFX_WITH_PHYSICS_BOX3D_BACKEND)
+import gfx.physics.backends.box3d;
+#endif
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)
 import gfx.physics.backends.custom;
 #endif
@@ -34,7 +37,15 @@ physics_backend_availability(PhysicsBackendKind backend) -> PhysicsBackendAvaila
     switch (backend)
     {
         case PhysicsBackendKind::BOX3D:
-            return {.backend = backend, .built = false, .available = false, .reason = "the Box3D backend is not built yet (physics step PH5)"};
+        {
+#if defined(GFX_WITH_PHYSICS_BOX3D_BACKEND)
+            std::string reason = box3d_backend::unavailable_reason();
+            const bool available = reason.empty();
+            return {.backend = backend, .built = true, .available = available, .reason = std::move(reason)};
+#else
+            return {.backend = backend, .built = false, .available = false, .reason = "the Box3D backend was not built (the CMake option GFX_PHYSICS_BACKEND_BOX3D is OFF)"};
+#endif
+        }
         case PhysicsBackendKind::REFERENCE:
             return {.backend = backend, .built = false, .available = false, .reason = "the reference backend is not built yet (physics step PH7)"};
         case PhysicsBackendKind::NULL_BACKEND:
@@ -86,6 +97,10 @@ create_physics_world(const PhysicsWorldDescription& description,
     }
     switch (backend)
     {
+#if defined(GFX_WITH_PHYSICS_BOX3D_BACKEND)
+        case PhysicsBackendKind::BOX3D:
+            return box3d_backend::create_physics_world(description);
+#endif
         case PhysicsBackendKind::NULL_BACKEND:
             return null_backend::create_physics_world(description);
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)

@@ -1,5 +1,5 @@
 // The library's task schedulers: inline, and a pool of std::jthread workers that take ranges with an atomic counter
-// while the caller takes some too and then waits for the last range.
+// while the caller takes some too and then waits for the last range, and that run started work from a queue.
 module gfx.physics.tasks;
 
 import std;
@@ -24,6 +24,18 @@ struct Ranges
 
 } // namespace
 
+auto
+TaskScheduler::start(StartedTask task) -> TaskTicket
+{
+    task();
+    return {};
+}
+
+void
+TaskScheduler::finish(TaskTicket /*ticket*/)
+{
+}
+
 void
 InlineTaskScheduler::parallel_for(std::uint32_t count,
                                   std::uint32_t minimum_range,
@@ -36,11 +48,22 @@ InlineTaskScheduler::parallel_for(std::uint32_t count,
     }
 }
 
-/// The pool: workers sleep on `work` until a loop is posted (its generation changes), take ranges until none is left,
-/// and count the finished ones. The caller returns when every range is done and no worker is still taking ranges, so
-/// that no worker reads the next loop's counter while thinking it is this one's.
+/// The pool: workers sleep on `work` until a loop is posted (its generation changes) or work is queued; they take
+/// ranges until none is left and count the finished ones, or run the oldest queued work. The caller of a loop returns
+/// when every range is done and no worker is still taking ranges, and marks the loop over (no task) before it does: a
+/// worker woken late joins only a loop in progress, so that none reads the next loop's counter while thinking it is
+/// this one's.
 struct ThreadTaskScheduler::State
 {
+    /// A started piece of work in its slot.
+    struct Started
+    {
+        StartedTask task{};
+        std::uint32_t generation = 0;
+        bool done = true;
+        std::exception_ptr failure{};
+    };
+
     std::uint32_t threads = 1;
     std::mutex mutex{};
     std::condition_variable work{};
@@ -55,7 +78,36 @@ struct ThreadTaskScheduler::State
     std::atomic<std::uint32_t> next{0};
     std::atomic<std::uint32_t> done{0};
     std::exception_ptr failure{};
+
+    // Started work: slots (reused), the queue of slots waiting for a thread (under mutex).
+    std::vector<Started> started{};
+    std::vector<std::uint32_t> free_slots{};
+    std::deque<std::uint32_t> queue{};
+    std::uint32_t next_generation = 1;
+
     std::vector<std::jthread> workers{};
+
+    /// Runs the oldest queued work; `lock` (held on entry and exit) is released while it runs.
+    void run_queued(std::unique_lock<std::mutex>& lock)
+    {
+        const std::uint32_t slot = queue.front();
+        queue.pop_front();
+        StartedTask queued = std::move(started[slot].task);
+        lock.unlock();
+        std::exception_ptr thrown;
+        try
+        {
+            queued();
+        }
+        catch (...)
+        {
+            thrown = std::current_exception();
+        }
+        lock.lock();
+        started[slot].failure = thrown;
+        started[slot].done = true;
+        finished.notify_all();
+    }
 
     /// Runs ranges until none is left.
     void run_ranges()
@@ -84,12 +136,23 @@ struct ThreadTaskScheduler::State
         {
             {
                 std::unique_lock lock{mutex};
-                work.wait(lock, [&] { return stopping || stop.stop_requested() || generation != seen; });
+                work.wait(lock, [&] { return stopping || stop.stop_requested() || generation != seen || !queue.empty(); });
                 if (stopping || stop.stop_requested())
                 {
                     return;
                 }
+                if (generation == seen)
+                {
+                    // Started work, then wait again.
+                    run_queued(lock);
+                    continue;
+                }
                 seen = generation;
+                if (task == nullptr)
+                {
+                    // Woken late, for a loop that is over: joining it would take the next loop's ranges with this one's count.
+                    continue;
+                }
                 ++active;
             }
             run_ranges();
@@ -168,6 +231,77 @@ auto
 ThreadTaskScheduler::concurrency() const noexcept -> std::uint32_t
 {
     return m_state->threads;
+}
+
+auto
+ThreadTaskScheduler::start(StartedTask task) -> TaskTicket
+{
+    // One thread: at once on the caller.
+    State& state = *m_state;
+    if (state.threads == 1)
+    {
+        return TaskScheduler::start(std::move(task));
+    }
+
+    // A slot for it, queued for the workers.
+    TaskTicket ticket{};
+    {
+        const std::scoped_lock lock{state.mutex};
+        if (state.free_slots.empty())
+        {
+            state.free_slots.push_back(static_cast<std::uint32_t>(state.started.size()));
+            state.started.emplace_back();
+        }
+        ticket.slot = state.free_slots.back();
+        state.free_slots.pop_back();
+        ticket.generation = state.next_generation;
+        state.next_generation = state.next_generation == std::numeric_limits<std::uint32_t>::max() ? 1 : state.next_generation + 1;
+        State::Started& slot = state.started[ticket.slot];
+        slot.task = std::move(task);
+        slot.generation = ticket.generation;
+        slot.done = false;
+        slot.failure = nullptr;
+        state.queue.push_back(ticket.slot);
+    }
+    state.work.notify_one();
+    return ticket;
+}
+
+void
+ThreadTaskScheduler::finish(TaskTicket ticket)
+{
+    // Done at once (one thread), or wait: running queued work meanwhile, or sleeping until a worker finishes some.
+    if (ticket.generation == 0)
+    {
+        return;
+    }
+    State& state = *m_state;
+    std::unique_lock lock{state.mutex};
+    if (state.started[ticket.slot].generation != ticket.generation)
+    {
+        return;
+    }
+
+    // The slot is indexed anew each time: queued work run here unlocks, and a start() meanwhile may grow the slots.
+    while (!state.started[ticket.slot].done)
+    {
+        if (!state.queue.empty())
+        {
+            state.run_queued(lock);
+        }
+        else
+        {
+            state.finished.wait(lock);
+        }
+    }
+    const std::exception_ptr failure = std::exchange(state.started[ticket.slot].failure, nullptr);
+    state.started[ticket.slot].generation = 0;
+    state.free_slots.push_back(ticket.slot);
+    lock.unlock();
+    if (failure)
+    {
+        std::rethrow_exception(failure);
+    }
 }
 
 } // namespace gfx::physics

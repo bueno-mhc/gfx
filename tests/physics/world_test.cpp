@@ -68,23 +68,32 @@ expect_capability_error(Operation&& operation,
 
 // ===================================================================================================== factory, null backend
 
-TEST(PhysicsFactoryTest, TheNullBackendIsTheOnlyOneBuiltSoFar)
+TEST(PhysicsFactoryTest, EachBackendReportsWhetherItWasBuiltAndCanRun)
 {
-    EXPECT_FALSE(physics_backend_availability(PhysicsBackendKind::BOX3D).built);
-    EXPECT_NE(physics_backend_availability(PhysicsBackendKind::BOX3D).reason.find("PH5"), std::string::npos);
+    // Box3D when GFX_PHYSICS_BACKEND_BOX3D is on; the reference backend comes with PH7; no custom backend in this build.
+    const PhysicsBackendAvailability box3d = physics_backend_availability(PhysicsBackendKind::BOX3D);
+    EXPECT_EQ(box3d.built, box3d.available);
+    EXPECT_EQ(box3d.reason.empty(), box3d.available);
     EXPECT_FALSE(physics_backend_availability(PhysicsBackendKind::REFERENCE).available);
+    EXPECT_NE(physics_backend_availability(PhysicsBackendKind::REFERENCE).reason.find("PH7"), std::string::npos);
     EXPECT_FALSE(physics_backend_availability(PhysicsBackendKind::CUSTOM).built);
     EXPECT_NE(physics_backend_availability(PhysicsBackendKind::CUSTOM).reason.find("GFX_PHYSICS_CUSTOM_BACKEND_TARGET"), std::string::npos);
     EXPECT_TRUE(physics_backend_availability(PhysicsBackendKind::NULL_BACKEND).available);
-    EXPECT_EQ(available_physics_backends(), std::vector<PhysicsBackendKind>{PhysicsBackendKind::NULL_BACKEND});
+    std::vector<PhysicsBackendKind> expected;
+    if (box3d.available)
+    {
+        expected.push_back(PhysicsBackendKind::BOX3D);
+    }
+    expected.push_back(PhysicsBackendKind::NULL_BACKEND);
+    EXPECT_EQ(available_physics_backends(), expected) << "simulating backends first";
     try
     {
-        (void)create_physics_world({}, PhysicsBackendKind::BOX3D);
-        ADD_FAILURE() << "a Box3D world before PH5";
+        (void)create_physics_world({}, PhysicsBackendKind::REFERENCE);
+        ADD_FAILURE() << "a reference world before PH7";
     }
     catch (const BackendCapabilityError& error)
     {
-        EXPECT_NE(std::string_view{error.what()}.find("[gfx::physics::BOX3D]"), std::string_view::npos) << error.what();
+        EXPECT_NE(std::string_view{error.what()}.find("[gfx::physics::REFERENCE]"), std::string_view::npos) << error.what();
     }
 }
 

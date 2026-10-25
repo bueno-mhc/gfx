@@ -1,8 +1,8 @@
 # gfx physics and camera: a decoupled physics abstraction over Box3D, and a camera module — architecture, decisions and plan
 
 Status: **approved 2026-10-24** (every §D question as recommended, plus the math rule recorded there); **PH0 committed**
-(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 implemented** (§B "PH4 as
-built"), awaiting validation. This
+(636478b, §B "PH0 as built", deviations accepted); **PH1 committed** (527b32c); **PH2 committed** (e970d83); **PH3 committed** (e33daf0); **PH4 committed** (db6ecce); **PH5
+implemented** (§B "PH5 as built"), awaiting validation. This
 document answers the request
 "C++23 physics abstraction library … Box3D … camera system". It follows the platform and UI designs' form: §0 lists
 where the request meets the existing project (each with a recommendation and a question in §D), §A gives the
@@ -837,6 +837,76 @@ Deviations from the proposal, for validation:
 8. **World handles are numbered by a process-wide atomic counter** (the one piece of state outside a world: names in
    errors, not behavior).
 9. **Narrow-phase fixes** to GJK and EPA (above) changed PH2 code.
+
+### PH5 as built (2026-10-25)
+
+**Box3D** (Erin Catto, MIT, alpha) at **main f36d061b** (2026-10-20, 41 commits after the v0.1.0 release: fixes to sensors,
+joint limits and continuous collision; chosen by the user over the tag), GitHub's source archive (2,884,055 bytes) pinned
+by SHA-256 `b035dce6…df17ed`: `gfx_require_box3d()` (GfxDependencies.cmake, static subproject: its samples, tests and
+benchmarks are top-level only), option **`GFX_PHYSICS_BACKEND_BOX3D`** (ON) → `GFX_WITH_PHYSICS_BOX3D_BACKEND` for the
+factory. Box3D's C headers compile in a module's global fragment next to `import std` (checked).
+
+**`gfx.physics.backends.box3d`** (`source/physics/backends/box3d/`, private file set): `Box3dBackend`, a
+`SteppedWorldBackend` over one Box3D world (internal partition `:backend`; units box3d_world.cpp, box3d_shapes.cpp,
+box3d_joints.cpp, box3d_queries.cpp):
+
+| Of the interface | In Box3D |
+|---|---|
+| Rigid bodies (kinds, poses, velocities, damping, gravity scale, locks, sleep, continuous) | `b3BodyDef` one to one; `move_kinematic` = `b3Body_SetTargetTransform`; forces, torques, impulses applied for the next step; mass properties from Box3D (`b3Body_ApplyMassFromShapes`, or `b3Body_SetMassData` for given ones) read back into the published records |
+| Sphere, capsule | `b3Sphere`, `b3Capsule` at the collider's pose (a capsule of half height 0: a sphere) |
+| Box, hull | `b3MakeBoxHull`, `b3CreateHull` of the hull's vertices, as transformed hulls; rounded ones and hulls of more than 128 vertices refused (`ROUNDED_HULLS`, `LARGE_HULLS`) |
+| Cylinder, cone | hulls of `round_shape_segments` sides (at most 64) |
+| Triangle mesh | `b3CreateMesh` in the body's frame, on static bodies only (`DYNAMIC_TRIANGLE_MESHES`); two-sided meshes get each triangle twice, once reversed (Box3D culls back sides) |
+| Height field | `b3CreateHeightField` (heights quantized to 16 bits between the field's lowest and highest), on static bodies only (`DYNAMIC_HEIGHT_FIELDS`), in the body's frame (`POSED_HEIGHT_FIELDS`) |
+| Compound | one Box3D shape per part on the body (Box3D's run-time compounds): dynamic compounds of convex parts work; each shape remembers the top-level child it comes from |
+| Materials | one friction coefficient: different static and dynamic ones refused (`SEPARATE_STATIC_FRICTION`); restitution; rolling resistance |
+| Filters | 64-bit category and mask, group |
+| Triggers | sensor shapes (no mass) on their body, or on a static body of their own; ENTER/EXIT from Box3D's sensor events (the first and last shape of a collider), **STAY** made by the backend every later step |
+| Distance joints | rod; spring (with limits); rope = a spring of 0 Hz limited to its length; stub = a spherical joint |
+| Hinge, slider, ball and socket, fixed, cone-twist | revolute (about the frames' z), prismatic (along the frames' x), spherical, weld (springs), spherical with cone and twist limits; frames computed from the bodies' poses when the joint is applied; hinge and twist limits within ±0.99π (`WIDE_JOINT_LIMITS`); six-DOF refused |
+| Breaking | Box3D's force and torque thresholds raise joint events; the backend destroys the Box3D joint, reports `JointEvent::BROKEN` and keeps the frames to make it again when enabled |
+| Events | contacts from Box3D's begin/end events counted per pair of colliders (one touch however many shapes touch; a destroyed collider's touches end at once), hits from its hit events; sleep from body move events (FELL_ASLEEP, WOKE_UP) |
+| Contacts | the manifold of each touching pair (`b3Contact_GetData`), in handle order |
+| Queries (`QueryEngine::BACKEND`) | `b3World_CastRay` (closest and every hit, one per collider), `b3World_CastShape` and `b3World_OverlapShape` with a proxy (spheres, capsules, boxes rounded or not, hulls), `b3World_OverlapAABB`; the query's filter applied as colliders are (groups included), ties to the smaller handle; cylinders, cones, meshes and closest points left to the abstraction |
+| Soft bodies | refused for now (`SOFT_BODIES`): the abstraction's XPBD comes with PH6 |
+| Settings | gravity; sub-steps, contact stiffness, damping and push speed, restitution threshold, warm starting; sleep on or off and its speed threshold; hit speed |
+| Statistics | phase times from Box3D's profile (pairs, collide, solve), its contact count |
+| Threads | Box3D's `enqueueTask`/`finishTask` over the world's `TaskScheduler` (workers: its concurrency) |
+
+**Task scheduler**: `TaskScheduler::start(StartedTask) → TaskTicket` and `finish(ticket)` (inline by default;
+`ThreadTaskScheduler` queues the work for its workers, and a waiting `finish()` runs queued work itself): what Box3D's
+hooks take (§A14's "wait(group)"). **A PH3 race fixed** (found when repeating the tests): a worker woken late for a loop
+that was over could join the next loop with the old loop's range count, overshoot its finished count and leave
+`parallel_for()` waiting forever; workers now join only a loop in progress (300 repeats pass).
+
+Framework additions: `check_world_description()` (backends that make their world before the SteppedWorld),
+`RecordedWorld::body_colliders()` / `collider_shape()` (Box3D's checks of a body's kind against its colliders' shapes).
+New capabilities: `ROUNDED_HULLS`, `LARGE_HULLS`, `POSED_HEIGHT_FIELDS`, `WIDE_JOINT_LIMITS`.
+
+Tests (+ 13): `gfx_physics_box3d_tests` (12: the factory; free fall (exact velocity, drop within 1 %); a stack of five boxes
+at rest, asleep, with its contacts; a pendulum's period within 2 % of 2π√(L/g); hinge limits, a rope's length, a weld
+breaking; contact begin/hit/end and trigger enter/stay/exit; the same bits in two runs and on four threads through the task
+hooks; every capability refused; a dynamic compound on a height field, a ball stopped by a two-sided mesh's back; Box3D's
+ray casts, shape cast and overlaps against the abstraction's; a kinematic platform lifting a crate; two asynchronous worlds
+stepping at once while four threads query them), `TaskSchedulerTest.StartedWorkRunsOnceAndFinishWaitsForIt`.
+
+Deviations from the proposal, for validation:
+
+1. **Box3D is pinned at a main commit** (f36d061b), not the v0.1.0 release (the user's choice).
+2. **Compounds of convex shapes work on moving bodies** (several Box3D shapes per body), where §A12 refused them; only
+   their mesh and height-field parts need static bodies.
+3. **Four capabilities added** for limits §A12 did not list: rounded hulls, hulls past 128 vertices (and round shapes past 64
+   sides), height fields at a pose, hinge and twist limits past ±0.99π.
+4. **Two-sided meshes** collide from both sides by holding each triangle twice (Box3D's meshes are one-sided).
+5. **Soft bodies are refused until PH6** (the design runs them through the abstraction's XPBD next to Box3D).
+6. **Changing a joint (`update`) or enabling it again makes the Box3D joint anew** from its creation frames (its warm start is
+   lost for a step); **moving a collider on its body** makes its shapes anew (its touches end, then begin again).
+7. **Box3D's own queries differ from the abstraction's in three ways** (documented in the backend's module): they skip
+   triggers (both do), ignore back sides of one-sided meshes, and do not report a ray that starts inside a shape (the
+   abstraction reports it at distance 0).
+8. **Solver and sleep settings Box3D has no counterpart for are hints it ignores**: velocity and position iterations, the
+   static friction speed, the angular sleep threshold and sleep time, the collision settings (Box3D's own constants).
+9. **The task scheduler gained `start()` / `finish()`**, and its PH3 race was fixed.
 ---
 
 ## C. The API as proposed (for validation, not final code)

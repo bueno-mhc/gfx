@@ -161,6 +161,21 @@ target_link_libraries(gfx_physics_components
     PRIVATE gfx::project_options gfx::simde)
 gfx_require_decoupled(gfx_physics_components FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
 
+# The backends: the null one always; Box3D with GFX_PHYSICS_BACKEND_BOX3D (fetched and pinned).
+set(_gfx_physics_backend_modules backends/null/null.cppm)
+set(_gfx_physics_backend_sources backends/null/null_world.cpp)
+if(GFX_PHYSICS_BACKEND_BOX3D)
+    gfx_require_box3d()
+    list(APPEND _gfx_physics_backend_modules
+        backends/box3d/box3d.cppm
+        backends/box3d/box3d_backend.cppm)
+    list(APPEND _gfx_physics_backend_sources
+        backends/box3d/box3d_world.cpp
+        backends/box3d/box3d_shapes.cpp
+        backends/box3d/box3d_joints.cpp
+        backends/box3d/box3d_queries.cpp)
+endif()
+
 add_library(gfx_physics)
 add_library(gfx::physics ALIAS gfx_physics)
 target_sources(gfx_physics
@@ -173,16 +188,23 @@ target_sources(gfx_physics
     PRIVATE
         FILE_SET backend_modules TYPE CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
-        FILES
-            backends/null/null.cppm
+        FILES ${_gfx_physics_backend_modules}
     PRIVATE
-        backends/null/null_world.cpp
+        ${_gfx_physics_backend_sources}
         physics_factory.cpp)
 
 target_compile_features(gfx_physics PUBLIC cxx_std_23)
 target_link_libraries(gfx_physics
     PUBLIC gfx::physics_components
     PRIVATE gfx::project_options)
+if(GFX_PHYSICS_BACKEND_BOX3D)
+    target_link_libraries(gfx_physics PRIVATE gfx::box3d)
+    target_compile_definitions(gfx_physics PRIVATE GFX_WITH_PHYSICS_BOX3D_BACKEND)
+    # Box3D's structs are initialized with designated initializers that leave most members zero.
+    set_source_files_properties(backends/box3d/box3d_backend.cppm backends/box3d/box3d_world.cpp backends/box3d/box3d_shapes.cpp
+        backends/box3d/box3d_joints.cpp backends/box3d/box3d_queries.cpp
+        PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+endif()
 if(GFX_PHYSICS_CUSTOM_BACKEND_TARGET)
     target_link_libraries(gfx_physics PRIVATE ${GFX_PHYSICS_CUSTOM_BACKEND_TARGET})
     target_compile_definitions(gfx_physics PRIVATE GFX_WITH_PHYSICS_CUSTOM_BACKEND)

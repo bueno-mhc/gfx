@@ -34,6 +34,13 @@ gfx_add_test(gfx_physics_tests
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 
+# The Box3D backend: simulations with known outcomes, events, determinism, capability errors, queries.
+if(GFX_PHYSICS_BACKEND_BOX3D)
+    gfx_add_test(gfx_physics_box3d_tests
+        SOURCES box3d_test.cpp
+        LIBRARIES gfx::physics)
+endif()
+
 # Worlds: the interfaces' error contract, the factory and the null backend, SteppedWorld on a recording backend (deferred
 # edits, publication, destruction, asynchronous steps, the reader handshake, queries, checks).
 gfx_add_test(gfx_physics_world_tests

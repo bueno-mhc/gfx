@@ -85,6 +85,7 @@ public:
     std::vector<BodyRecording> body_recordings{};                            ///< By body slot.
     std::vector<RigidBodyHandle> collider_bodies{};                          ///< By collider slot.
     std::vector<ShapeKind> collider_shapes{};                                ///< By collider slot.
+    std::vector<std::shared_ptr<const Shape>> collider_shape_pointers{};     ///< By collider slot.
     std::vector<RigidBodyHandle> trigger_bodies{};                           ///< By trigger slot (null: fixed in the world).
     std::vector<std::pair<RigidBodyHandle, RigidBodyHandle>> joint_bodies{}; ///< By joint slot.
     std::vector<std::uint32_t> soft_body_particles{};                        ///< By soft body slot.

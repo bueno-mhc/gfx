@@ -179,10 +179,10 @@ struct DistanceJointDescription
     RigidBodyHandle second{};                                      ///< The other (null: the world).
     Vector3 anchor_first{};                                        ///< In the first body's frame.
     Vector3 anchor_second{};                                       ///< In the second body's frame (the world's when null).
-    float length = 1.0F;                                           ///< The rest distance (0 for STUB), at least 0.
+    float length = 1.0F;                                           ///< The rest distance (ROPE: the longest; 0 for STUB), at least 0.
     DistanceMode mode = DistanceMode::ROD;                         ///< How the distance is held.
-    float minimum_length = 0.0F;                                   ///< ROPE and SPRING: the shortest allowed.
-    float maximum_length = std::numeric_limits<float>::infinity(); ///< ROPE and SPRING: the longest allowed.
+    float minimum_length = 0.0F;                                   ///< SPRING and ROPE: the shortest allowed.
+    float maximum_length = std::numeric_limits<float>::infinity(); ///< SPRING: the longest allowed (a rope's is its length).
     JointSpring spring{};                                          ///< SPRING: its softness.
     JointBreaking breaking{};                                      ///< When it breaks.
     bool collide_connected = false;                                ///< Whether the two bodies still collide.

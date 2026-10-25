@@ -455,6 +455,13 @@ check_description(const SleepDescription& description,
 }
 
 void
+check_world_description(const PhysicsWorldDescription& description,
+                        const BackendIdentity& backend)
+{
+    check_description(description, backend, "create_physics_world", {});
+}
+
+void
 check_description(const PhysicsWorldDescription& description,
                   const BackendIdentity& backend,
                   std::string_view operation,
