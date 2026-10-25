@@ -1163,6 +1163,10 @@ int main()
   their `replace_*()`): on the reference backend, a broad phase over a BVH, a loose octree or quadtree, a BSP,
   a hashed grid or sweep and prune; the GJK/EPA narrow phase; the sequential-impulse solver; semi-implicit
   Euler, Verlet or Runge–Kutta 4 integrators (XPBD for soft bodies).
+- **Debug drawing** (`gfx.physics.debug_draw`, renderer-independent): `tessellate(shape)` turns any shape into a
+  triangle mesh in its own frame (on the surface, normals out, closed for closed shapes; rounded boxes and hulls
+  exactly rounded), to cache once per shape and draw at each collider's pose; `DebugLines` collects colored lines
+  (boxes, axes, arrows, circles, contact points and normals) without allocating once warm.
 
 What a backend cannot do throws `BackendCapabilityError` naming the capability (`PhysicsCapability`), why,
 and what to do instead — never a silent approximation:
@@ -1450,7 +1454,8 @@ gfx/
 │                         solver, the sequential-impulse solver and joint rows); world/ (gfx.physics.world: SteppedWorld, deferred edits, snapshots, stepping,
 │                         queries, the soft bodies' step);
 │                         backends/box3d/ (the Box3D backend), backends/reference/ (the reference backend:
-│                         the abstraction's components, user constraints), backends/null/; physics.cppm (gfx.physics),
+│                         the abstraction's components, user constraints), backends/null/; debug_draw/
+│                         (gfx.physics.debug_draw: shapes as meshes, debug lines); physics.cppm (gfx.physics),
 │                         physics_factory (create_physics_world())
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed

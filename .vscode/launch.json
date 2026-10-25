@@ -179,7 +179,7 @@
                 { "label": "ui platform - Backends/UiPlatformInputTest.*, Backends/UiWindowTest.* (platform adapter, visible windows)", "value": "ui/gfx_ui_platform_tests.exe" },
                 { "label": "physics    - PhysicsEnumerationsTest.*, PhysicsHandlesTest.*, PhysicsErrorsTest.*, PrimitivesTest.*, IntersectionTest.*, BatchTest.*", "value": "physics/gfx_physics_common_tests.exe" },
                 { "label": "camera     - CameraProjectionTest.*, CameraTest.*, CameraControllerTest.*", "value": "physics/gfx_camera_tests.exe" },
-                { "label": "physics shapes - ShapeTest.*, GjkEpaTest.*, ContactTest.*, CollideTest.*, ManifoldCacheTest.*, ShapeQueryTest.*, SpatialStructureTest*, BroadPhaseTest.*, TaskSchedulerTest.*", "value": "physics/gfx_physics_tests.exe" },
+                { "label": "physics shapes - ShapeTest.*, GjkEpaTest.*, ContactTest.*, CollideTest.*, ManifoldCacheTest.*, ShapeQueryTest.*, SpatialStructureTest*, BroadPhaseTest.*, TaskSchedulerTest.*, DebugDrawTest.*", "value": "physics/gfx_physics_tests.exe" },
                 { "label": "physics world - PhysicsInterfaceTest.*, PhysicsFactoryTest.*, NullBackendTest.*, SteppedWorldTest.*", "value": "physics/gfx_physics_world_tests.exe" },
                 { "label": "physics dynamics - IntegratorTest.*, SoftBodyPresetTest.*, SoftBodyModelTest.*, XpbdSolverTest.*, JointRowsTest.*, SequentialImpulseSolverTest.*", "value": "physics/gfx_physics_dynamics_tests.exe" },
                 { "label": "physics reference - ReferenceTest.*", "value": "physics/gfx_physics_reference_tests.exe" },

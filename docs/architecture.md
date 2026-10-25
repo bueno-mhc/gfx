@@ -876,6 +876,7 @@ flowchart TB
         narrow["gfx.physics.narrow_phase<br/>GJK, EPA, separating axes, clipping,<br/>manifolds, shape queries"]
         shapes["gfx.physics.shapes<br/>convex shapes, hulls, meshes,<br/>height fields, compounds, mass"]
         tasks["gfx.physics.tasks<br/>TaskScheduler, ThreadTaskScheduler"]
+        debug_draw["gfx.physics.debug_draw<br/>shapes as meshes, debug lines"]
     end
     subgraph camera_lib["gfx::camera"]
         direction TB
@@ -887,6 +888,7 @@ flowchart TB
     end
     core["gfx::core<br/>gfx.core, gfx.core.math<br/>(constexpr; cglm and SIMDe at run time)"]
     umbrella --> world
+    umbrella --> debug_draw
     umbrella --> factory
     factory -.->|imports| box3d
     factory -.->|imports| reference
@@ -898,6 +900,7 @@ flowchart TB
     interface --> spatial
     interface --> narrow
     narrow --> shapes
+    debug_draw --> narrow
     spatial --> tasks
     components_lib --> common_lib
     camera -.->|factory imports| standard

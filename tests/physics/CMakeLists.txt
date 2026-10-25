@@ -21,7 +21,8 @@ gfx_add_test(gfx_camera_tests
     LIBRARIES gfx::camera)
 
 # Shapes and the narrow phase: hulls, mass properties, meshes, GJK and EPA, manifolds, collision of any two shapes,
-# queries against one shape; spatial structures against brute force, the broad phase, the task schedulers.
+# queries against one shape; spatial structures against brute force, the broad phase, the task schedulers; shapes as
+# meshes and debug lines.
 gfx_add_test(gfx_physics_tests
     SOURCES
         shape_test.cpp
@@ -31,6 +32,7 @@ gfx_add_test(gfx_physics_tests
         shape_query_test.cpp
         spatial_test.cpp
         broad_phase_test.cpp
+        debug_draw_test.cpp
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 

@@ -142,6 +142,7 @@ target_sources(gfx_physics_components
             world/snapshot.cppm
             world/stepped_world.cppm
             world/state.cppm
+            debug_draw/debug_draw.cppm
     PRIVATE
         tasks/tasks.cpp
         spatial/spatial.cpp
@@ -166,7 +167,8 @@ target_sources(gfx_physics_components
         world/snapshot.cpp
         world/validation.cpp
         world/world_objects.cpp
-        world/world_queries.cpp)
+        world/world_queries.cpp
+        debug_draw/debug_draw.cpp)
 
 target_compile_features(gfx_physics_components PUBLIC cxx_std_23)
 target_link_libraries(gfx_physics_components

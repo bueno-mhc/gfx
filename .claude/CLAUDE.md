@@ -636,6 +636,21 @@ Original hard requirements (from the user's initial specification):
   by `python -m http.server 8765 --bind 127.0.0.1 --directory <it>` (?version=10.9.1 / 11.4.1; window.results).
   **Found by the full run**: duplicated test registrations (§6 defect 15, fixed: test lists emptied before discovery). Check the
   CTest count against the sum of the suites (`ctest -N` + Group-Object on the names) when it jumps.
+- **Physics sandbox (S1 as built, 2026-10-25)** — new task (user, 2026-10-25: "a visual test combining all abstractions, for
+  the physics simulation … where I can interact and see the physics … with graphics"); docs/physics-sandbox-design.md (answers:
+  debug draw as a renderer-independent physics module; all features — interaction, scene presets, live controls, debug views; lit
+  solids without shadows; CTest scripted pick/drag/shot; plan S1 debug draw → S2 skeleton → S3 interaction → S4 scenes + backend
+  switch → S5 controls + debug views → S6 docs; defaults to validate: world on its own thread at 60 Hz + interpolation, drawing on
+  the main thread, dragging = kinematic hand body + SPRING distance joint, backend switch rebuilds the preset). **S1**: module
+  `gfx.physics.debug_draw` (source/physics/debug_draw/, in gfx::physics_components, re-exported by gfx.physics): `tessellate(shape,
+  {segments 32})` → DebugMesh {DebugVertex position+normal, indices CCW outside, two_sided} or appended; revolved profiles (sphere,
+  capsule, cylinder, cone; MeshBuilder winds triangles by their vertices' normals and drops zero-area ones), polytopes for boxes and
+  hulls (faces; rounded: edge strips + corner patches in rings, arcs via face_arc() from the smaller face index → watertight with
+  exact float equality), meshes/height fields flat, compounds recursive; `enclosed_volume()`; `DebugLines` (add_line/box(Aabb,
+  Obb)/axes/arrow/cross/circle/contacts, DebugColor packed RGBA8, clear keeps storage). Tests DebugDrawTest (7, in
+  gfx_physics_tests): closed by positions, on the surface via closest_point_on_shape, volumes vs formulas + Steiner (rounded box/hull)
+  converging 32 → 128 segments; a single fan per rounded corner did not converge (found by the test design, replaced by rings);
+  without the corner patches the tests fail (checked).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1005,7 +1020,8 @@ gfx/
 ├── THIRD_PARTY_LICENSES.md  every dependency + fonts (U10)
 ├── docs/   platform-design.md (windowing + input design, decisions, phases), architecture.md (as built, diagrams;
 │           §6 UI library since U10, §7 physics and camera since PH8), ui-design.md (UI decisions, phases, "Ux as built"),
-│           ui-atlas-format.md, physics-design.md (physics + camera decisions, phases, "PHx as built")
+│           ui-atlas-format.md, physics-design.md (physics + camera decisions, phases, "PHx as built"),
+│           physics-sandbox-design.md (interactive sandbox: answers, plan S1–S6, "Sx as built")
 ├── examples/windowed/  gfx_windowed_example (P6)
 ├── examples/ui_editor/ gfx_ui_editor_example (U10: render thread, docking editor, allocation check)
 ├── examples/physics/   gfx_physics_example (PH8: headless scene on Box3D or the reference backend, two cameras, checks)
@@ -1051,7 +1067,8 @@ gfx/
 │                  box3d_world/shapes/joints/queries .cpp), PH6 dynamics/ (gfx.physics.dynamics: dynamics, integrators, presets,
 │                  soft_body_solver .cppm + xpbd_math internal; integrators/presets/soft_body_model/soft_body_solver .cpp; PH7
 │                  sequential_impulses.cppm + joint_rows/sequential_impulses .cpp), PH7 backends/reference/ (reference.cppm,
-│                  reference_backend.cppm internal, reference_world/contacts .cpp),
+│                  reference_backend.cppm internal, reference_world/contacts .cpp), sandbox S1 debug_draw/ (gfx.physics.debug_draw:
+│                  debug_draw.cppm/.cpp),
 │                  physics.cppm (gfx.physics), physics_factory.cppm/.cpp
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests incl. math_test.cpp + slot_table/), physics/ (PH0:
             gfx_physics_common_tests, PH1 gfx_camera_tests (camera_projection/camera/controller_test.cpp), PH2 gfx_physics_tests (shape/gjk_epa/contact/collide_test.cpp; PH3 spatial_test.cpp, broad_phase_test.cpp; PH4 shape_query_test.cpp), PH4
@@ -1126,10 +1143,12 @@ gfx/
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
 | UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
 | PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) committed (e970d83)**; **PH3 (spatial structures, broad phase, task schedulers) committed (e33daf0)**; **PH4 (interfaces, SteppedWorld framework, null backend, factory, threading, shape queries, GJK/EPA robustness) committed (db6ecce)**; **PH5 (Box3D backend, task scheduler start/finish, PH3 race fix) committed (d2b2c8e)**; **PH6 (integrators, XPBD soft bodies coupled both ways with any backend, presets) committed (7856f19)**; **PH7 (reference backend, sequential-impulse solver, user constraints, sub-steps) committed (92728b6)**; **PH8 (sample `examples/physics` under CTest on Box3D and the reference backend, README physics section, architecture.md §7 with 7 diagrams; reference joint forces averaged over the sub-steps; test lists emptied before discovery) committed by the user as 16f062e "Corrected tests"** (2026-10-25, during the final test runs; the 2 deviations of docs/physics-design.md §B 'PH8 as built' still to validate; §5 'Physics sample and documentation'). Every phase of the physics plan is implemented. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
+| PS | **Physics sandbox** (user prompt 2026-10-25: an interactive visual application over every library) | answers recorded in docs/physics-sandbox-design.md §A; **S1 (gfx.physics.debug_draw) implemented, awaiting validation**; next S2 skeleton |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **976**, all passing in Debug and Release, 2026-10-25 (after PH8: + 2 example runs
+Test count at last report: **983**, all passing in Debug and Release, 2026-10-25 (after sandbox S1: + 7 DebugDrawTest;
+skips Debug 4, Release 19; run from PowerShell). Before: 976 (after PH8: + 2 example runs
 `PhysicsExample.{BOX3D,REFERENCE}`, + 1 ReferenceTest, + 1 CMake defect detector; skips Debug 4, Release 19; run from PowerShell). Before: 972 (after PH7: + 15 gfx_physics_reference_tests,
 + 3 solver tests, + 1 SteppedWorldTest, + 1 CMake defect detector; skips Debug 4, Release 19; run from PowerShell). Before: 952 (after PH6: + 17 gfx_physics_dynamics_tests,
 + 4 Box3dSoftBodyTest, + 1 SteppedWorldTest; skips Debug 4, Release 19; run from PowerShell). Before: 930 (after PH5: + 12 gfx_physics_box3d_tests, + 1 TaskSchedulerTest; skips Debug 4, Release 19; run from PowerShell). Before: 917 (after PH4: + 15 gfx_physics_world_tests, + 5
