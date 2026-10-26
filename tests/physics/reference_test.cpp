@@ -504,6 +504,54 @@ TEST(ReferenceTest, SpinningBallsKeepTheirContactsUnderThem)
     EXPECT_GT(lowest, 0.25F - 0.015F) << "not sunk into the floor (it rests within the solver's tolerance)";
 }
 
+TEST(ReferenceTest, FallingConvexShapesStayOnTheFloor)
+{
+    // The physics sandbox's showcase: three of each convex kind (a sphere, a capsule, a cylinder, a cone, a hull built at
+    // compile time, a compound) dropped tilted, landing on and against each other. A cylinder resting 3 mm deep in the
+    // floor and later a hull went through it: GJK took their shallow overlaps for slivers (GjkEpaTest.
+    // ShallowOverlapsOfALargeBoxAreOverlaps) and the contacts pushed them out through the floor's bottom face.
+    constexpr std::array<Vector3, 8> CORNERS{Vector3{.x = -0.5F, .y = -0.3F, .z = -0.5F}, Vector3{.x = 0.5F, .y = -0.3F, .z = -0.5F},
+                                             Vector3{.x = -0.5F, .y = -0.3F, .z = 0.5F},  Vector3{.x = 0.5F, .y = -0.3F, .z = 0.5F},
+                                             Vector3{.x = -0.25F, .y = 0.3F, .z = -0.25F}, Vector3{.x = 0.25F, .y = 0.3F, .z = -0.25F},
+                                             Vector3{.x = -0.25F, .y = 0.3F, .z = 0.25F},  Vector3{.x = 0.25F, .y = 0.3F, .z = 0.25F}};
+    constexpr auto PLINTH = convex_hull<8, 6, 24>(CORNERS);
+    const std::unique_ptr<PhysicsWorld> world = reference_world();
+    const Floor floor = make_floor(*world);
+    const std::array<std::shared_ptr<const Shape>, 6> shapes{
+        sphere(0.4F), make_shape(CapsuleShape{.half_height = 0.35F, .radius = 0.25F}), make_shape(CylinderShape{.half_height = 0.3F, .radius = 0.35F}),
+        make_shape(ConeShape{.half_height = 0.4F, .radius = 0.4F}), make_shape(HullShape(PLINTH)),
+        make_shape(CompoundShape({CompoundChild{.shape = sphere(0.3F), .pose = {.position = {.x = -0.45F}}}, CompoundChild{.shape = sphere(0.3F), .pose = {.position = {.x = 0.45F}}},
+                                  CompoundChild{.shape = make_shape(CapsuleShape{.half_height = 0.3F, .radius = 0.1F}),
+                                                .pose = {.orientation = Quaternion::from_axis_angle({.z = 1.0F}, PI / 2)}}}))};
+    std::vector<Body> bodies;
+    for (std::size_t kind = 0; kind < shapes.size(); ++kind)
+    {
+        for (int copy = 0; copy < 3; ++copy)
+        {
+            const Vector3 position{.x = 1.0F + static_cast<float>(kind) * 1.2F, .y = 2.0F + static_cast<float>(copy) * 1.5F + static_cast<float>(kind % 2) * 0.6F,
+                                   .z = -1.5F + static_cast<float>(copy) * 1.5F};
+            const Quaternion tilt = Quaternion::from_axis_angle(normalized(Vector3{.x = 1.0F, .y = 0.3F, .z = static_cast<float>(copy)}), 0.4F * static_cast<float>(copy + 1));
+            bodies.push_back(make_body(*world, {.pose = {.position = position, .orientation = tilt}}, {.shape = shapes[kind]}));
+        }
+    }
+    float lowest = std::numeric_limits<float>::max();
+    std::size_t lowest_body = 0;
+    for (int step = 0; step < 180; ++step)
+    {
+        world->step(STEP);
+        for (std::size_t index = 0; index < bodies.size(); ++index)
+        {
+            const float height = bodies[index].body->state().pose.position.y;
+            if (height < lowest)
+            {
+                lowest = height;
+                lowest_body = index;
+            }
+        }
+    }
+    EXPECT_GT(lowest, 0.0F) << "body " << lowest_body << " (kind " << lowest_body / 3 << ") went into the floor";
+}
+
 TEST(ReferenceTest, HitsThatBounceOffWithinAStepAreReported)
 {
     // A bouncy continuous ball at 60 m/s toward a wall: its speculative contact stops and returns it within one step, so its

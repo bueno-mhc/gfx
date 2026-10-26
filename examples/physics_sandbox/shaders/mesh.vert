@@ -13,7 +13,8 @@ layout(push_constant) uniform Push
 {
     mat4 view_projection; // world space to clip space
     vec4 light;           // xyz: unit direction toward the light; w: its strength
-    uint vertex_buffer;   // bindless index of the buffer holding every mesh's vertices
+    uint vertex_buffer;   // bindless index of the buffer holding the vertices (every mesh's, or the frame's surfaces')
+    uint vertex_word;     // first word of the vertices in it (gl_VertexIndex counts from there)
     uint instance_buffer; // bindless index of the buffer holding the frame's instances
     uint instance_word;   // first word of the instances in it
     uint flags;           // bit 0: the target is sRGB (colors are converted to linear)
@@ -44,9 +45,9 @@ vec3 to_linear(vec3 encoded)
 
 void main()
 {
-    // The vertex (gl_VertexIndex counts from the mesh's first vertex in the buffer) and the instance (gl_InstanceIndex
-    // counts from the draw's first instance).
-    const uint vertex = uint(gl_VertexIndex) * 6u;
+    // The vertex (gl_VertexIndex counts from the vertex word, plus the draw's vertex offset: a mesh's first vertex) and
+    // the instance (gl_InstanceIndex counts from the draw's first instance).
+    const uint vertex = push.vertex_word + uint(gl_VertexIndex) * 6u;
     const vec3 position = vec3(word_float(push.vertex_buffer, vertex), word_float(push.vertex_buffer, vertex + 1u),
                                word_float(push.vertex_buffer, vertex + 2u));
     const vec3 normal = vec3(word_float(push.vertex_buffer, vertex + 3u), word_float(push.vertex_buffer, vertex + 4u),

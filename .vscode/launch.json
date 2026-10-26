@@ -116,7 +116,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/debug/examples/physics_sandbox/gfx_physics_sandbox.exe",
-            "args": ["--backend", "${input:platformBackend}", "--physics", "${input:physicsBackend}", "--validation"],
+            "args": ["--backend", "${input:platformBackend}", "--physics", "${input:physicsBackend}", "--preset", "${input:sandboxPreset}", "--validation"],
             "cwd": "${workspaceFolder}/build/debug",
             "environment": [
                 { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" }
@@ -171,6 +171,13 @@
             "description": "Physics backend of the example",
             "options": ["box3d", "reference"],
             "default": "box3d"
+        },
+        {
+            "id": "sandboxPreset",
+            "type": "pickString",
+            "description": "Scene the physics sandbox starts with (the panel switches scenes)",
+            "options": ["showcase", "stacks", "dominoes", "chains", "cloth", "soft_volumes", "friction", "bouncing", "triggers"],
+            "default": "showcase"
         },
         {
             "id": "testExecutable",

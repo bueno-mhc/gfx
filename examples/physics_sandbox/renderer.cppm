@@ -3,8 +3,9 @@
 ///        library into a multisampled pass resolved into the frame's image.
 ///
 /// Each shape is tessellated once (gfx.physics.debug_draw) and its mesh copied into device-local storage buffers shared
-/// by every mesh; a frame lists instances (a shape at a pose, with a color) and lines, and render() draws one instanced
-/// call per mesh: the vertex shader pulls vertices and instances from bindless storage buffers (no vertex input, no
+/// by every mesh; a frame lists instances (a shape at a pose, with a color), moving surfaces (soft bodies: their indices
+/// stored once, their vertices written each frame) and lines, and render() draws one instanced call per mesh and one call
+/// per surface: the vertex shader pulls vertices and instances from bindless storage buffers (no vertex input, no
 /// descriptor set but the bindless table). Depth is reversed (cleared to 0, nearer is greater) for the camera's infinite
 /// far plane.
 export module physics_sandbox.renderer;
@@ -49,6 +50,7 @@ struct SceneRendererStatistics
     std::uint64_t mesh_vertices = 0;   ///< Their vertices.
     std::uint64_t mesh_indices = 0;    ///< Their indices.
     std::uint32_t instances = 0;       ///< Instances drawn.
+    std::uint32_t surfaces = 0;        ///< Moving surfaces drawn.
     std::uint32_t draw_calls = 0;      ///< Draw calls.
     std::uint32_t lines = 0;           ///< Line segments drawn.
     std::uint32_t skipped = 0;         ///< Instances or lines not drawn (storage full).
@@ -74,6 +76,14 @@ public:
              const gfx::Transform& pose,
              gfx::physics::DebugColor color,
              std::uint32_t flags = 0);
+
+    /// @brief Draws a surface whose vertices move (a soft body's) this frame, two-sided in @p color: @p positions in world
+    ///        space and @p indices (three per triangle into them), the same for @p key every frame (copied the first time
+    ///        @p key is seen); normals from the triangles around each vertex.
+    void add_surface(const void* key,
+                     std::span<const std::uint32_t> indices,
+                     std::span<const gfx::Vector3> positions,
+                     gfx::physics::DebugColor color);
 
     /// @brief This frame's lines (world space).
     [[nodiscard]] auto lines() noexcept -> gfx::physics::DebugLines&;

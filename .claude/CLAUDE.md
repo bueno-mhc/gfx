@@ -532,7 +532,7 @@ Original hard requirements (from the user's initial specification):
   0.5e-4 short of the plane; NEAR_DISTANCE 1.6e-3 + a probe PROBE_REACH further before trusting a normal that turned away);
   spatial `:spatial_structure` (SpatialStructure, SpatialStructureAdapter, make_spatial_structure). **GJK/EPA robustness fixed**
   (found by the new random tests, 10x sweeps and other seeds): GJK slivers (`is_sliver`: volume < 1e-4 · longest edge³ → the
-  nearest face decides), EPA restarts from a sliver, starts from the axis octahedron when the origin is on the start's boundary,
+  nearest face decides; bound replaced by a rounding-error one in sandbox S4), EPA restarts from a sliver, starts from the axis octahedron when the origin is on the start's boundary,
   visibility tolerance 1e-5 (expanded face always visible), monotone-distance guard keeping the best face. Gotchas: a member
   `joint_bodies` hid the free function inside WorldShared (qualify `physics::joint_bodies`); CTAD `std::array{std::array<...>{}}`
   copies the inner array (name the type); python heredocs in this shell turn `\\n` meant for C++ into real newlines — write such
@@ -689,6 +689,29 @@ Original hard requirements (from the user's initial specification):
   Tests SpinningBallsKeepTheirContactsUnderThem, HitsThatBounceOffWithinAStepAreReported (both fail with the old code — checked).
   Debugging gotcha: PowerShell passes `@'…'@` as an argument, so `python -I - … @'…'@` waits on stdin forever (write the script to a
   file).
+- **Physics sandbox S4 as built (2026-10-26)** — docs/physics-sandbox-design.md §C "S4 as built" (5 deviations). Module
+  `physics_sandbox.presets`: `Preset` (SHOWCASE, STACKS, DOMINOES, CHAINS, CLOTH, SOFT_VOLUMES, FRICTION, BOUNCING, TRIGGERS),
+  `preset_information()`/`find_preset()`, `build_preset(preset, scene)` → PresetResult{view (target, distance, yaw, pitch),
+  showcase}; refusals caught (`add_body_or`/`add_joint_or`: BackendCapabilityError → a substitute + `Scene::add_note()`
+  "capability: the reason's first line; what instead", once each; Box3D refuses ROUNDED_HULLS, SEPARATE_STATIC_FRICTION,
+  SIX_DEGREES_OF_FREEDOM_JOINTS). Scene: SceneSoftBody (surface triangles, or a sphere per particle; previous/current
+  positions, `drawn_positions()`), SceneJoint (distance joints' anchors drawn as a cable), SceneTrigger (`inside` from ENTER/EXIT,
+  `entered`, removed bodies' colliders dropped), notes, `add_floor()`, `palette()`; `add_body()` makes no body when a collider
+  is refused. Renderer: `add_surface(key, indices, positions, color)` (indices stored once per key as a mesh without vertices;
+  vertices + area-weighted normals written each frame into frame_data; `MeshPush::vertex_word`; one two-sided draw each).
+  Program: Scene/Interaction in unique_ptrs, `build(preset, backend)` (finish, wait_idle, interaction/scene/meshes gone,
+  rebuild, `CameraRig::aim()` at the view shifted left by PANEL_OFFSET 0.3 × distance — the showcase's target compensates, so
+  its S3 view is unchanged); panel Scene section (preset combo, backend radio buttons, reset; R), Controls closed by default;
+  `--preset`, `--tour` (TOUR_FRAMES 90 per preset × backend, `check_tour_stop()`: finite, above -1 m, under 30 m/s, steps taken;
+  the lowest body or particle named). CTest `PhysicsSandbox.Tour` (first platform backend, validation; about 9 s in Debug).
+  **Found by the tour, fixed in GJK** (physics-design.md §B "Follow-up after PH8: shallow overlaps of large shapes"): PH4's
+  `is_sliver()` (volume < 1e-4 × longest edge³) called the tetrahedron of a cylinder resting 2.9 mm deep in the 100 m floor a
+  sliver → "separated" with a normal pointing down → clipping on the floor's bottom face → pushed through (reference backend);
+  now a sliver's volume is within 16 × (ε × largest coordinate × Σ face areas + ε × |e1||e2||e3|). Tests
+  GjkEpaTest.ShallowOverlapsOfALargeBoxAreOverlaps, ReferenceTest.FallingConvexShapesStayOnTheFloor (both fail with the old
+  test; 20 seed sweeps clean). Gotchas: PowerShell 5.1 `Set-Content -Encoding utf8` writes a BOM (strip it); a seed sweep
+  needs a temporary Generator patch (env GFX_TEST_SEED_SWEEP, reverted after); ShapeQueryTest's "hits > 15" fails for some
+  seeds by coverage only.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1064,7 +1087,7 @@ gfx/
 ├── examples/ui_editor/ gfx_ui_editor_example (U10: render thread, docking editor, allocation check)
 ├── examples/physics/   gfx_physics_example (PH8: headless scene on Box3D or the reference backend, two cameras, checks)
 ├── examples/physics_sandbox/ gfx_physics_sandbox (sandbox S2: renderer.cppm/.cpp, scene.cppm/.cpp, physics_sandbox.cpp, shaders/;
-│                       S3 interaction.cppm/.cpp)
+│                       S3 interaction.cppm/.cpp; S4 presets.cppm/.cpp)
 ├── source/ CMakeLists.txt (add_subdirectory core, graphics)
 │   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
 │   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp,
@@ -1183,11 +1206,15 @@ gfx/
 | P | **Platform library: windowing + input** (user prompt 2026-10-15: backend-agnostic windows/surfaces above GLFW, SDL3, Win32, XCB, Cocoa, Web, headless; normalized events; physical `Key` / logical `KeyCode`; action mapping à la Enhanced Input / InputMap with compile-time schema, contexts, per-player routing, rebinding + persistence; lock-free input snapshots; `NativeWindowHandle` bridge to graphics; reused parts moved to a unified core; README with examples; architecture overview with diagrams at the end) | P0 (e3638c0), P1 (5cc9de0), P2 (a42d68a), P3 (SDL3, 2dcac3c), P4 (GLFW, e33b318), P5 (presentation, 4ec3519), P6 (example + docs, bbea683) committed; **follow-up (ignore_held_inputs, Debug frame metrics overlay) committed (a9f1e78)** (451 tests Debug + Release). Every phase of the platform plan is implemented. Design: [docs/platform-design.md](../docs/platform-design.md) |
 | UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
 | PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) committed (e970d83)**; **PH3 (spatial structures, broad phase, task schedulers) committed (e33daf0)**; **PH4 (interfaces, SteppedWorld framework, null backend, factory, threading, shape queries, GJK/EPA robustness) committed (db6ecce)**; **PH5 (Box3D backend, task scheduler start/finish, PH3 race fix) committed (d2b2c8e)**; **PH6 (integrators, XPBD soft bodies coupled both ways with any backend, presets) committed (7856f19)**; **PH7 (reference backend, sequential-impulse solver, user constraints, sub-steps) committed (92728b6)**; **PH8 (sample `examples/physics` under CTest on Box3D and the reference backend, README physics section, architecture.md §7 with 7 diagrams; reference joint forces averaged over the sub-steps; test lists emptied before discovery) committed by the user as 16f062e "Corrected tests"** (2026-10-25, during the final test runs; the 2 deviations of docs/physics-design.md §B 'PH8 as built' still to validate; §5 'Physics sample and documentation'). Every phase of the physics plan is implemented. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
-| PS | **Physics sandbox** (user prompt 2026-10-25: an interactive visual application over every library) | answers recorded in docs/physics-sandbox-design.md §A; **S1 (gfx.physics.debug_draw) committed (c5d0ac9)**; **S2 (examples/physics_sandbox skeleton: renderer, scene, orbit camera, statistics panel) committed (da1c14e)**; **S3 (interaction: picking, dragging, shooting, spawning, removing, fly camera, scripted CTest run; reference backend contact fixes) implemented, awaiting validation**; next S4 scenes + backend switch |
+| PS | **Physics sandbox** (user prompt 2026-10-25: an interactive visual application over every library) | answers recorded in docs/physics-sandbox-design.md §A; **S1 (gfx.physics.debug_draw) committed (c5d0ac9)**; **S2 (examples/physics_sandbox skeleton: renderer, scene, orbit camera, statistics panel) committed (da1c14e)**; **S3 (interaction: picking, dragging, shooting, spawning, removing, fly camera, scripted CTest run; reference backend contact fixes) committed (378ee8c)**; **S4 (nine presets, soft bodies/joints/triggers drawn, backend and preset switched at run time, refusals noted, --tour CTest; GJK sliver fix) implemented, awaiting validation**; next S5 live controls + debug views |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **987**, all passing in Debug and Release, 2026-10-25 (after sandbox S3: + 2 ReferenceTest; the
+Test count at last report: **990**, all passing in Debug and Release, 2026-10-26 (after sandbox S4: + 1 GjkEpaTest, + 1
+ReferenceTest, + 1 CTest PhysicsSandbox.Tour; skips Debug 4, Release 19; run from PowerShell; the first full Debug run had one
+failure, Backends/UiWindowTest.AUiInAVisibleWindowIsDrawnAndClicked/SDL3 (the pushed click never arrived), 10/10 alone, and 3 parallel
+runs of the 49 visible-window tests at -j 16 had one failure of another (MinimizedWindowsPresentNothing/GLFW_Device0): visible-window
+tests are flaky under load; the second full Debug run clean). Before: 987 (after sandbox S3: + 2 ReferenceTest; the
 sandbox runs now scripted; skips Debug 4, Release 19; run from PowerShell; one SegFault of
 Presentation/PresentationTest.FrameLatencyWaitsForPresentation/GLFW_Device1 (NVIDIA) at the start of a full Debug run, not reproduced
 in 20 runs alone nor 3 parallel runs of the 34 window tests, the next full run clean). Before: 985 (after sandbox S2: + 2 example runs

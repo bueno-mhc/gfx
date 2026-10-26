@@ -190,4 +190,28 @@ TEST(GjkEpaTest, SliversOfNearlyRepeatedPointsDoNotMakeSeparatedShapesOverlap)
     EXPECT_NEAR(convex_distance(hull, hull_pose, cylinder, cylinder_pose).distance, 0.436F, 2e-3F);
 }
 
+TEST(GjkEpaTest, ShallowOverlapsOfALargeBoxAreOverlaps)
+{
+    // A cylinder resting 2.9 mm deep in a floor 100 m wide and 1 m thick (found by the physics sandbox's tour): GJK's last
+    // tetrahedron, 100 m across and millimeters high, held the origin, but its volume was under 1e-4 of its longest edge
+    // cubed, so it counted as a sliver; its nearest face, 0.8 mm above the origin, made the shapes apart, with a normal
+    // pointing down, and the contact pushed the cylinder through the floor. The poses are exact (hex floats).
+    const BoxShape floor{.half_extents = {.x = 50, .y = 0.5F, .z = 50}};
+    const Transform floor_pose{.position = {.y = -0.5F}};
+    const CylinderShape cylinder{.half_height = 0.3F, .radius = 0.35F};
+    const Transform cylinder_pose{.position = {.x = 0x1.b16cfcp+1F, .y = 0x1.486d8p-2F, .z = -0x1.abf4e4p+0F},
+                                  .orientation = {.x = -0x1.1c65eap-5F, .y = 0x1.b359a8p-5F, .z = 0x1.2167a4p-9F, .w = 0x1.fef758p-1F}};
+    EXPECT_EQ(gjk(floor, floor_pose, cylinder, cylinder_pose).status, GjkStatus::OVERLAPPING);
+    const ShapeDistance distance = convex_distance(floor, floor_pose, cylinder, cylinder_pose);
+    EXPECT_NEAR(distance.distance, -0.00288F, 1e-4F);
+    EXPECT_TRUE(approximately_equal(distance.normal, {.y = 1}, 1e-4F)) << describe(distance.normal);
+    const std::optional<ContactManifold> manifold = collide_convex(floor, floor_pose, cylinder, cylinder_pose);
+    ASSERT_TRUE(manifold.has_value());
+    EXPECT_TRUE(approximately_equal(manifold->normal, {.y = 1}, 1e-4F)) << describe(manifold->normal);
+    for (const ContactPoint& point : manifold->contacts())
+    {
+        EXPECT_GT(point.separation, -0.01F) << "a point of the top face, not of the bottom one";
+    }
+}
+
 } // namespace

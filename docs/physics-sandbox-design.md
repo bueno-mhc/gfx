@@ -1,6 +1,6 @@
 # gfx physics sandbox: an interactive application over every library — decisions and plan
 
-Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 implemented** (§C "S3 as built"), awaiting validation.
+Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 committed** (378ee8c); **S4 implemented** (§C "S4 as built"), awaiting validation.
 
 The request (2026-10-25): *a visual test combining all abstractions, for the physics simulation — an application where I
 can interact and see the physics being calculated and executed, with graphics.* It is `examples/physics_sandbox`: a window
@@ -177,3 +177,64 @@ Deviations from the plan, for validation:
 3. **`--capture-frame`** (not planned), to check a frame in the middle of the script.
 4. **Two fixes to the reference backend** (above), with a public addition: `SolverContact::first_margin`/`second_margin`
    (0 by default: a solver that ignores them behaves as before).
+
+### S4 as built (2026-10-26)
+
+Module **`physics_sandbox.presets`** (`presets.cppm`/`.cpp`) and changes to the scene, the renderer and the program:
+
+- **Nine presets** (`Preset`, `preset_information()`, `find_preset()`, `build_preset(preset, scene)` → `PresetResult`: the
+  view the orbit starts with, the showcase's handles for the script): **showcase** (S2's scene); **stacks** (a pyramid of
+  eight levels, a tower of ten crates, a column of rounded crates, a wall of staggered bricks); **dominoes** (one every
+  half meter along a sine, each turned along it, the first tipped over); **chains** (fourteen capsules on ball-and-socket
+  joints hanging from a point, a rope bridge of sixteen planks on hinges sagging between two posts with three crates
+  dropped on it, a figure of ten parts — cone-twist neck, shoulders and hips, hinged elbows and knees with limits, a
+  six-degree-of-freedom waist — and a wrecking ball on a distance joint swinging into a stack); **cloth** (two cloths of
+  22 × 22 particles falling flat onto a sphere and a box, a curtain hanging by its top row from a bar with long-range
+  attachments); **soft volumes** (four tetrahedral jelly cubes from rigid to soft edges, a rope pinned to the world holding
+  a crate pinned to its end); **friction** (crates of friction 0 to 0.6 on a 25° slope of friction 1 — mixed as square
+  roots: the first three slide —, a crate of static friction 0.6 and dynamic 0.05 that sticks until pushed, balls rolling
+  with rolling resistance 0, 0.03, 0.15); **bouncing** (eight balls of restitution 0 to 0.95, bouncy crates, balls on a
+  tilted plate); **triggers** (three zones — two boxes, a sphere — and an arm on a motorized hinge sweeping sixteen bodies
+  around, balls falling into each zone).
+- **What a backend refuses**: a preset asks for what it shows and catches `BackendCapabilityError`; the backend gets the
+  nearest thing it has and the scene keeps a note of what was refused (capability and the reason's first line) and what
+  was made instead, shown in the panel and printed. Box3D refuses three: rounded crates (sharp ones), separate static
+  friction (0.05 for both), the six-degree-of-freedom waist (a cone-twist one).
+- **Scene**: soft bodies (`add_soft_body(description, surface, color)`: the triangles drawn, or none for a sphere at each
+  particle; their particles' last two positions, interpolated like poses), joints (`add_joint()`; distance joints drawn as
+  a line between their anchors while both bodies exist), triggers (`add_trigger(name, shape, pose, color)`: the colliders in
+  each from ENTER and EXIT events, those of removed bodies dropped, the ENTER count; drawn as lines, brighter while
+  occupied), notes, `add_floor()`, `palette()`. `add_body()` makes no body when a collider is refused.
+- **Renderer**: `add_surface(key, indices, positions, color)` — a moving surface's indices stored once per key (a mesh
+  without vertices), its vertices and area-weighted normals written each frame into the frame's buffer, one two-sided draw
+  each (an identity instance after the meshes'; `MeshPush::vertex_word` says where its vertices start). `clear_meshes()`
+  forgets the surfaces too.
+- **Switching**: the panel's Scene section picks the preset (a combo) and the physics backend (radio buttons, the backends
+  built), with a reset button (and R); any of them builds the scene again at the start of the next frame — the step in flight
+  finishes, the device waits idle, the interaction, the scene and the renderer's meshes go, the preset is built into a new
+  world, the camera aims at its view. Each preset's view is shifted left by 0.3 of its distance so the scene sits right of
+  the panel; the controls section starts closed so the panel fits.
+- **`--preset <name>`** starts with another scene; **`--tour`** builds every preset on every physics backend in turn (90
+  frames each, one step per frame) through the same rebuilding and checks each scene before leaving it: every dynamic body's
+  and particle's position and velocity finite, none lower than 1 m under the floor's top, none faster than 30 m/s, the steps
+  all taken — the lowest body or particle is named in the details. `--script` stays in the showcase.
+
+CTest: `PhysicsSandbox.Tour` runs the tour on the first platform backend with the validation layers (eighteen scenes, about
+9 s in Debug on NVIDIA); the scripted runs are unchanged and pass. Captures of every preset on both backends were looked at.
+
+**Found by the tour, fixed in the narrow phase** (physics design, §B "Follow-up after PH8: shallow overlaps of large
+shapes"): two of the showcase's bodies went through the floor on the reference backend. GJK's sliver test called a
+tetrahedron 100 m across and millimeters high a sliver, its nearest face made the shapes apart with a normal pointing down,
+and the contact pushed the body out through the floor's bottom face. A sliver is now a tetrahedron whose volume is within the
+rounding error of its corners.
+
+Deviations from the plan, for validation:
+
+1. **More than the presets listed**: the showcase is a preset; the chains preset adds a hanging chain and a wrecking ball, the
+   cloth preset a curtain, the soft volumes a rope holding a crate, the friction preset rolling resistance.
+2. **Refusals become substitutes and notes** (not planned): a preset still loads on a backend that lacks a feature.
+3. **`--tour`** and its CTest are how "each preset steps on each backend without errors" is checked.
+4. **A fix to GJK** (above), with two regression tests.
+5. Soft bodies cannot be grabbed (ray casts find colliders only), and they do not collide with each other (the framework's
+   XPBD solver collides particles with colliders and, optionally, with their own body's), so the jelly cubes are dropped
+   apart.

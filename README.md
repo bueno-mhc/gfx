@@ -1302,21 +1302,29 @@ runs it on both backends with `--steps 240 --threads 4`.
 physics world (Box3D or the reference backend) stepped at 60 Hz on its own thread while the main thread reads the
 window's events, moves an orbit camera, builds the UI and draws the bodies as lit, instanced meshes with Vulkan
 (4x multisampling, reversed depth), interpolated between the last two steps. Every shape is tessellated once by
-`gfx.physics.debug_draw`; a panel shows the step's phases, the frame and the controls. Left drag drags a body by the
-point grabbed (a spring-damper force; the wheel pushes it away or pulls it closer), right drag turns the camera,
-middle drag pans, the wheel zooms; Space shoots a ball at the pointer, 1–7 spawn a body there, Delete or X removes the
-body under it, F switches between orbiting and flying (W A S D, E and Q).
+`gfx.physics.debug_draw`; soft bodies are drawn as surfaces whose vertices move (cloth, jelly cubes) or as their
+particles (ropes), triggers and distance joints as lines. A panel picks the scene — nine presets: a showcase of every
+shape kind, stacks, dominoes, chains (a hanging chain, a rope bridge, a ragdoll-like figure, a wrecking ball), cloth,
+soft volumes, friction, bouncing, triggers — and the physics backend (either change builds the scene again: a world
+cannot move to another backend); it says what the backend refused and what was made instead (Box3D has no rounded
+boxes, no separate static friction, no six-degree-of-freedom joints), what is in each trigger, the step's phases and
+the frame. Left drag drags a body by the point grabbed (a spring-damper force; the wheel pushes it away or pulls it
+closer), right drag turns the camera, middle drag pans, the wheel zooms; Space shoots a ball at the pointer, 1–7 spawn
+a body there, Delete or X removes the body under it, F switches between orbiting and flying (W A S D, E and Q), R
+builds the scene again.
 
 ```bash
 build/debug/examples/physics_sandbox/gfx_physics_sandbox.exe --backend sdl3 --physics reference
 ```
 
 `--backend`, `--device`, `--frames` (one physics step per frame) and `--validation` work as for the windowed
-example; `--physics box3d|reference` picks the physics backend, `--threads` the physics task scheduler's threads,
-`--capture <file.ppm>` writes the last frame (or the one `--capture-frame <index>` names). `--script` drives it by a
-script instead of the mouse and keyboard — a grab and a drag, a shot, a spawn, a removal, a flight, through the same
-code — and checks what happened. CTest runs the script with the validation layers on SDL3 with Box3D and on GLFW with
-the reference backend.
+example; `--physics box3d|reference` picks the physics backend, `--preset <name>` the first scene, `--threads` the
+physics task scheduler's threads, `--capture <file.ppm>` writes the last frame (or the one `--capture-frame <index>`
+names). `--script` drives it by a script instead of the mouse and keyboard — a grab and a drag, a shot, a spawn, a
+removal, a flight, through the same code — and checks what happened; `--tour` builds every preset on every physics
+backend in turn, 90 frames each, and checks each scene (everything finite, nothing under the floor or flying away).
+CTest runs the script with the validation layers on SDL3 with Box3D and on GLFW with the reference backend, and the
+tour on the first platform backend.
 
 ## Requirements (Windows)
 

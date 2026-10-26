@@ -217,23 +217,33 @@ solve_tetrahedron(Simplex& simplex) noexcept -> bool
     return true;
 }
 
-/// Whether the tetrahedron of @p points is a sliver: three corners almost together or all four almost in a plane (its
-/// volume under 1e-4 of the cube of its longest edge), so that the signs solve_tetrahedron() tests are noise.
+/// Whether the tetrahedron of @p points is a sliver: its volume within the rounding error of its corners (three corners
+/// together, or all four in a plane, at the precision of their coordinates), so that the signs solve_tetrahedron()
+/// tests are noise. The bound is the determinant's first-order error: each corner off by δ (float's epsilon times the
+/// largest coordinate) changes it by δ times the areas of the faces' parallelograms, its products by ε times the edges'
+/// lengths. A thin tetrahedron of exact corners is no sliver: a shallow overlap of a large box spans one 100 m wide and
+/// 3 mm high, whose signs are sure (a bound relative to the longest edge called it one, and GJK reported its shapes
+/// apart).
 [[nodiscard]] constexpr auto
 is_sliver(const std::array<SupportPoint, 4>& points) noexcept -> bool
 {
-    const std::array<Vector3, 4> corners{points[0].difference, points[1].difference, points[2].difference, points[3].difference};
-    float longest = 0.0F;
-    for (std::size_t first = 0; first < 4; ++first)
+    constexpr float EPSILON = std::numeric_limits<float>::epsilon();
+    constexpr float SAFETY = 16.0F;
+    float largest = 0.0F;
+    for (const SupportPoint& point : points)
     {
-        for (std::size_t second = first + 1; second < 4; ++second)
+        for (const float coordinate : {point.difference.x, point.difference.y, point.difference.z})
         {
-            longest = std::max(longest, length_squared(corners[second] - corners[first]));
+            largest = std::max(largest, coordinate < 0.0F ? -coordinate : coordinate);
         }
     }
-    const float volume = dot(corners[1] - corners[0], cross(corners[2] - corners[0], corners[3] - corners[0]));
-    const float size = longest * square_root(longest);
-    return (volume < 0.0F ? -volume : volume) <= 1e-4F * size;
+    const Vector3 first = points[1].difference - points[0].difference;
+    const Vector3 second = points[2].difference - points[0].difference;
+    const Vector3 third = points[3].difference - points[0].difference;
+    const float volume = dot(first, cross(second, third));
+    const float areas = length(cross(second, third)) + length(cross(third, first)) + length(cross(first, second));
+    const float bound = EPSILON * largest * areas + EPSILON * length(first) * length(second) * length(third);
+    return (volume < 0.0F ? -volume : volume) <= SAFETY * bound;
 }
 
 /// The face of the tetrahedron of @p simplex closest to the origin.

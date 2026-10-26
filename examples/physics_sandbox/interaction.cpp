@@ -96,6 +96,21 @@ CameraRig::update(camera::Camera& camera,
     }
 }
 
+void
+CameraRig::aim(Vector3 target,
+               float distance,
+               float yaw,
+               float pitch)
+{
+    auto orbit = std::get<camera::OrbitControllerDescription>(m_orbit->description());
+    orbit.target = target;
+    orbit.distance = distance;
+    orbit.yaw = yaw;
+    orbit.pitch = std::clamp(pitch, orbit.minimum_pitch, orbit.maximum_pitch);
+    m_orbit->set_description(orbit);
+    m_mode = CameraMode::ORBIT;
+}
+
 // ===================================================================================================== interaction
 
 void

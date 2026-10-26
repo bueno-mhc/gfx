@@ -7,6 +7,7 @@ layout(push_constant) uniform Push
     mat4 view_projection;
     vec4 light;
     uint vertex_buffer;
+    uint vertex_word;
     uint instance_buffer;
     uint instance_word;
     uint flags;

@@ -26,6 +26,7 @@ import gfx.camera;              // the camera
 import physics_sandbox.font;    // the UI's font atlas, built by gfx_add_ui_atlas()
 import physics_sandbox.renderer;
 import physics_sandbox.scene;
+import physics_sandbox.presets;
 import physics_sandbox.interaction;
 
 namespace
@@ -60,6 +61,7 @@ constexpr auto INPUT = platform::make_input_schema(
                       platform::action("spawn_crate"),
                       platform::action("spawn_plinth"),
                       platform::action("spawn_dumbbell"),
+                      platform::action("reset"),
                       platform::action("quit")),
     platform::context("sandbox",
                       platform::bind("grab"_action, platform::MouseButton::LEFT),
@@ -81,6 +83,7 @@ constexpr auto INPUT = platform::make_input_schema(
                       platform::bind("spawn_crate"_action, platform::Key::NUMBER_5),
                       platform::bind("spawn_plinth"_action, platform::Key::NUMBER_6),
                       platform::bind("spawn_dumbbell"_action, platform::Key::NUMBER_7),
+                      platform::bind("reset"_action, platform::Key::R),
                       platform::bind("quit"_action, platform::Key::ESCAPE)));
 
 /// The spawn actions, in SpawnKind's order.
@@ -97,20 +100,42 @@ constexpr float TURN_RADIANS_PER_PIXEL = 0.006F;
 constexpr float PUSH_METERS_PER_WHEEL_STEP = 0.5F;
 constexpr float INTERFACE_FONT_SIZE = 15.0F; ///< UI units (points) per em.
 constexpr std::size_t PLOTTED_STEPS = 180;   ///< Step times plotted.
+constexpr float PANEL_WRAP_WIDTH = 400.0F;   ///< Where the panel's long lines wrap (UI units).
+constexpr float PANEL_OFFSET = 0.3F;         ///< A scene's view turns around a point this fraction of its distance left of its target (the panel is on the left).
+constexpr std::uint64_t TOUR_FRAMES = 90;    ///< Frames (steps) the tour spends in each scene.
+constexpr float TOUR_LOWEST = -1.0F;         ///< A body or particle lower than this fell through the floor (its top is at 0).
+constexpr float TOUR_FASTEST = 30.0F;        ///< Meters per second no body or particle of the presets reaches.
 
 /// What the command line asks for.
 struct Options
 {
     std::optional<platform::PlatformBackendKind> backend{};
     physics::PhysicsBackendKind physics = physics::PhysicsBackendKind::BOX3D;
+    Preset preset = Preset::SHOWCASE;
     std::optional<std::size_t> physical_device{};
     std::uint32_t threads = std::max(1U, std::thread::hardware_concurrency());
     std::optional<std::uint64_t> frames{};
     bool script = false;
+    bool tour = false;
     bool validation = false;
     std::optional<std::string> capture{};
     std::optional<std::uint64_t> capture_frame{};
 };
+
+/// The physics backends built.
+auto
+available_physics_backends() -> std::vector<physics::PhysicsBackendKind>
+{
+    std::vector<physics::PhysicsBackendKind> backends;
+    for (const physics::PhysicsBackendKind kind : {physics::PhysicsBackendKind::BOX3D, physics::PhysicsBackendKind::REFERENCE})
+    {
+        if (physics::physics_backend_availability(kind).available)
+        {
+            backends.push_back(kind);
+        }
+    }
+    return backends;
+}
 
 /// @p name in capitals (enumerator names).
 auto
@@ -153,6 +178,20 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
             }
             options.physics = *kind;
         }
+        else if (argument == "--preset" && has_value)
+        {
+            const std::optional<Preset> preset = find_preset(arguments[++index]);
+            if (!preset)
+            {
+                std::println(std::cerr, "unknown preset '{}'", arguments[index]);
+                return std::nullopt;
+            }
+            options.preset = *preset;
+        }
+        else if (argument == "--tour")
+        {
+            options.tour = true;
+        }
         else if (argument == "--device" && has_value)
         {
             options.physical_device = std::stoull(arguments[++index]);
@@ -183,15 +222,32 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         }
         else
         {
-            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--device <index>] "
-                                    "[--threads <count>] [--frames <count>] [--script] [--validation] [--capture <file.ppm>] [--capture-frame <index>]");
+            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--device <index>] "
+                                    "[--threads <count>] [--frames <count>] [--script | --tour] [--validation] [--capture <file.ppm>] [--capture-frame <index>]");
+            std::print(std::cerr, "presets:");
+            for (std::size_t preset = 0; preset < PRESET_COUNT; ++preset)
+            {
+                std::print(std::cerr, " {}", preset_information(static_cast<Preset>(preset)).name);
+            }
+            std::println(std::cerr, "");
             return std::nullopt;
         }
+    }
+    if (options.script && (options.tour || options.preset != Preset::SHOWCASE))
+    {
+        std::println(std::cerr, "--script runs in the showcase, without --tour");
+        return std::nullopt;
     }
     if (options.script)
     {
         // The script runs to its end at least.
         options.frames = std::max(options.frames.value_or(0), Script::FRAMES);
+    }
+    if (options.tour)
+    {
+        // Every preset on every physics backend, from the first preset.
+        options.preset = Preset::SHOWCASE;
+        options.frames = PRESET_COUNT * available_physics_backends().size() * TOUR_FRAMES;
     }
     return options;
 }
@@ -292,12 +348,24 @@ commands_from(const platform::InputFrame& frame,
 
 // ------------------------------------------------------------------------------------------------- drawing the scene
 
+/// @p color brighter by @p fraction (toward white).
+auto
+brighter(physics::DebugColor color,
+         float fraction) -> physics::DebugColor
+{
+    const auto channel = [fraction](std::uint8_t value) { return static_cast<std::uint8_t>(value + (255.0F - value) * fraction); };
+    return {.red = channel(color.red), .green = channel(color.green), .blue = channel(color.blue), .alpha = color.alpha};
+}
+
 /// Every collider of every body, at the poses drawn this frame, in its body's color (darker while asleep; the body under
-/// the pointer and the one dragged highlighted); the interaction's lines and the world's axes.
+/// the pointer and the one dragged highlighted); the soft bodies (surfaces, or particles); distance joints and triggers as
+/// lines (a trigger brighter while something is in it); the interaction's lines and the world's axes. @p positions is
+/// scratch storage.
 void
 add_scene(SceneRenderer& renderer,
           const Scene& scene,
-          const Interaction& interaction)
+          const Interaction& interaction,
+          std::vector<gfx::Vector3>& positions)
 {
     for (const SceneBody& body : scene.bodies())
     {
@@ -313,6 +381,47 @@ add_scene(SceneRenderer& renderer,
         for (const SceneCollider& collider : body.colliders)
         {
             renderer.add(collider.shape, pose * collider.pose, color, flags);
+        }
+    }
+    for (const SceneSoftBody& soft_body : scene.soft_bodies())
+    {
+        scene.drawn_positions(soft_body, positions);
+        if (!soft_body.surface.empty())
+        {
+            renderer.add_surface(&soft_body, soft_body.surface, positions, soft_body.color);
+            continue;
+        }
+        for (const gfx::Vector3& position : positions)
+        {
+            renderer.add(soft_body.particle, {.position = position}, soft_body.color);
+        }
+    }
+    for (const SceneJoint& joint : scene.joints())
+    {
+        // A distance joint's cable, while both bodies are there.
+        const SceneBody* first = scene.find(joint.first);
+        const SceneBody* second = joint.second.is_valid() ? scene.find(joint.second) : nullptr;
+        if (!joint.cable || first == nullptr || (joint.second.is_valid() && second == nullptr))
+        {
+            continue;
+        }
+        const gfx::Vector3 from = gfx::transform_point(scene.drawn_pose(*first), joint.cable->first);
+        const gfx::Vector3 to = second != nullptr ? gfx::transform_point(scene.drawn_pose(*second), joint.cable->second) : joint.cable->second;
+        renderer.lines().add_line(from, to, {.red = 210, .green = 210, .blue = 200});
+    }
+    for (const SceneTrigger& trigger : scene.triggers())
+    {
+        const physics::DebugColor color = trigger.inside.empty() ? trigger.color : brighter(trigger.color, 0.6F);
+        if (const auto* sphere = trigger.shape->get_if<physics::SphereShape>())
+        {
+            for (const gfx::Vector3 axis : {gfx::Vector3{.x = 1.0F}, gfx::Vector3{.y = 1.0F}, gfx::Vector3{.z = 1.0F}})
+            {
+                renderer.lines().add_circle(trigger.pose.position, axis, sphere->radius, color, 48);
+            }
+        }
+        else if (const auto* box = trigger.shape->get_if<physics::BoxShape>())
+        {
+            renderer.lines().add_box(physics::Obb{.center = trigger.pose.position, .half_extents = box->half_extents, .orientation = trigger.pose.orientation}, color);
         }
     }
     interaction.add_lines(renderer.lines());
@@ -333,14 +442,31 @@ struct FrameReport
     CameraMode camera = CameraMode::ORBIT;
     const Interaction* interaction = nullptr;
     bool scripted = false;
+    Preset preset = Preset::SHOWCASE;
+    std::span<const std::string_view> preset_names{};
+    std::span<const physics::PhysicsBackendKind> backends{};
 };
 
-void
+/// What the panel asks of the scene (applied at the start of the next frame).
+struct SceneRequest
+{
+    std::optional<Preset> preset{};                      ///< Another preset.
+    std::optional<physics::PhysicsBackendKind> backend{}; ///< Another backend.
+    bool reset = false;                                  ///< The preset built again.
+
+    [[nodiscard]] auto any() const noexcept -> bool
+    {
+        return preset || backend || reset;
+    }
+};
+
+auto
 statistics_panel(gfx::ui::UiFrame& frame,
                  const Scene& scene,
-                 const FrameReport& report)
+                 const FrameReport& report) -> SceneRequest
 {
-    // A summary always shown; the step's phases, the rendering and the controls in sections that open and close.
+    // A summary always shown; the scene, the step's phases, the rendering and the controls in sections that open and close.
+    SceneRequest request;
     frame.set_next_window_position({.x = 12, .y = 12}, gfx::ui::UiCondition::FIRST_USE_EVER);
     if (frame.begin_window("Physics sandbox", gfx::ui::UiWindowFlag::ALWAYS_AUTO_RESIZE))
     {
@@ -365,6 +491,43 @@ statistics_panel(gfx::ui::UiFrame& frame,
                        hovered != nullptr && !hovered->colliders.empty() ? std::format("a {}", hovered->colliders.front().shape->kind()) : std::string{"nothing to grab"});
             frame.text("grabs {}, shots {}, spawned {}, removed {}", done.grabs, done.shots, done.spawned, done.removed);
         }
+        if (frame.collapsing_header("Scene", gfx::ui::TreeNodeFlag::DEFAULT_OPEN))
+        {
+            // The preset and the backend (either change builds the scene again), what is in the triggers, what the
+            // backend refused.
+            std::size_t selected = std::to_underlying(report.preset);
+            if (frame.combo("preset", selected, report.preset_names))
+            {
+                request.preset = static_cast<Preset>(selected);
+            }
+            for (std::size_t index = 0; index < report.backends.size(); ++index)
+            {
+                const physics::PhysicsBackendKind backend = report.backends[index];
+                if (index > 0)
+                {
+                    frame.same_line();
+                }
+                if (frame.radio_button(backend == physics::PhysicsBackendKind::BOX3D ? "Box3D" : "reference", backend == scene.backend())
+                    && backend != scene.backend())
+                {
+                    request.backend = backend;
+                }
+            }
+            frame.same_line();
+            request.reset = frame.button("reset (R)");
+            frame.push_text_wrap_position(PANEL_WRAP_WIDTH);
+            frame.text_wrapped_unformatted(preset_information(report.preset).description);
+            frame.text("{} soft bodies, {} joints, {} triggers", scene.soft_bodies().size(), scene.joints().size(), scene.triggers().size());
+            for (const SceneTrigger& trigger : scene.triggers())
+            {
+                frame.bullet_text("{}: {} inside, {} entered", trigger.name, trigger.inside.size(), trigger.entered);
+            }
+            for (const std::string& note : scene.notes())
+            {
+                frame.text_wrapped("{} refused {}", scene.backend(), note);
+            }
+            frame.pop_text_wrap_position();
+        }
         if (frame.collapsing_header("Step phases"))
         {
             for (std::size_t phase = 0; phase < step.phase_seconds.size(); ++phase)
@@ -376,19 +539,77 @@ statistics_panel(gfx::ui::UiFrame& frame,
         if (frame.collapsing_header("Rendering") && report.drawn != nullptr)
         {
             frame.text_unformatted(report.device);
-            frame.text("{} instances in {} draws, {} lines, {}x MSAA", report.drawn->instances, report.drawn->draw_calls, report.drawn->lines,
-                       std::to_underlying(report.samples));
+            frame.text("{} instances and {} surfaces in {} draws, {} lines, {}x MSAA", report.drawn->instances, report.drawn->surfaces, report.drawn->draw_calls,
+                       report.drawn->lines, std::to_underlying(report.samples));
             frame.text("{} meshes: {} vertices, {} indices", report.drawn->meshes, report.drawn->mesh_vertices, report.drawn->mesh_indices);
         }
-        if (frame.collapsing_header("Controls", gfx::ui::TreeNodeFlag::DEFAULT_OPEN))
+        if (frame.collapsing_header("Controls"))
         {
             frame.text_unformatted("left drag: drag a body (wheel: push, pull)");
             frame.text_unformatted("right drag: turn   middle drag: pan   wheel: zoom");
             frame.text_unformatted("F: orbit / fly (W A S D, E Q)   Space: shoot");
-            frame.text_unformatted("1-7: spawn   Delete, X: remove   Esc: quit");
+            frame.text_unformatted("1-7: spawn   Delete, X: remove   R: reset");
+            frame.text_unformatted("Esc: quit");
         }
     }
     frame.end_window();
+    return request;
+}
+
+// ------------------------------------------------------------------------------------------------- the tour
+
+/// Whether @p scene (between steps) looks sane after its time in the tour: everything finite, nothing under the floor,
+/// nothing flying away, the steps all taken.
+auto
+check_tour_stop(const Scene& scene,
+                Preset preset,
+                std::uint64_t frames) -> ScriptCheck
+{
+    bool finite = true;
+    float lowest = std::numeric_limits<float>::infinity();
+    std::string lowest_what = "nothing";
+    float fastest = 0.0F;
+    std::size_t moving = 0;
+    std::size_t particles = 0;
+    const auto add = [&](gfx::Vector3 position, gfx::Vector3 velocity, auto&& what)
+    {
+        finite = finite && std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) && std::isfinite(gfx::length(velocity));
+        if (position.y < lowest)
+        {
+            lowest = position.y;
+            lowest_what = std::format("{} at ({:.2f}, {:.2f}, {:.2f})", what(), position.x, position.y, position.z);
+        }
+        fastest = std::max(fastest, gfx::length(velocity));
+    };
+    for (const SceneBody& body : scene.bodies())
+    {
+        if (body.kind == physics::BodyKind::DYNAMIC)
+        {
+            const physics::RigidBodyState state = body.body->state();
+            add(state.pose.position, state.linear_velocity,
+                [&body] { return std::format("{} ({})", body.body->handle(), body.colliders.empty() ? std::string{"no collider"} : std::format("{}", body.colliders.front().shape->kind())); });
+            ++moving;
+        }
+    }
+    std::vector<gfx::Vector3> positions;
+    std::vector<gfx::Vector3> velocities;
+    for (const SceneSoftBody& soft_body : scene.soft_bodies())
+    {
+        positions.resize(soft_body.body->particle_count());
+        velocities.resize(positions.size());
+        static_cast<void>(soft_body.body->positions(positions));
+        static_cast<void>(soft_body.body->velocities(velocities));
+        for (std::size_t index = 0; index < positions.size(); ++index)
+        {
+            add(positions[index], velocities[index], [&soft_body, index] { return std::format("{} particle {}", soft_body.body->handle(), index); });
+        }
+        particles += positions.size();
+    }
+    const bool stepped = scene.step_count() + 1 >= frames;
+    return {.description = std::format("{} on {}", preset_information(preset).name, scene.backend()),
+            .passed = finite && lowest > TOUR_LOWEST && fastest < TOUR_FASTEST && stepped,
+            .details = std::format("{} bodies, {} particles, {}finite, lowest {}, fastest {:.1f} m/s, {} steps, {} refusals", moving, particles,
+                                   finite ? "" : "not ", lowest_what, fastest, scene.step_count(), scene.notes().size())};
 }
 
 // ------------------------------------------------------------------------------------------------- capture
@@ -497,30 +718,86 @@ run(const Options& options) -> int
 
     // ---------------------------------------------------------------------------------- the scene
 
-    physics::ThreadTaskScheduler scheduler{options.threads};
-    Scene scene{options.physics, scheduler};
-    const Showcase showcase = build_showcase(scene);
-    Interaction interaction{scene};
-    std::optional<Script> script{};
-    if (options.script)
-    {
-        script.emplace(showcase);
-    }
-
     // A perspective camera with reversed depth and no far plane (Vulkan: +Y down in normalized device coordinates),
-    // moved by the rig (orbit or fly).
+    // moved by the rig (orbit or fly), aimed by each scene.
     const std::unique_ptr<camera::Camera> view_camera = camera::create_camera(
         {.projection = camera::PerspectiveProjection{.vertical_field_of_view = 0.9F, .aspect_ratio = 16.0F / 9.0F, .near_plane = 0.05F,
                                                      .far_plane = camera::INFINITE_FAR_PLANE},
          .clip = {.reversed_depth = true, .y_axis = camera::NormalizedDeviceYAxis::DOWN}});
-    CameraRig rig{camera::OrbitControllerDescription{.target = {.x = -5.5F, .y = 0.8F, .z = -2.5F}, .distance = 17.0F, .yaw = 0.12F, .pitch = -0.36F,
-                                                     .maximum_distance = 300.0F}};
+    CameraRig rig{camera::OrbitControllerDescription{.distance = 17.0F, .maximum_distance = 300.0F}};
+
+    // The scene: a preset built into a world of a backend, built again when either changes (the world cannot move to
+    // another backend). Nothing may step the old world or draw its meshes then: the step in flight and the GPU finish.
+    physics::ThreadTaskScheduler scheduler{options.threads};
+    const std::vector<physics::PhysicsBackendKind> physics_backends = available_physics_backends();
+    std::array<std::string_view, PRESET_COUNT> preset_names{};
+    for (std::size_t index = 0; index < PRESET_COUNT; ++index)
+    {
+        preset_names[index] = preset_information(static_cast<Preset>(index)).name;
+    }
+    std::unique_ptr<Scene> scene{};
+    std::unique_ptr<Interaction> interaction{};
+    Preset preset = options.preset;
+    std::vector<float> step_milliseconds(PLOTTED_STEPS, 0.0F);
+    const auto build = [&](Preset next,
+                           physics::PhysicsBackendKind backend) -> PresetResult
+    {
+        if (scene != nullptr)
+        {
+            scene->finish();
+        }
+        device->wait_idle();
+        interaction.reset();
+        scene.reset();
+        renderer.clear_meshes();
+        scene = std::make_unique<Scene>(backend, scheduler);
+        PresetResult built = build_preset(next, *scene);
+        interaction = std::make_unique<Interaction>(*scene);
+        const gfx::Vector3 right{.x = std::cos(built.view.yaw), .z = -std::sin(built.view.yaw)};
+        rig.aim(built.view.target - right * (PANEL_OFFSET * built.view.distance), built.view.distance, built.view.yaw, built.view.pitch);
+        preset = next;
+        std::ranges::fill(step_milliseconds, 0.0F);
+        std::println("{} on {}: {} bodies, {} soft bodies, {} joints, {} triggers", preset_information(next).name, backend, scene->bodies().size(),
+                     scene->soft_bodies().size(), scene->joints().size(), scene->triggers().size());
+        for (const std::string& note : scene->notes())
+        {
+            std::println("  {} refused {}", backend, note);
+        }
+        return built;
+    };
+    const PresetResult first = build(options.preset, options.physics);
+    std::optional<Script> script{};
+    if (options.script)
+    {
+        script.emplace(*first.showcase);
+    }
+
+    // The tour: every preset on every physics backend, each for TOUR_FRAMES frames, through the same rebuilding.
+    std::vector<std::pair<Preset, physics::PhysicsBackendKind>> tour_stops;
+    if (options.tour)
+    {
+        for (const physics::PhysicsBackendKind backend : physics_backends)
+        {
+            for (std::size_t index = 0; index < PRESET_COUNT; ++index)
+            {
+                tour_stops.emplace_back(static_cast<Preset>(index), backend);
+            }
+        }
+        if (tour_stops.front().second != options.physics)
+        {
+            static_cast<void>(build(tour_stops.front().first, tour_stops.front().second));
+        }
+    }
+    std::size_t tour_stop = 0;
+    std::uint64_t stop_start_frame = 0;
+    std::vector<ScriptCheck> tour_checks;
 
     // ---------------------------------------------------------------------------------- the loop
 
     platform::InputSystem input{INPUT};
     const platform::ContextActivation sandbox_context = input.activate_context("sandbox"_context);
-    std::vector<float> step_milliseconds(PLOTTED_STEPS, 0.0F);
+    std::vector<gfx::Vector3> drawn_positions;
+    SceneRequest request;
     std::uint64_t plotted_step = 0;
     std::uint64_t presented = 0;
     std::uint64_t frame_index = 0;
@@ -557,10 +834,27 @@ run(const Options& options) -> int
         const double advanced = options.frames ? static_cast<double>(STEP) : frame_seconds;
         ui_time += advanced;
 
+        // A new scene: asked by the panel or R (not while a script or the tour drives the sandbox), or the tour's next stop
+        // (the scene left checked first).
+        request.reset = request.reset || (!ui_wants_keyboard && frame.was_action_just_pressed("reset"_action));
+        if (request.any() && !script && !options.tour)
+        {
+            static_cast<void>(build(request.preset.value_or(preset), request.backend.value_or(scene->backend())));
+        }
+        request = {};
+        if (options.tour && frame_index - stop_start_frame >= TOUR_FRAMES && tour_stop + 1 < tour_stops.size())
+        {
+            scene->finish();
+            tour_checks.push_back(check_tour_stop(*scene, preset, frame_index - stop_start_frame));
+            ++tour_stop;
+            static_cast<void>(build(tour_stops[tour_stop].first, tour_stops[tour_stop].second));
+            stop_start_frame = frame_index;
+        }
+
         // This frame's commands: from the script, or from the mouse and keyboard.
         const gfx::Extent extent = presentation.extent();
-        const FrameCommands commands = script ? script->commands(frame_index, scene, *view_camera, extent)
-                                              : commands_from(frame, *window, ui_wants_mouse, ui_wants_keyboard, interaction.dragged().is_valid());
+        const FrameCommands commands = script ? script->commands(frame_index, *scene, *view_camera, extent)
+                                              : commands_from(frame, *window, ui_wants_mouse, ui_wants_keyboard, interaction->dragged().is_valid());
 
         // The camera, then the world: the step begun last frame completes, the interaction queries and edits the world, the
         // next step begins (it runs while this frame is drawn).
@@ -569,19 +863,19 @@ run(const Options& options) -> int
         {
             view_camera->set_aspect_ratio(static_cast<float>(extent.width) / static_cast<float>(extent.height));
         }
-        const std::uint64_t steps_before = scene.step_count();
-        scene.finish();
-        interaction.update(commands, *view_camera, extent);
+        const std::uint64_t steps_before = scene->step_count();
+        scene->finish();
+        interaction->update(commands, *view_camera, extent);
         if (script)
         {
-            script->observe(frame_index, scene, interaction, *view_camera, rig);
+            script->observe(frame_index, *scene, *interaction, *view_camera, rig);
         }
-        scene.clear_events();
-        scene.advance(advanced);
+        scene->clear_events();
+        scene->advance(advanced);
         ++frame_index;
-        if (scene.step_count() != steps_before)
+        if (scene->step_count() != steps_before)
         {
-            const physics::StepStatistics step = scene.statistics();
+            const physics::StepStatistics step = scene->statistics();
             double total = 0.0;
             for (const double seconds : step.phase_seconds)
             {
@@ -601,7 +895,7 @@ run(const Options& options) -> int
         command_pools.begin_frame(frame_number);
         renderer.begin_frame(frame_number);
         ui_renderer.begin_frame(frame_number);
-        add_scene(renderer, scene, interaction);
+        add_scene(renderer, *scene, *interaction, drawn_positions);
 
         // The UI's frame: the statistics panel (the plot oldest first).
         std::array<float, PLOTTED_STEPS> plot{};
@@ -610,16 +904,19 @@ run(const Options& options) -> int
             plot[index] = step_milliseconds[(plotted_step + index) % PLOTTED_STEPS];
         }
         gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(ui_time));
-        statistics_panel(ui_frame, scene,
-                         {.frame_seconds = frame_seconds,
-                          .threads = scheduler.concurrency(),
-                          .device = physical_device.properties().name,
-                          .samples = samples,
-                          .drawn = &renderer.statistics(),
-                          .step_milliseconds = plot,
-                          .camera = rig.mode(),
-                          .interaction = &interaction,
-                          .scripted = script.has_value()});
+        request = statistics_panel(ui_frame, *scene,
+                                   {.frame_seconds = frame_seconds,
+                                    .threads = scheduler.concurrency(),
+                                    .device = physical_device.properties().name,
+                                    .samples = samples,
+                                    .drawn = &renderer.statistics(),
+                                    .step_milliseconds = plot,
+                                    .camera = rig.mode(),
+                                    .interaction = interaction.get(),
+                                    .scripted = script.has_value(),
+                                    .preset = preset,
+                                    .preset_names = preset_names,
+                                    .backends = physics_backends});
         static_cast<void>(ui.end_frame());
         ui_wants_mouse = ui.wants_mouse();
         ui_wants_keyboard = ui.wants_keyboard();
@@ -690,22 +987,37 @@ run(const Options& options) -> int
     }
 
     // The step in flight and the GPU finish before anything is destroyed.
-    scene.finish();
+    scene->finish();
     device->wait_idle();
-    const physics::StepStatistics last = scene.statistics();
-    std::println("{} frames presented, {} steps, {} bodies ({} awake), {} contact points, {} validation errors", presented, scene.step_count(),
+    const physics::StepStatistics last = scene->statistics();
+    std::println("{} frames presented, {} steps, {} bodies ({} awake), {} contact points, {} validation errors", presented, scene->step_count(),
                  last.rigid_bodies, last.awake_bodies, last.contacts, validation_errors.count());
 
-    // The script's checks.
-    std::uint32_t failed = 0;
+    // The script's checks, or the tour's (the last stop's too).
+    std::vector<ScriptCheck> checks;
     if (script)
     {
-        for (const ScriptCheck& check : script->checks(scene))
+        checks = script->checks(*scene);
+    }
+    if (options.tour)
+    {
+        tour_checks.push_back(check_tour_stop(*scene, preset, frame_index - stop_start_frame));
+        if (tour_checks.size() != tour_stops.size())
         {
-            std::println("  {}  {}{}{}", check.passed ? "ok    " : "FAILED", check.description, check.details.empty() ? "" : ": ", check.details);
-            failed += check.passed ? 0U : 1U;
+            tour_checks.push_back({.description = "every stop of the tour", .passed = false,
+                                   .details = std::format("{} of {} stops reached", tour_checks.size(), tour_stops.size())});
         }
-        std::println("{} script checks failed", failed);
+        checks = std::move(tour_checks);
+    }
+    std::uint32_t failed = 0;
+    for (const ScriptCheck& check : checks)
+    {
+        std::println("  {}  {}{}{}", check.passed ? "ok    " : "FAILED", check.description, check.details.empty() ? "" : ": ", check.details);
+        failed += check.passed ? 0U : 1U;
+    }
+    if (!checks.empty())
+    {
+        std::println("{} checks failed", failed);
     }
     return validation_errors.count() == 0 && failed == 0 ? 0 : 1;
 }

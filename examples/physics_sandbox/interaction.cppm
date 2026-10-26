@@ -52,6 +52,13 @@ public:
                 const FrameCommands& commands,
                 float seconds);
 
+    /// @brief Orbits again: around @p target, @p distance away, at @p yaw and @p pitch (radians); applied at the next
+    ///        update().
+    void aim(gfx::Vector3 target,
+             float distance,
+             float yaw,
+             float pitch);
+
     /// @brief The current mode.
     [[nodiscard]] auto mode() const noexcept -> CameraMode
     {

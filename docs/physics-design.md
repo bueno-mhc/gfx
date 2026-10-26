@@ -1170,6 +1170,30 @@ on the floor: BEGIN, touching at every step once landed, no sinking beyond 1.5 c
 BEGIN, HIT and END — without the pushed points none of them). In the sandbox the reference backend now reports the shot 13
 frames after it (Box3D: 14).
 
+### Follow-up after PH8: shallow overlaps of large shapes (2026-10-26, found by the sandbox's tour)
+
+The sandbox's tour (every preset on both backends, each scene checked) found two of the showcase's bodies, a cylinder and
+the compile-time hull, 1.3 m under the floor on the reference backend after landing among the other shapes. The narrow
+phase gave the resting cylinder (2.9 mm deep in the floor, a box 100 m wide and 1 m thick) a manifold whose normal pointed
+down with a separation of -1.64 m, the way out through the floor's bottom face, and the solver pushed it there within one
+step.
+
+**GJK took a shallow overlap for a sliver.** Its last tetrahedron held the origin, but it was 100 m across and millimeters
+high: its volume (46.9) was under 1e-4 of its longest edge cubed (286), the test PH4 added for slivers (three support points
+of a cylinder's rim almost together, whose face signs are noise). Its nearest face, 0.8 mm above the origin, then made the
+shapes apart, with a normal pointing away from the overlap, and face clipping picked the floor's bottom face. A sliver is
+now a tetrahedron whose volume is within the rounding error of its corners: the determinant's first-order error, each
+corner off by float's epsilon times the largest coordinate (times the faces' parallelogram areas), plus epsilon times the
+product of the three edges, with a safety factor of 16 (`is_sliver()` in `gjk.cppm`). PH4's sliver (its regression test
+with exact poses) still is one; thin tetrahedra of exact corners no longer are. Twenty sweeps of other seeds over the
+GJK/EPA, contact, collision and shape-query tests found no failure (only two samples where the random rays hit a hull
+fewer times than the test asks for coverage).
+
+Tests (+ 2): `GjkEpaTest.ShallowOverlapsOfALargeBoxAreOverlaps` (the cylinder's exact pose: GJK reports an overlap, the
+distance is -2.88 mm with the normal up, the manifold's points are on the top face) and
+`ReferenceTest.FallingConvexShapesStayOnTheFloor` (the showcase's eighteen falling shapes, none goes into the floor). Both
+fail with the old test.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

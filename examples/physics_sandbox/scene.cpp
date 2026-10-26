@@ -99,16 +99,82 @@ Scene::add_body(const RigidBodyDescription& description,
     body.color = color;
     body.flags = flags;
     body.previous = body.current = description.pose;
-    for (const ColliderSpecification& specification : colliders)
+    try
     {
-        body.colliders.push_back({.collider = body.body->add_collider({.shape = specification.shape,
-                                                                       .pose = specification.pose,
-                                                                       .material = specification.material,
-                                                                       .density = specification.density}),
-                                  .shape = specification.shape,
-                                  .pose = specification.pose});
+        for (const ColliderSpecification& specification : colliders)
+        {
+            body.colliders.push_back({.collider = body.body->add_collider({.shape = specification.shape,
+                                                                           .pose = specification.pose,
+                                                                           .material = specification.material,
+                                                                           .density = specification.density}),
+                                      .shape = specification.shape,
+                                      .pose = specification.pose});
+        }
+    }
+    catch (...)
+    {
+        // A collider refused: no body.
+        m_bodies.pop_back();
+        throw;
     }
     return body;
+}
+
+auto
+Scene::add_soft_body(const SoftBodyDescription& description,
+                     std::vector<std::uint32_t> surface,
+                     DebugColor color) -> SceneSoftBody&
+{
+    SceneSoftBody& soft_body = m_soft_bodies.emplace_back();
+    try
+    {
+        soft_body.body = m_world->create_soft_body(description);
+    }
+    catch (...)
+    {
+        m_soft_bodies.pop_back();
+        throw;
+    }
+    soft_body.surface = std::move(surface);
+    if (soft_body.surface.empty())
+    {
+        soft_body.particle = make_shape(SphereShape{.radius = description.particle_radius});
+    }
+    soft_body.color = color;
+    soft_body.current.resize(description.particles.size());
+    std::ranges::transform(description.particles, soft_body.current.begin(), &SoftBodyParticle::position);
+    soft_body.previous = soft_body.current;
+    return soft_body;
+}
+
+auto
+Scene::add_joint(const JointDescription& description) -> SceneJoint&
+{
+    std::unique_ptr<Joint> joint = m_world->create_joint(description);
+    SceneJoint& made = m_joints.emplace_back();
+    std::tie(made.first, made.second) = joint_bodies(description);
+    if (const auto* distance = std::get_if<DistanceJointDescription>(&description))
+    {
+        made.cable = std::pair{distance->anchor_first, distance->anchor_second};
+    }
+    made.joint = std::move(joint);
+    return made;
+}
+
+auto
+Scene::add_trigger(std::string name,
+                   const std::shared_ptr<const Shape>& shape,
+                   const Transform& pose,
+                   DebugColor color) -> SceneTrigger&
+{
+    std::unique_ptr<Trigger> trigger = m_world->create_trigger({.shape = shape, .pose = pose});
+    return m_triggers.emplace_back(SceneTrigger{.trigger = std::move(trigger), .name = std::move(name), .shape = shape, .pose = pose, .color = color});
+}
+
+void
+Scene::add_note(std::string note)
+{
+    m_notes.push_back(std::move(note));
 }
 
 auto
@@ -144,6 +210,14 @@ Scene::remove_body(RigidBodyHandle handle) -> bool
     if (found == m_bodies.end())
     {
         return false;
+    }
+    // Its colliders leave the triggers (their EXIT events are not reported once they are gone).
+    for (const SceneCollider& collider : found->colliders)
+    {
+        for (SceneTrigger& trigger : m_triggers)
+        {
+            std::erase(trigger.inside, collider.collider->handle());
+        }
     }
     std::erase(m_shots, handle);
     m_bodies.erase(found);
@@ -214,8 +288,20 @@ Scene::drawn_pose(const SceneBody& body) const noexcept -> Transform
 }
 
 void
+Scene::drawn_positions(const SceneSoftBody& soft_body,
+                       std::vector<Vector3>& output) const
+{
+    output.resize(soft_body.current.size());
+    for (std::size_t index = 0; index < output.size(); ++index)
+    {
+        output[index] = soft_body.previous[index] + (soft_body.current[index] - soft_body.previous[index]) * m_alpha;
+    }
+}
+
+void
 Scene::capture()
 {
+    // The bodies' poses and the soft bodies' particles, the last two of each.
     for (SceneBody& body : m_bodies)
     {
         const RigidBodyState state = body.body->state();
@@ -223,8 +309,48 @@ Scene::capture()
         body.current = state.pose;
         body.awake = state.awake;
     }
+    for (SceneSoftBody& soft_body : m_soft_bodies)
+    {
+        std::swap(soft_body.previous, soft_body.current);
+        soft_body.current.resize(soft_body.body->particle_count());
+        static_cast<void>(soft_body.body->positions(soft_body.current));
+    }
+
+    // The contacts kept until clear_events(); what entered and left the triggers.
     const PhysicsEvents events = m_world->events();
     m_contacts.insert(m_contacts.end(), events.contacts.begin(), events.contacts.end());
+    for (const TriggerEvent& event : events.triggers)
+    {
+        const auto found = std::ranges::find_if(m_triggers, [&event](const SceneTrigger& trigger) { return trigger.trigger->handle() == event.trigger; });
+        if (found == m_triggers.end())
+        {
+            continue;
+        }
+        if (event.kind == TriggerEventKind::ENTER && !std::ranges::contains(found->inside, event.collider))
+        {
+            found->inside.push_back(event.collider);
+            ++found->entered;
+        }
+        else if (event.kind == TriggerEventKind::EXIT)
+        {
+            std::erase(found->inside, event.collider);
+        }
+    }
+}
+
+auto
+palette(std::size_t index) noexcept -> DebugColor
+{
+    return PALETTE[index % PALETTE.size()];
+}
+
+void
+add_floor(Scene& scene)
+{
+    const auto floor = make_shape(BoxShape{.half_extents = {.x = 40.0F, .y = 0.5F, .z = 40.0F}});
+    const std::array floor_collider{ColliderSpecification{.shape = floor, .material = {.friction = {.static_coefficient = 0.7F, .dynamic_coefficient = 0.7F}}}};
+    static_cast<void>(scene.add_body({.kind = BodyKind::STATIC, .pose = {.position = {.y = -0.5F}}}, floor_collider,
+                                     {.red = 150, .green = 152, .blue = 158}, INSTANCE_GRID));
 }
 
 auto
@@ -233,13 +359,8 @@ build_showcase(Scene& scene) -> Showcase
     Showcase showcase;
     const ShapeLibrary& shapes = scene.shapes();
 
-    // The floor: a static slab whose top is at y = 0, with the grid.
-    const auto floor = make_shape(BoxShape{.half_extents = {.x = 40.0F, .y = 0.5F, .z = 40.0F}});
-    const std::array floor_collider{ColliderSpecification{.shape = floor, .material = {.friction = {.static_coefficient = 0.7F, .dynamic_coefficient = 0.7F}}}};
-    static_cast<void>(scene.add_body({.kind = BodyKind::STATIC, .pose = {.position = {.y = -0.5F}}}, floor_collider,
-                                     {.red = 150, .green = 152, .blue = 158}, INSTANCE_GRID));
-
-    // A pyramid of crates (one shared shape).
+    // The floor, then a pyramid of crates (one shared shape).
+    add_floor(scene);
     const std::array crate_collider{ColliderSpecification{.shape = shapes.spawned[std::to_underlying(SpawnKind::CRATE)], .density = 400.0F}};
     constexpr int LEVELS = 6;
     for (int level = 0; level < LEVELS; ++level)

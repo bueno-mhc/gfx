@@ -25,11 +25,12 @@ struct MeshPush
     std::array<float, 16> view_projection{};
     std::array<float, 4> light{};
     std::uint32_t vertex_buffer = 0;
+    std::uint32_t vertex_word = 0;
     std::uint32_t instance_buffer = 0;
     std::uint32_t instance_word = 0;
     std::uint32_t flags = 0;
 };
-static_assert(sizeof(MeshPush) == 96);
+static_assert(sizeof(MeshPush) == 100);
 
 /// line.vert's push constants.
 struct LinePush
@@ -58,6 +59,15 @@ struct PendingMesh
 {
     std::uint32_t mesh = 0;
     gfx::physics::DebugMesh data{};
+};
+
+/// A frame's moving surface: its mesh (indices only), its vertices in the frame's positions and normals, its color.
+struct Surface
+{
+    std::uint32_t mesh = 0;
+    std::uint32_t first_vertex = 0;
+    std::uint32_t vertex_count = 0;
+    std::uint32_t color = 0;
 };
 
 /// A frame's instance.
@@ -120,6 +130,11 @@ struct SceneRenderer::State
     std::vector<PendingMesh> pending{};
     std::vector<Instance> instances{};
     std::vector<std::uint32_t> order{};
+    std::vector<std::uint32_t> surface_order{};
+    std::unordered_map<const void*, std::uint32_t> surface_lookup{};
+    std::vector<Surface> surfaces{};
+    std::vector<gfx::Vector3> surface_positions{};
+    std::vector<gfx::Vector3> surface_normals{};
     gfx::physics::DebugLines lines{};
     std::unique_ptr<gfx::ShaderModule> mesh_vertex{};
     std::unique_ptr<gfx::ShaderModule> mesh_fragment{};
@@ -226,6 +241,9 @@ SceneRenderer::begin_frame(std::uint64_t frame)
     state.uploader.begin_frame(frame);
     state.frame_data.begin_frame(frame);
     state.instances.clear();
+    state.surfaces.clear();
+    state.surface_positions.clear();
+    state.surface_normals.clear();
     state.lines.clear();
 }
 
@@ -250,6 +268,54 @@ SceneRenderer::add(const std::shared_ptr<const gfx::physics::Shape>& shape,
         state.pending.push_back(std::move(pending));
     }
     state.instances.push_back({.mesh = found->second, .pose = pose, .color = color.packed(), .flags = flags});
+}
+
+void
+SceneRenderer::add_surface(const void* key,
+                           std::span<const std::uint32_t> indices,
+                           std::span<const gfx::Vector3> positions,
+                           gfx::physics::DebugColor color)
+{
+    // The surface's indices: copied the first time its key is seen (a mesh without vertices).
+    State& state = *m_state;
+    auto [found, inserted] = state.surface_lookup.try_emplace(key, static_cast<std::uint32_t>(state.meshes.size()));
+    if (inserted)
+    {
+        PendingMesh pending{.mesh = found->second, .data = {}};
+        pending.data.indices.assign(indices.begin(), indices.end());
+        state.meshes.push_back({.shape = nullptr,
+                                .first_vertex = 0,
+                                .first_index = 0,
+                                .index_count = static_cast<std::uint32_t>(indices.size()),
+                                .two_sided = true,
+                                .ready = false});
+        state.pending.push_back(std::move(pending));
+    }
+
+    // Its vertices this frame, with each one's normal: the sum of its triangles' (area-weighted) normals.
+    const auto first = static_cast<std::uint32_t>(state.surface_positions.size());
+    state.surface_positions.insert(state.surface_positions.end(), positions.begin(), positions.end());
+    state.surface_normals.resize(state.surface_positions.size(), gfx::Vector3{});
+    const std::span<gfx::Vector3> normals = std::span{state.surface_normals}.subspan(first);
+    for (std::size_t index = 0; index + 2 < indices.size(); index += 3)
+    {
+        const std::uint32_t a = indices[index];
+        const std::uint32_t b = indices[index + 1];
+        const std::uint32_t c = indices[index + 2];
+        if (a >= positions.size() || b >= positions.size() || c >= positions.size())
+        {
+            continue;
+        }
+        const gfx::Vector3 face = gfx::cross(positions[b] - positions[a], positions[c] - positions[a]);
+        normals[a] += face;
+        normals[b] += face;
+        normals[c] += face;
+    }
+    for (gfx::Vector3& normal : normals)
+    {
+        normal = gfx::length_squared(normal) > 0.0F ? gfx::normalized(normal) : gfx::Vector3{.y = 1.0F};
+    }
+    state.surfaces.push_back({.mesh = found->second, .first_vertex = first, .vertex_count = static_cast<std::uint32_t>(positions.size()), .color = color.packed()});
 }
 
 auto
@@ -292,10 +358,16 @@ SceneRenderer::prepare(gfx::GraphicsRecorder& recorder)
         }
         mesh.first_vertex = static_cast<std::uint32_t>(state.stored_vertices);
         mesh.first_index = static_cast<std::uint32_t>(state.stored_indices);
-        state.uploader.upload_buffer(recorder, state.vertices->handle(), state.stored_vertices * VERTEX_WORDS * 4, words,
-                                     gfx::ResourceState::VERTEX_SHADER_STORAGE_READ, gfx::ResourceState::VERTEX_SHADER_STORAGE_READ);
-        state.uploader.upload_buffer(recorder, state.indices->handle(), state.stored_indices * 4, pending.data.indices,
-                                     gfx::ResourceState::INDEX_BUFFER, gfx::ResourceState::INDEX_BUFFER);
+        if (!words.empty())
+        {
+            state.uploader.upload_buffer(recorder, state.vertices->handle(), state.stored_vertices * VERTEX_WORDS * 4, words,
+                                         gfx::ResourceState::VERTEX_SHADER_STORAGE_READ, gfx::ResourceState::VERTEX_SHADER_STORAGE_READ);
+        }
+        if (!pending.data.indices.empty())
+        {
+            state.uploader.upload_buffer(recorder, state.indices->handle(), state.stored_indices * 4, pending.data.indices,
+                                         gfx::ResourceState::INDEX_BUFFER, gfx::ResourceState::INDEX_BUFFER);
+        }
         state.stored_vertices += pending.data.vertices.size();
         state.stored_indices += pending.data.indices.size();
         mesh.ready = true;
@@ -315,6 +387,7 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
     statistics.mesh_vertices = state.stored_vertices;
     statistics.mesh_indices = state.stored_indices;
     statistics.instances = 0;
+    statistics.surfaces = 0;
     statistics.draw_calls = 0;
     statistics.lines = 0;
     statistics.skipped = 0;
@@ -343,31 +416,82 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
                           const std::uint32_t mesh = state.instances[index].mesh;
                           return std::pair{state.meshes[mesh].two_sided, mesh};
                       });
-    const std::uint64_t instance_bytes = state.order.size() * INSTANCE_WORDS * 4;
-    const std::uint64_t line_bytes = state.lines.vertices().size() * LINE_VERTEX_WORDS * 4;
-    if (state.frame_data.used_bytes() + instance_bytes + line_bytes + 64 > state.frame_data.bytes_per_frame())
+    // The surfaces of ready meshes: an instance each after the meshes' (no turn, their color), their vertices.
+    state.surface_order.clear();
+    std::size_t surface_vertices = 0;
+    for (std::uint32_t index = 0; index < state.surfaces.size(); ++index)
     {
-        statistics.skipped += static_cast<std::uint32_t>(state.order.size() + state.lines.line_count());
+        if (state.meshes[state.surfaces[index].mesh].ready)
+        {
+            state.surface_order.push_back(index);
+            surface_vertices += state.surfaces[index].vertex_count;
+        }
+        else
+        {
+            ++statistics.skipped;
+        }
+    }
+    const std::size_t slots = state.order.size() + state.surface_order.size();
+    const std::uint64_t instance_bytes = slots * INSTANCE_WORDS * 4;
+    const std::uint64_t surface_bytes = surface_vertices * VERTEX_WORDS * 4;
+    const std::uint64_t line_bytes = state.lines.vertices().size() * LINE_VERTEX_WORDS * 4;
+    if (state.frame_data.used_bytes() + instance_bytes + surface_bytes + line_bytes + 96 > state.frame_data.bytes_per_frame())
+    {
+        statistics.skipped += static_cast<std::uint32_t>(slots + state.lines.line_count());
         state.order.clear();
+        state.surface_order.clear();
         state.lines.clear();
     }
     gfx::TransientAllocation instances{};
-    if (!state.order.empty())
+    if (!state.order.empty() || !state.surface_order.empty())
     {
         instances = state.frame_data.allocate(instance_bytes, 16);
+        const auto write_instance = [&instances](std::size_t slot,
+                                                 const gfx::Transform& pose,
+                                                 std::uint32_t color,
+                                                 std::uint32_t flags)
+        {
+            const std::size_t word = slot * INSTANCE_WORDS;
+            store(instances.memory, word, pose.position.x);
+            store(instances.memory, word + 1, pose.position.y);
+            store(instances.memory, word + 2, pose.position.z);
+            store(instances.memory, word + 3, pose.orientation.x);
+            store(instances.memory, word + 4, pose.orientation.y);
+            store(instances.memory, word + 5, pose.orientation.z);
+            store(instances.memory, word + 6, pose.orientation.w);
+            store(instances.memory, word + 7, color);
+            store(instances.memory, word + 8, flags);
+        };
         for (std::size_t slot = 0; slot < state.order.size(); ++slot)
         {
             const Instance& instance = state.instances[state.order[slot]];
-            const std::size_t word = slot * INSTANCE_WORDS;
-            store(instances.memory, word, instance.pose.position.x);
-            store(instances.memory, word + 1, instance.pose.position.y);
-            store(instances.memory, word + 2, instance.pose.position.z);
-            store(instances.memory, word + 3, instance.pose.orientation.x);
-            store(instances.memory, word + 4, instance.pose.orientation.y);
-            store(instances.memory, word + 5, instance.pose.orientation.z);
-            store(instances.memory, word + 6, instance.pose.orientation.w);
-            store(instances.memory, word + 7, instance.color);
-            store(instances.memory, word + 8, instance.flags);
+            write_instance(slot, instance.pose, instance.color, instance.flags);
+        }
+        for (std::size_t index = 0; index < state.surface_order.size(); ++index)
+        {
+            write_instance(state.order.size() + index, gfx::Transform{}, state.surfaces[state.surface_order[index]].color, 0);
+        }
+    }
+    gfx::TransientAllocation surface_data{};
+    if (!state.surface_order.empty())
+    {
+        surface_data = state.frame_data.allocate(surface_bytes, 16);
+        std::size_t word = 0;
+        for (const std::uint32_t index : state.surface_order)
+        {
+            const Surface& surface = state.surfaces[index];
+            for (std::uint32_t vertex = surface.first_vertex; vertex < surface.first_vertex + surface.vertex_count; ++vertex)
+            {
+                const gfx::Vector3 position = state.surface_positions[vertex];
+                const gfx::Vector3 normal = state.surface_normals[vertex];
+                store(surface_data.memory, word, position.x);
+                store(surface_data.memory, word + 1, position.y);
+                store(surface_data.memory, word + 2, position.z);
+                store(surface_data.memory, word + 3, normal.x);
+                store(surface_data.memory, word + 4, normal.y);
+                store(surface_data.memory, word + 5, normal.z);
+                word += VERTEX_WORDS;
+            }
         }
     }
     gfx::TransientAllocation lines{};
@@ -416,9 +540,9 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
     // One instanced draw per mesh.
     const std::array<float, 16> view_projection = matrix_floats(view.view_projection);
     const gfx::Vector3 light = gfx::normalized(view.light_direction);
-    if (!state.order.empty())
+    if (!state.order.empty() || !state.surface_order.empty())
     {
-        const MeshPush push{.view_projection = view_projection,
+        MeshPush push{.view_projection = view_projection,
                             .light = {light.x, light.y, light.z, view.light_strength},
                             .vertex_buffer = state.vertices->bindless_index().value(),
                             .instance_buffer = instances.buffer_index.value(),
@@ -450,6 +574,30 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
             first = end;
         }
         statistics.instances = static_cast<std::uint32_t>(state.order.size());
+
+        // Each surface, both sides: its vertices in the frame's buffer, its instance after the meshes'.
+        auto vertex_word = static_cast<std::uint32_t>(surface_data.offset / 4);
+        for (std::size_t index = 0; index < state.surface_order.size(); ++index)
+        {
+            const Surface& surface = state.surfaces[state.surface_order[index]];
+            const StoredMesh& mesh = state.meshes[surface.mesh];
+            if (bound_two_sided != true)
+            {
+                scope.bind_pipeline(state.two_sided_pipeline->handle());
+                bound_two_sided = true;
+            }
+            push.vertex_buffer = surface_data.buffer_index.value();
+            push.vertex_word = vertex_word;
+            scope.push_constants(push);
+            scope.draw_indexed({.index_count = mesh.index_count,
+                                .instance_count = 1,
+                                .first_index = mesh.first_index,
+                                .vertex_offset = 0,
+                                .first_instance = static_cast<std::uint32_t>(state.order.size() + index)});
+            vertex_word += surface.vertex_count * VERTEX_WORDS;
+            ++statistics.draw_calls;
+        }
+        statistics.surfaces = static_cast<std::uint32_t>(state.surface_order.size());
     }
 
     // The lines over the solids.
@@ -471,6 +619,7 @@ SceneRenderer::clear_meshes()
 {
     State& state = *m_state;
     state.lookup.clear();
+    state.surface_lookup.clear();
     state.meshes.clear();
     state.pending.clear();
     state.stored_vertices = 0;
