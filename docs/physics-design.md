@@ -1145,6 +1145,31 @@ Deviations from the proposal, for validation:
 2. **The reference backend's joint forces are the step's average** (above): a change of PH7's behavior, for breaking and for
    `JointState::force`/`torque`.
 
+### Follow-up after PH8: contacts of spinning and fast bodies (2026-10-25, found by the sandbox)
+
+The physics sandbox's scripted shot (a continuous ball at 60 m/s into a pyramid of crates) scattered the crates on the
+reference backend without a single contact event of the ball, and the ball sank into the pyramid.
+
+1. **Contact points turned with spinning bodies.** Between sub-steps the reference backend moved each contact point as a
+   point fixed on each body's surface, and the sequential-impulse solver's position stage did the same. A sphere spinning
+   after a glancing hit (up to about 240 rad/s, a radian per sub-step) carried that point away from the contact: the
+   separation grew by up to the radius (0.25 m measured), so the pair never counted as touching and positions were not
+   corrected. Contact points are now kept on the shapes' **cores** (a sphere's center, a capsule's segment, a rounded box's
+   inner box), which turn with their bodies, and the **margins** are added along the current normal — exact for spheres, for
+   capsules about their axis, unchanged for shapes without a margin. Public addition: `SolverContact::first_margin` and
+   `second_margin` (0 by default: a solver that ignores them behaves as before); the reference backend fills them from the
+   shape (or the compound's child) each manifold is on.
+2. **Hits resolved within a step were not reported.** With the points tracked correctly, the ball hit the front crate and
+   rebounded (restitution 0.2) inside one step: its points never ended a step within the slop. A pair now touches in a step
+   when the solver pushed at one of its points in any sub-step (`PairManifold::pushed`) or a point is within the slop, as
+   Box2D v3 reports hits from the points that applied an impulse.
+
+Tests (+ 2, `gfx_physics_reference_tests`): `SpinningBallsKeepTheirContactsUnderThem` (a ball spinning at 200 rad/s dropped
+on the floor: BEGIN, touching at every step once landed, no sinking beyond 1.5 cm — with the margins at 0 it sinks to
+0.199 m and reports nothing), `HitsThatBounceOffWithinAStepAreReported` (a bouncy continuous ball at 60 m/s against a wall:
+BEGIN, HIT and END — without the pushed points none of them). In the sandbox the reference backend now reports the shot 13
+frames after it (Box3D: 14).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

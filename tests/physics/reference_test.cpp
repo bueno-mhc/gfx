@@ -474,6 +474,64 @@ TEST(ReferenceTest, ContinuousBodiesDoNotTunnelThroughThinWalls)
     }
 }
 
+TEST(ReferenceTest, SpinningBallsKeepTheirContactsUnderThem)
+{
+    // A ball spinning at 200 rad/s (0.8 radian per sub-step) dropped on the floor: its contact stays under it, so the pair
+    // begins touching, touches at every step after (contacts_of), and the ball does not sink. Contact points kept fixed on
+    // the ball's surface turned away with the spin: the separation grew by up to its radius, the pair never touched (no
+    // events: the sandbox's shots lost theirs) and the ball sank into what it hit.
+    const std::unique_ptr<PhysicsWorld> world = reference_world();
+    const Floor floor = make_floor(*world);
+    const Body ball = make_body(*world, {.pose = {.position = {.y = 0.3F}}, .angular_velocity = {.x = 200.0F}, .angular_damping = 0.0F},
+                                {.shape = sphere(0.25F), .density = 3000.0F});
+    bool began = false;
+    int touching_steps = 0;
+    float lowest = std::numeric_limits<float>::max();
+    for (int step = 0; step < 60; ++step)
+    {
+        world->step(STEP);
+        for (const ContactEvent& event : world->events().contacts)
+        {
+            began = began || (event.kind == ContactEventKind::BEGIN && (event.first == ball.collider->handle() || event.second == ball.collider->handle()));
+        }
+        std::array<ContactInfo, 4> contacts{};
+        const QueryResult<std::span<ContactInfo>> touching = world->contacts_of(ball.body->handle(), contacts);
+        touching_steps += step >= 20 && touching && !touching->empty() ? 1 : 0;
+        lowest = std::min(lowest, ball.body->state().pose.position.y);
+    }
+    EXPECT_TRUE(began) << "BEGIN of the ball and the floor";
+    EXPECT_EQ(touching_steps, 40) << "touching at every step once landed";
+    EXPECT_GT(lowest, 0.25F - 0.015F) << "not sunk into the floor (it rests within the solver's tolerance)";
+}
+
+TEST(ReferenceTest, HitsThatBounceOffWithinAStepAreReported)
+{
+    // A bouncy continuous ball at 60 m/s toward a wall: its speculative contact stops and returns it within one step, so its
+    // points never end a step within the slop; the pair still touched (the solver pushed it), so BEGIN, HIT and END come.
+    const std::unique_ptr<PhysicsWorld> world = reference_world({.gravity = {}});
+    const std::unique_ptr<RigidBody> wall = world->create_rigid_body({.kind = BodyKind::STATIC});
+    const std::unique_ptr<Collider> wall_collider = wall->add_collider({.shape = box({.x = 2.0F, .y = 2.0F, .z = 0.1F})});
+    const Body ball = make_body(*world, {.pose = {.position = {.z = 2.7F}}, .linear_velocity = {.z = -60.0F}, .motion_quality = MotionQuality::CONTINUOUS},
+                                {.shape = sphere(0.25F), .material = {.restitution = 1.0F}});
+    std::array<bool, ENUMERATOR_COUNT<ContactEventKind>> seen{};
+    for (int step = 0; step < 10; ++step)
+    {
+        world->step(STEP);
+        for (const ContactEvent& event : world->events().contacts)
+        {
+            if ((event.first == ball.collider->handle() && event.second == wall_collider->handle())
+                || (event.first == wall_collider->handle() && event.second == ball.collider->handle()))
+            {
+                seen[std::to_underlying(event.kind)] = true;
+            }
+        }
+    }
+    EXPECT_GT(ball.body->state().linear_velocity.z, 50.0F) << "bounced back";
+    EXPECT_TRUE(seen[std::to_underlying(ContactEventKind::BEGIN)]);
+    EXPECT_TRUE(seen[std::to_underlying(ContactEventKind::HIT)]);
+    EXPECT_TRUE(seen[std::to_underlying(ContactEventKind::END)]);
+}
+
 /// Keeps the first body's center at a height (one row).
 class HeightConstraint final : public UserConstraint
 {

@@ -60,6 +60,7 @@ struct PairManifold
     BroadPhasePair pair{};
     ContactManifold manifold{};  ///< From pair.first to pair.second.
     float approach_speed = 0.0F; ///< How fast its deepest point closed before the solve (HIT events).
+    bool pushed = false;         ///< Whether the solver pushed at one of its points in a sub-step (a hit that bounced off in the step touched).
 };
 
 /// A solver contact's points in its bodies' frames (about their centers of mass), to move them with the bodies between
@@ -67,8 +68,8 @@ struct PairManifold
 struct ContactGeometry
 {
     Vector3 normal{};                                       ///< In the first body's orientation.
-    std::array<Vector3, MAXIMUM_MANIFOLD_POINTS> first{};  ///< The first surface's points.
-    std::array<Vector3, MAXIMUM_MANIFOLD_POINTS> second{}; ///< The second's.
+    std::array<Vector3, MAXIMUM_MANIFOLD_POINTS> first{};  ///< The points on the first shape's core (its surface less its margin).
+    std::array<Vector3, MAXIMUM_MANIFOLD_POINTS> second{}; ///< On the second's.
 };
 
 /// A pair of colliders touching.

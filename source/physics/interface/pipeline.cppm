@@ -245,6 +245,10 @@ struct SolverContact
     Friction friction{};        ///< The pair's coefficients (static, dynamic, rolling resistance in meters).
     float restitution = 0.0F;   ///< The pair's.
     Vector3 rolling_impulse{};  ///< The accumulated rolling-resistance impulse, in and out like the points'.
+    float first_margin = 0.0F;  ///< The first shape's margin where it touches (a sphere's or capsule's radius, a rounding):
+                                ///< a solver tracks the point on the shape's core, which turns with the body, and the margin
+                                ///< along the normal (a point fixed on a spinning sphere's surface would turn away).
+    float second_margin = 0.0F; ///< The second shape's.
 };
 
 /// @brief A joint or a user constraint as a solver solves it.

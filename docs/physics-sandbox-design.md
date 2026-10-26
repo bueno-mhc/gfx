@@ -1,6 +1,6 @@
 # gfx physics sandbox: an interactive application over every library — decisions and plan
 
-Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 implemented** (§C "S2 as built"), awaiting validation.
+Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 implemented** (§C "S3 as built"), awaiting validation.
 
 The request (2026-10-25): *a visual test combining all abstractions, for the physics simulation — an application where I
 can interact and see the physics being calculated and executed, with graphics.* It is `examples/physics_sandbox`: a window
@@ -118,3 +118,62 @@ Deviations from the plan, for validation:
    second pass that loads it (the UI's text is antialiased by its own distance fields).
 2. **`--capture`** (not planned): the last frame written to a PPM file, used to check the rendering here and, in S3, by the
    scripted run.
+
+### S3 as built (2026-10-25)
+
+Module **`physics_sandbox.interaction`** (`interaction.cppm`/`.cpp`) and changes to the scene and the program:
+
+- **`FrameCommands`**: what a frame asks — the pointer (framebuffer pixels) and whether it is over the scene, grab
+  pressed/held/released, push (meters along the pointer's ray while dragging), shoot, spawn (a `SpawnKind`), remove,
+  toggle fly, look, pan, fly movement, zoom. The program makes them from the input system's actions (`commands_from()`:
+  the mouse ignored while the UI wants it, the keyboard while the UI types; the wheel pushes a dragged body, else zooms) or
+  takes them from the script: **the same code runs either way**.
+- **`CameraRig`**: the orbit controller and a first-person one (`FirstPersonControllerDescription`, 8 m/s: yaw about the
+  world's up, no roll, W A S D on the horizontal plane, E and Q up and down); F switches — flying starts from the camera's
+  pose, orbiting again turns about the point ahead of it at the orbit's distance (yaw and pitch from the camera).
+- **`Interaction`** (between steps: after `Scene::finish()`, before `Scene::advance()`, since a query during a step
+  returns STEP_IN_PROGRESS): a ray through the pointer (`Camera::screen_to_world_ray()`) cast against the world
+  (`PhysicsWorld::ray_cast()`, the backend's queries) finds the dynamic body hovered (highlighted, flag 2); grabbing keeps
+  the point grabbed in the body's frame and its distance along the ray; **dragging applies a spring-damper force at that
+  point** (4 Hz, critically damped, scaled by the body's mass, carrying its weight, at most 40 g) and damps its spin
+  (`apply_force_at()`, `apply_torque()`); shooting throws a ball (radius 0.25 m, 3000 kg/m³, continuous collision) at 60 m/s
+  along the ray; spawning puts a body of the kind asked 0.9 m off the surface pointed at (or 10 m ahead); removing destroys
+  the hovered body. The drag's spring and the point pointed at are drawn as lines.
+- **`Scene`**: a `ShapeLibrary` (one shape per spawn kind and the ball, shared with the showcase: one mesh each),
+  `spawn()`, `shoot()` (at most 40 balls: the oldest goes), `remove_body()`, `find()` by body handle, `body_of()` by
+  collider, the contact events of the steps completed since `clear_events()`; `build_showcase()` returns a `Showcase` (the
+  pyramid's crates, its top and middle crates, the first sphere) for the script.
+- **`Script`** (`--script`, 420 frames of one step): grab the pyramid's top crate (frame 60), drag it 2.5 m aside and 2 m up
+  over a second, hold, release (150); shoot at the pyramid's middle (180); spawn a dumbbell on the floor (270); remove the
+  body under the first sphere's pixel (300); fly forward for a second (330 to 390); then six checks: the top crate grabbed;
+  dragged up (> 1 m) and aside (> 1.5 m), within 1.2 m of the pointer's target; a contact event between the ball and a
+  crate; the dumbbell at rest within 1.5 m of the point; one body fewer and the removed one gone; 8 m flown (±0.6), orbiting
+  again. The exit code is 1 when one fails.
+- The panel: a summary (backend, step, bodies, pairs, contact points, step and frame times, the plot of step times with the
+  slowest, the camera's mode, what the pointer points at, the interaction's counts) and sections that open and close (step
+  phases, rendering, controls — open); the window sizes itself. `--capture-frame <index>` captures another frame than the
+  last one.
+
+CTest: `PhysicsSandbox.SDL3` (Box3D) and `PhysicsSandbox.GLFW` (the reference backend) run the script with the validation
+layers. Both pass every check on NVIDIA; GLFW with the reference backend on Intel too.
+
+**Found by the sandbox, fixed in the reference backend** (physics design, §B "Follow-up after PH8"): a fast shot ball pushed
+into the pyramid without any contact event. Contact points were moved between sub-steps (and in the solver's position
+stage) as points fixed on each body's surface, so a sphere spinning after a glancing hit (up to about 240 rad/s here, a
+radian per sub-step) carried its point away from the contact: its separation grew by up to its radius, the pair never
+counted as touching, and the ball sank into what it hit. Contact points are now kept on the shapes' cores with the margins
+along the normal (`SolverContact::first_margin`/`second_margin`). A hit resolved and bounced off within one step then still
+went unreported: a pair now touches in a step when the solver pushed at one of its points in a sub-step, or when a point is
+within the slop.
+
+Deviations from the plan, for validation:
+
+1. **Dragging is a force, not a joint**: a spring-damper force at the grabbed point instead of a kinematic hand body joined
+   by a SPRING distance joint. A distance joint of length 0 acts along one line only, which turns when the two points meet
+   (the reference backend's row direction falls back to +Y at zero length), and damps only along it; the force damps in
+   every direction, needs no extra body, and behaves the same on both backends.
+2. **Flying is first person** (yaw about the world's up, no roll, horizontal movement with E/Q for height) rather than the
+   free-fly controller, whose mouse turns about the camera's own axes and so rolls the view as it goes.
+3. **`--capture-frame`** (not planned), to check a frame in the middle of the script.
+4. **Two fixes to the reference backend** (above), with a public addition: `SolverContact::first_margin`/`second_margin`
+   (0 by default: a solver that ignores them behaves as before).

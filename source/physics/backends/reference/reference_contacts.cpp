@@ -27,11 +27,13 @@ manifolds_of(std::span<const PairManifold> manifolds,
     return {range.begin(), range.end()};
 }
 
-/// Whether the pair's manifolds have a point closer than the slop.
+/// Whether the pair touched in the step: the solver pushed at one of its points, or one is closer than the slop.
 [[nodiscard]] auto
 touches(std::span<const PairManifold> manifolds) noexcept -> bool
 {
-    return std::ranges::any_of(manifolds, [](const PairManifold& manifold) { return manifold.manifold.point_count > 0 && manifold.manifold.deepest() < LINEAR_SLOP; });
+    return std::ranges::any_of(manifolds, [](const PairManifold& manifold) {
+        return manifold.manifold.point_count > 0 && (manifold.pushed || manifold.manifold.deepest() < LINEAR_SLOP);
+    });
 }
 
 } // namespace
@@ -157,7 +159,8 @@ ReferenceBackend::find_contacts(float seconds,
 void
 ReferenceBackend::report_contacts(WorldSnapshot& pending)
 {
-    // The touching pairs (a point within the slop), their contacts, BEGIN (and HIT) for those that start.
+    // The touching pairs (pushed apart by the solver, or a point within the slop), their contacts, BEGIN (and HIT) for those
+    // that start.
     m_touching.clear();
     const float hit_speed = pending.configuration.hit_event_speed;
     for (std::size_t index = 0; index < m_manifolds.size();)

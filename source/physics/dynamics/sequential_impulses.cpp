@@ -183,8 +183,8 @@ struct PreparedPoint
 {
     Vector3 lever_first{};          ///< From the first center to the point.
     Vector3 lever_second{};         ///< From the second center.
-    Vector3 local_first{};          ///< The first surface's point, about the first center in its orientation.
-    Vector3 local_second{};         ///< The second's.
+    Vector3 local_first{};          ///< The point on the first shape's core, about the first center in its orientation.
+    Vector3 local_second{};         ///< On the second's.
     float separation = 0.0F;        ///< When prepared.
     float normal_mass = 0.0F;       ///< Effective mass along the normal.
     std::array<float, 2> tangent_mass{};
@@ -210,6 +210,8 @@ struct PreparedContact
     float restitution = 0.0F;
     Vector3 rolling_impulse{};
     Matrix3 rolling_mass{.columns = {Vector3{}, Vector3{}, Vector3{}}};
+    float first_margin = 0.0F;  ///< The shapes' margins (their points kept on their cores).
+    float second_margin = 0.0F;
 };
 
 /// Equality rows solved together at most (a point and an orientation held).
@@ -579,14 +581,16 @@ SequentialImpulseSolver::solve(const SolverStep& step)
         prepared.rolling = contact.friction.rolling;
         prepared.restitution = contact.restitution;
         prepared.rolling_impulse = settings.warm_starting ? contact.rolling_impulse : Vector3{};
+        prepared.first_margin = contact.first_margin;
+        prepared.second_margin = contact.second_margin;
         for (std::uint32_t point = 0; point < prepared.point_count; ++point)
         {
             const ContactPoint& source = contact.manifold.points[point];
             PreparedPoint& target = prepared.points[point];
             target.lever_first = source.position - first.center;
             target.lever_second = source.position - second.center;
-            target.local_first = rotate(conjugate(first.orientation), source.position - normal * (0.5F * source.separation) - first.center);
-            target.local_second = rotate(conjugate(second.orientation), source.position + normal * (0.5F * source.separation) - second.center);
+            target.local_first = rotate(conjugate(first.orientation), source.position - normal * (0.5F * source.separation + contact.first_margin) - first.center);
+            target.local_second = rotate(conjugate(second.orientation), source.position + normal * (0.5F * source.separation + contact.second_margin) - second.center);
             target.separation = source.separation;
             const float normal_inverse = contact_inverse_mass(prepared.bodies, target.lever_first, target.lever_second, normal);
             target.normal_mass = normal_inverse > TINY ? 1.0F / normal_inverse : 0.0F;
@@ -939,8 +943,8 @@ SequentialImpulseSolver::solve(const SolverStep& step)
             const SolverBody& second = *contact.bodies.second;
             const PreparedPoint& prepared = contact.points[point];
             const Vector3 normal = rotate(first.orientation, contact.local_normal);
-            const Vector3 on_first = first.center + rotate(first.orientation, prepared.local_first);
-            const Vector3 on_second = second.center + rotate(second.orientation, prepared.local_second);
+            const Vector3 on_first = first.center + rotate(first.orientation, prepared.local_first) + normal * contact.first_margin;
+            const Vector3 on_second = second.center + rotate(second.orientation, prepared.local_second) - normal * contact.second_margin;
             const float separation = dot(on_second - on_first, normal);
             const float correction = std::clamp(POSITION_CORRECTION_FACTOR * (separation + LINEAR_SLOP), -MAXIMUM_LINEAR_CORRECTION, 0.0F);
             if (correction == 0.0F)

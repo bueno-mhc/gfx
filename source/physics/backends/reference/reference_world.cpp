@@ -25,6 +25,31 @@ constexpr float TINY = 1.0e-9F;
 /// A matrix of zeros.
 constexpr Matrix3 ZERO_MATRIX{.columns = {Vector3{}, Vector3{}, Vector3{}}};
 
+/// The margin of the part of @p shape a contact is on: a sphere's or capsule's radius, a box's or hull's rounding, a
+/// compound child's when @p sub_shape names one; none for triangles (meshes and height fields).
+[[nodiscard]] auto
+contact_margin(const Shape& shape,
+               std::uint32_t sub_shape) noexcept -> float
+{
+    return std::visit(
+        [sub_shape](const auto& geometry) -> float {
+            using Geometry = std::remove_cvref_t<decltype(geometry)>;
+            if constexpr (std::same_as<Geometry, CompoundShape>)
+            {
+                return sub_shape < geometry.children().size() ? contact_margin(*geometry.children()[sub_shape].shape, NO_SUB_SHAPE) : 0.0F;
+            }
+            else if constexpr (std::same_as<Geometry, TriangleMeshShape> || std::same_as<Geometry, HeightFieldShape>)
+            {
+                return 0.0F;
+            }
+            else
+            {
+                return geometry.margin();
+            }
+        },
+        shape.geometry());
+}
+
 /// The mass properties a body moves with: a dynamic body's (a unit mass and inertia when its colliders give none),
 /// none for the others.
 [[nodiscard]] auto
@@ -728,7 +753,9 @@ ReferenceBackend::simulate(float seconds,
                                                   .dynamic_coefficient = std::sqrt(a.dynamic_coefficient * b.dynamic_coefficient),
                                                   .rolling = std::max(a.rolling, b.rolling)},
                                      .restitution = std::max(first->configuration.material.restitution, second->configuration.material.restitution),
-                                     .rolling_impulse = {}});
+                                     .rolling_impulse = {},
+                                     .first_margin = contact_margin(*first->configuration.shape, manifold.manifold.sub_shape_first),
+                                     .second_margin = contact_margin(*second->configuration.shape, manifold.manifold.sub_shape_second)});
         m_contact_manifolds.push_back(index);
     }
     m_solver_joints.clear();
@@ -783,6 +810,8 @@ ReferenceBackend::simulate(float seconds,
     // with their bodies (collided once per step), the solve.
     const std::uint32_t sub_steps = std::max(1U, world.solver.sub_steps);
     const float sub_seconds = seconds / static_cast<float>(sub_steps);
+    // Each point is kept on the shapes' cores (their surfaces less their margins), which turn with their bodies, and the
+    // margins along the normal: a spinning sphere's contact stays under it (a point fixed on its surface would turn away).
     m_contact_geometry.resize(m_solver_contacts.size());
     for (std::size_t index = 0; index < m_solver_contacts.size(); ++index)
     {
@@ -794,8 +823,11 @@ ReferenceBackend::simulate(float seconds,
         for (std::uint32_t point = 0; point < contact.manifold.point_count; ++point)
         {
             const ContactPoint& source = contact.manifold.points[point];
-            geometry.first[point] = rotate(conjugate(first.orientation), source.position - contact.manifold.normal * (0.5F * source.separation) - first.center);
-            geometry.second[point] = rotate(conjugate(second.orientation), source.position + contact.manifold.normal * (0.5F * source.separation) - second.center);
+            const Vector3 normal = contact.manifold.normal;
+            const Vector3 core_first = source.position - normal * (0.5F * source.separation + contact.first_margin);
+            const Vector3 core_second = source.position + normal * (0.5F * source.separation + contact.second_margin);
+            geometry.first[point] = rotate(conjugate(first.orientation), core_first - first.center);
+            geometry.second[point] = rotate(conjugate(second.orientation), core_second - second.center);
         }
     }
     for (std::uint32_t sub_step = 0; sub_step < sub_steps; ++sub_step)
@@ -850,8 +882,8 @@ ReferenceBackend::simulate(float seconds,
                 contact.manifold.normal = normal;
                 for (std::uint32_t point = 0; point < contact.manifold.point_count; ++point)
                 {
-                    const Vector3 on_first = first.center + rotate(first.orientation, geometry.first[point]);
-                    const Vector3 on_second = second.center + rotate(second.orientation, geometry.second[point]);
+                    const Vector3 on_first = first.center + rotate(first.orientation, geometry.first[point]) + normal * contact.first_margin;
+                    const Vector3 on_second = second.center + rotate(second.orientation, geometry.second[point]) - normal * contact.second_margin;
                     contact.manifold.points[point].position = (on_first + on_second) * 0.5F;
                     contact.manifold.points[point].separation = dot(on_second - on_first, normal);
                 }
@@ -859,6 +891,16 @@ ReferenceBackend::simulate(float seconds,
         }
         m_solver->solve(
             {.seconds = sub_seconds, .settings = world.solver, .bodies = m_solver_bodies, .contacts = m_solver_contacts, .joints = m_solver_joints, .scheduler = m_scheduler});
+
+        // The pairs the solver pushed apart in this sub-step touched in the step, even if they parted by its end.
+        for (std::size_t index = 0; index < m_solver_contacts.size(); ++index)
+        {
+            const ContactManifold& manifold = m_solver_contacts[index].manifold;
+            if (std::ranges::any_of(manifold.contacts(), [](const ContactPoint& point) { return point.normal_impulse > 0.0F; }))
+            {
+                m_manifolds[m_contact_manifolds[index]].pushed = true;
+            }
+        }
 
         // The joints' loads over the whole step: a load one sub-step takes (a landing stopped at once) counts too.
         if (sub_step == 0)

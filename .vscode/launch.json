@@ -110,8 +110,8 @@
         },
         {
             // The physics sandbox (examples/physics_sandbox), with the Vulkan validation layers: a physics world drawn
-            // with Vulkan under an orbit camera (right drag orbits, middle drag pans, the wheel zooms; Escape quits).
-            // Asks for the platform backend and the physics backend.
+            // with Vulkan (left drag drags a body, right drag turns, middle drag pans, the wheel zooms, Space shoots,
+            // 1-7 spawn, Delete removes, F flies; Escape quits). Asks for the platform backend and the physics backend.
             "name": "gfx: Physics sandbox",
             "type": "cppdbg",
             "request": "launch",
