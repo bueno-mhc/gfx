@@ -1,0 +1,224 @@
+#version 460
+// A round of treelet restructuring (Karras and Aila 2013, "Fast Parallel Construction of High-Quality Bounding Volume
+// Hierarchies", section 4), bottom up: at each node with at least `minimum_leaves` leaves under it, the treelet — the node's
+// children, then the subtree of largest surface area opened until TREELET_LEAVES subtrees hang from it — is rebuilt with the
+// topology of least surface-area-heuristic cost over those subtrees, found by dynamic programming over their subsets; the
+// treelet's internal nodes are reused, the node keeps its place. Only a strictly cheaper topology is written. Other nodes
+// get their annotation again (their children's costs changed).
+//
+// The costs of a topology are evaluated as the bounds pass evaluates them (the same areas, the same associations), so the
+// current topology costs exactly what its annotations say and the result does not depend on the order the GPU runs the
+// invocations in.
+#pragma use_vulkan_memory_model
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_GOOGLE_include_directive : require
+#include "bvh_climb.glsl"
+
+layout(push_constant) uniform Push
+{
+    Tree tree;
+    uint minimum_leaves; // nodes with fewer leaves under them are not treelet roots
+} push;
+
+const uint SUBSETS = 1U << TREELET_LEAVES;
+
+// The treelet's subtrees: references, boxes, costs, leaves, last leaf positions; and its internal nodes (the root first).
+uint subtrees[TREELET_LEAVES];
+vec3 subtree_minimums[TREELET_LEAVES];
+vec3 subtree_maximums[TREELET_LEAVES];
+float subtree_costs[TREELET_LEAVES];
+uint subtree_leaves[TREELET_LEAVES];
+uint subtree_last_leaves[TREELET_LEAVES];
+uint internal_nodes[TREELET_LEAVES];
+
+// Per subset of the subtrees (bit k: subtree k): the area of their box, the least cost of a tree over them, its split.
+float subset_areas[SUBSETS];
+float subset_costs[SUBSETS];
+uint subset_splits[SUBSETS];
+
+// The pending nodes of the rebuild: subsets and the nodes they become.
+uint pending_subsets[TREELET_LEAVES];
+uint pending_nodes[TREELET_LEAVES];
+
+Box subset_box(uint subset, uint subtree_count)
+{
+    Box box = empty_box();
+    for (uint subtree = 0U; subtree < subtree_count; ++subtree)
+    {
+        if ((subset & (1U << subtree)) != 0U)
+        {
+            box = union_of(box, Box(subtree_minimums[subtree], subtree_maximums[subtree]));
+        }
+    }
+    return box;
+}
+
+float annotated_cost(Tree tree, uint node)
+{
+    return uintBitsToFloat(gpu_coherent_word_vectors[tree.annotations].values[node].z);
+}
+
+void restructure(Tree tree, uint leaf_count, uint root)
+{
+    // The treelet: the root's children, then the internal subtree of largest area opened (the first on ties).
+    uint first_child;
+    uint second_child;
+    const Box root_box = read_node_coherent(tree, root, first_child, second_child);
+    const float current_cost =
+        internal_cost(surface_area(root_box), annotated_cost(tree, node_of(first_child, leaf_count)), annotated_cost(tree, node_of(second_child, leaf_count)));
+    subtrees[0] = first_child;
+    subtrees[1] = second_child;
+    internal_nodes[0] = root;
+    uint subtree_count = 2U;
+    uint internal_count = 1U;
+    while (subtree_count < TREELET_LEAVES)
+    {
+        int largest = -1;
+        float largest_area = -1.0;
+        for (uint subtree = 0U; subtree < subtree_count; ++subtree)
+        {
+            if (!is_leaf(subtrees[subtree]))
+            {
+                uint unused_first;
+                uint unused_second;
+                const float area = surface_area(read_node_coherent(tree, subtrees[subtree], unused_first, unused_second));
+                if (area > largest_area)
+                {
+                    largest = int(subtree);
+                    largest_area = area;
+                }
+            }
+        }
+        if (largest < 0)
+        {
+            break;
+        }
+        const uint opened = subtrees[largest];
+        uint opened_first;
+        uint opened_second;
+        read_node_coherent(tree, opened, opened_first, opened_second);
+        internal_nodes[internal_count++] = opened;
+        subtrees[largest] = opened_first;
+        subtrees[subtree_count++] = opened_second;
+    }
+
+    // The subtrees' boxes and annotations.
+    for (uint subtree = 0U; subtree < subtree_count; ++subtree)
+    {
+        const uint node = node_of(subtrees[subtree], leaf_count);
+        uint unused_first;
+        uint unused_second;
+        const Box box = read_node_coherent(tree, node, unused_first, unused_second);
+        const uvec4 annotation = gpu_coherent_word_vectors[tree.annotations].values[node];
+        subtree_minimums[subtree] = box.minimum;
+        subtree_maximums[subtree] = box.maximum;
+        subtree_leaves[subtree] = annotation.x;
+        subtree_last_leaves[subtree] = annotation.y;
+        subtree_costs[subtree] = uintBitsToFloat(annotation.z);
+    }
+
+    // The least cost over every subset, smaller subsets first (a subset's parts are smaller numbers). Each split is
+    // enumerated once: the part holding the subset's lowest subtree.
+    const uint full = (1U << subtree_count) - 1U;
+    for (uint subset = 1U; subset <= full; ++subset)
+    {
+        subset_areas[subset] = surface_area(subset_box(subset, subtree_count));
+        if (bitCount(subset) == 1)
+        {
+            subset_costs[subset] = subtree_costs[findLSB(subset)];
+            continue;
+        }
+        const uint lowest = subset & (~subset + 1U);
+        const uint rest = subset ^ lowest;
+        float best = infinity();
+        uint best_part = 0U;
+        for (uint others = rest;; others = (others - 1U) & rest)
+        {
+            const uint part = lowest | others;
+            if (part != subset)
+            {
+                precise float cost = subset_costs[part] + subset_costs[subset ^ part];
+                if (cost < best)
+                {
+                    best = cost;
+                    best_part = part;
+                }
+            }
+            if (others == 0U)
+            {
+                break;
+            }
+        }
+        precise float cost = BVH_INTERNAL_COST * subset_areas[subset] + best;
+        subset_costs[subset] = cost;
+        subset_splits[subset] = best_part;
+    }
+    if (!(subset_costs[full] < current_cost))
+    {
+        combine_children(tree, leaf_count, root);
+        return;
+    }
+
+    // The rebuild, top down: each subset of two subtrees or more takes the next internal node of the treelet.
+    uint pending = 1U;
+    pending_subsets[0] = full;
+    pending_nodes[0] = root;
+    uint next_internal = 1U;
+    while (pending > 0U)
+    {
+        --pending;
+        const uint subset = pending_subsets[pending];
+        const uint node = pending_nodes[pending];
+        uint children[2];
+        for (uint side = 0U; side < 2U; ++side)
+        {
+            const uint part = side == 0U ? subset_splits[subset] : subset ^ subset_splits[subset];
+            if (bitCount(part) == 1)
+            {
+                children[side] = subtrees[findLSB(part)];
+            }
+            else
+            {
+                children[side] = internal_nodes[next_internal++];
+                pending_subsets[pending] = part;
+                pending_nodes[pending] = children[side];
+                ++pending;
+            }
+            gpu_coherent_words[tree.parents].words[node_of(children[side], leaf_count)] = node;
+        }
+        uint leaves = 0U;
+        uint last_leaf = 0U;
+        for (uint subtree = 0U; subtree < subtree_count; ++subtree)
+        {
+            if ((subset & (1U << subtree)) != 0U)
+            {
+                leaves += subtree_leaves[subtree];
+                last_leaf = max(last_leaf, subtree_last_leaves[subtree]);
+            }
+        }
+        write_node_coherent(tree, node, subset_box(subset, subtree_count), children[0], children[1]);
+        gpu_coherent_word_vectors[tree.annotations].values[node] = make_annotation(leaves, last_leaf, subset_costs[subset]);
+    }
+}
+
+void process(Tree tree, uint leaf_count, uint node)
+{
+    if (gpu_coherent_word_vectors[tree.annotations].values[node].x >= push.minimum_leaves)
+    {
+        restructure(tree, leaf_count, node);
+    }
+    else
+    {
+        combine_children(tree, leaf_count, node);
+    }
+}
+
+void main()
+{
+    const uint leaf_count = gpu_words[push.tree.header].words[HEADER_LEAVES];
+    const uint position = gl_GlobalInvocationID.x;
+    if (position < leaf_count)
+    {
+        climb(push.tree, leaf_count, leaf_count - 1U + position);
+    }
+}

@@ -1,7 +1,8 @@
 # gfx physics: a GPU-exclusive XPBD backend on a Karras BVH — architecture, decisions and plan
 
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
-as built"; not committed yet). **G1 implemented** (§B "G1 as built", 4 deviations), awaiting validation.
+as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee). **G2 implemented** (§B "G2
+as built", 5 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -442,7 +443,8 @@ constants, typed bindless aliases), `step.glsl` (was `gpu_xpbd.glsl`: step param
 body helpers), `workgroup.glsl`, `primitives.glsl` (count resolution, blocked and striped element indices). Specialization
 constants 6–8: the invalid bindless index, the elements per invocation, the radix bits. New constants in `enums.cppm`:
 `GPU_XPBD_ITEMS_PER_INVOCATION` 8, `GPU_XPBD_TILE_SIZE` 512, `GPU_XPBD_MAXIMUM_ELEMENTS`, `GPU_XPBD_RADIX_BITS` 8,
-`GPU_XPBD_RANK_SORT_LIMIT` 4096, `GPU_XPBD_MINIMUM_SUBGROUP_SIZE` 8. The step does not use the primitives yet (G2 does).
+`GPU_XPBD_RANK_SORT_LIMIT` 4096, `GPU_XPBD_MINIMUM_SUBGROUP_SIZE` 8. The step does not use the primitives yet (G2's BVH
+does; the step from G3).
 
 **Deviations (for validation).**
 1. **`GpuPrimitives` is public** (exported by `gfx.physics.gpu_xpbd`): the tests reach it there, and tools may sort, scan and
@@ -463,6 +465,122 @@ sorts of 0 to 200 003 pairs (rank and radix paths, 32-, 30-, 10-, 4- and 2-bit k
 equal to `std::ranges::stable_sort`; a million keys sorted (time printed); compactions with values and with indices; counts
 from GPU words (scan, sort by radix and by rank, a word above the maximum clamped, dispatch arguments for 5555 and 0
 elements); the variant asked for is the one running; misuses refused.
+
+### G2 as built (2026-10-31)
+
+**`GpuBvh`** (exported partition `gfx.physics.gpu_xpbd:bvh`, pimpl; unit `gpu_bvh.cpp`): a tree of boxes (two vectors each,
+as `reduce_bounds()` reads them) recorded into the caller's `ComputeRecorder`, on the caller's `GpuPrimitives` (sort,
+scans, reduction). `GpuBvhDescription` {`layout` (`GpuBvhLayout` BINARY or FOUR_WIDE), `treelet_rounds`, `debug_name`};
+`reserve(maximum)` before recording (the primitives too); `build(boxes, count)` (a `GpuCount`: a constant or a GPU word);
+`refit(boxes)` (same leaves, moved boxes); `find_pairs(pairs, pair_count, capacity)` within the tree and
+`find_pairs(other, …)` between two trees; `cast_rays(rays, hits, count)`; the buffers for reading back (header, nodes,
+annotations, four-wide nodes, sorted codes); the free function `structure_nodes(header, nodes, output)` lists a tree read
+back as the spatial structures list theirs (`BroadPhase::structure_nodes()`). Misuses (a refit, a search or rays before a
+build, a count above the reserve) throw `InvalidUsageError` when recorded.
+
+- **Layout.** n leaves: 2n − 1 nodes of 32 bytes in one array — the internal nodes 0 … n − 2 (node 0 the root when n ≥ 2),
+  then the leaves in the sorted order. A node holds its box's minimum and maximum (float bits) and two words: its children
+  (an internal node's index, or `GPU_XPBD_BVH_LEAF_FLAG` | the leaf's position), or for a leaf its primitive. The nodes are
+  read and written as word vectors, so an index's bits never pass through a float (a NaN or denormal pattern a driver might
+  canonicalize or flush). Beside them: a parent per node, an **annotation** per node (leaves under it, the last leaf
+  position under it, its surface-area-heuristic cost), a counter per internal node, the header {leaf count, root, `GpuBvhFlag`
+  bits, reserved}, and for FOUR_WIDE a 128-byte node per internal node (children's boxes by axis, children, their last leaves).
+- **Build** (`bvh_morton`, the sort, `bvh_hierarchy`, `bvh_bounds`): the box around every box (`reduce_bounds`), each
+  center's 30-bit Morton code in it (10 bits per axis, `GPU_XPBD_MORTON_BITS`), a stable sort of (code, index) by 30 bits,
+  the hierarchy of Karras 2012 (figure 4) with **δ the common prefix length** (32 + that of the indices when codes are equal,
+  §0 row 15), then the bounds bottom up: one invocation per leaf climbs, counting itself on each parent's counter with
+  acquire-release semantics (queue-family scope, the Vulkan memory model, coherent views of the nodes and annotations); the
+  second to arrive writes the union and the annotation. Costs: leaf `GPU_XPBD_BVH_LEAF_COST` (1) × area, internal
+  `GPU_XPBD_BVH_INTERNAL_COST` (1.2) × area + (cost of its children), areas 2(xy + yz + zx) — every operation `precise` (no
+  fused multiply-add) and in one association everywhere, so a node's cost is the same bits whoever computes it.
+- **Treelets** (`bvh_treelet`, Karras and Aila 2013): round r climbs again (counters zeroed by `bvh_reset`); a node over at
+  least `GPU_XPBD_TREELET_LEAVES` (7) · 2^r leaves forms its treelet (its children, then the internal subtree of largest area
+  opened, the first on ties, until 7 subtrees), weighs every topology over the subtrees by dynamic programming over their
+  2⁷ subsets (each split enumerated once, the first least cost kept), and writes the best one into the treelet's own
+  internal nodes when it is strictly cheaper; other nodes get their annotation again. The current topology's cost is
+  evaluated exactly as the DP evaluates topologies, so "strictly cheaper" never depends on rounding, and the result does not
+  depend on the order the GPU runs the invocations in.
+- **Four-wide** (`bvh_wide`): a binary node rooting a four-wide node takes its two children and opens the internal child of
+  largest area (the first on ties) until four hang there; internal children root four-wide nodes of their own, at their
+  binary index. Each internal node finds out alone whether it roots one, by repeating the openings from the root along its
+  path — no level-by-level dispatches, nothing shared between invocations.
+- **Pairs** (`bvh_pairs`, run twice): each leaf of the query tree traverses the target tree (stack of
+  `GPU_XPBD_BVH_STACK_SIZE` 64 entries; a Karras tree is at most 63 internal nodes deep) and counts its overlapping leaves;
+  the counts are scanned into offsets (their sum is the pair count); the second run writes each leaf's pairs from its offset
+  in the same order. Within a tree, each pair once: a leaf pairs only with later leaves, and subtrees whose last leaf is not
+  later are skipped (the annotation's last leaf). Pairs past the capacity are counted, not written. A traversal deeper than
+  the stack sets `GpuBvhFlag::STACK_OVERFLOW` in the target's header (never seen in the tests).
+- **Rays** (`bvh_rays`): the nearest leaf box each ray enters (nearer children first, subtrees entered beyond the nearest hit
+  skipped, ties to the smaller primitive), for G8's ray queries and for the measurements.
+- **Refit**: counters reset, the bounds climb over the existing hierarchy with the new boxes, the four-wide nodes again.
+
+**Determinism.** The same boxes give the same codes, tree, annotations, four-wide nodes and pairs in the same order, bit for
+bit, twice and with either variant of the primitives (tested). Unions are exact, costs are evaluated in one fixed way, the
+four-wide and treelet choices break ties by position, pairs land at scanned offsets.
+
+**Measurements** (`GpuBvhMeasurementTest`: 100 000 boxes, Release, validation layers off, recording, submission and waiting
+included, best of five; "uniform": boxes spread evenly, "scene": a stress case — most boxes in sixteen clusters, many on a
+floor, a tenth of them large, half sizes 5–20 m):
+
+| | RTX 5060 | Intel RaptorLake |
+|---|---|---|
+| plain build, binary (uniform / scene) | 0.37 / 0.32 ms | 6.5 / 3.0 ms |
+| four-wide nodes on top | +0.2–0.4 ms | within the noise (4.6 / 5.0 ms) |
+| first treelet round on top | +75–87 ms | +69–78 ms |
+| second, third round | +55–80, +40–62 ms | +38–46, +20–29 ms |
+| SAH cost after 1 / 2 / 3 rounds (uniform) | −5.3 / −5.7 / −5.7 % | the same trees |
+| SAH cost after 1 / 2 / 3 rounds (scene) | −20 / −23 / −24 % | the same trees |
+| pairs, uniform (56 485), binary → four-wide | 0.79 → 0.49 ms | 7.4 → 3.1 ms |
+| pairs, scene (4.1 M), binary → four-wide | 23.4 → 12.7 ms | 70.7 → 36.8 ms |
+| 100 000 rays, scene, binary → four-wide | 4.8 → 3.4 ms | 15.8 → 15.1 ms |
+| 100 000 rays, scene, four-wide, 0 → 1 → 3 rounds | 3.4 → 2.5 → 2.5 ms | 15.1 → 10.1 → 9.2 ms |
+
+**Defaults decided** (§D13): **FOUR_WIDE** traversal (pairs 38–59 % faster, rays faster or equal, the nodes cost less than a
+millisecond per build); **no treelet rounds** for a tree rebuilt every step (the first round costs two to three hundred
+plain builds on the RTX 5060, eleven to twenty-six on the Intel GPU). A tree rebuilt rarely (the static tree) may take one
+round when its ray queries matter (rays 26–39 % faster in the scene): G3 and G8 decide with the world's numbers. The world's
+settings (`GpuXpbdDescription`) gain these fields with G3, when a world first uses a tree. In Debug with the validation
+layers the plain builds were slower (2 ms on the RTX 5060, 5–8 ms on the Intel GPU), the treelet rounds as slow, and the
+four-wide nodes as much faster.
+
+**Found.** The RTX 5060's driver lost writes to the fourth component of a vector of an array indexed at run time
+(`minimums[axis][member]`: the fourth child's box stayed empty; Intel's was right). Found by comparing the four-wide nodes
+with the CPU's bit for bit. The four-wide passes now gather per child and build each row from constant components, and the
+traversals read a row's component through `lane()` (selections).
+
+**Deviations (for validation).**
+1. **A component, not yet in the world.** `GpuBvh` is public and tested on its own, like `GpuPrimitives`. The world keeps
+   refusing colliders until G3 brings contacts — accepting them without collisions would ignore collisions silently. So the
+   world's static and moving trees and `structure_nodes()` of a running world come with G3, the particle tree with G7; every
+   piece they need (build, refit, pairs between trees, `structure_nodes()` of a read-back tree) is here and tested.
+2. **Treelet rounds, not top levels**: `treelet_rounds` (round r restructures nodes over at least 7 · 2^r leaves), the knob
+   Karras and Aila's method has, instead of the design's `treelet_levels` (the n top levels). One invocation weighs a whole
+   treelet (the paper uses a warp per treelet, its subsets in shared memory): simpler, and too slow for per-step rebuilds
+   as measured (above). A warp-parallel version can come if a static tree's queries need treelets.
+3. **Annotations beside the 32-byte nodes** (leaves, last leaf, cost: 16 bytes per node): the self-pair search skips
+   subtrees without later leaves, the treelet pass needs the costs, and the tests check them; traversal reads them only
+   within a tree.
+4. **Rays now**: the box-level nearest-hit traversal (`cast_rays()`) is in G2 (for the measurements); G8 adds the shapes.
+5. **Each tree has its own pipelines** (six to eight): sharing them between the world's trees can come with G3 if creation
+   time matters.
+
+**Constants and enumerations** (`enums.cppm`): `GpuBvhLayout` {BINARY, FOUR_WIDE}, `GpuBvhFlag` {NONE, STACK_OVERFLOW};
+`GPU_XPBD_MORTON_BITS` 10, `GPU_XPBD_BVH_LEAF_FLAG` 2³¹, `GPU_XPBD_BVH_STACK_SIZE` 64, `GPU_XPBD_TREELET_LEAVES` 7,
+`GPU_XPBD_BVH_INTERNAL_COST` 1.2, `GPU_XPBD_BVH_LEAF_COST` 1 — specialization constants 9–15 (the costs by their bits).
+Shaders: `bvh.glsl` (layout, boxes, areas, costs, `lane()`, ray entry), `bvh_climb.glsl` (the climb, the union of children),
+`bvh_morton`, `bvh_hierarchy`, `bvh_bounds`, `bvh_reset`, `bvh_treelet`, `bvh_wide`, `bvh_pairs`, `bvh_rays`;
+`common.glsl` gained word-vector views. `record_pass()` moved to `:resources` (shared by the primitives and the tree).
+
+**Tests** (`gpu_bvh_test.cpp` in `gfx_physics_gpu_xpbd_tests`, on both GPUs × both variants with the validation layers;
+the fixture now shared with the primitives' tests in `tests/physics/gpu_test.hpp`): Karras trees of 0 to 100 000 boxes —
+codes within a cell of the CPU's, equal codes in the boxes' order, **the internal nodes the CPU builds from the same codes**,
+each leaf and primitive reached once, unions exact, annotations and costs bit for bit, contiguous leaf ranges; treelet rounds
+1–3 on uniform and clustered boxes **equal bit for bit to the CPU's restructuring of the GPU's plain tree**, costs never
+higher; four-wide nodes of 2 to 30 000 boxes equal to the CPU's collapse; pairs within trees of 0 to 20 000 boxes and between
+two trees equal to brute force in both layouts with and without treelets, the same order twice, a short capacity still
+counting every pair; rays (from inside boxes, along axes, short) entering the nearest box within 1 mm; refits (the same
+children, moved boxes, their pairs); a count from a GPU word giving the same tree as the constant; the same bits twice and
+in the other variant; `structure_nodes()`; misuses. `GpuBvhMeasurementTest` prints the table above for each GPU.
 
 ---
 

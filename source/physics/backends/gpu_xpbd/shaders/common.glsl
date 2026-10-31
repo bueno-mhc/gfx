@@ -22,6 +22,13 @@ layout(constant_id = 5) const uint BODY_LOCK_SHIFT = 0U;
 layout(constant_id = 6) const uint INVALID_INDEX = 0U;
 layout(constant_id = 7) const uint ITEMS_PER_INVOCATION = 0U;
 layout(constant_id = 8) const uint RADIX_BITS = 0U;
+layout(constant_id = 9) const uint BVH_LEAF = 0U;
+layout(constant_id = 10) const uint BVH_STACK_SIZE = 1U;
+layout(constant_id = 11) const uint TREELET_LEAVES = 2U; // (the smallest the treelet pass compiles with: arrays it sizes)
+layout(constant_id = 12) const float BVH_INTERNAL_COST = 0.0;
+layout(constant_id = 13) const float BVH_LEAF_COST = 0.0;
+layout(constant_id = 14) const uint MORTON_BITS = 0U;
+layout(constant_id = 15) const uint BVH_STACK_OVERFLOW = 0U;
 
 // Elements of a workgroup's tile, and digits of a radix pass.
 const uint TILE_SIZE = gl_WorkGroupSize.x * ITEMS_PER_INVOCATION;
@@ -38,6 +45,13 @@ layout(set = 0, binding = 3, std430) buffer GpuWordBuffer
 {
     uint words[];
 } gpu_words[];
+
+// Vectors of words: what holds floats and indices side by side (BVH nodes: a box's corner and a child), so that the
+// indices' bits never pass through a float.
+layout(set = 0, binding = 3, std430) buffer GpuWordVectorBuffer
+{
+    uvec4 values[];
+} gpu_word_vectors[];
 
 // Positive infinity (the minimum of an empty box).
 float infinity()

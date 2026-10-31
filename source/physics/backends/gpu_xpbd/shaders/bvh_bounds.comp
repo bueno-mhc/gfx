@@ -1,0 +1,41 @@
+#version 460
+// The bounds of a BVH, bottom up (a build after its hierarchy, or a refit of the same leaves to new boxes): each invocation
+// writes its leaf (the box of its primitive, the leaf's annotation), then climbs, the second invocation reaching a node
+// writing the union of its children's boxes and its annotation.
+#pragma use_vulkan_memory_model
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_GOOGLE_include_directive : require
+#include "bvh_climb.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint boxes_buffer;
+    uint boxes_first;
+    uint primitives_buffer; // the primitive of each leaf position (the sorted values)
+    Tree tree;
+} push;
+
+void process(Tree tree, uint leaf_count, uint node)
+{
+    combine_children(tree, leaf_count, node);
+}
+
+void main()
+{
+    const uint leaf_count = gpu_words[push.tree.header].words[HEADER_LEAVES];
+    const uint position = gl_GlobalInvocationID.x;
+    if (position >= leaf_count)
+    {
+        return;
+    }
+
+    // The leaf.
+    const uint primitive = gpu_words[push.primitives_buffer].words[position];
+    const uint box = 2U * (push.boxes_first + primitive);
+    const Box leaf_box = Box(gpu_vectors[push.boxes_buffer].values[box].xyz, gpu_vectors[push.boxes_buffer].values[box + 1U].xyz);
+    const uint node = leaf_count - 1U + position;
+    write_node_coherent(push.tree, node, leaf_box, primitive, 0U);
+    gpu_coherent_word_vectors[push.tree.annotations].values[node] = make_annotation(1U, position, leaf_cost(surface_area(leaf_box)));
+
+    climb(push.tree, leaf_count, node);
+}

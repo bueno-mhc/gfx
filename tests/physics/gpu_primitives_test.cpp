@@ -2,40 +2,15 @@
 // variants (subgroup arithmetic where the GPU has it, and the portable one), with the Vulkan validation layers: exclusive
 // scans (one, two and three levels), reductions of boxes, stable sorts by rank and by radix, compactions, dispatch
 // arguments, counts written by a pass, the same bits in both variants, the refusals.
-#include "vulkan_test.hpp"
-
-import gfx.physics;
-import gfx.physics.gpu_xpbd;
+#include "gpu_test.hpp"
 
 namespace
 {
 
 using namespace gfx::physics;
 namespace gpu = gfx::physics::gpu_xpbd;
-
-/// Every physical device of the machine that runs gfx.
-auto
-physical_devices() -> std::vector<std::size_t>
-{
-    std::vector<std::size_t> devices;
-    if (!gfx::backend_availability(gfx::BackendKind::VULKAN).available)
-    {
-        return devices;
-    }
-    const std::unique_ptr<gfx::Instance> instance =
-        gfx::create_instance(gfx::BackendKind::VULKAN, {.application_name = "gfx GPU primitives tests (enumeration)"});
-    for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
-    {
-        if (instance->physical_device(index).missing_core_features().empty())
-        {
-            devices.push_back(index);
-        }
-    }
-    return devices;
-}
-
-/// A word that marks what a primitive must not write.
-constexpr std::uint32_t UNTOUCHED = 0xDEADBEEFU;
+using gfx::tests::random_words;
+using gfx::tests::UNTOUCHED;
 
 /// The exclusive prefix sums of @p values (wrapping modulo 2³²), and their sum.
 auto
@@ -51,99 +26,9 @@ serial_scan(std::span<const std::uint32_t> values) -> std::pair<std::vector<std:
     return {sums, running};
 }
 
-/// Random words: uniform below @p limit (0: every 32-bit value).
-auto
-random_words(std::size_t count,
-             std::uint32_t seed,
-             std::uint64_t limit = 0) -> std::vector<std::uint32_t>
-{
-    std::mt19937 generator{seed};
-    std::vector<std::uint32_t> words(count);
-    for (std::uint32_t& word : words)
-    {
-        word = limit == 0 ? static_cast<std::uint32_t>(generator()) : static_cast<std::uint32_t>(generator() % limit);
-    }
-    return words;
-}
-
 /// The primitives on one GPU in one variant.
-class GpuPrimitivesTest : public gfx::tests::VulkanDeviceTest,
-                          public testing::WithParamInterface<std::tuple<std::size_t, GpuVariantChoice>>
+class GpuPrimitivesTest : public gfx::tests::GpuTest
 {
-protected:
-    void SetUp() override
-    {
-        VulkanDeviceTest::SetUp();
-        if (IsSkipped() || HasFatalFailure())
-        {
-            return;
-        }
-        m_primitives = std::make_unique<gpu::GpuPrimitives>(*m_device, gpu::capabilities(*m_device, {.subgroups = std::get<1>(GetParam())}));
-    }
-
-    [[nodiscard]] auto physical_device() -> gfx::PhysicalDevice& override
-    {
-        return m_instance->physical_device(std::get<0>(GetParam()));
-    }
-
-    void release_device_objects() override
-    {
-        m_primitives.reset();
-        m_buffers.clear();
-    }
-
-    /// A device-local buffer of @p count words holding @p words (UNTOUCHED past them), kept until the test ends.
-    auto words_buffer(std::size_t count,
-                      std::span<const std::uint32_t> words = {}) -> gfx::Buffer&
-    {
-        std::vector<std::uint32_t> contents(std::max<std::size_t>(count, 4), UNTOUCHED);
-        std::ranges::copy(words, contents.begin());
-        return upload(std::as_bytes(std::span{contents}), gfx::BufferUsage::NONE);
-    }
-
-    /// A device-local buffer of @p bytes (with STORAGE, transfer and @p usage) holding @p bytes, kept until the test ends.
-    auto upload(std::span<const std::byte> bytes,
-                gfx::BufferUsage usage) -> gfx::Buffer&
-    {
-        std::unique_ptr<gfx::Buffer> staging = m_device->create_buffer(
-            {.size = bytes.size(), .usage = gfx::BufferUsage::TRANSFER_SOURCE, .location = gfx::MemoryLocation::HOST_UPLOAD, .debug_name = "staging"});
-        std::ranges::copy(bytes, staging->mapped_memory().begin());
-        staging->flush_mapped_range();
-        m_buffers.push_back(m_device->create_buffer(
-            {.size = bytes.size(),
-             .usage = gfx::BufferUsage::STORAGE | gfx::BufferUsage::TRANSFER_SOURCE | gfx::BufferUsage::TRANSFER_DESTINATION | usage,
-             .debug_name = "test words"}));
-        gfx::Buffer& buffer = *m_buffers.back();
-        run<gfx::QueueType::COMPUTE>([&](gfx::ComputeRecorder& recorder) {
-            const std::array regions{gfx::BufferCopyRegion{.size = bytes.size()}};
-            recorder.copy_buffer(staging->handle(), buffer.handle(), regions);
-        });
-        return buffer;
-    }
-
-    /// Records @p recording after a barrier making earlier submissions' writes visible, runs it on the compute queue.
-    template<class Recording>
-    void record(Recording&& recording)
-    {
-        run<gfx::QueueType::COMPUTE>([&](gfx::ComputeRecorder& recorder) {
-            const gfx::GlobalMemoryBarrier visible{.source_stages = gfx::PipelineStage::ALL_COMMANDS,
-                                                   .source_access = gfx::MemoryAccess::TRANSFER_WRITE | gfx::MemoryAccess::SHADER_STORAGE_WRITE,
-                                                   .destination_stages = gfx::PipelineStage::COMPUTE_SHADER,
-                                                   .destination_access = gfx::MemoryAccess::SHADER_STORAGE_READ | gfx::MemoryAccess::SHADER_STORAGE_WRITE};
-            recorder.barrier({.memory_barriers = std::span{&visible, 1}});
-            recording(recorder);
-        });
-    }
-
-    /// The first @p count words of @p buffer.
-    auto words(const gfx::Buffer& buffer,
-               std::size_t count) -> std::vector<std::uint32_t>
-    {
-        return read_buffer<std::uint32_t>(buffer, std::max<std::size_t>(count, 1), gfx::ResourceState::COMPUTE_SHADER_STORAGE_WRITE);
-    }
-
-    std::unique_ptr<gpu::GpuPrimitives> m_primitives;
-    std::vector<std::unique_ptr<gfx::Buffer>> m_buffers;
 };
 
 TEST_P(GpuPrimitivesTest, ScansMatchTheSerialSums)
@@ -422,10 +307,9 @@ TEST_P(GpuPrimitivesTest, MisusesAreRefused)
 
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          GpuPrimitivesTest,
-                         testing::Combine(testing::ValuesIn(physical_devices()), testing::Values(GpuVariantChoice::AUTOMATIC, GpuVariantChoice::PORTABLE)),
-                         [](const testing::TestParamInfo<std::tuple<std::size_t, GpuVariantChoice>>& parameter) {
-                             return std::format("Device{}_{}", std::get<0>(parameter.param), std::get<1>(parameter.param));
-                         });
+                         testing::Combine(testing::ValuesIn(gfx::tests::gpu_physical_devices()),
+                                          testing::Values(GpuVariantChoice::AUTOMATIC, GpuVariantChoice::PORTABLE)),
+                         gfx::tests::gpu_test_name);
 GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(GpuPrimitivesTest);
 
 } // namespace

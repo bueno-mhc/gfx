@@ -74,9 +74,10 @@ struct GpuBodyReadback
     GpuVector angular_velocity{}; ///< w: angular damping.
 };
 
-/// The specialization constants of the passes (ids as shaders/common.glsl declares them): the workgroup size, the body
-/// flags, the invalid bindless index, the elements per invocation and the radix bits.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 9> SPECIALIZATION_CONSTANTS{{
+/// The specialization constants of the passes (ids as shaders/common.glsl declares them; floats by their bits): the
+/// workgroup size, the body flags, the invalid bindless index, the elements per invocation, the radix bits, and the BVHs'
+/// leaf bit, stack size, treelet leaves, node costs, Morton bits and overflow flag.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 16> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -86,6 +87,13 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 9> SPECIALI
     {6, INVALID_BINDLESS_INDEX},
     {7, GPU_XPBD_ITEMS_PER_INVOCATION},
     {8, GPU_XPBD_RADIX_BITS},
+    {9, GPU_XPBD_BVH_LEAF_FLAG},
+    {10, GPU_XPBD_BVH_STACK_SIZE},
+    {11, GPU_XPBD_TREELET_LEAVES},
+    {12, std::bit_cast<std::uint32_t>(GPU_XPBD_BVH_INTERNAL_COST)},
+    {13, std::bit_cast<std::uint32_t>(GPU_XPBD_BVH_LEAF_COST)},
+    {14, GPU_XPBD_MORTON_BITS},
+    {15, std::to_underlying(GpuBvhFlag::STACK_OVERFLOW)},
 }};
 
 /// Workgroups covering @p count invocations.
@@ -202,5 +210,27 @@ inline constexpr GlobalMemoryBarrier TRANSFER_TO_HOST{.source_stages = PipelineS
                                                        .source_access = MemoryAccess::TRANSFER_WRITE,
                                                        .destination_stages = PipelineStage::HOST,
                                                        .destination_access = MemoryAccess::HOST_READ};
+
+/// A pass's writes, before indirect dispatches read their arguments (and later compute passes everything).
+inline constexpr GlobalMemoryBarrier COMPUTE_TO_INDIRECT{.source_stages = PipelineStage::COMPUTE_SHADER,
+                                                          .source_access = MemoryAccess::SHADER_STORAGE_WRITE,
+                                                          .destination_stages = PipelineStage::DRAW_INDIRECT | PipelineStage::COMPUTE_SHADER,
+                                                          .destination_access = MemoryAccess::INDIRECT_COMMAND_READ | MemoryAccess::SHADER_STORAGE_READ |
+                                                                                MemoryAccess::SHADER_STORAGE_WRITE};
+
+/// Records a pass: its pipeline, its push constants, @p workgroup_count workgroups, then the barrier to the next pass.
+template<class Push>
+void
+record_pass(ComputeRecorder& recorder,
+            const ComputePipeline& pipeline,
+            const Push& push,
+            std::uint32_t workgroup_count,
+            const GlobalMemoryBarrier& barrier = COMPUTE_TO_COMPUTE)
+{
+    recorder.bind_pipeline(pipeline.handle());
+    recorder.push_constants(push);
+    recorder.dispatch(workgroup_count);
+    recorder.barrier({.memory_barriers = std::span{&barrier, 1}});
+}
 
 } // namespace gfx::physics::gpu_xpbd

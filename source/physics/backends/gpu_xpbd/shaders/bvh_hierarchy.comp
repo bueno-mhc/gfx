@@ -1,0 +1,96 @@
+#version 460
+// The hierarchy of a BVH (Karras 2012, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees",
+// figure 4): each internal node i finds the range of sorted codes it covers — its direction d from its neighbors' common
+// prefixes, the range's other end by an exponential then a binary search — and splits it where the common prefix grows,
+// by a binary search. δ(i, j) is the length of the common prefix of codes i and j (32 + that of i and j themselves when the
+// codes are equal: every leaf distinct), −1 outside the leaves. Writes each internal node's children, their parents, its
+// counter (zero), and the header (invocation 0).
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint codes_buffer; // the sorted Morton codes
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    Tree tree;
+} push;
+
+int leaf_count;
+
+int delta(int first, int second)
+{
+    if (second < 0 || second >= leaf_count)
+    {
+        return -1;
+    }
+    const uint first_code = gpu_words[push.codes_buffer].words[first];
+    const uint second_code = gpu_words[push.codes_buffer].words[second];
+    if (first_code != second_code)
+    {
+        return 31 - findMSB(first_code ^ second_code);
+    }
+    return 32 + 31 - findMSB(uint(first ^ second));
+}
+
+void main()
+{
+    leaf_count = int(resolve_count(push.maximum, push.count_buffer, push.count_word));
+    const int node = int(gl_GlobalInvocationID.x);
+    if (node == 0)
+    {
+        // The header; the root (node 0, internal or the only leaf) has no parent.
+        gpu_words[push.tree.header].words[HEADER_LEAVES] = uint(leaf_count);
+        gpu_words[push.tree.header].words[HEADER_ROOT] = leaf_count >= 2 ? 0U : BVH_LEAF;
+        gpu_words[push.tree.header].words[HEADER_FLAGS] = 0U;
+        gpu_words[push.tree.parents].words[0] = INVALID_INDEX;
+    }
+    if (node >= leaf_count - 1)
+    {
+        return;
+    }
+
+    // The direction of the range, and the common prefix it must exceed.
+    const int direction = delta(node, node + 1) - delta(node, node - 1) >= 0 ? 1 : -1;
+    const int minimum_prefix = delta(node, node - direction);
+
+    // The range's other end: an upper bound by doubling, then a binary search.
+    int bound = 2;
+    while (delta(node, node + bound * direction) > minimum_prefix)
+    {
+        bound *= 2;
+    }
+    int length = 0;
+    for (int step = bound / 2; step >= 1; step /= 2)
+    {
+        if (delta(node, node + (length + step) * direction) > minimum_prefix)
+        {
+            length += step;
+        }
+    }
+    const int other = node + length * direction;
+
+    // The split: the last leaf sharing more than the range's common prefix with this end.
+    const int node_prefix = delta(node, other);
+    int split = 0;
+    int step = length;
+    do
+    {
+        step = (step + 1) / 2;
+        if (delta(node, node + (split + step) * direction) > node_prefix)
+        {
+            split += step;
+        }
+    } while (step > 1);
+    const int gamma = node + split * direction + min(direction, 0);
+
+    // The children: leaves where the range ends at the split.
+    const uint first_child = min(node, other) == gamma ? BVH_LEAF | uint(gamma) : uint(gamma);
+    const uint second_child = max(node, other) == gamma + 1 ? BVH_LEAF | uint(gamma + 1) : uint(gamma + 1);
+    gpu_word_vectors[push.tree.nodes].values[2 * node].w = first_child;
+    gpu_word_vectors[push.tree.nodes].values[2 * node + 1].w = second_child;
+    gpu_words[push.tree.parents].words[node_of(first_child, uint(leaf_count))] = uint(node);
+    gpu_words[push.tree.parents].words[node_of(second_child, uint(leaf_count))] = uint(node);
+    gpu_words[push.tree.counters].words[node] = 0U;
+}

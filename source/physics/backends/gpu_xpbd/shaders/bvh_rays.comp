@@ -1,0 +1,199 @@
+#version 460
+// The nearest leaf box each ray enters (what a ray query traverses before testing shapes): from the root, nearer children
+// first, subtrees entered beyond the nearest hit so far skipped. A ray is two vectors (origin and its maximum distance,
+// direction); a hit two words (the primitive, INVALID_INDEX for none; the distance where the ray enters its box, 0 when it
+// starts inside). Ties go to the smaller primitive.
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    Tree tree;
+    uint flags; // WIDE
+    uint rays_buffer;
+    uint rays_first;
+    uint hits_buffer;
+    uint hits_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+} push;
+
+const uint WIDE = 2U;
+
+vec3 origin;
+vec3 direction;
+vec3 inverse_direction;
+float best_distance;
+uint best_primitive;
+
+uint stack_nodes[BVH_STACK_SIZE];
+float stack_distances[BVH_STACK_SIZE];
+uint size;
+
+void candidate(float distance, uint primitive)
+{
+    if (distance < best_distance || (distance == best_distance && primitive < best_primitive))
+    {
+        best_distance = distance;
+        best_primitive = primitive;
+    }
+}
+
+float entry(Box box)
+{
+    return ray_entry(box, origin, direction, inverse_direction, best_distance);
+}
+
+void push_node(uint node, float distance)
+{
+    if (size == BVH_STACK_SIZE)
+    {
+        atomicOr(gpu_words[push.tree.header].words[HEADER_FLAGS], BVH_STACK_OVERFLOW);
+        return;
+    }
+    stack_nodes[size] = node;
+    stack_distances[size] = distance;
+    ++size;
+}
+
+void traverse_binary(uint leaf_count)
+{
+    uint first;
+    uint second;
+    const float root_distance = entry(read_node(push.tree, 0U, first, second));
+    if (leaf_count == 1U)
+    {
+        if (root_distance <= best_distance)
+        {
+            candidate(root_distance, first);
+        }
+        return;
+    }
+    if (root_distance <= best_distance)
+    {
+        push_node(0U, root_distance);
+    }
+    while (size > 0U)
+    {
+        --size;
+        if (stack_distances[size] > best_distance)
+        {
+            continue;
+        }
+        uint children[2];
+        read_node(push.tree, stack_nodes[size], children[0], children[1]);
+        float distances[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            uint primitive;
+            uint unused;
+            const Box box = read_node(push.tree, node_of(children[side], leaf_count), primitive, unused);
+            distances[side] = entry(box);
+            if (is_leaf(children[side]) && distances[side] <= best_distance)
+            {
+                candidate(distances[side], primitive);
+            }
+        }
+
+        // The internal children, the nearer popped first.
+        const int nearer = distances[1] < distances[0] ? 1 : 0;
+        for (int order = 0; order < 2; ++order)
+        {
+            const int side = order == 0 ? 1 - nearer : nearer;
+            if (!is_leaf(children[side]) && distances[side] <= best_distance)
+            {
+                push_node(children[side], distances[side]);
+            }
+        }
+    }
+}
+
+void traverse_wide(uint leaf_count)
+{
+    push_node(0U, 0.0);
+    while (size > 0U)
+    {
+        --size;
+        if (stack_distances[size] > best_distance)
+        {
+            continue;
+        }
+        const uint wide = 8U * stack_nodes[size];
+        uvec4 rows[8];
+        for (uint row = 0U; row < 8U; ++row)
+        {
+            rows[row] = gpu_word_vectors[push.tree.wide_nodes].values[wide + row];
+        }
+
+        // The children entered: leaves become candidates, internal nodes are pushed farthest first.
+        uint internal_children[4];
+        float internal_distances[4];
+        uint internal_count = 0U;
+        for (uint slot = 0U; slot < 4U; ++slot)
+        {
+            const uint child = lane(rows[6], slot);
+            if (child == INVALID_INDEX)
+            {
+                continue;
+            }
+            const float distance = entry(wide_child_box(rows, slot));
+            if (distance > best_distance)
+            {
+                continue;
+            }
+            if (is_leaf(child))
+            {
+                candidate(distance, gpu_word_vectors[push.tree.nodes].values[2U * node_of(child, leaf_count)].w);
+            }
+            else
+            {
+                // Kept sorted by decreasing distance.
+                uint place = internal_count++;
+                while (place > 0U && internal_distances[place - 1U] < distance)
+                {
+                    internal_children[place] = internal_children[place - 1U];
+                    internal_distances[place] = internal_distances[place - 1U];
+                    --place;
+                }
+                internal_children[place] = child;
+                internal_distances[place] = distance;
+            }
+        }
+        for (uint index = 0U; index < internal_count; ++index)
+        {
+            push_node(internal_children[index], internal_distances[index]);
+        }
+    }
+}
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    const uint ray = 2U * (push.rays_first + index);
+    const vec4 start = gpu_vectors[push.rays_buffer].values[ray];
+    origin = start.xyz;
+    direction = gpu_vectors[push.rays_buffer].values[ray + 1U].xyz;
+    inverse_direction = 1.0 / direction;
+    best_distance = start.w;
+    best_primitive = INVALID_INDEX;
+    size = 0U;
+
+    const uint leaf_count = gpu_words[push.tree.header].words[HEADER_LEAVES];
+    if (leaf_count >= 2U && (push.flags & WIDE) != 0U)
+    {
+        traverse_wide(leaf_count);
+    }
+    else if (leaf_count > 0U)
+    {
+        traverse_binary(leaf_count);
+    }
+    const uint hit = 2U * (push.hits_first + index);
+    gpu_words[push.hits_buffer].words[hit] = best_primitive;
+    gpu_words[push.hits_buffer].words[hit + 1U] = floatBitsToUint(best_primitive == INVALID_INDEX ? start.w : best_distance);
+}

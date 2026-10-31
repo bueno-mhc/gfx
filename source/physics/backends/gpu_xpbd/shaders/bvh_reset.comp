@@ -1,0 +1,20 @@
+#version 460
+// Zeroes the counters of a BVH's internal nodes before a bottom-up pass over an existing hierarchy (a refit, a treelet
+// round).
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    Tree tree;
+} push;
+
+void main()
+{
+    const uint leaf_count = gpu_words[push.tree.header].words[HEADER_LEAVES];
+    const uint node = gl_GlobalInvocationID.x;
+    if (node + 1U < leaf_count)
+    {
+        gpu_words[push.tree.counters].words[node] = 0U;
+    }
+}

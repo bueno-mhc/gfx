@@ -64,6 +64,21 @@ enum class GpuBodyFlag : std::uint32_t
     AWAKE     = 1U << 3,  ///< Simulated (asleep bodies keep their pose and have no velocity).
 };
 
+/// @brief The nodes a BVH of the GPU backend is traversed by (GpuBvhDescription::layout).
+enum class GpuBvhLayout : std::uint8_t
+{
+    BINARY,    ///< Karras's binary radix tree, as built.
+    FOUR_WIDE, ///< The binary tree collapsed into nodes of four children (the largest children opened first).
+};
+
+/// @brief What a BVH of the GPU backend reports in its header (GpuBvhHeader::flags). Bitmask.
+enum class GpuBvhFlag : std::uint32_t
+{
+    NONE           = 0,       ///< Nothing to report.
+    STACK_OVERFLOW = 1U << 0, ///< A traversal (or the four-wide pass's walk to the root) went deeper than
+                              ///< GPU_XPBD_BVH_STACK_SIZE: its results are incomplete.
+};
+
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
 ///        ("[gfx::physics::SPATIAL] Bvh::remove: ...").
 enum class PhysicsSubsystem : std::uint8_t
@@ -553,6 +568,29 @@ inline constexpr std::uint32_t GPU_XPBD_RANK_SORT_LIMIT = 4096;
 ///        one subgroup: at most as many as it has invocations).
 inline constexpr std::uint32_t GPU_XPBD_MINIMUM_SUBGROUP_SIZE = 8;
 
+/// @brief Bits per axis of the Morton codes the GPU backend's BVHs sort their boxes' centers by (three axes interleaved:
+///        30-bit codes).
+inline constexpr std::uint32_t GPU_XPBD_MORTON_BITS = 10;
+
+/// @brief The bit marking a child of a GPU backend's BVH node as a leaf (the other bits: the leaf's position in the
+///        sorted order).
+inline constexpr std::uint32_t GPU_XPBD_BVH_LEAF_FLAG = 1U << 31U;
+
+/// @brief Entries of a GPU backend's BVH traversal stack, and nodes of the four-wide pass's walk to the root (a Karras tree
+///        is at most 63 internal nodes deep: its prefix lengths grow strictly from 0 to 62).
+inline constexpr std::uint32_t GPU_XPBD_BVH_STACK_SIZE = 64;
+
+/// @brief Leaves of a treelet the GPU backend's BVH restructures (Karras and Aila 2013): every topology over them is
+///        weighed (2⁷ subsets).
+inline constexpr std::uint32_t GPU_XPBD_TREELET_LEAVES = 7;
+
+/// @brief The surface area heuristic's cost of an internal node of a GPU backend's BVH, per unit of area (a traversal
+///        step), relative to GPU_XPBD_BVH_LEAF_COST.
+inline constexpr float GPU_XPBD_BVH_INTERNAL_COST = 1.2F;
+
+/// @brief The surface area heuristic's cost of a leaf of a GPU backend's BVH, per unit of area (a box test of a primitive).
+inline constexpr float GPU_XPBD_BVH_LEAF_COST = 1.0F;
+
 } // namespace gfx::physics
 
 export namespace gfx::camera
@@ -660,6 +698,25 @@ struct EnumerationTraits<physics::GpuBodyFlag>
         EnumeratorName{physics::GpuBodyFlag::DYNAMIC, "DYNAMIC"},
         EnumeratorName{physics::GpuBodyFlag::KINEMATIC, "KINEMATIC"},
         EnumeratorName{physics::GpuBodyFlag::AWAKE, "AWAKE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuBvhLayout>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuBvhLayout::BINARY, "BINARY"},
+        EnumeratorName{physics::GpuBvhLayout::FOUR_WIDE, "FOUR_WIDE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuBvhFlag>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuBvhFlag::STACK_OVERFLOW, "STACK_OVERFLOW"},
     };
 };
 
@@ -1217,6 +1274,8 @@ namespace gfx::enumeration_verification
 static_assert(verify<physics::PhysicsBackendKind>(), "EnumerationTraits<physics::PhysicsBackendKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuVariantChoice>(), "EnumerationTraits<physics::GpuVariantChoice>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBodyFlag>(), "EnumerationTraits<physics::GpuBodyFlag>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuBvhLayout>(), "EnumerationTraits<physics::GpuBvhLayout>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuBvhFlag>(), "EnumerationTraits<physics::GpuBvhFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsSubsystem>(), "EnumerationTraits<physics::PhysicsSubsystem>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsCapability>(), "EnumerationTraits<physics::PhysicsCapability>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::BodyKind>(), "EnumerationTraits<physics::BodyKind>::NAMES is out of sync with the enumeration");

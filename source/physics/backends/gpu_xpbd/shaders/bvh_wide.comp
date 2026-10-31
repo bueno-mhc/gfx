@@ -1,0 +1,131 @@
+#version 460
+// The four-wide layout of a BVH: a node X of the binary tree roots a four-wide node whose children are found by opening,
+// from X's two children, the internal child of largest surface area (the first on ties) until four hang there; children
+// that are internal nodes root four-wide nodes of their own (at their binary index: the four-wide array has a slot per
+// internal node, used by those that root one). Each internal node finds whether it roots one by repeating the openings
+// from the root down along its path: nothing to coordinate between invocations, no level-by-level dispatches.
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    Tree tree;
+} push;
+
+uint leaf_count;
+uint members[4];
+uint member_count;
+
+// The children of the four-wide node X roots.
+void open_node(uint node)
+{
+    uint first;
+    uint second;
+    read_node(push.tree, node, first, second);
+    members[0] = first;
+    members[1] = second;
+    member_count = 2U;
+    while (member_count < 4U)
+    {
+        int largest = -1;
+        float largest_area = -1.0;
+        for (uint member = 0U; member < member_count; ++member)
+        {
+            if (!is_leaf(members[member]))
+            {
+                uint unused_first;
+                uint unused_second;
+                const float area = surface_area(read_node(push.tree, members[member], unused_first, unused_second));
+                if (area > largest_area)
+                {
+                    largest = int(member);
+                    largest_area = area;
+                }
+            }
+        }
+        if (largest < 0)
+        {
+            return;
+        }
+        uint opened_first;
+        uint opened_second;
+        read_node(push.tree, members[largest], opened_first, opened_second);
+        members[largest] = opened_first;
+        members[member_count++] = opened_second;
+    }
+}
+
+void main()
+{
+    leaf_count = gpu_words[push.tree.header].words[HEADER_LEAVES];
+    const uint node = gl_GlobalInvocationID.x;
+    if (node + 1U >= leaf_count)
+    {
+        return;
+    }
+
+    // The path from the node up to the root.
+    uint path[BVH_STACK_SIZE];
+    uint length = 0U;
+    for (uint current = node; current != INVALID_INDEX; current = gpu_words[push.tree.parents].words[current])
+    {
+        if (length == BVH_STACK_SIZE)
+        {
+            atomicOr(gpu_words[push.tree.header].words[HEADER_FLAGS], BVH_STACK_OVERFLOW);
+            return;
+        }
+        path[length++] = current;
+    }
+
+    // Down from the root: each four-wide node's children either hold the node (it roots one), or pass the path on to the
+    // child on it, or none of them is on it (the node was opened: it roots none).
+    uint position = length - 1U;
+    while (position > 0U)
+    {
+        open_node(path[position]);
+        uint next = 0U;
+        for (uint candidate = position; candidate-- > 0U && next == 0U;)
+        {
+            for (uint member = 0U; member < member_count; ++member)
+            {
+                if (members[member] == path[candidate])
+                {
+                    next = candidate + 1U;
+                }
+            }
+        }
+        if (next == 0U)
+        {
+            return;
+        }
+        position = next - 1U;
+    }
+
+    // The four-wide node: its children's boxes by axis, the children, their last leaf positions (empty slots: an empty
+    // box, no child). Gathered per child, then written as rows (no vector component indexed at run time: see lane()).
+    open_node(node);
+    vec3 minimums[4] = vec3[4](vec3(infinity()), vec3(infinity()), vec3(infinity()), vec3(infinity()));
+    vec3 maximums[4] = vec3[4](vec3(-infinity()), vec3(-infinity()), vec3(-infinity()), vec3(-infinity()));
+    uint children[4] = uint[4](INVALID_INDEX, INVALID_INDEX, INVALID_INDEX, INVALID_INDEX);
+    uint last_leaves[4] = uint[4](0U, 0U, 0U, 0U);
+    for (uint member = 0U; member < member_count; ++member)
+    {
+        const uint child_node = node_of(members[member], leaf_count);
+        uint unused_first;
+        uint unused_second;
+        const Box box = read_node(push.tree, child_node, unused_first, unused_second);
+        minimums[member] = box.minimum;
+        maximums[member] = box.maximum;
+        children[member] = members[member];
+        last_leaves[member] = gpu_word_vectors[push.tree.annotations].values[child_node].y;
+    }
+    const uint wide = 8U * node;
+    gpu_word_vectors[push.tree.wide_nodes].values[wide] = floatBitsToUint(vec4(minimums[0].x, minimums[1].x, minimums[2].x, minimums[3].x));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 1U] = floatBitsToUint(vec4(minimums[0].y, minimums[1].y, minimums[2].y, minimums[3].y));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 2U] = floatBitsToUint(vec4(minimums[0].z, minimums[1].z, minimums[2].z, minimums[3].z));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 3U] = floatBitsToUint(vec4(maximums[0].x, maximums[1].x, maximums[2].x, maximums[3].x));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 4U] = floatBitsToUint(vec4(maximums[0].y, maximums[1].y, maximums[2].y, maximums[3].y));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 5U] = floatBitsToUint(vec4(maximums[0].z, maximums[1].z, maximums[2].z, maximums[3].z));
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 6U] = uvec4(children[0], children[1], children[2], children[3]);
+    gpu_word_vectors[push.tree.wide_nodes].values[wide + 7U] = uvec4(last_leaves[0], last_leaves[1], last_leaves[2], last_leaves[3]);
+}

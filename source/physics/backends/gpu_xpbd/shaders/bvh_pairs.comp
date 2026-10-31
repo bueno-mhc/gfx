@@ -1,0 +1,172 @@
+#version 460
+// The overlapping pairs of two BVHs' boxes, or of one BVH's (the same tree: each pair of distinct leaves once, the later
+// leaf found by the earlier one, subtrees holding no later leaf skipped): each leaf of the query tree traverses the target
+// tree. Run twice: the count pass writes each query leaf's count, the write pass (after the counts were scanned into
+// offsets) writes its pairs from its offset, in the same order — so the pairs land where they do whatever the scheduling.
+// A pair is two primitives: the query's then the target's (the same tree: the smaller first). Pairs past the capacity are
+// counted, not written.
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint query_header;
+    uint query_nodes;
+    Tree target;
+    uint flags;          // SAME_TREE | WIDE | WRITE
+    uint counts_buffer;  // per query leaf: its count (count pass)
+    uint offsets_buffer; // per query leaf: its first pair (write pass)
+    uint pairs_buffer;   // two words per pair
+    uint pairs_first;
+    uint capacity;
+} push;
+
+const uint SAME_TREE = 1U;
+const uint WIDE = 2U;
+const uint WRITE = 4U;
+
+uint query_position;
+uint query_primitive;
+Box query_box;
+uint found;
+uint offset;
+
+void report(uint target_primitive)
+{
+    if ((push.flags & WRITE) != 0U && offset + found < push.capacity)
+    {
+        const bool same_tree = (push.flags & SAME_TREE) != 0U;
+        const uint pair = 2U * (push.pairs_first + offset + found);
+        gpu_words[push.pairs_buffer].words[pair] = same_tree ? min(query_primitive, target_primitive) : query_primitive;
+        gpu_words[push.pairs_buffer].words[pair + 1U] = same_tree ? max(query_primitive, target_primitive) : target_primitive;
+    }
+    ++found;
+}
+
+// Whether a subtree may hold a leaf to pair with (the same tree: a later leaf than the query's).
+bool may_pair(uint last_leaf)
+{
+    return (push.flags & SAME_TREE) == 0U || last_leaf > query_position;
+}
+
+void traverse_binary(uint leaf_count)
+{
+    uint stack[BVH_STACK_SIZE];
+    uint size = 0U;
+    if (leaf_count == 1U)
+    {
+        uint primitive;
+        uint unused;
+        if (may_pair(0U) && overlaps(query_box, read_node(push.target, 0U, primitive, unused)))
+        {
+            report(primitive);
+        }
+        return;
+    }
+    uint unused_first;
+    uint unused_second;
+    if (may_pair(gpu_word_vectors[push.target.annotations].values[0].y) && overlaps(query_box, read_node(push.target, 0U, unused_first, unused_second)))
+    {
+        stack[size++] = 0U;
+    }
+    while (size > 0U)
+    {
+        const uint node = stack[--size];
+        uint children[2];
+        read_node(push.target, node, children[0], children[1]);
+        for (int side = 0; side < 2; ++side)
+        {
+            const uint child = children[side];
+            const uint child_node = node_of(child, leaf_count);
+            if (is_leaf(child))
+            {
+                uint primitive;
+                uint unused;
+                if (may_pair(child & ~BVH_LEAF) && overlaps(query_box, read_node(push.target, child_node, primitive, unused)))
+                {
+                    report(primitive);
+                }
+            }
+            else if (may_pair(gpu_word_vectors[push.target.annotations].values[child_node].y) &&
+                     overlaps(query_box, read_node(push.target, child_node, unused_first, unused_second)))
+            {
+                if (size == BVH_STACK_SIZE)
+                {
+                    atomicOr(gpu_words[push.target.header].words[HEADER_FLAGS], BVH_STACK_OVERFLOW);
+                }
+                else
+                {
+                    stack[size++] = child;
+                }
+            }
+        }
+    }
+}
+
+void traverse_wide(uint leaf_count)
+{
+    uint stack[BVH_STACK_SIZE];
+    uint size = 1U;
+    stack[0] = 0U;
+    while (size > 0U)
+    {
+        const uint wide = 8U * stack[--size];
+        uvec4 rows[8];
+        for (uint row = 0U; row < 8U; ++row)
+        {
+            rows[row] = gpu_word_vectors[push.target.wide_nodes].values[wide + row];
+        }
+        for (uint slot = 0U; slot < 4U; ++slot)
+        {
+            const uint child = lane(rows[6], slot);
+            if (child == INVALID_INDEX || !may_pair(lane(rows[7], slot)))
+            {
+                continue;
+            }
+            if (!overlaps(query_box, wide_child_box(rows, slot)))
+            {
+                continue;
+            }
+            if (is_leaf(child))
+            {
+                report(gpu_word_vectors[push.target.nodes].values[2U * node_of(child, leaf_count)].w);
+            }
+            else if (size == BVH_STACK_SIZE)
+            {
+                atomicOr(gpu_words[push.target.header].words[HEADER_FLAGS], BVH_STACK_OVERFLOW);
+            }
+            else
+            {
+                stack[size++] = child;
+            }
+        }
+    }
+}
+
+void main()
+{
+    const uint query_count = gpu_words[push.query_header].words[HEADER_LEAVES];
+    query_position = gl_GlobalInvocationID.x;
+    if (query_position >= query_count)
+    {
+        return;
+    }
+    uint unused;
+    query_box = read_node(Tree(push.query_header, push.query_nodes, 0U, 0U, 0U, 0U), query_count - 1U + query_position, query_primitive, unused);
+    found = 0U;
+    offset = (push.flags & WRITE) != 0U ? gpu_words[push.offsets_buffer].words[query_position] : 0U;
+
+    const uint leaf_count = gpu_words[push.target.header].words[HEADER_LEAVES];
+    if (leaf_count >= 2U && (push.flags & WIDE) != 0U)
+    {
+        traverse_wide(leaf_count);
+    }
+    else if (leaf_count > 0U)
+    {
+        traverse_binary(leaf_count);
+    }
+    if ((push.flags & WRITE) == 0U)
+    {
+        gpu_words[push.counts_buffer].words[query_position] = found;
+    }
+}

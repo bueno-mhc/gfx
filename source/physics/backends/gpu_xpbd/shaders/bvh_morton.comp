@@ -1,0 +1,51 @@
+#version 460
+// The first pass of a BVH build: each box's center, placed in the box around every box (reduced by the previous pass) on a
+// grid of 2^MORTON_BITS cells per axis, gives a Morton code (the three axes' cell bits interleaved, x highest); the key is
+// the code, the value the box's index.
+#extension GL_GOOGLE_include_directive : require
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint boxes_buffer;
+    uint boxes_first;
+    uint bounds_buffer; // the box around every box (two vectors)
+    uint keys_buffer;
+    uint values_buffer;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+} push;
+
+// The ten low bits of value spread to every third bit (MORTON_BITS is 10: the C++ side checks it).
+uint spread_bits(uint value)
+{
+    value &= 0x3FFU;
+    value = (value | (value << 16U)) & 0x030000FFU;
+    value = (value | (value << 8U)) & 0x0300F00FU;
+    value = (value | (value << 4U)) & 0x030C30C3U;
+    value = (value | (value << 2U)) & 0x09249249U;
+    return value;
+}
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+
+    // The center's cell (an axis with no extent puts every center in its first cell).
+    const uint box = 2U * (push.boxes_first + index);
+    const vec3 center = (gpu_vectors[push.boxes_buffer].values[box].xyz + gpu_vectors[push.boxes_buffer].values[box + 1U].xyz) * 0.5;
+    const vec3 low = gpu_vectors[push.bounds_buffer].values[0].xyz;
+    const vec3 extent = gpu_vectors[push.bounds_buffer].values[1].xyz - low;
+    const vec3 position = mix(vec3(0.0), (center - low) / extent, greaterThan(extent, vec3(0.0)));
+    const float cells = float(1U << MORTON_BITS);
+    const uvec3 cell = uvec3(clamp(position * cells, vec3(0.0), vec3(cells - 1.0)));
+
+    gpu_words[push.keys_buffer].words[index] = (spread_bits(cell.x) << 2U) | (spread_bits(cell.y) << 1U) | spread_bits(cell.z);
+    gpu_words[push.values_buffer].words[index] = index;
+}

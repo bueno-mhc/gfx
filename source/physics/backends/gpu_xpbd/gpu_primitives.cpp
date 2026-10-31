@@ -173,28 +173,6 @@ struct DispatchArgumentsPush
 };
 static_assert(sizeof(RadixScatterPush) == 15 * sizeof(std::uint32_t) && sizeof(RankSortPush) == 11 * sizeof(std::uint32_t));
 
-/// The barrier ending a dispatch of arguments: the arguments are read by indirect dispatches (and compute passes).
-constexpr GlobalMemoryBarrier COMPUTE_TO_INDIRECT{.source_stages = PipelineStage::COMPUTE_SHADER,
-                                                  .source_access = MemoryAccess::SHADER_STORAGE_WRITE,
-                                                  .destination_stages = PipelineStage::DRAW_INDIRECT | PipelineStage::COMPUTE_SHADER,
-                                                  .destination_access = MemoryAccess::INDIRECT_COMMAND_READ | MemoryAccess::SHADER_STORAGE_READ |
-                                                                        MemoryAccess::SHADER_STORAGE_WRITE};
-
-/// Records a pass: its pipeline, its push constants, @p workgroups workgroups, then the barrier to the next pass.
-template<class Push>
-void
-record_pass(ComputeRecorder& recorder,
-            const ComputePipeline& pipeline,
-            const Push& push,
-            std::uint32_t workgroups,
-            const GlobalMemoryBarrier& barrier = COMPUTE_TO_COMPUTE)
-{
-    recorder.bind_pipeline(pipeline.handle());
-    recorder.push_constants(push);
-    recorder.dispatch(workgroups);
-    recorder.barrier({.memory_barriers = std::span{&barrier, 1}});
-}
-
 /// Throws the InvalidUsageError of @p operation.
 [[noreturn]] void
 refuse(std::string_view operation,
