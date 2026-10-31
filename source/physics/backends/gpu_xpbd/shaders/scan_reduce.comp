@@ -1,0 +1,4 @@
+#version 460
+// The first pass of an exclusive scan (scan_reduce.glsl): the portable variant, in shared memory (scan_reduce_subgroups.comp: the subgroup one).
+#extension GL_GOOGLE_include_directive : require
+#include "scan_reduce.glsl"

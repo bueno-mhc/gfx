@@ -1,0 +1,52 @@
+#version 460
+// A stable sort of few keys (at most GPU_XPBD_RANK_SORT_LIMIT) in one pass: each key's place is the number of keys before
+// it in the order (smaller, or equal and earlier), counted against tiles of keys loaded into shared memory. Its key and
+// value are written there.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint keys_buffer;
+    uint keys_first;
+    uint values_buffer;
+    uint values_first;
+    uint sorted_keys_buffer;
+    uint sorted_keys_first;
+    uint sorted_values_buffer;
+    uint sorted_values_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+} push;
+
+shared uint tile_keys[gl_WorkGroupSize.x];
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    const bool present = index < count;
+    const uint key = present ? gpu_words[push.keys_buffer].words[push.keys_first + index] : 0U;
+
+    // The keys before this one, a tile at a time (every invocation loads and waits, present or not).
+    uint place = 0U;
+    for (uint base = 0U; base < count; base += gl_WorkGroupSize.x)
+    {
+        const uint loaded = base + gl_LocalInvocationIndex;
+        tile_keys[gl_LocalInvocationIndex] = loaded < count ? gpu_words[push.keys_buffer].words[push.keys_first + loaded] : 0U;
+        barrier();
+        const uint end = min(gl_WorkGroupSize.x, count - base);
+        for (uint other = 0U; other < end; ++other)
+        {
+            const uint other_key = tile_keys[other];
+            place += other_key < key || (other_key == key && base + other < index) ? 1U : 0U;
+        }
+        barrier();
+    }
+    if (present)
+    {
+        gpu_words[push.sorted_keys_buffer].words[push.sorted_keys_first + place] = key;
+        gpu_words[push.sorted_values_buffer].words[push.sorted_values_first + place] = gpu_words[push.values_buffer].words[push.values_first + index];
+    }
+}

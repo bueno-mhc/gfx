@@ -1,0 +1,26 @@
+#version 460
+// The arguments of an indirect dispatch over a count a pass wrote: (⌈count / per workgroup⌉, 1, 1), the count at most the
+// maximum. One invocation.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint count_buffer;
+    uint count_word;
+    uint arguments_buffer;
+    uint arguments_first; // the word of the x group count (y and z follow)
+    uint per_workgroup;
+    uint maximum;
+} push;
+
+void main()
+{
+    if (gl_GlobalInvocationID.x == 0U)
+    {
+        const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+        gpu_words[push.arguments_buffer].words[push.arguments_first] = (count + push.per_workgroup - 1U) / push.per_workgroup;
+        gpu_words[push.arguments_buffer].words[push.arguments_first + 1U] = 1U;
+        gpu_words[push.arguments_buffer].words[push.arguments_first + 2U] = 1U;
+    }
+}

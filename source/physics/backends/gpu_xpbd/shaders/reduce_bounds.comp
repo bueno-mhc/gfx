@@ -1,0 +1,4 @@
+#version 460
+// A pass of the reduction of boxes (reduce_bounds.glsl): the portable variant, in shared memory (reduce_bounds_subgroups.comp: the subgroup one).
+#extension GL_GOOGLE_include_directive : require
+#include "reduce_bounds.glsl"

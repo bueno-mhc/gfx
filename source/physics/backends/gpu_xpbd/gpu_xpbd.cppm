@@ -20,6 +20,7 @@ import gfx.interface;
 import gfx.physics.enums;
 import gfx.physics.interface;
 export import :settings;
+export import :primitives;
 
 export namespace gfx::physics::gpu_xpbd
 {

@@ -88,8 +88,8 @@ TEST_P(GpuXpbdTest, CapabilitiesAreReportedAndVariantsChosen)
     EXPECT_EQ(found.queue_family, m_device->queue(gfx::QueueType::COMPUTE).family_index());
     EXPECT_EQ(found.subgroup_operations, limits.subgroup_operations);
     EXPECT_GE(found.free_storage_buffers, GPU_XPBD_STORAGE_BUFFERS);
-    EXPECT_EQ(found.subgroups, gfx::has_all(limits.subgroup_operations, gfx::SubgroupOperation::BASIC | gfx::SubgroupOperation::ARITHMETIC |
-                                                                            gfx::SubgroupOperation::BALLOT));
+    EXPECT_EQ(found.subgroups, gfx::has_all(limits.subgroup_operations, gfx::SubgroupOperation::BASIC | gfx::SubgroupOperation::ARITHMETIC) &&
+                                   limits.minimum_subgroup_size >= GPU_XPBD_MINIMUM_SUBGROUP_SIZE);
     EXPECT_EQ(found.integer64_atomics, m_physical_device->supports(gfx::DeviceFeature::SHADER_INTEGER64_ATOMICS));
 
     // The portable variants whatever the device has; the summary says which run.

@@ -36,7 +36,8 @@ struct GpuXpbdCapabilities
     std::uint32_t maximum_subgroup_size = 0;                         ///< Largest subgroup.
     SubgroupOperation subgroup_operations = SubgroupOperation::NONE; ///< Subgroup operations of compute shaders.
     std::uint32_t free_storage_buffers = 0;                          ///< Storage buffers the bindless table still holds.
-    bool subgroups = false;                                          ///< The subgroup variant runs (else shared memory).
+    bool subgroups = false;                                          ///< The subgroup variant runs (else shared memory): subgroup
+                                                                     ///< arithmetic, subgroups of GPU_XPBD_MINIMUM_SUBGROUP_SIZE at least.
     bool integer64_atomics = false;                                  ///< The 64-bit atomic variant runs (else two 32-bit passes).
     bool timestamps = false;                                         ///< Its queue writes timestamps (phases timed on the GPU).
     bool float16 = false;                                            ///< 16-bit floating point (reported only: contacts need 32 bits).

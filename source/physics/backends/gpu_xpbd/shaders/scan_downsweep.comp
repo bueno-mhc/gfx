@@ -1,0 +1,4 @@
+#version 460
+// The last pass of an exclusive scan (scan_downsweep.glsl): the portable variant, in shared memory (scan_downsweep_subgroups.comp: the subgroup one).
+#extension GL_GOOGLE_include_directive : require
+#include "scan_downsweep.glsl"

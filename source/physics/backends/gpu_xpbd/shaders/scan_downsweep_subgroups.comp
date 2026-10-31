@@ -1,0 +1,5 @@
+#version 460
+// The last pass of an exclusive scan (scan_downsweep.glsl): the subgroup variant (scan_downsweep.comp: the portable one).
+#extension GL_GOOGLE_include_directive : require
+#define GPU_XPBD_SUBGROUPS
+#include "scan_downsweep.glsl"

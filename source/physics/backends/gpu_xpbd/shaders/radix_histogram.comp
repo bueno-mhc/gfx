@@ -1,0 +1,46 @@
+#version 460
+// The first pass of a radix sort pass (histogram, scan, scatter): each workgroup counts the digits of its tile's keys
+// (RADIX_BITS bits from the shift) into the histogram, digit-major: histogram[digit · tile count + tile], so that an
+// exclusive scan of it gives every tile the first place of each of its digits. Counts made with shared atomics are exact
+// whatever their order.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint keys_buffer;
+    uint keys_first;
+    uint histogram_buffer;
+    uint histogram_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    uint shift;
+    uint tile_count; // workgroups of the pass (tiles past the count count nothing)
+} push;
+
+shared uint digit_counts[RADIX_SIZE];
+
+void main()
+{
+    for (uint digit = gl_LocalInvocationIndex; digit < RADIX_SIZE; digit += gl_WorkGroupSize.x)
+    {
+        digit_counts[digit] = 0U;
+    }
+    barrier();
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    for (uint item = 0U; item < ITEMS_PER_INVOCATION; ++item)
+    {
+        const uint index = striped_index(item);
+        if (index < count)
+        {
+            const uint key = gpu_words[push.keys_buffer].words[push.keys_first + index];
+            atomicAdd(digit_counts[(key >> push.shift) & (RADIX_SIZE - 1U)], 1U);
+        }
+    }
+    barrier();
+    for (uint digit = gl_LocalInvocationIndex; digit < RADIX_SIZE; digit += gl_WorkGroupSize.x)
+    {
+        gpu_words[push.histogram_buffer].words[push.histogram_first + digit * push.tile_count + gl_WorkGroupID.x] = digit_counts[digit];
+    }
+}

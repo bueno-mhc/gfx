@@ -1,0 +1,77 @@
+#version 460
+// The last pass of a radix sort pass: each workgroup writes its tile's keys and values where the scanned histogram puts
+// them. Stable: the tile is read in rounds of one element per invocation, in element order; each element's rank among
+// the round's elements of its digit comes from the earlier invocations of the round (counted in shared memory, no atomic),
+// and each digit's next place advances by the round's count once every invocation has read it.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint keys_buffer;
+    uint keys_first;
+    uint values_buffer;
+    uint values_first;
+    uint sorted_keys_buffer;
+    uint sorted_keys_first;
+    uint sorted_values_buffer;
+    uint sorted_values_first;
+    uint histogram_buffer; // scanned
+    uint histogram_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    uint shift;
+    uint tile_count;
+} push;
+
+shared uint next_place[RADIX_SIZE];
+shared uint round_digits[gl_WorkGroupSize.x];
+
+void main()
+{
+    // Where each digit of this tile starts.
+    for (uint digit = gl_LocalInvocationIndex; digit < RADIX_SIZE; digit += gl_WorkGroupSize.x)
+    {
+        next_place[digit] = gpu_words[push.histogram_buffer].words[push.histogram_first + digit * push.tile_count + gl_WorkGroupID.x];
+    }
+    barrier();
+
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint lane = gl_LocalInvocationIndex;
+    for (uint item = 0U; item < ITEMS_PER_INVOCATION; ++item)
+    {
+        // The round's digits (RADIX_SIZE: no element).
+        const uint index = striped_index(item);
+        const bool present = index < count;
+        const uint key = present ? gpu_words[push.keys_buffer].words[push.keys_first + index] : 0U;
+        const uint digit = present ? (key >> push.shift) & (RADIX_SIZE - 1U) : RADIX_SIZE;
+        round_digits[lane] = digit;
+        barrier();
+
+        // This element's rank among the round's elements of its digit, and whether it is the digit's last.
+        uint rank = 0U;
+        bool last = true;
+        for (uint other = 0U; other < gl_WorkGroupSize.x; ++other)
+        {
+            if (round_digits[other] == digit)
+            {
+                rank += other < lane ? 1U : 0U;
+                last = last && other <= lane;
+            }
+        }
+        if (present)
+        {
+            const uint place = next_place[digit] + rank;
+            gpu_words[push.sorted_keys_buffer].words[push.sorted_keys_first + place] = key;
+            gpu_words[push.sorted_values_buffer].words[push.sorted_values_first + place] =
+                gpu_words[push.values_buffer].words[push.values_first + index];
+        }
+        barrier();
+        if (present && last)
+        {
+            next_place[digit] += rank + 1U;
+        }
+        barrier();
+    }
+}

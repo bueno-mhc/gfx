@@ -15,8 +15,8 @@ namespace gfx::physics::gpu_xpbd
 namespace
 {
 
-/// The subgroup operations the subgroup variant uses.
-constexpr SubgroupOperation SUBGROUP_VARIANT_OPERATIONS = SubgroupOperation::BASIC | SubgroupOperation::ARITHMETIC | SubgroupOperation::BALLOT;
+/// The subgroup operations the subgroup variant uses (shaders/workgroup.glsl).
+constexpr SubgroupOperation SUBGROUP_VARIANT_OPERATIONS = SubgroupOperation::BASIC | SubgroupOperation::ARITHMETIC;
 
 /// Adds @p name to @p missing when @p reported is under @p required.
 template<class Value>
@@ -171,7 +171,8 @@ capabilities(Device& device,
         .maximum_subgroup_size = limits.maximum_subgroup_size,
         .subgroup_operations = limits.subgroup_operations,
         .free_storage_buffers = bindless_capacity(BindlessResourceKind::STORAGE_BUFFER) - bindless.used_by(BindlessResourceKind::STORAGE_BUFFER),
-        .subgroups = variants.subgroups == GpuVariantChoice::AUTOMATIC && has_all(limits.subgroup_operations, SUBGROUP_VARIANT_OPERATIONS),
+        .subgroups = variants.subgroups == GpuVariantChoice::AUTOMATIC && has_all(limits.subgroup_operations, SUBGROUP_VARIANT_OPERATIONS) &&
+                     limits.minimum_subgroup_size >= GPU_XPBD_MINIMUM_SUBGROUP_SIZE,
         .integer64_atomics = variants.integer64_atomics == GpuVariantChoice::AUTOMATIC && device.enabled(DeviceFeature::SHADER_INTEGER64_ATOMICS),
         .timestamps = device.enabled(DeviceFeature::TIMESTAMP_QUERY) && family < families.size() && families[family].timestamp_valid_bits > 0,
         .float16 = device.enabled(DeviceFeature::SHADER_FLOAT16),

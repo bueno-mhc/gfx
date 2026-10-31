@@ -164,7 +164,9 @@ TEST_P(UiAccessibilityPlatformTest, AUiAutomationClientFindsTheNodesAndInvokesAB
     }
     EXPECT_FALSE(ui.accessibility_enabled()) << "no assistive technology asked yet";
 
-    // The client on its own thread while this one pumps and runs frames; then the Invoke request arrives.
+    // The client on its own thread while this one pumps and runs frames; then the Invoke request arrives. Frames run
+    // until the client returns: its calls (FindAll, Invoke) are answered by the window's procedure on this thread, so
+    // joining before it is done waits forever (a cap of 30 s from the start hung a loaded run); its deadline ends it.
     std::atomic<bool> done{false};
     ClientResult result;
     std::jthread client{[&]
@@ -172,7 +174,7 @@ TEST_P(UiAccessibilityPlatformTest, AUiAutomationClientFindsTheNodesAndInvokesAB
         result = query_window(native, L"Save", std::chrono::steady_clock::now() + 20s);
         done = true;
     }};
-    while (!done && std::chrono::steady_clock::now() - start < 30s)
+    while (!done)
     {
         frame();
     }

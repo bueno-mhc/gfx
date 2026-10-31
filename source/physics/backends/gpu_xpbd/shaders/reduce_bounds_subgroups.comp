@@ -1,0 +1,5 @@
+#version 460
+// A pass of the reduction of boxes (reduce_bounds.glsl): the subgroup variant (reduce_bounds.comp: the portable one).
+#extension GL_GOOGLE_include_directive : require
+#define GPU_XPBD_SUBGROUPS
+#include "reduce_bounds.glsl"

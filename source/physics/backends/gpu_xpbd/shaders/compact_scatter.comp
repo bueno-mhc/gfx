@@ -1,0 +1,34 @@
+#version 460
+// The last pass of a compaction: each element whose flag is 1 is written at its place (the exclusive scan of the flags),
+// its value when the values buffer is valid, else its index. Element order is kept.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint flags_buffer;
+    uint flags_first;
+    uint values_buffer; // INVALID_INDEX: the elements' indices
+    uint values_first;
+    uint places_buffer;
+    uint places_first;
+    uint output_buffer;
+    uint output_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+} push;
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    for (uint item = 0U; item < ITEMS_PER_INVOCATION; ++item)
+    {
+        const uint index = striped_index(item);
+        if (index < count && gpu_words[push.flags_buffer].words[push.flags_first + index] != 0U)
+        {
+            const uint value = push.values_buffer != INVALID_INDEX ? gpu_words[push.values_buffer].words[push.values_first + index] : index;
+            gpu_words[push.output_buffer].words[push.output_first + gpu_words[push.places_buffer].words[push.places_first + index]] = value;
+        }
+    }
+}

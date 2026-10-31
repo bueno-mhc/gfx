@@ -1,0 +1,5 @@
+#version 460
+// The first pass of an exclusive scan (scan_reduce.glsl): the subgroup variant (scan_reduce.comp: the portable one).
+#extension GL_GOOGLE_include_directive : require
+#define GPU_XPBD_SUBGROUPS
+#include "scan_reduce.glsl"

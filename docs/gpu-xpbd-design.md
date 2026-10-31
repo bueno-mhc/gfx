@@ -1,7 +1,7 @@
 # gfx physics: a GPU-exclusive XPBD backend on a Karras BVH — architecture, decisions and plan
 
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
-as built"; not committed yet); G1 in progress.
+as built"; not committed yet). **G1 implemented** (§B "G1 as built", 4 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -401,6 +401,68 @@ woken by a push; the same edits (360 bodies made, pushed and destroyed over 90 s
 portable variants; refusals naming their phase; a device with a GRAPHICS queue only; the fake device (no queue, no limits, no
 bindless table) refused with each missing capability named; the factory's own devices (two worlds at once, one stepping
 asynchronously). `world_test.cpp`'s backend list includes `GPU_XPBD` when available.
+
+### G1 as built (2026-10-31)
+
+**`GpuPrimitives`** (exported partition `gfx.physics.gpu_xpbd:primitives`, pimpl; units `gpu_primitives.cpp`): recorded into
+the caller's `ComputeRecorder` on storage buffers named by `GpuSpan` {bindless index, first element}; a `GpuCount` is a
+constant maximum, or a word a pass wrote (clamped to the maximum, which sizes every dispatch). `reserve(maximum)` sizes the
+scratch (called before recording; at most `GPU_XPBD_MAXIMUM_ELEMENTS`, 65535 tiles of 512). Each primitive orders its passes
+and ends with a barrier to later compute passes (to indirect dispatches for `dispatch_arguments()`); the caller orders what
+wrote the inputs. Misuses (a count above the reserve, a sort into an input's buffer, 0 or more than 32 key bits, arguments
+without a count word) throw `InvalidUsageError` when recorded.
+
+- **`exclusive_scan(input, output, count, total)`**: reduce-then-scan over levels of 512-element tiles (at most three levels
+  for 33.5 M words): `scan_reduce` sums each tile into the level above, the top level (one tile) is scanned in place by one
+  workgroup, which writes the total, then `scan_downsweep` scans each level's tiles from the offsets above. In place allowed.
+- **`reduce_bounds(boxes, result, count)`**: boxes of two vectors (minimum, maximum), reduced level by level; the empty box
+  (+∞, −∞) for none.
+- **`sort(keys, values, sorted_keys, sorted_values, count, key_bits)`**: stable, out of place. Up to
+  `GPU_XPBD_RANK_SORT_LIMIT` (4096) keys, **by rank** in one pass (each key counts the keys before it, a tile of keys at a time
+  in shared memory); beyond, **LSD radix**, `GPU_XPBD_RADIX_BITS` (8) per pass, ⌈key_bits / 8⌉ passes alternating between the
+  scratch and the outputs so the last writes the outputs: `radix_histogram` (shared atomics; histogram digit-major,
+  `digit · tiles + tile`) → the scan, in place → `radix_scatter` (the tile in rounds of 64 elements in element order; an
+  element's rank = the earlier invocations of its round with its digit, counted in shared memory; each digit's next place
+  advances once the round has read it). Keys are below 2^key_bits (a precondition: fewer bits, fewer passes).
+- **`compact(flags, values, output, output_count, count)`**: the flags (0 or 1) scanned into places, the total as the count,
+  then `compact_scatter` writes each flagged value (or index) at its place.
+- **`dispatch_arguments(count, arguments, per_workgroup)`**: (⌈count / per workgroup⌉, 1, 1) for an indirect dispatch.
+
+**Variants.** The workgroup operations (sum, exclusive sum, box minimum and maximum: `shaders/workgroup.glsl`) have a subgroup
+variant (subgroup arithmetic within subgroups, then across them by the first subgroup) and a portable one (Hillis–Steele
+scan, tree reductions in shared memory). They are **two SPIR-V modules per pass** — `scan_reduce.comp` and
+`scan_reduce_subgroups.comp` include the same body, the latter after `#define GPU_XPBD_SUBGROUPS` — because a module declaring
+the subgroup capabilities is invalid on a device without them even if a specialization constant never takes that branch.
+The subgroup variant now needs `BASIC | ARITHMETIC` and subgroups of at least `GPU_XPBD_MINIMUM_SUBGROUP_SIZE` (8: a workgroup
+of 64 then has no more subgroups than the first subgroup has lanes); both GPUs here qualify. Integer sums and floating-point
+minimums and maximums are exact, so the variants give the same bits.
+
+**Shaders.** Includes split: `common.glsl` (extensions — the subgroup ones under `GPU_XPBD_SUBGROUPS` —, specialization
+constants, typed bindless aliases), `step.glsl` (was `gpu_xpbd.glsl`: step parameters, patches, the step's push constants,
+body helpers), `workgroup.glsl`, `primitives.glsl` (count resolution, blocked and striped element indices). Specialization
+constants 6–8: the invalid bindless index, the elements per invocation, the radix bits. New constants in `enums.cppm`:
+`GPU_XPBD_ITEMS_PER_INVOCATION` 8, `GPU_XPBD_TILE_SIZE` 512, `GPU_XPBD_MAXIMUM_ELEMENTS`, `GPU_XPBD_RADIX_BITS` 8,
+`GPU_XPBD_RANK_SORT_LIMIT` 4096, `GPU_XPBD_MINIMUM_SUBGROUP_SIZE` 8. The step does not use the primitives yet (G2 does).
+
+**Deviations (for validation).**
+1. **`GpuPrimitives` is public** (exported by `gfx.physics.gpu_xpbd`): the tests reach it there, and tools may sort, scan and
+   compact on a gfx device with it; the design had the primitives internal.
+2. **The radix sort's in-tile ranking is the same in both variants** (counted in shared memory; no ballot-based multisplit):
+   the subgroup variant speeds up its scans only. Measured: a million 32-bit keys in about 3 ms on the RTX 5060, 27–38 ms on
+   the Intel GPU (Debug, validation layers, recording and waiting included), the two variants alike. A ballot multisplit can
+   come if a later phase needs it.
+3. **Variants are separate SPIR-V modules**, not specialization constants (above); and the variant needs no ballot (G0 asked
+   for `BALLOT` and did not check the subgroup size).
+4. **Dispatches are sized by the maximum** even when the count is a GPU-written word (passes past the count do nothing);
+   `dispatch_arguments()` is there for callers that want indirect dispatches.
+
+**Tests** (`gpu_primitives_test.cpp` in `gfx_physics_gpu_xpbd_tests`; each on both GPUs × both variants with the validation
+layers): scans of 0 to 600 001 words (one, two and three levels; wrapping and small values; in place) against serial sums,
+with nothing written past the count; box reductions of 0 to 300 001 boxes against serial minimums and maximums (exact);
+sorts of 0 to 200 003 pairs (rank and radix paths, 32-, 30-, 10-, 4- and 2-bit keys, already sorted input, values = indices)
+equal to `std::ranges::stable_sort`; a million keys sorted (time printed); compactions with values and with indices; counts
+from GPU words (scan, sort by radix and by rank, a word above the maximum clamped, dispatch arguments for 5555 and 0
+elements); the variant asked for is the one running; misuses refused.
 
 ---
 

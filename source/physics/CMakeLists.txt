@@ -190,6 +190,7 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             FILES
                 backends/gpu_xpbd/gpu_xpbd.cppm
                 backends/gpu_xpbd/gpu_xpbd_settings.cppm
+                backends/gpu_xpbd/gpu_primitives.cppm
         PRIVATE
             FILE_SET backend_modules TYPE CXX_MODULES
             BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
@@ -201,6 +202,7 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/gpu_xpbd.cpp
             backends/gpu_xpbd/capabilities.cpp
             backends/gpu_xpbd/gpu_resources.cpp
+            backends/gpu_xpbd/gpu_primitives.cpp
             backends/gpu_xpbd/gpu_xpbd_world.cpp)
     target_compile_features(gfx_physics_gpu_xpbd PUBLIC cxx_std_23)
     target_link_libraries(gfx_physics_gpu_xpbd
@@ -213,6 +215,17 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/shaders/patch_bodies.comp
             backends/gpu_xpbd/shaders/xpbd_integrate.comp
             backends/gpu_xpbd/shaders/xpbd_velocity_update.comp
+            backends/gpu_xpbd/shaders/scan_reduce.comp
+            backends/gpu_xpbd/shaders/scan_reduce_subgroups.comp
+            backends/gpu_xpbd/shaders/scan_downsweep.comp
+            backends/gpu_xpbd/shaders/scan_downsweep_subgroups.comp
+            backends/gpu_xpbd/shaders/reduce_bounds.comp
+            backends/gpu_xpbd/shaders/reduce_bounds_subgroups.comp
+            backends/gpu_xpbd/shaders/radix_histogram.comp
+            backends/gpu_xpbd/shaders/radix_scatter.comp
+            backends/gpu_xpbd/shaders/rank_sort.comp
+            backends/gpu_xpbd/shaders/compact_scatter.comp
+            backends/gpu_xpbd/shaders/dispatch_arguments.comp
         INCLUDE_DIRECTORIES backends/gpu_xpbd/shaders)
     gfx_require_decoupled(gfx_physics_gpu_xpbd FORBIDDEN gfx_platform gfx_platform_graphics gfx_ui gfx_ui_platform gfx_ui_atlas_tools gfx_camera)
 endif()

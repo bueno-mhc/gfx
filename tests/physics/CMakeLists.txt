@@ -65,7 +65,7 @@ gfx_add_test(gfx_physics_reference_tests
 # fixtures in vulkan_test.hpp), and on the graphics tests' fake device (no compute) for its capability errors.
 if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     gfx_add_test(gfx_physics_gpu_xpbd_tests
-        SOURCES gpu_xpbd_test.cpp
+        SOURCES gpu_xpbd_test.cpp gpu_primitives_test.cpp
         MODULES ${PROJECT_SOURCE_DIR}/tests/graphics/interface/fake_backend.cppm
         MODULE_BASE_DIRECTORY ${PROJECT_SOURCE_DIR}/tests/graphics/interface
         LIBRARIES gfx::physics gfx::physics_gpu_xpbd gfx::gfx)
