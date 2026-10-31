@@ -115,7 +115,7 @@ into `<build>/ui-test-fonts`, next to their license texts: `NotoSans-OFL.txt`, `
 
 | Font | Source | License | Copyright | Used by |
 |---|---|---|---|---|
-| Noto Sans (Latin, Greek, Cyrillic) | [google/fonts](https://github.com/google/fonts) commit 47d54ca1 | OFL-1.1, no Reserved Font Name | 2022 The Noto Project Authors | tests; atlases embedded in `gfx_windowed_example` and `gfx_ui_editor_example` |
+| Noto Sans (Latin, Greek, Cyrillic) | [google/fonts](https://github.com/google/fonts) commit 47d54ca1 | OFL-1.1, no Reserved Font Name | 2022 The Noto Project Authors | tests; atlases embedded in `gfx_windowed_example`, `gfx_ui_editor_example` and `gfx_physics_sandbox` |
 | Noto Sans Hebrew | google/fonts commit 47d54ca1 | OFL-1.1, no Reserved Font Name | 2022 The Noto Project Authors | tests; an atlas embedded in `gfx_ui_editor_example` |
 | Noto Sans Arabic | google/fonts commit 47d54ca1 | OFL-1.1, no Reserved Font Name | 2022 The Noto Project Authors | tests; an atlas embedded in `gfx_ui_editor_example` |
 | Source Sans 3 (OpenType CFF, CFF2 variable, WOFF, WOFF2) | [adobe-fonts/source-sans](https://github.com/adobe-fonts/source-sans) commit 87b37a2d | OFL-1.1, Reserved Font Name "Source" | 2010-2024 Adobe | tests only |

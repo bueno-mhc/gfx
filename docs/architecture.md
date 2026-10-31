@@ -1,11 +1,12 @@
 # gfx — architecture overview (the code as built)
 
-This document describes the code as it is built, on 2026-10-25: the libraries, their modules, the
-objects and how they relate, the paths a frame, an event and a physics step take, the threads, and how
-everything is built and tested. The decisions behind the platform, UI, physics and camera libraries, with
-the alternatives considered, are in [platform-design.md](platform-design.md), [ui-design.md](ui-design.md)
-and [physics-design.md](physics-design.md) (the last two also record what each phase built); the atlas file
-format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the
+This document describes the code as it is built, on 2026-10-31: the libraries, their modules, the
+objects and how they relate, the paths a frame, an event and a physics step take, the threads, the physics
+sandbox that puts every library in one window, and how everything is built and tested. The decisions behind
+the platform, UI, physics and camera libraries and the sandbox, with the alternatives considered, are in
+[platform-design.md](platform-design.md), [ui-design.md](ui-design.md), [physics-design.md](physics-design.md)
+and [physics-sandbox-design.md](physics-sandbox-design.md) (the last three also record what each phase built);
+the atlas file format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the
 [README](../README.md).
 
 Diagrams are [Mermaid](https://mermaid.js.org/) (GitHub renders them). Arrows read "uses" or "depends
@@ -23,6 +24,7 @@ flowchart TB
         example["gfx_windowed_example<br/>examples/windowed"]
         editor["gfx_ui_editor_example<br/>examples/ui_editor"]
         physics_example["gfx_physics_example<br/>examples/physics"]
+        sandbox["gfx_physics_sandbox<br/>examples/physics_sandbox (§8)"]
         tests["tests/*"]
     end
     subgraph ui_platform_lib["gfx::ui_platform"]
@@ -63,6 +65,9 @@ flowchart TB
     tests --> ui_platform
     tests --> physics_modules
     physics_example --> physics_modules
+    sandbox --> bridge
+    sandbox --> ui_platform
+    sandbox --> physics_modules
     physics_modules --> core
     physics_modules -.->|factory imports| physics_backends
     physics_backends --> third_box3d["Box3D (static)"]
@@ -909,7 +914,7 @@ flowchart TB
 ```
 
 - **`gfx::physics_common`**: one enumerations file for physics and camera, 17 handle kinds (core's `Handle<Tag>`,
-  explicitly instantiated once: a toolchain workaround, §8), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
+  explicitly instantiated once: a toolchain workaround, §9), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
   `QueryResult<T> = std::expected<T, QueryFailure>`, and primitives whose tests are constexpr, with SIMD batches
   (frustum culling of boxes and spheres) giving the same bits as the scalar code.
 - **`gfx::camera`** depends on the primitives only; **`gfx::physics_components`** never on the camera.
@@ -1113,7 +1118,11 @@ flowchart TB
 Shapes are a `std::variant` (sphere, capsule, cylinder, cone, box, hull, triangle, triangle mesh, height field,
 compound); `make_shape()` makes one that colliders share. Hulls can be built at compile time (`convex_hull<V, F, I>()`:
 quickhull in a constant expression into a `FixedHull`); meshes and compounds keep a static BVH of their parts. GJK and
-EPA are robust to slivers, origins on a boundary and nearly coplanar points (found by random sweeps).
+EPA are robust to slivers, origins on a boundary and nearly coplanar points (found by random sweeps); a sliver is a
+tetrahedron whose volume is within the rounding error of its corners, so a shallow overlap of a large shape (a body
+resting on a 100 m floor) is no sliver. Every structure shows its nodes or cells (`nodes()`: `SpatialNode` boxes with
+their depth and proxies), and a broad phase component lists them (`BroadPhase::structure_nodes()`): what the
+sandbox's broad phase view draws (§8).
 
 ### 7.6 Soft bodies and their coupling with rigid bodies
 
@@ -1184,7 +1193,134 @@ on top of the virtual state, so a custom camera (off-axis stereo, jittered proje
 
 Two worlds share nothing (no global state) and step on two threads at once.
 
-## 8. Build and tests
+## 8. The physics sandbox: every library in one window
+
+`examples/physics_sandbox` (`gfx_physics_sandbox`) shows a physics world being simulated and lets the user act on it:
+the platform library gives the window and the input actions, the camera library the orbit and first-person cameras, the
+physics library the world (Box3D or the reference backend, stepped on its own thread) and the debug drawing, the
+graphics library draws the bodies with Vulkan, and the UI library draws the panel. It knows nothing the libraries do
+not show: every scene, control and view goes through their public API. Its decisions and what each step built are in
+[physics-sandbox-design.md](physics-sandbox-design.md).
+
+### 8.1 Modules
+
+```mermaid
+flowchart TB
+    subgraph sandbox_target["gfx_physics_sandbox"]
+        direction TB
+        main["physics_sandbox.cpp<br/>window, input schema, panel, frame loop,<br/>--script, --tour, --views, --capture"]
+        controls["physics_sandbox.controls<br/>SimulationControl, DebugViews,<br/>ControlScript"]
+        interaction["physics_sandbox.interaction<br/>FrameCommands, CameraRig,<br/>Interaction, Script"]
+        presets["physics_sandbox.presets<br/>nine scenes, refusals noted"]
+        scene["physics_sandbox.scene<br/>Scene: the world, its bodies, soft bodies,<br/>joints, triggers, the last two poses"]
+        renderer["physics_sandbox.renderer<br/>SceneRenderer: meshes, surfaces,<br/>wireframe, lines"]
+        generated["physics_sandbox.shaders, physics_sandbox.font<br/>(generated at build time)"]
+    end
+    main --> controls
+    main --> presets
+    controls --> interaction
+    controls --> renderer
+    interaction --> scene
+    presets --> scene
+    renderer --> generated
+    main --> generated
+    scene --> physics["gfx.physics<br/>worlds, debug drawing"]
+    renderer --> physics
+    interaction --> camera["gfx.camera<br/>cameras, controllers"]
+    renderer --> graphics["gfx<br/>Vulkan through the interface"]
+    main --> bridge["gfx.platform.graphics<br/>window, input, WindowSwapchain"]
+    main --> ui["gfx.ui, gfx.ui.platform<br/>the panel and its renderer"]
+```
+
+- **`scene`** owns the world and what the sandbox made in it (`std::deque` of bodies with their colliders and colors,
+  soft bodies with their drawn triangles, joints with their anchors in their bodies' frames, triggers with what is in
+  them), keeps each body's last two completed poses and draws between them, and collects the events between frames.
+- **`presets`** builds a scene into an empty `Scene` of either backend; what a backend refuses (a
+  `BackendCapabilityError`) gets the nearest thing it has and a note. A change of scene or backend builds a new world:
+  a world cannot move to another backend.
+- **`interaction`** turns the mouse and keyboard, or a script, into the same `FrameCommands`: the camera rig and the
+  picking, dragging (a spring-damper force at the grabbed point), shooting, spawning and removing.
+- **`controls`** applies the simulation's settings to the world between steps (gravity, the solver, sleeping, the
+  reference backend's broad phase and integrator), gathers the debug views' lines (bounding boxes, contacts, the broad
+  phase's nodes, joints) and the bodies' islands, and scripts the controls for CTest.
+- **`renderer`** draws what a frame lists: shapes as instanced meshes, soft bodies as surfaces, and lines.
+
+### 8.2 A frame
+
+```mermaid
+sequenceDiagram
+    participant M as main thread
+    participant W as world thread
+    participant G as GPU
+    M->>M: events, the input frame, the panel's requests (a new scene between frames)
+    M->>M: frame commands (mouse and keyboard, or the script), the camera
+    M->>W: Scene.finish(): wait for the step begun last frame
+    W-->>M: poses, particles, events
+    M->>M: Interaction: ray casts, drags, shots, spawns, removals (recorded edits)
+    M->>M: SimulationControl.apply(), DebugViews.capture()
+    M->>W: Scene.advance(): begin the next step (paused: none, or exactly one)
+    Note over W: the step runs while the frame is drawn
+    M->>M: SceneRenderer: instances at interpolated poses, surfaces, lines, the panel
+    M->>G: the scene pass (resolved), the UI pass, present
+```
+
+Queries answer only between steps (a query during a step returns STEP_IN_PROGRESS at once), so everything that reads
+the world — picking, the views' contacts and nodes, the scripts' observations — runs after `finish()` and before
+`advance()`. Steps are a fixed 1/60 s: `advance()` accumulates the frame's time (scaled in slow motion), runs the steps
+due beyond one at once, begins one on the world's thread, and draws the bodies between their last two poses.
+
+### 8.3 Drawing a world
+
+```mermaid
+flowchart TB
+    subgraph once["once per shape"]
+        direction TB
+        shape["a collider's shape"] --> tessellate["tessellate()<br/>(gfx.physics.debug_draw)"]
+        tessellate --> stored["device-local buffers every mesh shares:<br/>vertices (position, normal), indices<br/>(Uploader, through staging)"]
+    end
+    subgraph each_frame["each frame"]
+        direction TB
+        instances["instances: pose, color, flags<br/>(grid, highlight)"]
+        surfaces["soft bodies: indices once,<br/>vertices and normals each frame"]
+        lines["lines: joints, triggers, views,<br/>the drag spring"]
+        transient["TransientBufferAllocator<br/>(the frame's region)"]
+        instances --> transient
+        surfaces --> transient
+        lines --> transient
+    end
+    subgraph scene_pass["scene pass"]
+        direction TB
+        meshes["one instanced draw per mesh<br/>(4x MSAA, reversed depth;<br/>back faces culled, or two-sided)"]
+        surface_draws["one draw per surface<br/>(two-sided)"]
+        wireframe["the same again as lines<br/>(PolygonMode::LINE, biased depth)"]
+        line_draw["the lines"]
+        meshes --> surface_draws
+        surface_draws --> wireframe
+        wireframe --> line_draw
+    end
+    stored --> meshes
+    transient --> meshes
+    line_draw --> resolve["resolved into the swapchain image"]
+    resolve --> ui_pass["UI pass (loads the image): the panel"]
+    ui_pass --> present["present"]
+```
+
+The vertex shaders pull vertices and instances from bindless storage buffers (no vertex input, no descriptor set but
+the bindless table): a mesh's vertices from the shared buffer, a surface's from the frame's. The UI draws in a second
+pass because its pipeline has no depth format; the scene pass resolves into the swapchain image first.
+
+### 8.4 Checked by CTest
+
+| Run | What it checks |
+|---|---|
+| `PhysicsSandbox.SDL3` (Box3D), `PhysicsSandbox.GLFW` (the reference backend) | `--script --validation`: 620 frames driven by scripts through the same code as the mouse and keyboard — a grab and a drag, a shot that hits the pyramid, a spawn, a removal, a flight; then a pause, a single step, slow motion, a ball floating without gravity and falling with it, the solver's settings, the broad phase and the integrator replaced (refused by Box3D), every debug view, the islands — fifteen checks, and no message from the validation layers |
+| `PhysicsSandbox.Tour` | `--tour --validation`: every preset on every physics backend, built in turn through the same rebuilding as the panel's, 90 frames each; every body and particle finite, above the floor, under 30 m/s |
+
+The sandbox found three defects of the libraries this way, each fixed with a regression test: contact points that
+turned with spinning spheres and hits resolved within one step (the reference backend), and shallow overlaps of a large
+box taken for GJK slivers (bodies pushed through the floor).
+
+## 9. Build and tests
 
 ```mermaid
 flowchart TB
@@ -1203,10 +1339,11 @@ flowchart TB
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
 | `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, the UI renderer drawing into the window (with the UI library), resize, minimize, frame latency, unsupported settings |
 | `tests/ui` | the atlas tools (every font format, decoder, generator and packer; reproducible bytes; the command-line tool), embedded atlases, text layout (bidi, fallbacks, shaping, breaking, the cache), the text editor, draw lists, the renderer on every GPU (shapes and text read back, text compared with the field evaluated on the CPU), the context under synthetic input (windows, widgets, tables, docking and layouts, navigation, shortcuts, the accessibility tree; drawn on every GPU), allocation counts (`operator new` replaced: none after the first frames), the platform adapter, a UI in visible windows, a UI Automation client reading the tree through AccessKit |
-| `tests/physics` | the primitives at compile time and against references, SIMD batches against the scalar code, shapes and shape queries against exact answers, GJK/EPA under random sweeps, spatial structures and broad phases against brute force, the cameras, the world framework on a recording backend (edits in order, snapshots, the reader handshake, the error contract of every interface), integrators against analytic orbits, soft bodies with known outcomes, Box3D, the reference backend (stacks, pendulum periods, joints, friction, restitution, continuous bodies, user constraints, each component replaced), the same bits on one and four threads; the decoupling checks (link closures and imports) |
+| `tests/physics` | the primitives at compile time and against references, SIMD batches against the scalar code, shapes and shape queries against exact answers, GJK/EPA under random sweeps, spatial structures and broad phases against brute force, the cameras, debug drawing (meshes closed and on the surface, volumes converging), the structures' nodes covering their proxies, the world framework on a recording backend (edits in order, snapshots, the reader handshake, the error contract of every interface), integrators against analytic orbits, soft bodies with known outcomes, Box3D, the reference backend (stacks, pendulum periods, joints, friction, restitution, continuous bodies, user constraints, each component replaced), the same bits on one and four threads; the decoupling checks (link closures and imports) |
 | `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, UI misuse such as sliders over booleans, ...) and a check that no enumerator collides with a platform macro |
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
 | `PhysicsExample.*` | the physics example on Box3D and on the reference backend: four seconds of the scene on four threads, every check passing (label `example`) |
+| `PhysicsSandbox.*` | the physics sandbox's scripted runs on each platform backend, one with each physics backend, and its tour of every preset on both physics backends, with the validation layers (§8.4, label `example`) |
 | `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 
 Toolchain workarounds the build applies (each with a detector test): `--allow-multiple-definition`

@@ -1,6 +1,6 @@
 # gfx physics sandbox: an interactive application over every library — decisions and plan
 
-Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 committed** (378ee8c); **S4 committed** (7727d29); **S5 implemented** (§C "S5 as built"), awaiting validation.
+Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 committed** (378ee8c); **S4 committed** (7727d29); **S5 committed** (abbb007); **S6 implemented** (§C "S6 as built"), awaiting validation: every step of the plan is built.
 
 The request (2026-10-25): *a visual test combining all abstractions, for the physics simulation — an application where I
 can interact and see the physics being calculated and executed, with graphics.* It is `examples/physics_sandbox`: a window
@@ -291,3 +291,26 @@ Deviations from the plan, for validation:
 4. **`--views`** (not planned), to start with views on and to capture them.
 5. **The floor has no wireframe**, and Box3D's panel labels the iterations unused (its soft step has none).
 6. **The control script extends `--script`** (the same CTest runs, now 620 frames) rather than a separate run.
+
+### S6 as built (2026-10-31)
+
+Documentation of the sandbox as built; no code changed.
+
+- **Architecture overview** ([architecture.md](architecture.md)): the sandbox among the applications (§1); §7.5 says how
+  GJK tells slivers from shallow overlaps and that structures show their nodes; a new **§8 "The physics sandbox: every
+  library in one window"** — §8.1 its modules and what each uses (diagram), §8.2 a frame across the main thread, the
+  world's thread and the GPU (sequence diagram) and why everything that reads the world runs between `finish()` and
+  `advance()`, §8.3 drawing a world (diagram: meshes once per shape, instances, surfaces and lines per frame, the scene
+  pass's draws, the resolve, the UI pass), §8.4 what CTest checks and the three library defects the sandbox found; Build
+  and tests is now §9, with the sandbox's runs and the physics suites' new coverage. All 32 diagrams render in Mermaid
+  10.9.1 and 11.4.1 (the local check page); the new ones were looked at in 11.4.1, where a long subgraph title ("scene
+  pass: 4x MSAA, reversed depth") was cut short — shortened, its detail moved into the first node.
+- **README**: a second physics snippet — what a renderer needs to draw a world for debugging (meshes once per shape,
+  bounding boxes, contacts, a component broad phase's nodes) — compiled with the project's warnings as errors and run
+  (one mesh, 56 lines) from a temporary target removed after; the sandbox's entry in the layout; the paragraph on the
+  sandbox no longer says "in progress".
+- **THIRD_PARTY_LICENSES.md**: the sandbox embeds a Noto Sans atlas.
+- **This record**: S5 and S6 as built.
+
+CTest runs the sandbox on both physics backends (`PhysicsSandbox.SDL3` with Box3D, `PhysicsSandbox.GLFW` with the reference
+backend, `PhysicsSandbox.Tour` with both), as the plan asked.

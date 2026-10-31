@@ -1169,6 +1169,77 @@ int main()
   exactly rounded), to cache once per shape and draw at each collider's pose; `DebugLines` collects colored lines
   (boxes, axes, arrows, circles, contact points and normals) without allocating once warm.
 
+What a renderer needs to draw a world for debugging, gathered between steps (the physics sandbox does this with
+Vulkan, below):
+
+```cpp
+import std;
+import gfx.physics;
+
+using namespace gfx;
+using namespace gfx::physics;
+
+// Each shape's mesh made once (in the shape's frame: drawn at each collider's pose); lines made each frame.
+struct DebugDrawing
+{
+    std::unordered_map<const Shape*, DebugMesh> meshes;
+    DebugLines lines;
+    std::vector<SpatialNode> nodes;
+    std::array<ContactInfo, 64> contacts{};
+
+    void gather(const PhysicsWorld& world,
+                const RigidBody& body,
+                std::span<const Collider* const> colliders)
+    {
+        for (const Collider* collider : colliders)
+        {
+            if (const auto [mesh, made] = meshes.try_emplace(collider->shape().get()); made)
+            {
+                mesh->second = tessellate(*collider->shape());
+            }
+            lines.add_box(collider->world_bounds(), {.red = 230, .green = 200, .blue = 60});
+        }
+        if (const QueryResult<std::span<ContactInfo>> found = world.contacts_of(body.handle(), contacts))
+        {
+            for (const ContactInfo& contact : *found)
+            {
+                lines.add_contacts(contact.manifold, {.red = 240, .green = 70, .blue = 50}, 0.05F, 0.3F);
+            }
+        }
+    }
+
+    // A component broad phase (the reference backend's) shows its nodes or cells; a backend's own (Box3D's) does not.
+    void gather_broad_phase(PhysicsWorld& world)
+    {
+        if (world.broad_phase().is_external())
+        {
+            world.broad_phase().structure_nodes(nodes);
+            for (const SpatialNode& node : nodes)
+            {
+                lines.add_box(node.box, {.green = 200, .blue = static_cast<std::uint8_t>(255 - 20 * std::min(node.depth, 8U))});
+            }
+        }
+    }
+};
+
+int main()
+{
+    const std::unique_ptr<PhysicsWorld> world = create_physics_world({}, PhysicsBackendKind::REFERENCE);
+    const auto ground = world->create_rigid_body({.kind = BodyKind::STATIC});
+    const auto floor = ground->add_collider({.shape = make_shape(BoxShape{.half_extents = {.x = 10, .y = 0.5F, .z = 10}}),
+                                             .pose = {.position = {.y = -0.5F}}});
+    const auto ball = world->create_rigid_body({.pose = {.position = {.y = 0.5F}}});
+    const auto ball_collider = ball->add_collider({.shape = make_shape(SphereShape{.radius = 0.5F})});
+    world->step(1.0F / 60);
+
+    DebugDrawing drawing;
+    const std::array<const Collider*, 1> colliders{ball_collider.get()};
+    drawing.gather(*world, *ball, colliders);
+    drawing.gather_broad_phase(*world);
+    std::println("{} mesh, {} lines", drawing.meshes.size(), drawing.lines.line_count());
+}
+```
+
 What a backend cannot do throws `BackendCapabilityError` naming the capability (`PhysicsCapability`), why,
 and what to do instead — never a silent approximation:
 
@@ -1408,7 +1479,8 @@ gfx/
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
 ├── examples/physics/     a headless physics scene on Box3D or the reference backend, with two cameras, checked
-├── examples/physics_sandbox/  a physics world drawn with Vulkan under an orbit camera, with UI panels
+├── examples/physics_sandbox/  every library in one window: a physics world (Box3D or the reference backend)
+│                              drawn with Vulkan, nine scenes, interaction, live controls, debug views, a panel
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,
