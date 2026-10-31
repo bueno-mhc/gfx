@@ -1,6 +1,7 @@
 #version 460
 // Lit solids: a directional light and a sky/ground ambient term; the floor's grid (instance flag bit 0) every meter,
-// stronger every five, antialiased by the screen-space derivatives of the position; a highlight (flag bit 1).
+// stronger every five, antialiased by the screen-space derivatives of the position; a highlight (flag bit 1). The
+// wireframe (push flag bit 1) draws the edges in one dark color, except the floor's.
 
 layout(push_constant) uniform Push
 {
@@ -30,6 +31,17 @@ float grid_line(vec2 coordinates, float spacing, float width)
 
 void main()
 {
+    if ((push.flags & 2u) != 0u)
+    {
+        // The floor (with the grid) has no wireframe: its long diagonal would cross the scene.
+        if ((instance_flags & 1u) != 0u)
+        {
+            discard;
+        }
+        result = vec4(0.02, 0.022, 0.03, 1.0);
+        return;
+    }
+
     // Back faces (two-sided meshes) are lit from their own side.
     vec3 normal = normalize(world_normal);
     if (!gl_FrontFacing)

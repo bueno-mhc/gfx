@@ -70,9 +70,14 @@ struct SceneSoftBody
 struct SceneJoint
 {
     std::unique_ptr<gfx::physics::Joint> joint{};                    ///< The world's joint (gone with either body).
+    gfx::physics::JointKind kind = gfx::physics::JointKind::DISTANCE; ///< What it is.
     gfx::physics::RigidBodyHandle first{};                           ///< Its first body.
     gfx::physics::RigidBodyHandle second{};                          ///< Its second (null: the world).
-    std::optional<std::pair<gfx::Vector3, gfx::Vector3>> cable{};    ///< Distance joints: the anchors (bodies' frames) drawn as a line.
+    gfx::Vector3 anchor_first{};                                     ///< Its anchor in the first body's frame.
+    gfx::Vector3 anchor_second{};                                    ///< In the second body's frame (the world's when null).
+    std::optional<gfx::Vector3> axis{};                              ///< Hinges, sliders, cone-twists, six-DOF: its axis in the first body's frame.
+    bool cable = false;                                              ///< Distance joints: drawn as a line between the anchors.
+    bool broken = false;                                             ///< Whether a JointEvent reported it broken.
 };
 
 /// A trigger the scene made, with what is in it.
@@ -117,6 +122,11 @@ public:
 
     /// @brief The world.
     [[nodiscard]] auto world() noexcept -> gfx::physics::PhysicsWorld&
+    {
+        return *m_world;
+    }
+
+    [[nodiscard]] auto world() const noexcept -> const gfx::physics::PhysicsWorld&
     {
         return *m_world;
     }
@@ -212,6 +222,12 @@ public:
 
     /// @brief Waits for a step in flight and takes its poses and events; the world then answers queries.
     void finish();
+
+    /// @brief Paused: completes the step in flight and begins none; the latest poses are drawn.
+    void hold();
+
+    /// @brief Paused: completes the step in flight, then begins exactly one step (drawn once completed).
+    void step_once();
 
     /// @brief Where @p body is drawn: between its last two completed poses.
     [[nodiscard]] auto drawn_pose(const SceneBody& body) const noexcept -> gfx::Transform;

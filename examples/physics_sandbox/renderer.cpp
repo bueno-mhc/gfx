@@ -18,6 +18,8 @@ constexpr std::uint32_t INSTANCE_WORDS = 9;    ///< An instance: translation, or
 constexpr std::uint32_t LINE_VERTEX_WORDS = 4; ///< A line vertex: position, color (line.vert).
 constexpr gfx::Format DEPTH_FORMAT = gfx::Format::D32_SFLOAT;
 constexpr std::uint64_t STAGING_BYTES = 16ULL << 20U; ///< Mesh bytes copied per frame at most (the rest waits a frame).
+constexpr float WIREFRAME_DEPTH_BIAS = 2.0F;  ///< Toward the camera (reversed depth: greater is nearer), so edges win.
+constexpr float WIREFRAME_DEPTH_SLOPE = 1.0F; ///< The same, scaled by the triangle's depth slope.
 
 /// mesh.vert's and mesh.frag's push constants.
 struct MeshPush
@@ -142,6 +144,7 @@ struct SceneRenderer::State
     std::unique_ptr<gfx::ShaderModule> line_fragment{};
     std::unique_ptr<gfx::GraphicsPipeline> mesh_pipeline{};
     std::unique_ptr<gfx::GraphicsPipeline> two_sided_pipeline{};
+    std::unique_ptr<gfx::GraphicsPipeline> wireframe_pipeline{};
     std::unique_ptr<gfx::GraphicsPipeline> line_pipeline{};
     std::unique_ptr<gfx::Image> color_image{};
     std::unique_ptr<gfx::ImageView> color_view{};
@@ -197,7 +200,8 @@ SceneRenderer::SceneRenderer(gfx::Device& device,
                                           .bindless = false,
                                           .debug_name = "sandbox mesh indices"});
 
-    // Lit solids culled from behind (one-sided) or not (two-sided meshes), lines over them; depth reversed.
+    // Lit solids culled from behind (one-sided) or not (two-sided meshes), their edges as lines (the wireframe), lines
+    // over them; depth reversed.
     state.mesh_vertex = device.create_shader_module(shaders::mesh_vert);
     state.mesh_fragment = device.create_shader_module(shaders::mesh_frag);
     state.line_vertex = device.create_shader_module(shaders::line_vert);
@@ -221,6 +225,18 @@ SceneRenderer::SceneRenderer(gfx::Device& device,
                                                                 .state = {.rasterization = {.cull_mode = gfx::CullMode::NONE},
                                                                           .depth_stencil = TESTED_AND_WRITTEN,
                                                                           .debug_name = "sandbox two-sided meshes"}});
+    state.wireframe_pipeline = device.create_graphics_pipeline({.vertex_shader = state.mesh_vertex->handle(),
+                                                                .fragment_shader = state.mesh_fragment->handle(),
+                                                                .color_formats = formats,
+                                                                .depth_format = DEPTH_FORMAT,
+                                                                .samples = description.samples,
+                                                                .state = {.rasterization = {.polygon_mode = gfx::PolygonMode::LINE,
+                                                                                            .cull_mode = gfx::CullMode::NONE,
+                                                                                            .depth_bias = true,
+                                                                                            .depth_bias_constant = WIREFRAME_DEPTH_BIAS,
+                                                                                            .depth_bias_slope = WIREFRAME_DEPTH_SLOPE},
+                                                                          .depth_stencil = TESTED,
+                                                                          .debug_name = "sandbox wireframe"}});
     state.line_pipeline = device.create_graphics_pipeline({.vertex_shader = state.line_vertex->handle(),
                                                            .fragment_shader = state.line_fragment->handle(),
                                                            .color_formats = formats,
@@ -389,6 +405,7 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
     statistics.instances = 0;
     statistics.surfaces = 0;
     statistics.draw_calls = 0;
+    statistics.wireframe_draws = 0;
     statistics.lines = 0;
     statistics.skipped = 0;
     if (extent.width == 0 || extent.height == 0)
@@ -537,19 +554,26 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
     scope.set_viewport({.width = static_cast<float>(extent.width), .height = static_cast<float>(extent.height)});
     scope.set_scissor({.width = extent.width, .height = extent.height});
 
-    // One instanced draw per mesh.
+    // One instanced draw per mesh, then each surface; with the wireframe, all of them again as lines over the solids.
     const std::array<float, 16> view_projection = matrix_floats(view.view_projection);
     const gfx::Vector3 light = gfx::normalized(view.light_direction);
-    if (!state.order.empty() || !state.surface_order.empty())
-    {
+    const auto draw_meshes = [&](bool wireframe) {
         MeshPush push{.view_projection = view_projection,
-                            .light = {light.x, light.y, light.z, view.light_strength},
-                            .vertex_buffer = state.vertices->bindless_index().value(),
-                            .instance_buffer = instances.buffer_index.value(),
-                            .instance_word = static_cast<std::uint32_t>(instances.offset / 4),
-                            .flags = state.srgb ? 1U : 0U};
-        scope.bind_index_buffer(state.indices->handle(), 0, gfx::IndexType::UNSIGNED_INTEGER_32);
-        std::optional<bool> bound_two_sided{};
+                      .light = {light.x, light.y, light.z, view.light_strength},
+                      .vertex_buffer = state.vertices->bindless_index().value(),
+                      .instance_buffer = instances.buffer_index.value(),
+                      .instance_word = static_cast<std::uint32_t>(instances.offset / 4),
+                      .flags = (state.srgb ? 1U : 0U) | (wireframe ? 2U : 0U)};
+        const gfx::GraphicsPipeline* bound = nullptr;
+        const auto use = [&](const gfx::GraphicsPipeline& pipeline) {
+            if (bound != &pipeline)
+            {
+                scope.bind_pipeline(pipeline.handle());
+                bound = &pipeline;
+                scope.push_constants(push);
+            }
+        };
+        std::uint32_t draws = 0;
         for (std::size_t first = 0; first < state.order.size();)
         {
             const std::uint32_t mesh_index = state.instances[state.order[first]].mesh;
@@ -559,21 +583,15 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
                 ++end;
             }
             const StoredMesh& mesh = state.meshes[mesh_index];
-            if (bound_two_sided != mesh.two_sided)
-            {
-                scope.bind_pipeline(mesh.two_sided ? state.two_sided_pipeline->handle() : state.mesh_pipeline->handle());
-                scope.push_constants(push);
-                bound_two_sided = mesh.two_sided;
-            }
+            use(wireframe ? *state.wireframe_pipeline : mesh.two_sided ? *state.two_sided_pipeline : *state.mesh_pipeline);
             scope.draw_indexed({.index_count = mesh.index_count,
                                 .instance_count = static_cast<std::uint32_t>(end - first),
                                 .first_index = mesh.first_index,
                                 .vertex_offset = static_cast<std::int32_t>(mesh.first_vertex),
                                 .first_instance = static_cast<std::uint32_t>(first)});
-            ++statistics.draw_calls;
+            ++draws;
             first = end;
         }
-        statistics.instances = static_cast<std::uint32_t>(state.order.size());
 
         // Each surface, both sides: its vertices in the frame's buffer, its instance after the meshes'.
         auto vertex_word = static_cast<std::uint32_t>(surface_data.offset / 4);
@@ -581,11 +599,7 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
         {
             const Surface& surface = state.surfaces[state.surface_order[index]];
             const StoredMesh& mesh = state.meshes[surface.mesh];
-            if (bound_two_sided != true)
-            {
-                scope.bind_pipeline(state.two_sided_pipeline->handle());
-                bound_two_sided = true;
-            }
+            use(wireframe ? *state.wireframe_pipeline : *state.two_sided_pipeline);
             push.vertex_buffer = surface_data.buffer_index.value();
             push.vertex_word = vertex_word;
             scope.push_constants(push);
@@ -595,8 +609,20 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
                                 .vertex_offset = 0,
                                 .first_instance = static_cast<std::uint32_t>(state.order.size() + index)});
             vertex_word += surface.vertex_count * VERTEX_WORDS;
-            ++statistics.draw_calls;
+            ++draws;
         }
+        return draws;
+    };
+    if (!state.order.empty() || !state.surface_order.empty())
+    {
+        scope.bind_index_buffer(state.indices->handle(), 0, gfx::IndexType::UNSIGNED_INTEGER_32);
+        statistics.draw_calls += draw_meshes(false);
+        if (view.wireframe)
+        {
+            statistics.wireframe_draws = draw_meshes(true);
+            statistics.draw_calls += statistics.wireframe_draws;
+        }
+        statistics.instances = static_cast<std::uint32_t>(state.order.size());
         statistics.surfaces = static_cast<std::uint32_t>(state.surface_order.size());
     }
 

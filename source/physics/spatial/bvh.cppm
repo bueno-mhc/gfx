@@ -139,6 +139,32 @@ public:
         }
     }
 
+    /// @brief Calls `visitor(node)` for every node of the tree, parents before their children: its box, its depth
+    ///        from the root, one proxy for a leaf.
+    template<class Visitor>
+    void nodes(Visitor&& visitor) const
+    {
+        if (m_root == spatial_detail::NONE)
+        {
+            return;
+        }
+        std::array<std::pair<std::uint32_t, std::uint32_t>, 256> stack{};
+        std::size_t size = 0;
+        stack[size++] = {m_root, 0};
+        while (size > 0)
+        {
+            const auto [index, depth] = stack[--size];
+            const Node& node = m_nodes[index];
+            const bool leaf = node.child1 == spatial_detail::NONE;
+            visitor(SpatialNode{.box = node.box, .depth = depth, .proxies = leaf ? 1U : 0U});
+            if (!leaf && size + 2 <= stack.size())
+            {
+                stack[size++] = {node.child2, depth + 1};
+                stack[size++] = {node.child1, depth + 1};
+            }
+        }
+    }
+
 private:
     /// A node: a leaf (child1 NONE) holds a proxy's slot.
     struct Node

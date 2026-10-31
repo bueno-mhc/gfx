@@ -1,5 +1,6 @@
-# The physics sandbox: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--device <index>]
-#                                          [--threads <count>] [--frames <count>] [--script | --tour] [--validation] [--capture <file.ppm>]
+# The physics sandbox: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--views <list>]
+#                                          [--device <index>] [--threads <count>] [--frames <count>] [--script | --tour]
+#                                          [--validation] [--capture <file.ppm>]
 add_executable(gfx_physics_sandbox)
 target_sources(gfx_physics_sandbox
     PRIVATE
@@ -8,13 +9,15 @@ target_sources(gfx_physics_sandbox
         scene.cpp
         presets.cpp
         interaction.cpp
+        controls.cpp
     PRIVATE
         FILE_SET CXX_MODULES
         FILES
             renderer.cppm
             scene.cppm
             presets.cppm
-            interaction.cppm)
+            interaction.cppm
+            controls.cppm)
 target_link_libraries(gfx_physics_sandbox PRIVATE
     gfx::platform_graphics gfx::ui gfx::ui_platform gfx::physics gfx::camera gfx::project_options)
 gfx_deploy_runtime_dependencies(gfx_physics_sandbox)
@@ -37,7 +40,8 @@ gfx_add_ui_atlas(gfx_physics_sandbox
     EMBED MODULE physics_sandbox.font NAMESPACE physics_sandbox)
 
 # The scripted run on each platform backend, one with each physics backend (SDL3 with Box3D, GLFW with the reference
-# backend): a grab and a drag, a shot, a spawn, a removal and a flight, their outcomes checked; and the tour on the first
+# backend): a grab and a drag, a shot, a spawn, a removal and a flight, then a pause, a single step, slow motion, gravity,
+# the solver, the broad phase and the integrator, every debug view, their outcomes checked; and the tour on the first
 # platform backend: every preset on every physics backend, switched at run time, each scene checked. With the validation
 # layers when the tests found them (tests/graphics/vulkan); a failed check or a validation error fails the run.
 if(GFX_BUILD_TESTS)

@@ -5,7 +5,7 @@
 ///
 /// A structure stores, per proxy, a key (the ColliderHandle it stands for) and a box, and answers queries by box, ray,
 /// segment, sphere and frustum (visitors return false to stop), the pairs of proxies whose boxes overlap (each once),
-/// and iteration. It stores the boxes it is given: fattening is the broad phase's (SpatialBroadPhase). Queries are
+/// and iteration; it shows its nodes or cells (SpatialNode) to debug views. It stores the boxes it is given: fattening is the broad phase's (SpatialBroadPhase). Queries are
 /// const and may run on several threads at once while nothing changes the structure.
 export module gfx.physics.spatial:structure;
 
@@ -305,8 +305,19 @@ everything() noexcept -> Aabb
 
 } // namespace spatial_detail
 
+/// @brief A node or a cell of a spatial structure, as a debug view draws it: a tree's node, a loose tree's or a grid's
+///        occupied cell, a sweep-and-prune proxy's intervals.
+struct SpatialNode
+{
+    Aabb box{};                ///< Its bounds (a cell's own box, not the larger one a loose tree tests).
+    std::uint32_t depth = 0;   ///< Its level: 0 at the root (trees), the cell level (loose trees), 0 elsewhere.
+    std::uint32_t proxies = 0; ///< The proxies listed in it (0 for a tree's inner node).
+
+    [[nodiscard]] constexpr auto operator==(const SpatialNode&) const noexcept -> bool = default;
+};
+
 /// @brief A spatial structure: proxies (a collider key and a box) inserted, removed and updated, queries by box, ray,
-///        segment, sphere and frustum, overlapping pairs, iteration.
+///        segment, sphere and frustum, overlapping pairs, iteration, its nodes.
 template<class Structure>
 concept SpatialStructureConcept = requires(Structure& structure, const Structure& reader, ColliderHandle key, Aabb box, Ray ray, Segment segment,
                                            Sphere sphere, Frustum frustum, SpatialProxyHandle proxy) {
@@ -324,6 +335,7 @@ concept SpatialStructureConcept = requires(Structure& structure, const Structure
     reader.query(frustum, [](ColliderHandle) { return true; });
     reader.pairs([](ColliderHandle, ColliderHandle) {});
     reader.iterate([](ColliderHandle, const Aabb&) {});
+    reader.nodes([](const SpatialNode&) {});
 };
 
 } // namespace gfx::physics

@@ -17,7 +17,7 @@ layout(push_constant) uniform Push
     uint vertex_word;     // first word of the vertices in it (gl_VertexIndex counts from there)
     uint instance_buffer; // bindless index of the buffer holding the frame's instances
     uint instance_word;   // first word of the instances in it
-    uint flags;           // bit 0: the target is sRGB (colors are converted to linear)
+    uint flags;           // bit 0: the target is sRGB (colors are converted to linear); bit 1: the wireframe
 } push;
 
 layout(location = 0) out vec3 world_position;

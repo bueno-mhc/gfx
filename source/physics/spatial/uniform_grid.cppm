@@ -166,6 +166,32 @@ public:
         }
     }
 
+    /// @brief Calls `visitor(node)` for every occupied cell (its cube, depth 0, the proxies listed in it: a proxy is
+    ///        listed in every cell it overlaps), then for every proxy too large for the cells (its box, depth 1).
+    template<class Visitor>
+    void nodes(Visitor&& visitor) const
+    {
+        constexpr std::uint64_t MASK = (std::uint64_t{1} << 21U) - 1;
+        m_cells.for_each([&](std::uint64_t cell, std::uint32_t head) {
+            std::uint32_t count = 0;
+            for (std::uint32_t entry = head; entry != spatial_detail::NONE; entry = m_entries[entry].next)
+            {
+                ++count;
+            }
+            const auto corner = [cell](std::uint32_t shift) {
+                return static_cast<float>(static_cast<std::int64_t>(cell >> shift & MASK) - LIMIT) * CellSize;
+            };
+            const Vector3 minimum{.x = corner(0), .y = corner(21), .z = corner(42)};
+            visitor(SpatialNode{.box = {.minimum = minimum, .maximum = minimum + Vector3{.x = CellSize, .y = CellSize, .z = CellSize}},
+                                .depth = 0,
+                                .proxies = count});
+        });
+        for (const std::uint32_t large : m_large)
+        {
+            visitor(SpatialNode{.box = m_proxies[large].box, .depth = 1, .proxies = 1});
+        }
+    }
+
 private:
     /// Coordinates are clamped to ±2^20 cells (21 bits each in the key).
     static constexpr std::int64_t LIMIT = 1 << 20;

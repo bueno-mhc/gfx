@@ -465,6 +465,11 @@ public:
     {
         return BroadPhase::ended_pairs();
     }
+
+    void structure_nodes(std::vector<SpatialNode>& nodes) const override
+    {
+        BroadPhase::structure_nodes(nodes);
+    }
 };
 
 class BareNarrowPhase final : public NarrowPhase
@@ -854,6 +859,8 @@ TEST(PhysicsInterfaceTest, EveryOperationABackendDoesNotImplementThrowsADescript
     expect_not_implemented([&] { (void)bare_broad_phase.pairs(); }, "BroadPhase::pairs", "CUSTOM_BROAD_PHASE");
     expect_not_implemented([&] { (void)bare_broad_phase.new_pairs(); }, "BroadPhase::new_pairs", "CUSTOM_BROAD_PHASE");
     expect_not_implemented([&] { (void)bare_broad_phase.ended_pairs(); }, "BroadPhase::ended_pairs", "CUSTOM_BROAD_PHASE");
+    std::vector<SpatialNode> nodes;
+    expect_not_implemented([&] { bare_broad_phase.structure_nodes(nodes); }, "BroadPhase::structure_nodes", "CUSTOM_BROAD_PHASE");
     BareNarrowPhase bare_narrow_phase;
     expect_not_implemented([&] { bare_narrow_phase.collide(ShapeInstance{}, ShapeInstance{}, contacts, CollisionSettings{}); }, "NarrowPhase::collide", "CUSTOM_NARROW_PHASE");
     BareSolver bare_solver;

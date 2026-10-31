@@ -30,6 +30,9 @@ public:
     /// @brief Gets each key with its box.
     using ItemVisitor = std::function<void(ColliderHandle, const Aabb&)>;
 
+    /// @brief Gets each node or cell.
+    using NodeVisitor = std::function<void(const SpatialNode&)>;
+
     virtual ~SpatialStructure() = default;
 
     /// @brief Its kind.
@@ -86,6 +89,9 @@ public:
 
     /// @brief Visits every key with its box.
     virtual void iterate(const ItemVisitor& visitor) const = 0;
+
+    /// @brief Visits its nodes or cells (SpatialNode: what a debug view draws).
+    virtual void nodes(const NodeVisitor& visitor) const = 0;
 
 protected:
     SpatialStructure() = default;
@@ -197,6 +203,11 @@ public:
     void iterate(const ItemVisitor& visitor) const override
     {
         m_structure.iterate(visitor);
+    }
+
+    void nodes(const NodeVisitor& visitor) const override
+    {
+        m_structure.nodes(visitor);
     }
 
 private:

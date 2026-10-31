@@ -189,6 +189,46 @@ public:
         }
     }
 
+    /// @brief Calls `visitor(node)` for every occupied cell, coarsest level first: the cell's own box (on the axis a
+    ///        quadtree does not split, and for level 0 — proxies too large or outside the region — the box around its
+    ///        proxies), its level, its proxies.
+    template<class Visitor>
+    void nodes(Visitor&& visitor) const
+    {
+        for (std::uint32_t level = 0; level <= Depth; ++level)
+        {
+            if (m_level_counts[level] == 0)
+            {
+                continue;
+            }
+            m_cells[level].for_each([&](std::uint64_t cell, std::uint32_t head) {
+                // The box around the cell's proxies, then the cell's own extent along the axes the tree splits.
+                Aabb box = Aabb::empty();
+                std::uint32_t count = 0;
+                for (std::uint32_t slot = head; slot != spatial_detail::NONE; slot = m_proxies[slot].next)
+                {
+                    box = box.merged(m_proxies[slot].box);
+                    ++count;
+                }
+                if (level > 0)
+                {
+                    std::array<float, 3> low{box.minimum.x, box.minimum.y, box.minimum.z};
+                    std::array<float, 3> high{box.maximum.x, box.maximum.y, box.maximum.z};
+                    for (std::size_t index = 0; index < Dimensions; ++index)
+                    {
+                        const std::size_t axis = AXES[index];
+                        const float size = cell_size(level, axis);
+                        const auto coordinate = static_cast<float>(cell >> (20U * index) & 0xFFFFFU);
+                        low[axis] = component(m_region.minimum, axis) + coordinate * size;
+                        high[axis] = low[axis] + size;
+                    }
+                    box = {.minimum = {.x = low[0], .y = low[1], .z = low[2]}, .maximum = {.x = high[0], .y = high[1], .z = high[2]}};
+                }
+                visitor(SpatialNode{.box = box, .depth = level, .proxies = count});
+            });
+        }
+    }
+
 private:
     /// The axes the tree splits.
     static constexpr std::array<std::size_t, Dimensions> AXES = [] {

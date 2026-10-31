@@ -1,6 +1,6 @@
 # gfx physics sandbox: an interactive application over every library — decisions and plan
 
-Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 committed** (378ee8c); **S4 implemented** (§C "S4 as built"), awaiting validation.
+Status: **answers given 2026-10-25** (below); **S1 committed** (c5d0ac9); **S2 committed** (da1c14e); **S3 committed** (378ee8c); **S4 committed** (7727d29); **S5 implemented** (§C "S5 as built"), awaiting validation.
 
 The request (2026-10-25): *a visual test combining all abstractions, for the physics simulation — an application where I
 can interact and see the physics being calculated and executed, with graphics.* It is `examples/physics_sandbox`: a window
@@ -238,3 +238,56 @@ Deviations from the plan, for validation:
 5. Soft bodies cannot be grabbed (ray casts find colliders only), and they do not collide with each other (the framework's
    XPBD solver collides particles with colliders and, optionally, with their own body's), so the jelly cubes are dropped
    apart.
+
+### S5 as built (2026-10-31)
+
+Module **`physics_sandbox.controls`** (`controls.cppm`/`.cpp`), changes to the scene, the renderer and the program, and
+an addition to the physics library (below).
+
+- **Simulation** (`SimulationSettings`, `SimulationControl`): pause (P), single step (N; `Scene::hold()` completes the step
+  in flight and begins none, drawing the latest poses; `Scene::step_once()` begins exactly one), slow motion (a time scale
+  from 0.05 to 4: the frame's seconds scaled before the fixed-step accumulator), gravity, the solver's sub-steps, velocity
+  and position iterations and warm starting, sleeping, and on a backend that takes components the broad phase (BVH,
+  octree, quadtree, BSP, uniform grid, sweep and prune on one or three axes: `make_broad_phase()`) and the rigid bodies'
+  integrator (semi-implicit Euler, Verlet, Runge–Kutta 4). `SimulationControl::apply()` sends what changed since the last
+  frame, between steps (after `Scene::finish()`, before the next step begins); a change of gravity wakes every dynamic body
+  (a sleeping one would not notice); what the backend refuses (Box3D runs its own broad phase and integrator) goes back in
+  the settings and is kept for the panel. `adopt()` takes a new scene's world as it is, so the settings carry over to
+  every scene built after.
+- **Views** (`ViewSettings`, `DebugViews`): the meshes' **wireframe** (a pipeline of PolygonMode::LINE, culling none,
+  depth tested without writing, biased toward the camera; the fragment shader draws edges in one dark color and leaves
+  the floor out: its 80 m diagonal crossed the scene), **bounding boxes** (colliders by awake, asleep, static; soft
+  bodies; triggers), **contacts** (each dynamic body's `contacts_of()`, a pair of dynamic bodies drawn once: points and
+  normals), the **broad phase**'s nodes or cells (`BroadPhase::structure_nodes()`, colored by depth, dimmer when listing
+  no proxy; Box3D's refusal shown instead), **joints** (anchors on both bodies, the line between, the axis of hinges,
+  sliders, cone-twists and six-DOF joints; red once broken — `Scene` now keeps joints' anchors and axes in their bodies'
+  frames and their JointEvents), and **colors** by body (darker asleep), by sleep (awake, asleep, static) or by **island**
+  (dynamic bodies joined by their contacts with each other and by joints: a union-find in the sandbox, since worlds do
+  not expose islands). The lines are gathered between steps from the last completed step and drawn over the frame.
+- **Panel**: sections Simulation, Views (with what the views found: boxes, contact points, nodes, joints, islands) and
+  Step phases (each phase's time with its plot over the last 180 steps); Scene stays open, the others closed. Keys P and
+  N. **`--views <list>`** starts with views on (`wireframe,boxes,contacts,broad_phase,joints` and `sleep` or `islands`).
+- **Script**: `--script` now runs 620 frames: after the interaction's 420, `ControlScript` pauses (frame 420), steps once
+  (450), runs at a quarter of the speed for 40 frames (455), lets a ball go without gravity at (6, 5, 6) (496) and gives
+  gravity back after 30 frames, sets 8 sub-steps, 12 velocity and 4 position iterations (557), asks for an octree and
+  Verlet (560), turns every view on with island colors and holds the ball by a ball-and-socket joint (570); nine checks:
+  no step while paused, one single step, 10 steps in 40 slow frames, the ball still (within 1 cm, under 1 cm/s) without
+  gravity and falling with it, the solver's settings in the world's description, the components replaced (reference) or
+  refused with both refusals noted and the settings back (Box3D), every view drew something (boxes, contact points,
+  nodes or the refusal, a joint, wireframe draws), at least two islands. All fifteen checks pass on Box3D with SDL3 and
+  on the reference backend with GLFW, with the validation layers; the tour still passes. Captures of the views on both
+  backends and of the panel's sections were looked at.
+
+**Library addition** (physics design, §B "Follow-up after PH8: structures shown to debug views"): `SpatialNode`, the
+structures' `nodes()` (now in `SpatialStructureConcept`), the run-time `SpatialStructure::nodes()`, and
+`BroadPhase::structure_nodes()`; seven new typed tests check that the nodes cover every proxy.
+
+Deviations from the plan, for validation:
+
+1. **A library addition** for the broad phase view (above): a structure had no way to show what it is made of.
+2. **Islands are the sandbox's own** (contacts and joints between dynamic bodies), not the backends' (Box3D keeps its
+   islands inside; the reference backend's union-find is internal to its step).
+3. **Changing gravity wakes every body**: otherwise sleeping bodies ignore it.
+4. **`--views`** (not planned), to start with views on and to capture them.
+5. **The floor has no wireframe**, and Box3D's panel labels the iterations unused (its soft step has none).
+6. **The control script extends `--script`** (the same CTest runs, now 620 frames) rather than a separate run.

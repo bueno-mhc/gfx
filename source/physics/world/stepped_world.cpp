@@ -269,6 +269,11 @@ public:
         refuse_backend_component(backend(), "BroadPhase::ended_pairs", PhysicsCapability::CUSTOM_BROAD_PHASE);
     }
 
+    void structure_nodes(std::vector<SpatialNode>& /*nodes*/) const override
+    {
+        refuse_backend_component(backend(), "BroadPhase::structure_nodes", PhysicsCapability::CUSTOM_BROAD_PHASE);
+    }
+
 private:
     BroadPhaseKind m_kind;
 };

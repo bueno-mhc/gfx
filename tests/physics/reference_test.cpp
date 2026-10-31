@@ -708,6 +708,11 @@ public:
         return m_inner.ended_pairs();
     }
 
+    void structure_nodes(std::vector<SpatialNode>& nodes) const override
+    {
+        m_inner.structure_nodes(nodes);
+    }
+
 private:
     SpatialBroadPhaseComponent<Structure> m_inner{};
 };
@@ -847,6 +852,12 @@ TEST(ReferenceTest, EachComponentCanBeReplaced)
             EXPECT_EQ(world->broad_phase().kind(), BroadPhaseKind::OCTREE);
             run(*world, 120);
             updates = counting->updates;
+
+            // The octree shows its cells: the floor's (a coarse level) and the boxes', each listed once.
+            std::vector<SpatialNode> nodes;
+            world->broad_phase().structure_nodes(nodes);
+            EXPECT_EQ(std::ranges::fold_left(nodes, 0U, [](std::uint32_t sum, const SpatialNode& node) { return sum + node.proxies; }), 4U);
+            EXPECT_TRUE(std::ranges::any_of(nodes, [](const SpatialNode& node) { return node.depth > 0; }));
         }
         else
         {

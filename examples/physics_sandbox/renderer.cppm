@@ -41,6 +41,7 @@ struct SceneView
     gfx::Vector3 light_direction{.x = 0.35F, .y = 0.85F, .z = 0.4F};         ///< Toward the light (any length but 0).
     float light_strength = 0.85F;                                            ///< The directional light's share.
     std::array<float, 4> background{0.05F, 0.06F, 0.08F, 1.0F};              ///< Clear color (linear).
+    bool wireframe = false;                                                  ///< The meshes' edges drawn over them.
 };
 
 /// What the last frame drew.
@@ -52,6 +53,7 @@ struct SceneRendererStatistics
     std::uint32_t instances = 0;       ///< Instances drawn.
     std::uint32_t surfaces = 0;        ///< Moving surfaces drawn.
     std::uint32_t draw_calls = 0;      ///< Draw calls.
+    std::uint32_t wireframe_draws = 0; ///< Of them, drawing the wireframe.
     std::uint32_t lines = 0;           ///< Line segments drawn.
     std::uint32_t skipped = 0;         ///< Instances or lines not drawn (storage full).
 };
@@ -92,7 +94,8 @@ public:
     void prepare(gfx::GraphicsRecorder& recorder);
 
     /// @brief Records the scene's pass into @p target (a view of an image of @p extent, in COLOR_ATTACHMENT_WRITE state,
-    ///        left there): cleared, the instances, the lines; with multisampling, resolved into it.
+    ///        left there): cleared, the instances (and their edges with SceneView::wireframe), the lines; with
+    ///        multisampling, resolved into it.
     void render(gfx::GraphicsRecorder& recorder,
                 gfx::ImageViewHandle target,
                 gfx::Extent extent,

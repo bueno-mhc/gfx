@@ -190,6 +190,56 @@ TYPED_TEST(SpatialStructureTest, QueriesAndPairsMatchBruteForce)
     EXPECT_THROW(structure.update(SpatialProxyHandle{}, Aabb{}), PhysicsError);
 }
 
+TYPED_TEST(SpatialStructureTest, NodesCoverEveryProxy)
+{
+    // The nodes a debug view draws: none listing a proxy when the structure is empty; otherwise every proxy's center in
+    // a node that lists proxies, and each proxy listed once (a grid lists a proxy in each cell it overlaps).
+    TypeParam structure{};
+    const auto nodes_of = [&structure] {
+        std::vector<SpatialNode> nodes;
+        structure.nodes([&nodes](const SpatialNode& node) { nodes.push_back(node); });
+        return nodes;
+    };
+    const auto listed = [](const std::vector<SpatialNode>& nodes) {
+        return std::ranges::fold_left(nodes, std::uint64_t{0}, [](std::uint64_t sum, const SpatialNode& node) { return sum + node.proxies; });
+    };
+    EXPECT_EQ(listed(nodes_of()), 0U);
+
+    Generator generator{4242};
+    std::vector<std::pair<SpatialProxyHandle, Aabb>> proxies;
+    for (std::uint32_t index = 0; index < 400; ++index)
+    {
+        const Aabb box = random_box(generator);
+        proxies.emplace_back(structure.insert(PhysicsHandles::make<ColliderTag>(index + 1), box), box);
+    }
+    const std::vector<SpatialNode> nodes = nodes_of();
+    if constexpr (TypeParam::KIND == SpatialStructureKind::UNIFORM_GRID)
+    {
+        EXPECT_GE(listed(nodes), proxies.size());
+    }
+    else
+    {
+        EXPECT_EQ(listed(nodes), proxies.size());
+    }
+    for (const SpatialNode& node : nodes)
+    {
+        ASSERT_FALSE(node.box.is_empty());
+    }
+    for (const auto& [proxy, box] : proxies)
+    {
+        const Vector3 center = box.center();
+        EXPECT_TRUE(std::ranges::any_of(nodes, [center](const SpatialNode& node) { return node.proxies > 0 && node.box.expanded(1e-3F).contains(center); }))
+            << "no node lists the proxy centered at " << center.x << ", " << center.y << ", " << center.z;
+    }
+
+    // Emptied again: no node lists a proxy.
+    for (const auto& [proxy, box] : proxies)
+    {
+        structure.remove(proxy);
+    }
+    EXPECT_EQ(listed(nodes_of()), 0U);
+}
+
 TEST(SpatialStructureTest, TreesStayBalancedAndShallow)
 {
     // A BVH of 4096 boxes inserted in sorted order (the worst case for a naive tree): the rotations keep it balanced.
@@ -263,6 +313,16 @@ TEST(SpatialStructureTest, StructuresChosenAtRunTimeAnswerAsTheStructuresThemsel
         found.clear();
         structure->query(ray, 300.0F, [&found](ColliderHandle key, float /*distance*/) { return found.insert(key), true; });
         EXPECT_EQ(found, expected_ray) << to_string(kind);
+        std::uint64_t listed = 0;
+        structure->nodes([&listed](const SpatialNode& node) { listed += node.proxies; });
+        if (kind == SpatialStructureKind::UNIFORM_GRID)
+        {
+            EXPECT_GE(listed, boxes.size());
+        }
+        else
+        {
+            EXPECT_EQ(listed, boxes.size()) << to_string(kind);
+        }
 
         // The proxies hold what they were given; removed ones are refused; clear() forgets everything.
         EXPECT_EQ(structure->key(proxies[7]), boxes[7].first);

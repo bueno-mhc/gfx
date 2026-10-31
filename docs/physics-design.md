@@ -1194,6 +1194,30 @@ distance is -2.88 mm with the normal up, the manifold's points are on the top fa
 `ReferenceTest.FallingConvexShapesStayOnTheFloor` (the showcase's eighteen falling shapes, none goes into the floor). Both
 fail with the old test.
 
+### Follow-up after PH8: structures shown to debug views (2026-10-31, for the sandbox's S5)
+
+The sandbox's broad phase view draws the structure a broad phase keeps, which nothing exposed: a structure answered
+queries and pairs, never what it is made of. Added to the public API:
+
+- **`SpatialNode`** (`gfx.physics.spatial:structure`): a node or a cell as a debug view draws it — its box, its depth,
+  the proxies listed in it.
+- **`nodes(visitor)`** on every structure, now part of `SpatialStructureConcept`: the BVH's nodes (parents first, a leaf
+  listing its proxy); a loose octree's or quadtree's occupied cells by level (the cell's own box, not the larger one it
+  tests; on the axis a quadtree does not split, and for level 0 — proxies too large or outside the region — the box
+  around the cell's proxies); the BSP tree's nodes that hold proxies or split space (the box of what reached them); a
+  grid's occupied cells (a proxy is listed in every cell it overlaps) and its proxies too large for cells (depth 1);
+  sweep and prune's proxies in the order of its first axis (no hierarchy: its intervals are the proxies' boxes). The
+  run-time `SpatialStructure` gains `nodes(NodeVisitor)`.
+- **`BroadPhase::structure_nodes(nodes)`** (pure virtual with the throwing default, CUSTOM_BROAD_PHASE):
+  `SpatialBroadPhaseComponent` fills the vector (cleared, storage kept) from its structure; the world's description of
+  a backend's own broad phase (Box3D's) refuses it, as its other operations.
+
+Tests (+ 7): `SpatialStructureTest.NodesCoverEveryProxy` over the seven structures (no node lists a proxy when empty;
+with 400 random boxes each proxy is listed once — at least once in a grid — and its center lies in a node that lists
+proxies; nodes have boxes; emptied, none lists a proxy), the run-time structures list as many proxies, the reference
+backend's octree lists its four colliders after the component test's stack, Box3D's broad phase refuses, and the
+interface test calls the throwing default.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

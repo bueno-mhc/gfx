@@ -165,6 +165,17 @@ public:
         }
     }
 
+    /// @brief Calls `visitor(node)` for every proxy in the order of the first axis: no hierarchy, only intervals sorted
+    ///        on each axis, so a node is a proxy's box (its intervals), depth 0, one proxy.
+    template<class Visitor>
+    void nodes(Visitor&& visitor) const
+    {
+        for (const std::uint32_t slot : m_order[0])
+        {
+            visitor(SpatialNode{.box = m_proxies[slot].box, .depth = 0, .proxies = 1});
+        }
+    }
+
 private:
     struct Proxy
     {

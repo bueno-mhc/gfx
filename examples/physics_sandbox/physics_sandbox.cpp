@@ -8,14 +8,24 @@
 // camera (orbit: around its target; fly: in place), middle drag pans the orbit's target, the wheel zooms. Keys: Space
 // shoots a ball at the pointer, 1-7 spawn a sphere, capsule, cylinder, cone, crate, plinth or dumbbell there, Delete or X
 // removes the body under the pointer, F switches between orbiting and flying (W A S D move, E and Q rise and sink),
-// Escape quits.
+// R builds the scene again, P pauses, N takes a single step while paused, Escape quits. The panel's sections pick the
+// scene and the backend, change the simulation (slow motion, gravity, the solver, sleeping, the reference backend's broad
+// phase and integrator) and turn on debug views (wireframe, bounding boxes, contacts, the broad phase's structure,
+// joints, bodies colored by sleep or island).
 //
-// Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--device <index>] [--threads <count>]
-//                            [--frames <count>] [--script] [--validation] [--capture <file.ppm>] [--capture-frame <index>]
+// Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--views <list>]
+//                            [--device <index>] [--threads <count>] [--frames <count>] [--script | --tour] [--validation]
+//                            [--capture <file.ppm>] [--capture-frame <index>]
+//   --preset P     starts with scene P (showcase, stacks, dominoes, chains, cloth, soft_volumes, friction, bouncing,
+//                  triggers)
+//   --views L      starts with the debug views of the comma-separated list L on (wireframe, boxes, contacts, broad_phase,
+//                  joints, sleep, islands; the last two color the bodies)
 //   --frames N     closes after N frames, one physics step per frame (the same frames on any machine); the window then
 //                  does not take the focus
 //   --script       drives the sandbox by a script instead of the mouse and keyboard (a grab and a drag, a shot, a spawn,
-//                  a removal, a flight), then checks what happened: the exit code is 1 if a check fails
+//                  a removal, a flight; then pausing, a single step, slow motion, gravity, the solver, the broad phase
+//                  and the integrator, every view), then checks what happened: the exit code is 1 if a check fails
+//   --tour         builds every preset on every physics backend in turn and checks each scene
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
 //   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM)
 import std;
@@ -28,6 +38,7 @@ import physics_sandbox.renderer;
 import physics_sandbox.scene;
 import physics_sandbox.presets;
 import physics_sandbox.interaction;
+import physics_sandbox.controls;
 
 namespace
 {
@@ -62,6 +73,8 @@ constexpr auto INPUT = platform::make_input_schema(
                       platform::action("spawn_plinth"),
                       platform::action("spawn_dumbbell"),
                       platform::action("reset"),
+                      platform::action("pause"),
+                      platform::action("step"),
                       platform::action("quit")),
     platform::context("sandbox",
                       platform::bind("grab"_action, platform::MouseButton::LEFT),
@@ -84,6 +97,8 @@ constexpr auto INPUT = platform::make_input_schema(
                       platform::bind("spawn_plinth"_action, platform::Key::NUMBER_6),
                       platform::bind("spawn_dumbbell"_action, platform::Key::NUMBER_7),
                       platform::bind("reset"_action, platform::Key::R),
+                      platform::bind("pause"_action, platform::Key::P),
+                      platform::bind("step"_action, platform::Key::N),
                       platform::bind("quit"_action, platform::Key::ESCAPE)));
 
 /// The spawn actions, in SpawnKind's order.
@@ -117,6 +132,7 @@ struct Options
     std::optional<std::uint64_t> frames{};
     bool script = false;
     bool tour = false;
+    ViewSettings views{};
     bool validation = false;
     std::optional<std::string> capture{};
     std::optional<std::uint64_t> capture_frame{};
@@ -188,6 +204,48 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
             }
             options.preset = *preset;
         }
+        else if (argument == "--views" && has_value)
+        {
+            // Names separated by commas.
+            const std::string_view list = arguments[++index];
+            for (const auto part : list | std::views::split(','))
+            {
+                const std::string_view name{part.begin(), part.end()};
+                if (name == "wireframe")
+                {
+                    options.views.wireframe = true;
+                }
+                else if (name == "boxes")
+                {
+                    options.views.bounding_boxes = true;
+                }
+                else if (name == "contacts")
+                {
+                    options.views.contacts = true;
+                }
+                else if (name == "broad_phase")
+                {
+                    options.views.broad_phase = true;
+                }
+                else if (name == "joints")
+                {
+                    options.views.joints = true;
+                }
+                else if (name == "sleep")
+                {
+                    options.views.coloring = BodyColoring::SLEEP;
+                }
+                else if (name == "islands")
+                {
+                    options.views.coloring = BodyColoring::ISLAND;
+                }
+                else
+                {
+                    std::println(std::cerr, "unknown view '{}' (wireframe, boxes, contacts, broad_phase, joints, sleep, islands)", name);
+                    return std::nullopt;
+                }
+            }
+        }
         else if (argument == "--tour")
         {
             options.tour = true;
@@ -222,7 +280,7 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         }
         else
         {
-            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--device <index>] "
+            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--views <list>] [--device <index>] "
                                     "[--threads <count>] [--frames <count>] [--script | --tour] [--validation] [--capture <file.ppm>] [--capture-frame <index>]");
             std::print(std::cerr, "presets:");
             for (std::size_t preset = 0; preset < PRESET_COUNT; ++preset)
@@ -240,8 +298,8 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
     }
     if (options.script)
     {
-        // The script runs to its end at least.
-        options.frames = std::max(options.frames.value_or(0), Script::FRAMES);
+        // The scripts (the interaction's, then the controls') run to their end at least.
+        options.frames = std::max(options.frames.value_or(0), Script::FRAMES + ControlScript::FRAMES);
     }
     if (options.tour)
     {
@@ -357,25 +415,24 @@ brighter(physics::DebugColor color,
     return {.red = channel(color.red), .green = channel(color.green), .blue = channel(color.blue), .alpha = color.alpha};
 }
 
-/// Every collider of every body, at the poses drawn this frame, in its body's color (darker while asleep; the body under
-/// the pointer and the one dragged highlighted); the soft bodies (surfaces, or particles); distance joints and triggers as
-/// lines (a trigger brighter while something is in it); the interaction's lines and the world's axes. @p positions is
-/// scratch storage.
+/// Every collider of every body, at the poses drawn this frame, colored as @p views asks (their own colors darker while
+/// asleep, by sleep, by island; the body under the pointer and the one dragged highlighted); the soft bodies (surfaces,
+/// or particles); distance joints and triggers as lines (a trigger brighter while something is in it); the debug views'
+/// lines; the interaction's lines and the world's axes. @p positions is scratch storage.
 void
 add_scene(SceneRenderer& renderer,
           const Scene& scene,
           const Interaction& interaction,
+          const ViewSettings& views,
+          const DebugViews& debug,
           std::vector<gfx::Vector3>& positions)
 {
-    for (const SceneBody& body : scene.bodies())
+    for (std::size_t index = 0; index < scene.bodies().size(); ++index)
     {
+        const SceneBody& body = scene.bodies()[index];
         const gfx::Transform pose = scene.drawn_pose(body);
-        physics::DebugColor color = body.color;
-        if (body.kind == physics::BodyKind::DYNAMIC && !body.awake)
-        {
-            color = {.red = static_cast<std::uint8_t>(color.red * 0.72F), .green = static_cast<std::uint8_t>(color.green * 0.72F),
-                     .blue = static_cast<std::uint8_t>(color.blue * 0.72F)};
-        }
+        const std::span<const std::uint32_t> islands = debug.islands();
+        const physics::DebugColor color = body_color(body, views.coloring, index < islands.size() ? islands[index] : NO_ISLAND);
         const physics::RigidBodyHandle handle = body.body->handle();
         const std::uint32_t flags = body.flags | (handle == interaction.hovered() || handle == interaction.dragged() ? INSTANCE_HIGHLIGHT : 0U);
         for (const SceneCollider& collider : body.colliders)
@@ -405,8 +462,8 @@ add_scene(SceneRenderer& renderer,
         {
             continue;
         }
-        const gfx::Vector3 from = gfx::transform_point(scene.drawn_pose(*first), joint.cable->first);
-        const gfx::Vector3 to = second != nullptr ? gfx::transform_point(scene.drawn_pose(*second), joint.cable->second) : joint.cable->second;
+        const gfx::Vector3 from = gfx::transform_point(scene.drawn_pose(*first), joint.anchor_first);
+        const gfx::Vector3 to = second != nullptr ? gfx::transform_point(scene.drawn_pose(*second), joint.anchor_second) : joint.anchor_second;
         renderer.lines().add_line(from, to, {.red = 210, .green = 210, .blue = 200});
     }
     for (const SceneTrigger& trigger : scene.triggers())
@@ -424,6 +481,11 @@ add_scene(SceneRenderer& renderer,
             renderer.lines().add_box(physics::Obb{.center = trigger.pose.position, .half_extents = box->half_extents, .orientation = trigger.pose.orientation}, color);
         }
     }
+    const std::span<const physics::DebugLineVertex> lines = debug.lines().vertices();
+    for (std::size_t index = 0; index + 1 < lines.size(); index += 2)
+    {
+        renderer.lines().add_line(lines[index].position, lines[index + 1].position, lines[index].color);
+    }
     interaction.add_lines(renderer.lines());
     renderer.lines().add_axes({.position = {.y = 0.01F}}, 1.0F);
 }
@@ -439,13 +501,117 @@ struct FrameReport
     gfx::SampleCount samples = gfx::SampleCount::ONE;
     const SceneRendererStatistics* drawn = nullptr;
     std::span<const float> step_milliseconds{};
+    std::span<const std::array<float, PLOTTED_STEPS>> phase_milliseconds{};
     CameraMode camera = CameraMode::ORBIT;
     const Interaction* interaction = nullptr;
     bool scripted = false;
     Preset preset = Preset::SHOWCASE;
     std::span<const std::string_view> preset_names{};
     std::span<const physics::PhysicsBackendKind> backends{};
+    const SimulationControl* control = nullptr;
+    const DebugViews* debug = nullptr;
 };
+
+/// The integrators' names, in INTEGRATOR_CHOICES's order.
+constexpr std::array<std::string_view, INTEGRATOR_CHOICES.size()> INTEGRATOR_NAMES{"semi-implicit Euler", "Verlet", "Runge-Kutta 4"};
+
+/// The simulation section: time (pause, single steps, slow motion), the world (gravity, the solver, sleeping), the
+/// reference backend's components; what the backend refused.
+void
+simulation_section(gfx::ui::UiFrame& frame,
+                   Scene& scene,
+                   SimulationSettings& settings,
+                   const SimulationControl& control)
+{
+    static_cast<void>(frame.checkbox("paused (P)", settings.paused));
+    frame.same_line();
+    if (frame.button("step (N)") && settings.paused)
+    {
+        settings.step_once = true;
+    }
+    static_cast<void>(frame.slider("time scale", settings.time_scale, 0.05F, 4.0F, "{:.2f}x", gfx::ui::SliderFlag::LOGARITHMIC));
+    std::array<float, 3> gravity{settings.gravity.x, settings.gravity.y, settings.gravity.z};
+    if (frame.slider("gravity", gravity, -20.0F, 20.0F, "{:.1f}"))
+    {
+        settings.gravity = {.x = gravity[0], .y = gravity[1], .z = gravity[2]};
+    }
+    static_cast<void>(frame.slider("sub-steps", settings.solver.sub_steps, 1U, 16U));
+    const bool iterations = scene.world().solver().is_external();
+    static_cast<void>(frame.slider(iterations ? "velocity iterations" : "velocity iterations (unused)", settings.solver.velocity_iterations, 1U, 32U));
+    static_cast<void>(frame.slider(iterations ? "position iterations" : "position iterations (unused)", settings.solver.position_iterations, 0U, 10U));
+    static_cast<void>(frame.checkbox("warm starting", settings.solver.warm_starting));
+    frame.same_line();
+    static_cast<void>(frame.checkbox("sleeping", settings.sleep));
+
+    // The components a backend that takes them can be given.
+    physics::PhysicsWorld& world = scene.world();
+    if (world.broad_phase().is_external())
+    {
+        std::array<std::string_view, BROAD_PHASE_CHOICE_COUNT> names{};
+        for (std::size_t index = 0; index < names.size(); ++index)
+        {
+            names[index] = broad_phase_choice_name(static_cast<BroadPhaseChoice>(index));
+        }
+        std::size_t selected = std::to_underlying(settings.broad_phase);
+        if (frame.combo("broad phase", selected, names))
+        {
+            settings.broad_phase = static_cast<BroadPhaseChoice>(selected);
+        }
+    }
+    else
+    {
+        frame.text("broad phase: {}'s own", scene.backend());
+    }
+    if (world.integrator().is_external())
+    {
+        std::size_t selected = static_cast<std::size_t>(std::ranges::find(INTEGRATOR_CHOICES, settings.integrator) - INTEGRATOR_CHOICES.begin());
+        if (frame.combo("integrator", selected, INTEGRATOR_NAMES) && selected < INTEGRATOR_CHOICES.size())
+        {
+            settings.integrator = INTEGRATOR_CHOICES[selected];
+        }
+    }
+    else
+    {
+        frame.text("integrator: {}'s own", scene.backend());
+    }
+    frame.push_text_wrap_position(PANEL_WRAP_WIDTH);
+    for (const std::string& refusal : control.refusals())
+    {
+        frame.text_wrapped("{} refused {}", scene.backend(), refusal);
+    }
+    frame.pop_text_wrap_position();
+}
+
+/// The views section: what is drawn over the scene and how bodies are colored, with what the views found.
+void
+views_section(gfx::ui::UiFrame& frame,
+              ViewSettings& views,
+              const DebugViews& debug)
+{
+    static_cast<void>(frame.checkbox("wireframe", views.wireframe));
+    frame.same_line();
+    static_cast<void>(frame.checkbox("bounding boxes", views.bounding_boxes));
+    frame.same_line();
+    static_cast<void>(frame.checkbox("contacts", views.contacts));
+    static_cast<void>(frame.checkbox("broad phase", views.broad_phase));
+    frame.same_line();
+    static_cast<void>(frame.checkbox("joints", views.joints));
+    frame.text_unformatted("colors:");
+    frame.same_line();
+    static_cast<void>(frame.radio_button("body", views.coloring, BodyColoring::BODY));
+    frame.same_line();
+    static_cast<void>(frame.radio_button("sleep", views.coloring, BodyColoring::SLEEP));
+    frame.same_line();
+    static_cast<void>(frame.radio_button("island", views.coloring, BodyColoring::ISLAND));
+    const DebugStatistics& found = debug.statistics();
+    frame.text("{} boxes, {} contact points, {} nodes, {} joints, {} islands", found.boxes, found.contact_points, found.nodes, found.joints, found.islands);
+    if (!found.structure_note.empty())
+    {
+        frame.push_text_wrap_position(PANEL_WRAP_WIDTH);
+        frame.text_wrapped("broad phase not shown: {}", found.structure_note);
+        frame.pop_text_wrap_position();
+    }
+}
 
 /// What the panel asks of the scene (applied at the start of the next frame).
 struct SceneRequest
@@ -462,10 +628,13 @@ struct SceneRequest
 
 auto
 statistics_panel(gfx::ui::UiFrame& frame,
-                 const Scene& scene,
-                 const FrameReport& report) -> SceneRequest
+                 Scene& scene,
+                 const FrameReport& report,
+                 SimulationSettings& settings,
+                 ViewSettings& views) -> SceneRequest
 {
-    // A summary always shown; the scene, the step's phases, the rendering and the controls in sections that open and close.
+    // A summary always shown; the scene, the simulation, the views, the step's phases, the rendering and the controls in
+    // sections that open and close.
     SceneRequest request;
     frame.set_next_window_position({.x = 12, .y = 12}, gfx::ui::UiCondition::FIRST_USE_EVER);
     if (frame.begin_window("Physics sandbox", gfx::ui::UiWindowFlag::ALWAYS_AUTO_RESIZE))
@@ -528,11 +697,24 @@ statistics_panel(gfx::ui::UiFrame& frame,
             }
             frame.pop_text_wrap_position();
         }
+        if (frame.collapsing_header("Simulation") && report.control != nullptr)
+        {
+            simulation_section(frame, scene, settings, *report.control);
+        }
+        if (frame.collapsing_header("Views") && report.debug != nullptr)
+        {
+            views_section(frame, views, *report.debug);
+        }
         if (frame.collapsing_header("Step phases"))
         {
+            // Each phase's time in the last step, and its plot.
             for (std::size_t phase = 0; phase < step.phase_seconds.size(); ++phase)
             {
-                frame.text("{:<12} {:6.3f} ms", static_cast<physics::StepPhase>(phase), step.phase_seconds[phase] * 1000.0);
+                const std::string label = std::format("{:<12} {:6.3f} ms", static_cast<physics::StepPhase>(phase), step.phase_seconds[phase] * 1000.0);
+                if (phase < report.phase_milliseconds.size())
+                {
+                    frame.plot_lines(label, report.phase_milliseconds[phase], {.minimum = 0.0F, .size = {.x = 160, .y = 22}});
+                }
             }
             frame.text("joints {}, soft bodies {}", step.joints, step.soft_bodies);
         }
@@ -549,7 +731,7 @@ statistics_panel(gfx::ui::UiFrame& frame,
             frame.text_unformatted("right drag: turn   middle drag: pan   wheel: zoom");
             frame.text_unformatted("F: orbit / fly (W A S D, E Q)   Space: shoot");
             frame.text_unformatted("1-7: spawn   Delete, X: remove   R: reset");
-            frame.text_unformatted("Esc: quit");
+            frame.text_unformatted("P: pause   N: single step   Esc: quit");
         }
     }
     frame.end_window();
@@ -739,6 +921,14 @@ run(const Options& options) -> int
     std::unique_ptr<Interaction> interaction{};
     Preset preset = options.preset;
     std::vector<float> step_milliseconds(PLOTTED_STEPS, 0.0F);
+    std::array<std::vector<float>, gfx::ENUMERATOR_COUNT<physics::StepPhase>> phase_milliseconds{};
+    phase_milliseconds.fill(std::vector<float>(PLOTTED_STEPS, 0.0F));
+
+    // The simulation's settings and the views, kept across scenes (applied to each new world).
+    SimulationSettings settings;
+    ViewSettings views = options.views;
+    SimulationControl control;
+    DebugViews debug;
     const auto build = [&](Preset next,
                            physics::PhysicsBackendKind backend) -> PresetResult
     {
@@ -753,10 +943,16 @@ run(const Options& options) -> int
         scene = std::make_unique<Scene>(backend, scheduler);
         PresetResult built = build_preset(next, *scene);
         interaction = std::make_unique<Interaction>(*scene);
+        control.adopt(*scene);
+        control.apply(*scene, settings);
         const gfx::Vector3 right{.x = std::cos(built.view.yaw), .z = -std::sin(built.view.yaw)};
         rig.aim(built.view.target - right * (PANEL_OFFSET * built.view.distance), built.view.distance, built.view.yaw, built.view.pitch);
         preset = next;
         std::ranges::fill(step_milliseconds, 0.0F);
+        for (std::vector<float>& series : phase_milliseconds)
+        {
+            std::ranges::fill(series, 0.0F);
+        }
         std::println("{} on {}: {} bodies, {} soft bodies, {} joints, {} triggers", preset_information(next).name, backend, scene->bodies().size(),
                      scene->soft_bodies().size(), scene->joints().size(), scene->triggers().size());
         for (const std::string& note : scene->notes())
@@ -767,9 +963,11 @@ run(const Options& options) -> int
     };
     const PresetResult first = build(options.preset, options.physics);
     std::optional<Script> script{};
+    std::optional<ControlScript> control_script{};
     if (options.script)
     {
         script.emplace(*first.showcase);
+        control_script.emplace(Script::FRAMES);
     }
 
     // The tour: every preset on every physics backend, each for TOUR_FRAMES frames, through the same rebuilding.
@@ -837,6 +1035,14 @@ run(const Options& options) -> int
         // A new scene: asked by the panel or R (not while a script or the tour drives the sandbox), or the tour's next stop
         // (the scene left checked first).
         request.reset = request.reset || (!ui_wants_keyboard && frame.was_action_just_pressed("reset"_action));
+        if (!ui_wants_keyboard && !script && frame.was_action_just_pressed("pause"_action))
+        {
+            settings.paused = !settings.paused;
+        }
+        if (!ui_wants_keyboard && !script && frame.was_action_just_pressed("step"_action) && settings.paused)
+        {
+            settings.step_once = true;
+        }
         if (request.any() && !script && !options.tour)
         {
             static_cast<void>(build(request.preset.value_or(preset), request.backend.value_or(scene->backend())));
@@ -857,7 +1063,8 @@ run(const Options& options) -> int
                                               : commands_from(frame, *window, ui_wants_mouse, ui_wants_keyboard, interaction->dragged().is_valid());
 
         // The camera, then the world: the step begun last frame completes, the interaction queries and edits the world, the
-        // next step begins (it runs while this frame is drawn).
+        // settings are applied and the views gathered, the next step begins (it runs while this frame is drawn) — unless
+        // paused (one step when asked), and slower in slow motion.
         rig.update(*view_camera, commands, static_cast<float>(advanced));
         if (extent.width > 0 && extent.height > 0)
         {
@@ -870,16 +1077,40 @@ run(const Options& options) -> int
         {
             script->observe(frame_index, *scene, *interaction, *view_camera, rig);
         }
+        if (control_script)
+        {
+            control_script->control(frame_index, *scene, settings, views);
+        }
+        control.apply(*scene, settings);
+        debug.capture(*scene, views);
+        if (control_script)
+        {
+            control_script->observe(frame_index, *scene, settings, control, debug, renderer.statistics());
+        }
         scene->clear_events();
-        scene->advance(advanced);
+        if (!settings.paused)
+        {
+            settings.step_once = false;
+            scene->advance(advanced * static_cast<double>(settings.time_scale));
+        }
+        else if (settings.step_once)
+        {
+            settings.step_once = false;
+            scene->step_once();
+        }
+        else
+        {
+            scene->hold();
+        }
         ++frame_index;
         if (scene->step_count() != steps_before)
         {
             const physics::StepStatistics step = scene->statistics();
             double total = 0.0;
-            for (const double seconds : step.phase_seconds)
+            for (std::size_t phase = 0; phase < step.phase_seconds.size(); ++phase)
             {
-                total += seconds;
+                total += step.phase_seconds[phase];
+                phase_milliseconds[phase][plotted_step % PLOTTED_STEPS] = static_cast<float>(step.phase_seconds[phase] * 1000.0);
             }
             step_milliseconds[plotted_step % PLOTTED_STEPS] = static_cast<float>(total * 1000.0);
             ++plotted_step;
@@ -895,13 +1126,18 @@ run(const Options& options) -> int
         command_pools.begin_frame(frame_number);
         renderer.begin_frame(frame_number);
         ui_renderer.begin_frame(frame_number);
-        add_scene(renderer, *scene, *interaction, drawn_positions);
+        add_scene(renderer, *scene, *interaction, views, debug, drawn_positions);
 
-        // The UI's frame: the statistics panel (the plot oldest first).
+        // The UI's frame: the statistics panel (the plots oldest first).
         std::array<float, PLOTTED_STEPS> plot{};
+        std::array<std::array<float, PLOTTED_STEPS>, gfx::ENUMERATOR_COUNT<physics::StepPhase>> phase_plots{};
         for (std::size_t index = 0; index < PLOTTED_STEPS; ++index)
         {
             plot[index] = step_milliseconds[(plotted_step + index) % PLOTTED_STEPS];
+            for (std::size_t phase = 0; phase < phase_plots.size(); ++phase)
+            {
+                phase_plots[phase][index] = phase_milliseconds[phase][(plotted_step + index) % PLOTTED_STEPS];
+            }
         }
         gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(ui_time));
         request = statistics_panel(ui_frame, *scene,
@@ -911,12 +1147,16 @@ run(const Options& options) -> int
                                     .samples = samples,
                                     .drawn = &renderer.statistics(),
                                     .step_milliseconds = plot,
+                                    .phase_milliseconds = phase_plots,
                                     .camera = rig.mode(),
                                     .interaction = interaction.get(),
                                     .scripted = script.has_value(),
                                     .preset = preset,
                                     .preset_names = preset_names,
-                                    .backends = physics_backends});
+                                    .backends = physics_backends,
+                                    .control = &control,
+                                    .debug = &debug},
+                                   settings, views);
         static_cast<void>(ui.end_frame());
         ui_wants_mouse = ui.wants_mouse();
         ui_wants_keyboard = ui.wants_keyboard();
@@ -933,7 +1173,7 @@ run(const Options& options) -> int
             renderer.prepare(recorder);
             ui_renderer.prepare(recorder, ui_data);
             const camera::Camera& eye = *view_camera;
-            renderer.render(recorder, image->image.view, extent, {.view_projection = eye.view_projection()});
+            renderer.render(recorder, image->image.view, extent, {.view_projection = eye.view_projection(), .wireframe = views.wireframe});
             const std::array to_interface{
                 gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE, gfx::ResourceState::COLOR_ATTACHMENT_READ_WRITE)};
             recorder.barrier({.image_barriers = to_interface});
@@ -998,6 +1238,7 @@ run(const Options& options) -> int
     if (script)
     {
         checks = script->checks(*scene);
+        std::ranges::move(control_script->checks(), std::back_inserter(checks));
     }
     if (options.tour)
     {

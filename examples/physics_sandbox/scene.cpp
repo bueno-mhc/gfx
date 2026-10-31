@@ -152,11 +152,43 @@ Scene::add_joint(const JointDescription& description) -> SceneJoint&
 {
     std::unique_ptr<Joint> joint = m_world->create_joint(description);
     SceneJoint& made = m_joints.emplace_back();
+    made.kind = joint_kind(description);
     std::tie(made.first, made.second) = joint_bodies(description);
-    if (const auto* distance = std::get_if<DistanceJointDescription>(&description))
-    {
-        made.cable = std::pair{distance->anchor_first, distance->anchor_second};
-    }
+
+    // The anchors and the axis in the bodies' frames, from their poses now (the world's frame for no second body).
+    const SceneBody* first = find(made.first);
+    const SceneBody* second = made.second.is_valid() ? find(made.second) : nullptr;
+    const Transform first_pose = first != nullptr ? first->current : Transform{};
+    const Transform second_pose = second != nullptr ? second->current : Transform{};
+    const auto local = [&](Vector3 anchor) {
+        made.anchor_first = transform_point(inverse(first_pose), anchor);
+        made.anchor_second = transform_point(inverse(second_pose), anchor);
+    };
+    const auto local_axis = [&](Vector3 axis) { made.axis = rotate(conjugate(first_pose.orientation), axis); };
+    std::visit(
+        [&](const auto& joint_description) {
+            using Description = std::remove_cvref_t<decltype(joint_description)>;
+            if constexpr (std::same_as<Description, DistanceJointDescription>)
+            {
+                made.anchor_first = joint_description.anchor_first;
+                made.anchor_second = joint_description.anchor_second;
+                made.cable = true;
+            }
+            else if constexpr (std::same_as<Description, SixDegreesOfFreedomJointDescription>)
+            {
+                local(joint_description.frame.position);
+                local_axis(rotate(joint_description.frame.orientation, Vector3{.x = 1.0F}));
+            }
+            else
+            {
+                local(joint_description.anchor);
+                if constexpr (requires { joint_description.axis; })
+                {
+                    local_axis(joint_description.axis);
+                }
+            }
+        },
+        description);
     made.joint = std::move(joint);
     return made;
 }
@@ -281,6 +313,24 @@ Scene::finish()
     }
 }
 
+void
+Scene::hold()
+{
+    // No step begins; what is drawn is the last completed step.
+    finish();
+    m_accumulator = 0.0;
+    m_alpha = 1.0F;
+}
+
+void
+Scene::step_once()
+{
+    finish();
+    m_world->begin_step(STEP);
+    m_accumulator = 0.0;
+    m_alpha = 1.0F;
+}
+
 auto
 Scene::drawn_pose(const SceneBody& body) const noexcept -> Transform
 {
@@ -334,6 +384,16 @@ Scene::capture()
         else if (event.kind == TriggerEventKind::EXIT)
         {
             std::erase(found->inside, event.collider);
+        }
+    }
+    for (const JointEvent& event : events.joints)
+    {
+        for (SceneJoint& joint : m_joints)
+        {
+            if (event.kind == JointEventKind::BROKEN && event.joint.is_valid() && joint.joint->handle() == event.joint)
+            {
+                joint.broken = true;
+            }
         }
     }
 }

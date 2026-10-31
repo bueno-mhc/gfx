@@ -134,6 +134,30 @@ public:
         }
     }
 
+    /// @brief Calls `visitor(node)` for every node holding proxies or splitting space, parents before their children:
+    ///        the box of what reached it, its depth, the proxies it lists (a leaf's, or those its plane cuts).
+    template<class Visitor>
+    void nodes(Visitor&& visitor) const
+    {
+        std::array<std::uint32_t, 2 * (MAXIMUM_DEPTH + 2)> stack{};
+        std::size_t size = 0;
+        stack[size++] = 0;
+        while (size > 0)
+        {
+            const Node& node = m_nodes[stack[--size]];
+            if (node.count == 0 && node.axis == 3)
+            {
+                continue;
+            }
+            visitor(SpatialNode{.box = node.bounds, .depth = node.depth, .proxies = node.count});
+            if (node.axis != 3)
+            {
+                stack[size++] = node.first + 1;
+                stack[size++] = node.first;
+            }
+        }
+    }
+
 private:
     /// A node: a leaf (axis 3) or a plane `component(axis) = split` with children `first` and `first + 1` (below,
     /// above); its proxies (a list from `head`) are its leaf's or those its plane cuts.

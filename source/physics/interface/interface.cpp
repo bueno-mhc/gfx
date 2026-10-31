@@ -448,6 +448,12 @@ BroadPhase::ended_pairs() const -> std::span<const BroadPhasePair>
     throw_not_implemented("BroadPhase::ended_pairs", PhysicsCapability::CUSTOM_BROAD_PHASE);
 }
 
+void
+BroadPhase::structure_nodes(std::vector<SpatialNode>& /*nodes*/) const
+{
+    throw_not_implemented("BroadPhase::structure_nodes", PhysicsCapability::CUSTOM_BROAD_PHASE);
+}
+
 // ===================================================================================================== NarrowPhase
 
 void

@@ -65,6 +65,11 @@ public:
     /// @brief The pairs that ended at the last update, sorted.
     [[nodiscard]] virtual auto ended_pairs() const -> std::span<const BroadPhasePair> = 0;
 
+    /// @brief Its structure's nodes or cells into @p nodes (cleared first, its storage kept): what a debug view draws
+    ///        (SpatialNode). Between steps.
+    /// @throws BackendCapabilityError if the world runs the backend's own broad phase (CUSTOM_BROAD_PHASE).
+    virtual void structure_nodes(std::vector<SpatialNode>& nodes) const = 0;
+
 protected:
     using PhysicsObject::PhysicsObject;
 };
@@ -165,6 +170,12 @@ public:
     [[nodiscard]] auto ended_pairs() const -> std::span<const BroadPhasePair> override
     {
         return m_broad_phase.ended_pairs();
+    }
+
+    void structure_nodes(std::vector<SpatialNode>& nodes) const override
+    {
+        nodes.clear();
+        m_broad_phase.structure().nodes([&nodes](const SpatialNode& node) { nodes.push_back(node); });
     }
 
 private:

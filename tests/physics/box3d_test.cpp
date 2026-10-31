@@ -76,6 +76,8 @@ TEST(Box3dTest, TheFactoryMakesBox3dWorlds)
     EXPECT_TRUE(world->backend() == PhysicsBackendKind::BOX3D);
     EXPECT_EQ(world->solver().kind(), SolverKind::SOFT_STEP);
     EXPECT_EQ(world->broad_phase().kind(), BroadPhaseKind::BACKEND);
+    std::vector<SpatialNode> nodes;
+    EXPECT_THROW(world->broad_phase().structure_nodes(nodes), BackendCapabilityError) << "Box3D's own broad phase is not shown";
     EXPECT_THROW((void)box3d_world({.gravity = {.y = std::numeric_limits<float>::quiet_NaN()}}), PhysicsError);
 }
 
