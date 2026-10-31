@@ -11,8 +11,9 @@
 /// **Phase G0** (foundations): rigid bodies move under gravity, forces, impulses, damping and their motion locks;
 /// kinematic bodies by their velocities. Colliders, joints, triggers and soft bodies are refused with a
 /// BackendCapabilityError naming the phase that brings them; user constraints are refused for good (their rows are C++
-/// code, which the GPU cannot run). **G1 and G2**: the GPU building blocks the next phases use (GpuPrimitives: scans,
-/// reductions, sorts, compactions; GpuBvh: Karras trees of boxes, treelets, four-wide nodes, pairs, rays).
+/// code, which the GPU cannot run). **G1 to G3**: the GPU building blocks the next phases use (GpuPrimitives: scans,
+/// reductions, sorts, compactions; GpuBvh: Karras trees of boxes, treelets, four-wide nodes, pairs, rays; GpuNarrowPhase:
+/// convex shapes, instance boxes, contact manifolds as physics::collide() makes them, the contact cache).
 export module gfx.physics.gpu_xpbd;
 
 import std;
@@ -23,6 +24,7 @@ import gfx.physics.interface;
 export import :settings;
 export import :primitives;
 export import :bvh;
+export import :narrow_phase;
 
 export namespace gfx::physics::gpu_xpbd
 {

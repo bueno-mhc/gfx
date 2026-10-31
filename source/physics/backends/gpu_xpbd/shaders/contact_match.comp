@@ -1,0 +1,89 @@
+#version 460
+// The contact cache (GpuNarrowPhase::match): each point of each current manifold finds its predecessor — the point of the
+// previous manifold of the same pair with the same feature — by a binary search of the pair among the previous
+// manifolds sorted by pair, then a comparison of the features. A predecessor is the previous manifold's index × 4 + its
+// point, or INVALID_INDEX.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint previous_buffer;
+    uint previous_first;
+    uint sorted_firsts_buffer; // the previous manifolds' first instances, sorted by pair
+    uint order_buffer;         // the previous manifolds' indices, sorted by pair
+    uint previous_maximum;
+    uint previous_count_buffer;
+    uint previous_count_word;
+    uint current_buffer;
+    uint current_first;
+    uint predecessors_buffer;
+    uint predecessors_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+} push;
+
+uvec4 previous_header(uint manifold)
+{
+    return gpu_word_vectors[push.previous_buffer].values[10U * (push.previous_first + manifold)];
+}
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    const uint current = 10U * (push.current_first + index);
+    const uvec4 header = gpu_word_vectors[push.current_buffer].values[current];
+    uint predecessors[4] = uint[4](INVALID_INDEX, INVALID_INDEX, INVALID_INDEX, INVALID_INDEX);
+    if (header.z > 0U)
+    {
+        // The first previous manifold whose pair is not before this one's.
+        const uint previous_count = resolve_count(push.previous_maximum, push.previous_count_buffer, push.previous_count_word);
+        uint low = 0U;
+        uint high = previous_count;
+        while (low < high)
+        {
+            const uint middle = low + (high - low) / 2U;
+            const uint first = gpu_words[push.sorted_firsts_buffer].words[middle];
+            const uvec4 candidate = previous_header(gpu_words[push.order_buffer].words[middle]);
+            const uint second = candidate.z == 0U ? INVALID_INDEX : candidate.y;
+            if (first < header.x || (first == header.x && second < header.y))
+            {
+                low = middle + 1U;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        // Its points with the same features.
+        if (low < previous_count)
+        {
+            const uint manifold = gpu_words[push.order_buffer].words[low];
+            const uvec4 found = previous_header(manifold);
+            if (found.z > 0U && found.x == header.x && found.y == header.y)
+            {
+                for (uint point = 0U; point < header.z && point < 4U; ++point)
+                {
+                    const uvec3 feature = gpu_word_vectors[push.current_buffer].values[current + 3U + 2U * point].xyz;
+                    for (uint other = 0U; other < found.z && other < 4U; ++other)
+                    {
+                        if (all(equal(gpu_word_vectors[push.previous_buffer].values[10U * (push.previous_first + manifold) + 3U + 2U * other].xyz, feature)))
+                        {
+                            predecessors[point] = manifold * 4U + other;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    gpu_word_vectors[push.predecessors_buffer].values[push.predecessors_first + index] =
+        uvec4(predecessors[0], predecessors[1], predecessors[2], predecessors[3]);
+}

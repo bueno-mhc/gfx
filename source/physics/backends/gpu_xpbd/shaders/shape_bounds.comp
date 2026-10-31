@@ -1,0 +1,47 @@
+#version 460
+// The box around each instance's shape at its pose (GpuNarrowPhase::bounds), as convex_bounds(): the core's reach along
+// each world axis from its support function, plus its margin, grown by the expansion asked for.
+#extension GL_GOOGLE_include_directive : require
+#include "narrow_phase.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint instances_buffer;
+    uint instances_first;
+    uint boxes_buffer;
+    uint boxes_first;
+    uint shape_records;
+    uint hull_vertices;
+    uint hull_faces;
+    uint hull_indices;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    float expansion;
+} push;
+
+void main()
+{
+    shape_records = push.shape_records;
+    hull_vertices = push.hull_vertices;
+    hull_faces = push.hull_faces;
+    hull_indices = push.hull_indices;
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    uint shape_index;
+    const Pose pose = load_instance(push.instances_buffer, push.instances_first + index, shape_index);
+    const ConvexShape shape = load_shape(shape_index);
+    const vec3 low = vec3(-dot(posed_support(shape, pose, vec3(-1.0, 0.0, 0.0)), vec3(-1.0, 0.0, 0.0)),
+                          -dot(posed_support(shape, pose, vec3(0.0, -1.0, 0.0)), vec3(0.0, -1.0, 0.0)),
+                          -dot(posed_support(shape, pose, vec3(0.0, 0.0, -1.0)), vec3(0.0, 0.0, -1.0)));
+    const vec3 high = vec3(dot(posed_support(shape, pose, vec3(1.0, 0.0, 0.0)), vec3(1.0, 0.0, 0.0)),
+                           dot(posed_support(shape, pose, vec3(0.0, 1.0, 0.0)), vec3(0.0, 1.0, 0.0)),
+                           dot(posed_support(shape, pose, vec3(0.0, 0.0, 1.0)), vec3(0.0, 0.0, 1.0)));
+    const uint box = 2U * (push.boxes_first + index);
+    gpu_vectors[push.boxes_buffer].values[box] = vec4(low - shape.margin - push.expansion, 0.0);
+    gpu_vectors[push.boxes_buffer].values[box + 1U] = vec4(high + shape.margin + push.expansion, 0.0);
+}

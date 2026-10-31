@@ -1,8 +1,8 @@
 # gfx physics: a GPU-exclusive XPBD backend on a Karras BVH — architecture, decisions and plan
 
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
-as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee). **G2 implemented** (§B "G2
-as built", 5 deviations), awaiting validation.
+as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
+(§B "G2 as built"; committed 6858652). **G3 implemented** (§B "G3 as built", 5 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -581,6 +581,85 @@ two trees equal to brute force in both layouts with and without treelets, the sa
 counting every pair; rays (from inside boxes, along axes, short) entering the nearest box within 1 mm; refits (the same
 children, moved boxes, their pairs); a count from a GPU word giving the same tree as the constant; the same bits twice and
 in the other variant; `structure_nodes()`; misuses. `GpuBvhMeasurementTest` prints the table above for each GPU.
+
+### G3 as built (2026-10-31)
+
+**`GpuNarrowPhase`** (exported partition `gfx.physics.gpu_xpbd:narrow_phase`, pimpl; unit `gpu_narrow_phase.cpp`), recorded
+into the caller's `ComputeRecorder` like the primitives and the tree:
+
+- **Shape table**: `add_shape(const Shape&)` takes the six convex kinds (a 48-byte record each: kind, sizes, margin; a
+  hull's vertices, faces with their planes and polygons appended to shared arrays) and refuses triangle meshes, height
+  fields and compounds with a `BackendCapabilityError` naming G4; `upload_shapes(recorder)` records the copies of the whole
+  table through a staging buffer (before the passes that read it, as `reserve()`); a pass recorded with shapes not uploaded
+  throws `InvalidUsageError`.
+- **`bounds(instances, boxes, count, expansion)`**: the box of each `GpuInstance` (position, shape index, orientation;
+  32 bytes) as `convex_bounds()` computes it — the core's reach along each world axis from its support function, plus the
+  margin — grown by the expansion: what `GpuBvh::build()` reads.
+- **`collide(instances, pairs, manifolds, count, settings)`**: one invocation per candidate pair (a `GpuPair` of instance
+  indices, as `GpuBvh::find_pairs()` writes them), one 160-byte `GpuManifold` at the pair's index (instances, point count,
+  algorithm, normal, four points with their positions, separations and `ContactFeature`s; no points: no contact).
+  `to_contact_manifold()` turns one into the CPU's `ContactManifold`.
+- **`match(previous, previous_count, current, count, predecessors)`** — the contact cache: the previous manifolds sorted by
+  pair (two stable radix sorts: second instance, then first instance gathered in that order; manifolds without points sort
+  last), each current point's predecessor found by a binary search of its pair and a comparison of features: the previous
+  manifold's index × 4 + its point, or 0xFFFFFFFF. `reserve(maximum)` sizes its scratch.
+
+**The CPU's narrow phase, ported.** The shaders (`narrow_phase.glsl`: the table, poses, support functions and supporting
+faces of the six kinds, the Minkowski difference, features, manifolds; `gjk.glsl`; `epa.glsl`; `manifold.glsl`: clipping,
+reduction to four points, single-point manifolds, the general path; `analytic.glsl`: sphere–sphere, sphere–capsule,
+capsule–capsule, sphere–box, box–box separating axes; passes `narrow_phase_collide`, `shape_bounds`, `contact_keys`,
+`contact_match`) follow `gfx.physics.shapes` and `gfx.physics.narrow_phase` operation by operation: the dispatch of
+`collide_convex()` (analytic pairs in either order, flipped), GJK with Ericson's Voronoi regions and the sliver test, EPA
+with its octahedron restart, horizon and best-face guard in fixed storage, Sutherland–Hodgman clipping with feature tags,
+`reduce_contact_points()`. The literal tolerances are the CPU's literals; the named limits come as specialization
+constants 16–38 (shape kinds, contact algorithms, `MAXIMUM_FACE_VERTICES`, `MAXIMUM_GJK_ITERATIONS`, the EPA storage,
+`NO_SUB_SHAPE`, the shapes' `FACE_ALIGNMENT`, `SIDE_ALIGNMENT`, `ROUND_FACE_VERTICES`, `GEOMETRIC_TOLERANCE`, the clipped
+polygons' capacity). Large working storage (the EPA polytope, the clipped polygons, the supporting faces) is private memory
+of the invocation.
+
+**How it agrees with the CPU** (`ManifoldsAreTheCpusOnEveryPairOfShapes`: 300 random poses of each of the 64 ordered pairs of
+eight shapes — sphere, capsule, cylinder, cone, box, rounded box, hull, rounded hull — apart, touching and overlapping, with
+the default speculative distance and with none; about 9 500 contacts per run, every algorithm used): **99.9 % of the pairs
+give the CPU's manifold at the same poses** — the same algorithm, point count and feature ids, normals within 1.8°, points
+and separations within 5 mm (EPA's within its convergence: 2.5°, 2.5 cm, 2 mm — it stops at a depth within 10⁻⁴ of its
+reach, which leaves a curved surface's normal free by about a degree) — **and every other pair (19 to 24 per run) gives the
+manifold the CPU gives at a pose of either shape 1 µm to 0.2 mm (or µrad to 0.2 mrad) away.** None disagrees. Those
+nearby-pose cases are the CPU algorithm's own knife edges, where rounding decides: support points tied along a face normal
+(the separating-axis fallback names any corner of the face), a clipped segment running along a reference side plane, EPA in
+deep overlaps of curved shapes (a ring of equally deep normals; the polytope's best face). GPU divisions, square roots,
+sines and fused operations are not the CPU's, so the two meet at those edges differently.
+
+**Deviations (for validation).**
+1. **A component, still not in the world — and the world waits for G5, not G3.** G2's report said the world's trees came with
+   G3. But G3 makes contacts and nothing responds to them until G5 (the solver): colliders accepted now would let bodies pass
+   through each other silently. So colliders stay refused until G5, which wires bounds, trees, pairs, manifolds and the cache
+   into the step (and `structure_nodes()` of a running world).
+2. **A manifold per candidate pair, in place.** `collide()` writes a slot per pair (empty when apart); compacting the pairs
+   with contacts into a dense list is G5's, which knows what the solver needs.
+3. **The cache finds predecessors; what it carries comes later**: the static-friction anchors with G5, the touching age and
+   the BEGIN/END events with G8.
+4. **One shader for every pair kind**, each invocation running the path its pair needs (analytic, separating axes, GJK, EPA,
+   clipping): divergence costs, measured below; sorting pairs by kind or separate dispatches can come if G5's step shows the
+   need.
+5. **Triangles wait for G4**, with the meshes they come from (the CPU's `TriangleShape` and triangle–triangle separating
+   axes).
+
+**Measured** (`GpuNarrowPhaseMeasurementTest`: 192 000 pairs, 3000 random poses of each ordered pair, every algorithm —
+about half deep overlaps through EPA, so a heavier mix than resting contacts; recording, submission and waiting included,
+best of five): **13.9 ms on the RTX 5060 (14 pairs per microsecond) and 75.8 ms on the Intel GPU** in Release without the
+validation layers — the same as in Debug with them (13.5 and 77 ms): the GPU's work decides.
+
+**Found.** glslang checks a constant index into an array sized by a specialization-constant *expression* as if it held one
+element (`2 * MAXIMUM_FACE_VERTICES`: the clipped polygons' capacity is a constant of its own); `half`, `input`, `output`,
+`centroid`, `shared` and `flat` are reserved words in GLSL.
+
+**Tests** (`gpu_narrow_phase_test.cpp` in `gfx_physics_gpu_xpbd_tests`, on both GPUs with the validation layers): the
+manifolds above; instance boxes equal to `Shape::bounds(pose)` grown (within 0.1 mm); the same bits twice; the cache (pairs
+shuffled, dropped and added, shapes moved by up to a millimeter, the previous count from a GPU word: every predecessor the
+one the manifolds read back name, most points matched); **bounds → `GpuBvh` → pairs → manifolds** for 1200 shapes in a 12 m
+cube against every pair on the CPU (the same 2039 contacts; every CPU contact's pair from the tree; none on the GPU between
+shapes the CPU finds apart); misuses (a mesh, a negative speculative distance, an infinite expansion, a cache above its
+reserve, a shape not uploaded). `GpuNarrowPhaseMeasurementTest` prints the throughput.
 
 ---
 

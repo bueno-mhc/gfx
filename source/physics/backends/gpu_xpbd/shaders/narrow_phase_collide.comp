@@ -1,0 +1,108 @@
+#version 460
+// The manifold of each candidate pair of instances (GpuNarrowPhase::collide), as the CPU's collide_convex() dispatches it:
+// the analytic pairs in either order (the result flipped for the reversed order), the separating axis test for two boxes,
+// GJK, EPA and face clipping for every other pair. One manifold per pair, at the pair's index (no points: no contact).
+#extension GL_GOOGLE_include_directive : require
+#include "analytic.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint instances_buffer;
+    uint instances_first;
+    uint pairs_buffer;
+    uint pairs_first;
+    uint manifolds_buffer;
+    uint manifolds_first;
+    uint shape_records;
+    uint hull_vertices;
+    uint hull_faces;
+    uint hull_indices;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    float speculative_distance;
+} push;
+
+void main()
+{
+    shape_records = push.shape_records;
+    hull_vertices = push.hull_vertices;
+    hull_faces = push.hull_faces;
+    hull_indices = push.hull_indices;
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+
+    // The pair's instances and shapes.
+    const uint first_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index)];
+    const uint second_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index) + 1U];
+    uint first_shape;
+    uint second_shape;
+    pose_first = load_instance(push.instances_buffer, push.instances_first + first_instance, first_shape);
+    pose_second = load_instance(push.instances_buffer, push.instances_first + second_instance, second_shape);
+    shape_first = load_shape(first_shape);
+    shape_second = load_shape(second_shape);
+
+    // The analytic pairs (either order), two boxes, or the general path.
+    result = empty_manifold();
+    const float speculative = push.speculative_distance;
+    const uint a = shape_first.kind;
+    const uint b = shape_second.kind;
+    bool found = false;
+    if (a == SHAPE_SPHERE && b == SHAPE_SPHERE)
+    {
+        found = collide_spheres(shape_first, pose_first, shape_second, pose_second, speculative);
+    }
+    else if (a == SHAPE_SPHERE && b == SHAPE_CAPSULE)
+    {
+        found = collide_sphere_capsule(shape_first, pose_first, shape_second, pose_second, speculative);
+    }
+    else if (a == SHAPE_CAPSULE && b == SHAPE_SPHERE)
+    {
+        found = collide_sphere_capsule(shape_second, pose_second, shape_first, pose_first, speculative);
+        if (found)
+        {
+            flip_manifold(result);
+        }
+    }
+    else if (a == SHAPE_CAPSULE && b == SHAPE_CAPSULE)
+    {
+        found = collide_capsules(shape_first, pose_first, shape_second, pose_second, speculative);
+    }
+    else if (a == SHAPE_SPHERE && b == SHAPE_BOX)
+    {
+        found = collide_sphere_box(shape_first, pose_first, shape_second, pose_second, speculative);
+    }
+    else if (a == SHAPE_BOX && b == SHAPE_SPHERE)
+    {
+        found = collide_sphere_box(shape_second, pose_second, shape_first, pose_first, speculative);
+        if (found)
+        {
+            flip_manifold(result);
+        }
+    }
+    else if (a == SHAPE_BOX && b == SHAPE_BOX)
+    {
+        found = collide_boxes(shape_first, pose_first, shape_second, pose_second, speculative);
+    }
+    else
+    {
+        found = collide_convex_general(speculative);
+    }
+
+    // The manifold (GpuManifold): header, normal, four points (the unused ones zero).
+    const uint points = found ? result.count : 0U;
+    const uint base = 10U * (push.manifolds_first + index);
+    gpu_word_vectors[push.manifolds_buffer].values[base] = uvec4(first_instance, second_instance, points, points > 0U ? result.algorithm : 0U);
+    gpu_vectors[push.manifolds_buffer].values[base + 1U] = vec4(points > 0U ? result.normal : vec3(0.0), 0.0);
+    for (uint point = 0U; point < MANIFOLD_POINTS; ++point)
+    {
+        const bool used = point < points;
+        gpu_vectors[push.manifolds_buffer].values[base + 2U + 2U * point] = used ? vec4(result.positions[point], result.separations[point]) : vec4(0.0);
+        gpu_word_vectors[push.manifolds_buffer].values[base + 3U + 2U * point] =
+            used ? uvec4(NO_SUB_SHAPE, NO_SUB_SHAPE, result.features[point], 0U) : uvec4(0U);
+    }
+}

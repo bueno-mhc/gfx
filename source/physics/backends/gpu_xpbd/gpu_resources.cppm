@@ -12,6 +12,7 @@ import gfx.enums;
 import gfx.handles;
 import gfx.interface;
 import gfx.physics.enums;
+import gfx.physics.shapes;
 
 namespace gfx::physics::gpu_xpbd
 {
@@ -74,10 +75,12 @@ struct GpuBodyReadback
     GpuVector angular_velocity{}; ///< w: angular damping.
 };
 
-/// The specialization constants of the passes (ids as shaders/common.glsl declares them; floats by their bits): the
-/// workgroup size, the body flags, the invalid bindless index, the elements per invocation, the radix bits, and the BVHs'
-/// leaf bit, stack size, treelet leaves, node costs, Morton bits and overflow flag.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 16> SPECIALIZATION_CONSTANTS{{
+/// The specialization constants of the passes (ids as shaders/common.glsl and shaders/narrow_phase.glsl declare them;
+/// floats by their bits): the workgroup size, the body flags, the invalid bindless index, the elements per invocation, the
+/// radix bits; the BVHs' leaf bit, stack size, treelet leaves, node costs, Morton bits and overflow flag; the narrow
+/// phase's shape kinds, contact algorithms, limits (face vertices, GJK iterations, EPA storage), the absent sub-shape,
+/// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 39> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -94,7 +97,32 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 16> SPECIAL
     {13, std::bit_cast<std::uint32_t>(GPU_XPBD_BVH_LEAF_COST)},
     {14, GPU_XPBD_MORTON_BITS},
     {15, std::to_underlying(GpuBvhFlag::STACK_OVERFLOW)},
+    {16, std::to_underlying(ShapeKind::SPHERE)},
+    {17, std::to_underlying(ShapeKind::CAPSULE)},
+    {18, std::to_underlying(ShapeKind::CYLINDER)},
+    {19, std::to_underlying(ShapeKind::CONE)},
+    {20, std::to_underlying(ShapeKind::BOX)},
+    {21, std::to_underlying(ShapeKind::CONVEX_HULL)},
+    {22, std::to_underlying(ContactAlgorithm::SPHERE_SPHERE)},
+    {23, std::to_underlying(ContactAlgorithm::SPHERE_CAPSULE)},
+    {24, std::to_underlying(ContactAlgorithm::CAPSULE_CAPSULE)},
+    {25, std::to_underlying(ContactAlgorithm::SPHERE_BOX)},
+    {26, std::to_underlying(ContactAlgorithm::BOX_BOX)},
+    {27, std::to_underlying(ContactAlgorithm::GJK)},
+    {28, std::to_underlying(ContactAlgorithm::EPA)},
+    {29, MAXIMUM_FACE_VERTICES},
+    {30, MAXIMUM_GJK_ITERATIONS},
+    {31, MAXIMUM_EPA_VERTICES},
+    {32, MAXIMUM_EPA_FACES},
+    {33, NO_SUB_SHAPE},
+    {34, std::bit_cast<std::uint32_t>(shape_detail::FACE_ALIGNMENT)},
+    {35, std::bit_cast<std::uint32_t>(shape_detail::SIDE_ALIGNMENT)},
+    {36, shape_detail::ROUND_FACE_VERTICES},
+    {37, std::bit_cast<std::uint32_t>(GEOMETRIC_TOLERANCE)},
+    {38, 2 * MAXIMUM_FACE_VERTICES},
 }};
+static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
+              "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");
 
 /// Workgroups covering @p count invocations.
 [[nodiscard]] constexpr auto

@@ -1,0 +1,38 @@
+#version 460
+// The keys of the contact cache's sort (GpuNarrowPhase::match): manifolds ordered by their pair (first instance, then
+// second) by two stable sorts, the second word first. Without gathering, each manifold's second instance with its index;
+// gathering, the first instance of the manifold each sorted index names. A manifold without points has the largest keys
+// (INVALID_INDEX): it sorts last and matches nothing.
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint manifolds_buffer;
+    uint manifolds_first;
+    uint keys_buffer;
+    uint values_buffer;
+    uint order_buffer;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    uint gather;
+} push;
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    const uint manifold = push.gather != 0U ? gpu_words[push.order_buffer].words[index] : index;
+    const uvec4 header = gpu_word_vectors[push.manifolds_buffer].values[10U * (push.manifolds_first + manifold)];
+    const uint key = header.z == 0U ? INVALID_INDEX : push.gather != 0U ? header.x : header.y;
+    gpu_words[push.keys_buffer].words[index] = key;
+    if (push.gather == 0U)
+    {
+        gpu_words[push.values_buffer].words[index] = index;
+    }
+}
