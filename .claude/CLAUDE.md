@@ -742,6 +742,24 @@ Original hard requirements (from the user's initial specification):
   shape, boxes, contacts_of, structure_nodes) extracted from the README into a temporary examples/readme_snippet_check target
   (gfx::physics + gfx::project_options, -Werror), built, run ("1 mesh, 56 lines"), removed; layout entry; THIRD_PARTY_LICENSES: the
   sandbox embeds Noto Sans.
+- **GPU XPBD backend G0 as built (2026-10-31)** — docs/gpu-xpbd-design.md §B "G0 as built" (5 deviations). Graphics:
+  `DeviceFeature::SHADER_INTEGER64_ATOMICS` (on request only; Vulkan turns the 64-bit atomics off unless required) and
+  `SHADER_MEMORY_MODEL` (automatic), `SubgroupOperation` bitmask + `DeviceLimits::subgroup_operations` / `maximum_storage_buffer_range` /
+  `maximum_compute_shared_memory_size`, **`Device::enabled(DeviceFeature)`** (pure virtual; FakeDevice answers supports()); test
+  shader wide_atomics.comp. **Intel RaptorLake has no 64-bit buffer atomics** (portable variant on real hardware). Physics enums:
+  `PhysicsBackendKind::GPU_XPBD`, `GpuVariantChoice`, `GpuBodyFlag`, constants GPU_XPBD_* (workgroup 64, lock shift 8, shared
+  memory 16384, storage range 2^27, storage buffers 64); workgroup size + flag bits reach shaders as **specialization constants**
+  (ids 0–5, filtered by the module's reflected constants: the validator refuses undeclared ids). Option
+  `GFX_PHYSICS_BACKEND_GPU_XPBD` (default OFF; build.py and presets ON), target `gfx::physics_gpu_xpbd` in source/physics/CMakeLists
+  (graphics + physics_components); gfx_physics links it and drops `gfx` from its forbidden list then; import scan `EXCLUDE` +
+  `PhysicsDecoupling.GpuBackendImportsOnlyPhysicsAndGraphics`. Module `gfx.physics.gpu_xpbd` (+ exported `:settings`; internal
+  `:probing`, `:resources`, `:backend`; a partition cannot import its own primary interface), units gpu_xpbd/capabilities/
+  gpu_resources/gpu_xpbd_world .cpp, shaders gpu_xpbd.glsl (typed aliases of bindless binding 3; `patch` is a GLSL keyword) +
+  patch_bodies/xpbd_integrate/xpbd_velocity_update.comp. GpuXpbdBackend: CPU mirror of read-back values (exact), edits → 176-byte
+  patches, one command buffer per step + timeline wait on the stepping thread, readback; **velocities from the substep's
+  displacement and rotation vector** (difference of poses gained 0.16 % speed falling from 10 m in float32 — bit-identical to a
+  CPU float32 simulation). G0 refuses colliders/joints/soft bodies/triggers naming their phase. Tests gfx_physics_gpu_xpbd_tests
+  (18: 8 × 2 GPUs + fake-device capability error + factory).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1162,7 +1180,9 @@ gfx/
 │                  sequential_impulses.cppm + joint_rows/sequential_impulses .cpp), PH7 backends/reference/ (reference.cppm,
 │                  reference_backend.cppm internal, reference_world/contacts .cpp), sandbox S1 debug_draw/ (gfx.physics.debug_draw:
 │                  debug_draw.cppm/.cpp),
-│                  physics.cppm (gfx.physics), physics_factory.cppm/.cpp
+│                  physics.cppm (gfx.physics), physics_factory.cppm/.cpp;
+│                  G0 backends/gpu_xpbd/ (gfx.physics.gpu_xpbd: gpu_xpbd.cppm + gpu_xpbd_settings/probing/resources/backend .cppm,
+│                  .cpp units, shaders/; target gfx_physics_gpu_xpbd; tests/physics/gpu_xpbd_test.cpp)
 └── tests/  toolchain/ (+defects/), core/ (gfx_core_tests incl. math_test.cpp + slot_table/), physics/ (PH0:
             gfx_physics_common_tests, PH1 gfx_camera_tests (camera_projection/camera/controller_test.cpp), PH2 gfx_physics_tests (shape/gjk_epa/contact/collide_test.cpp; PH3 spatial_test.cpp, broad_phase_test.cpp; PH4 shape_query_test.cpp), PH4
             gfx_physics_world_tests (interface_default_test.cpp generated, world_test.cpp, world_test_support.cppm), PH5
@@ -1237,11 +1257,13 @@ gfx/
 | UI | **UI + SDF/MSDF font system** (user prompt 2026-10-16: hybrid immediate/retained UI with Dear ImGui + docking parity, tables, accessibility; every text through an SDF/MSDF pipeline: any font format → msdfgen/msdf-atlas-gen atlases built at build time, serialized `.uiatlas`, loaded with no glyph work; HarfBuzz, SheenBidi, line breaking; consumes graphics (and audio) abstractions; GitHub repo) | **design approved 2026-10-17** ([docs/ui-design.md](../docs/ui-design.md), answers in §D: audio out of scope, the rest as recommended); U0 (b1b4ba4), U1 (4ba8362), U2 (fccdc7a), U3 (ba6e838), U4 (5511d8a), U5 (1acbc63), U6 (a77c83e), follow-up after U6 (5e7f8a6: allocation-free cache misses, LRU fix, bidi fast path; cache policy accepted), U7 (855b7c7: tables, list clipper, splitters, resizable child regions, plots, progress bars, images), follow-up after U7 (f0d66c7: cache misses of mixed lengths, replacement by size), U8 (a7d82de: docking, dock builder, JSON layouts), U9 (76ee050: navigation, shortcuts, accessibility tree, AccessKit provider) committed; **U10 (sample `examples/ui_editor` drawn by a render thread, allocation-free after warm-up under CTest; THIRD_PARTY_LICENSES.md; architecture overview §6; library fixes: retained text layouts reusable, draw data published in turn with keyed storage) committed (987476c)** (§B "U10 as built", 5 deviations). Every phase of the UI plan is implemented. Follow-up after U10 (cbafd37: Vulkan command recording allocation-free), fix after U10 (ae811c2: linear caret positions and hit tests) committed; follow-up after U10 (Vulkan submissions and deleter allocation-free; the editor counts its render thread's whole frame) committed and merged into main at the user's request (2026-10-24). |
 | PH | **Physics abstraction + camera module** (user prompt 2026-10-24: decoupled C++23 physics over Box3D, GJK/EPA, BVH/octree/quadtree/BSP/grid/SAP on abstract primitives, sequential impulses, XPBD soft bodies, pluggable integrators, custom backends; camera module with quaternions, perspective/orthographic, frustum, unprojection) | **design approved 2026-10-24: every §D answer as recommended** + user rule: math at compile time when possible, else **SIMD via existing MIT libraries (chosen: cglm + SIMDe, downloads approved and pinned)**, parallelize where possible. **PH0 (foundations) committed (636478b; deviations accepted by 'continue')**; **PH1 (camera) committed (527b32c)**; **PH2 (shapes and narrow phase) committed (e970d83)**; **PH3 (spatial structures, broad phase, task schedulers) committed (e33daf0)**; **PH4 (interfaces, SteppedWorld framework, null backend, factory, threading, shape queries, GJK/EPA robustness) committed (db6ecce)**; **PH5 (Box3D backend, task scheduler start/finish, PH3 race fix) committed (d2b2c8e)**; **PH6 (integrators, XPBD soft bodies coupled both ways with any backend, presets) committed (7856f19)**; **PH7 (reference backend, sequential-impulse solver, user constraints, sub-steps) committed (92728b6)**; **PH8 (sample `examples/physics` under CTest on Box3D and the reference backend, README physics section, architecture.md §7 with 7 diagrams; reference joint forces averaged over the sub-steps; test lists emptied before discovery) committed by the user as 16f062e "Corrected tests"** (2026-10-25, during the final test runs; the 2 deviations of docs/physics-design.md §B 'PH8 as built' still to validate; §5 'Physics sample and documentation'). Every phase of the physics plan is implemented. Facts: GCC 16 accepts GMF static inline exposure with -Wno-expose-global-module-tu-local (verified, runs correctly); C++ std headers in a GMF next to import std compiled in a small test. |
 | PS | **Physics sandbox** (user prompt 2026-10-25: an interactive visual application over every library) | answers recorded in docs/physics-sandbox-design.md §A; **S1 (gfx.physics.debug_draw) committed (c5d0ac9)**; **S2 (examples/physics_sandbox skeleton: renderer, scene, orbit camera, statistics panel) committed (da1c14e)**; **S3 (interaction: picking, dragging, shooting, spawning, removing, fly camera, scripted CTest run; reference backend contact fixes) committed (378ee8c)**; **S4 (nine presets, soft bodies/joints/triggers drawn, backend and preset switched at run time, refusals noted, --tour CTest; GJK sliver fix) committed (7727d29)**; **S5 (live controls: pause, single step, slow motion, gravity, solver, sleep, broad phase and integrator swapped; debug views: wireframe, boxes, contacts, broad phase structure, joints, sleep and island colors, per-phase plots; control script in --script; library: structures' nodes and BroadPhase::structure_nodes) committed (abbb007)**; **S6 (documentation: architecture.md §8 with 3 diagrams, README debug-drawing snippet compiled, licenses) implemented, awaiting validation**. Every step of the sandbox plan is built. |
+| GX | **GPU-exclusive XPBD physics backend** (user prompt 2026-10-31: rigid + soft XPBD on graphics compute only, Karras radix-tree BVH, GPU GJK/EPA, Jones–Plassmann coloring + Jacobi, bit-identical, capability probing, pipeline variants, interface unchanged except `PhysicsBackendKind`) | **design proposed** ([docs/gpu-xpbd-design.md](../docs/gpu-xpbd-design.md): §0 where the prompt meets the code (20 rows), §A decisions, §B phases G0–G10, §D 20 questions); **all answered as recommended (2026-10-31)**; **G0 (foundations: graphics compute features, target, factory, probing, GPU body integration) accepted with its 5 deviations (2026-10-31; not committed yet)**; G1 (GPU primitives) in progress |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **997**, all passing in Debug and Release, 2026-10-31 (sandbox S6: documentation only, both suites run
-again). Before: 997 (after sandbox S5: + 7
+Test count at last report: **1018**, all passing in Debug and Release, 2026-10-31 (GPU XPBD G0: + 18 gfx_physics_gpu_xpbd_tests,
++ 2 Vulkan device tests (compute limits/features, 64-bit atomics + memory model), + 1 PhysicsDecoupling.GpuBackendImportsOnlyPhysicsAndGraphics;
+skips Debug 4, Release 19; run from PowerShell). Before: 997 (after sandbox S6: documentation only). Before: 997 (after sandbox S5: + 7
 SpatialStructureTest/N.NodesCoverEveryProxy; skips Debug 4, Release 19; run from PowerShell; the first Debug build stopped on a CRC mismatch of gfx.interface:device in gfx@synth_0 after the sandbox CMakeLists was edited during the build (a reconfigure mid-build), the rebuild and both runs clean). Before: 990 (after sandbox S4: + 1 GjkEpaTest, + 1
 ReferenceTest, + 1 CTest PhysicsSandbox.Tour; skips Debug 4, Release 19; run from PowerShell; the first full Debug run had one
 failure, Backends/UiWindowTest.AUiInAVisibleWindowIsDrawnAndClicked/SDL3 (the pushed click never arrived), 10/10 alone, and 3 parallel
@@ -1404,6 +1426,16 @@ After a gap analysis against Unreal RHI / NVRHI / Diligent / The Forge / Dawn, t
    6 CI (MSVC/Clang/GCC, Linux), packaging, Doxygen, architecture document.
 
 ## 10. Open questions (asked, not answered yet)
+
+0000. ~~**GPU XPBD physics backend (2026-10-31)**~~ ANSWERED 2026-10-31: docs/gpu-xpbd-design.md §D, **every question as
+    recommended** (interface as built, GPU_XPBD only, factory device + direct entry gfx.physics.gpu_xpbd, separate target + option
+    OFF, graphics additions, one readback per step, synchronous GPU queries, λ reset per substep, islands, replay on overflow,
+    conformance suite in G9, phases G0–G10). Facts found: no shared conformance suite exists (Box3D/reference/framework tests are separate); `IntegratorKind::XPBD`
+    and `SolverKind::XPBD` already exist; the graphics interface does not report subgroup operations, 64-bit atomics, the
+    storage-buffer range, shared memory size or the Vulkan memory model (nothing wired in the Vulkan backend);
+    `PhysicsWorldDescription` has no device slot and physics targets must not link graphics (gfx_require_decoupled); the
+    prompt's λ rules contradict each other (reset per substep vs kept across substeps) and its δ formula and treelet attribution
+    are wrong (Karras & Aila 2013).
 
 000. **Physics + camera (2026-10-24)**: docs/physics-design.md §D (17 questions, each with a recommendation). Facts found:
     Box3D is real (erincatto/box3d, announced 2026-06-30, MIT, C17, alpha, tag v0.1.0, PRs disabled, MinGW preset):

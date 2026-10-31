@@ -176,6 +176,47 @@ target_link_libraries(gfx_physics_components
     PRIVATE gfx::project_options gfx::simde)
 gfx_require_decoupled(gfx_physics_components FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
 
+# The GPU backend (docs/gpu-xpbd-design.md): XPBD on the graphics library's compute, a target of its own because it
+# depends on graphics, which the rest of the physics library must not. With GFX_PHYSICS_BACKEND_GPU_XPBD, gfx::physics
+# links it for the factory's PhysicsBackendKind::GPU_XPBD, and applications running it on their own device link
+# gfx::physics_gpu_xpbd (`import gfx.physics.gpu_xpbd;`).
+if(GFX_PHYSICS_BACKEND_GPU_XPBD)
+    add_library(gfx_physics_gpu_xpbd)
+    add_library(gfx::physics_gpu_xpbd ALIAS gfx_physics_gpu_xpbd)
+    target_sources(gfx_physics_gpu_xpbd
+        PUBLIC
+            FILE_SET public_modules TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES
+                backends/gpu_xpbd/gpu_xpbd.cppm
+                backends/gpu_xpbd/gpu_xpbd_settings.cppm
+        PRIVATE
+            FILE_SET backend_modules TYPE CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES
+                backends/gpu_xpbd/gpu_probing.cppm
+                backends/gpu_xpbd/gpu_resources.cppm
+                backends/gpu_xpbd/gpu_xpbd_backend.cppm
+        PRIVATE
+            backends/gpu_xpbd/gpu_xpbd.cpp
+            backends/gpu_xpbd/capabilities.cpp
+            backends/gpu_xpbd/gpu_resources.cpp
+            backends/gpu_xpbd/gpu_xpbd_world.cpp)
+    target_compile_features(gfx_physics_gpu_xpbd PUBLIC cxx_std_23)
+    target_link_libraries(gfx_physics_gpu_xpbd
+        PUBLIC gfx::physics_components gfx::graphics
+        PRIVATE gfx::project_options)
+    gfx_add_shaders(gfx_physics_gpu_xpbd
+        MODULE gfx.physics.gpu_xpbd.shaders
+        NAMESPACE gfx::physics::gpu_xpbd::shaders
+        SHADERS
+            backends/gpu_xpbd/shaders/patch_bodies.comp
+            backends/gpu_xpbd/shaders/xpbd_integrate.comp
+            backends/gpu_xpbd/shaders/xpbd_velocity_update.comp
+        INCLUDE_DIRECTORIES backends/gpu_xpbd/shaders)
+    gfx_require_decoupled(gfx_physics_gpu_xpbd FORBIDDEN gfx_platform gfx_platform_graphics gfx_ui gfx_ui_platform gfx_ui_atlas_tools gfx_camera)
+endif()
+
 # The backends: the null and reference ones always; Box3D with GFX_PHYSICS_BACKEND_BOX3D (fetched and pinned).
 set(_gfx_physics_backend_modules
     backends/null/null.cppm
@@ -230,4 +271,11 @@ if(GFX_PHYSICS_CUSTOM_BACKEND_TARGET)
     target_link_libraries(gfx_physics PRIVATE ${GFX_PHYSICS_CUSTOM_BACKEND_TARGET})
     target_compile_definitions(gfx_physics PRIVATE GFX_WITH_PHYSICS_CUSTOM_BACKEND)
 endif()
-gfx_require_decoupled(gfx_physics FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
+# With the GPU backend, gfx::physics depends on graphics through it (and only then).
+set(_gfx_physics_forbidden ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
+if(GFX_PHYSICS_BACKEND_GPU_XPBD)
+    target_link_libraries(gfx_physics PRIVATE gfx::physics_gpu_xpbd)
+    target_compile_definitions(gfx_physics PRIVATE GFX_WITH_PHYSICS_GPU_XPBD_BACKEND)
+    list(REMOVE_ITEM _gfx_physics_forbidden gfx)
+endif()
+gfx_require_decoupled(gfx_physics FORBIDDEN ${_gfx_physics_forbidden})

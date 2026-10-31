@@ -1,0 +1,64 @@
+#version 460
+// The prediction of an XPBD substep (Müller et al. 2020, Algorithm 2): each awake dynamic body's velocities take gravity,
+// its force and torque (with the gyroscopic term) and its damping, then its center and orientation move by them; a
+// kinematic body moves by the velocities it was given. The substep's displacement and rotation vector are kept apart
+// (the constraint projections add to them too): the velocity update divides them by the substep's duration, where the
+// difference of two poses would lose most of its bits to cancellation (a body falling from 10 m gained 0.16 % of speed in
+// single precision; at 1000 m, far more).
+#extension GL_GOOGLE_include_directive : require
+#include "step.glsl"
+
+void main()
+{
+    const uint slot = gl_GlobalInvocationID.x;
+    if (slot >= PARAMETERS.body_count)
+    {
+        return;
+    }
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
+    if (!body_moves(flags))
+    {
+        return;
+    }
+    vec4 center = gpu_vectors[PARAMETERS.body_centers].values[slot];
+    vec4 orientation = gpu_vectors[PARAMETERS.body_orientations].values[slot];
+    vec4 linear = gpu_vectors[PARAMETERS.body_linear_velocities].values[slot];
+    vec4 angular = gpu_vectors[PARAMETERS.body_angular_velocities].values[slot];
+    const float h = PARAMETERS.gravity.w;
+
+    if ((flags & BODY_DYNAMIC) != 0U)
+    {
+        // Linear: gravity (times the body's scale), the force, then the damping, along the free axes only.
+        const vec4 inverse_diagonal = gpu_vectors[PARAMETERS.body_inverse_inertias].values[2U * slot];
+        const vec3 inverse_off = gpu_vectors[PARAMETERS.body_inverse_inertias].values[2U * slot + 1U].xyz;
+        const float gravity_scale = inverse_diagonal.w;
+        const vec3 force = gpu_vectors[PARAMETERS.body_forces].values[slot].xyz;
+        const vec3 linear_freedom = body_freedom(flags, false);
+        linear.xyz += h * (PARAMETERS.gravity.xyz * gravity_scale + force * center.w);
+        linear.xyz *= linear_freedom / (1.0 + h * linear.w);
+
+        // Angular: the world inverse inertia (0 about the locked axes), the torque less the gyroscopic term, the damping.
+        const mat3 rotation = rotation_matrix(orientation);
+        const vec3 angular_freedom = body_freedom(flags, true);
+        const mat3 freedom = mat3(vec3(angular_freedom.x, 0.0, 0.0), vec3(0.0, angular_freedom.y, 0.0), vec3(0.0, 0.0, angular_freedom.z));
+        const mat3 inverse_inertia = freedom * rotation * symmetric_matrix(inverse_diagonal.xyz, inverse_off) * transpose(rotation) * freedom;
+        const vec4 inertia_diagonal = gpu_vectors[PARAMETERS.body_inertias].values[2U * slot];
+        const vec3 inertia_off = gpu_vectors[PARAMETERS.body_inertias].values[2U * slot + 1U].xyz;
+        const mat3 inertia = rotation * symmetric_matrix(inertia_diagonal.xyz, inertia_off) * transpose(rotation);
+        const vec3 torque = gpu_vectors[PARAMETERS.body_torques].values[slot].xyz;
+        angular.xyz += h * (inverse_inertia * (torque - cross(angular.xyz, inertia * angular.xyz)));
+        angular.xyz *= angular_freedom / (1.0 + h * angular.w);
+    }
+
+    // The predicted pose, and how far it moved.
+    const vec3 displacement = h * linear.xyz;
+    const vec3 rotation = h * angular.xyz;
+    center.xyz += displacement;
+    orientation = normalize(orientation + 0.5 * quaternion_multiply(vec4(rotation, 0.0), orientation));
+    gpu_vectors[PARAMETERS.body_displacements].values[slot] = vec4(displacement, 0.0);
+    gpu_vectors[PARAMETERS.body_rotations].values[slot] = vec4(rotation, 0.0);
+    gpu_vectors[PARAMETERS.body_centers].values[slot] = center;
+    gpu_vectors[PARAMETERS.body_orientations].values[slot] = orientation;
+    gpu_vectors[PARAMETERS.body_linear_velocities].values[slot] = linear;
+    gpu_vectors[PARAMETERS.body_angular_velocities].values[slot] = angular;
+}

@@ -964,6 +964,11 @@ public:
         return m_physical_device;
     }
 
+    [[nodiscard]] auto enabled(DeviceFeature feature) const noexcept -> bool override
+    {
+        return m_physical_device.supports(feature);
+    }
+
     [[nodiscard]] auto queue(QueueType type, std::uint32_t index) -> Queue& override
     {
         return Device::queue(type, index);

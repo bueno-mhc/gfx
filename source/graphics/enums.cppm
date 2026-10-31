@@ -111,6 +111,23 @@ enum class DeviceFeature : std::uint8_t
     MEMORY_BUDGET,             ///< Memory budget and usage queries per heap.
     GPU_CRASH_MARKERS,         ///< GPU-written markers that locate a crash (breadcrumbs).
     FRAME_LATENCY_WAIT,        ///< Swapchain::wait_for_frame_latency() (waits for presentation to complete).
+    SHADER_INTEGER64_ATOMICS,  ///< 64-bit integer atomic operations on storage buffers and shared memory.
+    SHADER_MEMORY_MODEL,       ///< The shader memory model: atomics and barriers with acquire/release semantics at device
+                               ///< scope (the Vulkan memory model), so workgroups exchange data within a dispatch.
+};
+
+/// @brief Subgroup (wave) operations compute shaders may use (DeviceLimits::subgroup_operations). Bitmask.
+enum class SubgroupOperation : std::uint8_t
+{
+    NONE             = 0,       ///< No subgroup operation.
+    BASIC            = 1U << 0, ///< Subgroup identifiers, sizes, elections and barriers.
+    VOTE             = 1U << 1, ///< All, any and equal votes.
+    ARITHMETIC       = 1U << 2, ///< Reductions and inclusive and exclusive scans (add, multiply, minimum, maximum, bitwise).
+    BALLOT           = 1U << 3, ///< Ballots and broadcasts.
+    SHUFFLE          = 1U << 4, ///< Shuffles by invocation index or exclusive or.
+    SHUFFLE_RELATIVE = 1U << 5, ///< Shuffles up and down.
+    CLUSTERED        = 1U << 6, ///< Reductions over clusters of invocations.
+    QUAD             = 1U << 7, ///< Operations within quads of invocations.
 };
 
 // =================================================================================================
@@ -1190,6 +1207,24 @@ struct EnumerationTraits<DeviceFeature>
         EnumeratorName{DeviceFeature::MEMORY_BUDGET, "MEMORY_BUDGET"},
         EnumeratorName{DeviceFeature::GPU_CRASH_MARKERS, "GPU_CRASH_MARKERS"},
         EnumeratorName{DeviceFeature::FRAME_LATENCY_WAIT, "FRAME_LATENCY_WAIT"},
+        EnumeratorName{DeviceFeature::SHADER_INTEGER64_ATOMICS, "SHADER_INTEGER64_ATOMICS"},
+        EnumeratorName{DeviceFeature::SHADER_MEMORY_MODEL, "SHADER_MEMORY_MODEL"},
+    };
+};
+
+template<>
+struct EnumerationTraits<SubgroupOperation>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{SubgroupOperation::BASIC, "BASIC"},
+        EnumeratorName{SubgroupOperation::VOTE, "VOTE"},
+        EnumeratorName{SubgroupOperation::ARITHMETIC, "ARITHMETIC"},
+        EnumeratorName{SubgroupOperation::BALLOT, "BALLOT"},
+        EnumeratorName{SubgroupOperation::SHUFFLE, "SHUFFLE"},
+        EnumeratorName{SubgroupOperation::SHUFFLE_RELATIVE, "SHUFFLE_RELATIVE"},
+        EnumeratorName{SubgroupOperation::CLUSTERED, "CLUSTERED"},
+        EnumeratorName{SubgroupOperation::QUAD, "QUAD"},
     };
 };
 
@@ -2460,6 +2495,7 @@ static_assert(verify<QueueCapability>(), "EnumerationTraits<QueueCapability>::NA
 static_assert(verify<PhysicalDeviceType>(), "EnumerationTraits<PhysicalDeviceType>::NAMES is out of sync with the enumeration");
 static_assert(verify<PhysicalDevicePreference>(), "EnumerationTraits<PhysicalDevicePreference>::NAMES is out of sync with the enumeration");
 static_assert(verify<DeviceFeature>(), "EnumerationTraits<DeviceFeature>::NAMES is out of sync with the enumeration");
+static_assert(verify<SubgroupOperation>(), "EnumerationTraits<SubgroupOperation>::NAMES is out of sync with the enumeration");
 static_assert(verify<Format>(), "EnumerationTraits<Format>::NAMES is out of sync with the enumeration");
 static_assert(verify<FormatNumericType>(), "EnumerationTraits<FormatNumericType>::NAMES is out of sync with the enumeration");
 static_assert(verify<ImageAspect>(), "EnumerationTraits<ImageAspect>::NAMES is out of sync with the enumeration");

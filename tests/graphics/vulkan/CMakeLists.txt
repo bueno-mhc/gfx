@@ -51,6 +51,7 @@ gfx_add_shaders(gfx_vulkan_tests
         shaders/accumulate.comp
         shaders/halves.task
         shaders/halves.mesh
+        shaders/wide_atomics.comp
     INCLUDE_DIRECTORIES shaders/include)
 target_compile_definitions(gfx_vulkan_tests PRIVATE
     GFX_TEST_VULKAN_SHADER_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/shaders"

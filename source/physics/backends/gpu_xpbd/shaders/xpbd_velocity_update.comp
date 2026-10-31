@@ -1,0 +1,24 @@
+#version 460
+// The velocity update of an XPBD substep (Müller et al. 2020, Algorithm 2): each awake dynamic body's velocities become
+// what its pose did over the substep (what the constraint projections between the passes moved included), from the
+// displacement and rotation vector the passes accumulated (xpbd_integrate.comp says why not from two poses); kinematic
+// bodies keep the velocities they were given.
+#extension GL_GOOGLE_include_directive : require
+#include "step.glsl"
+
+void main()
+{
+    const uint slot = gl_GlobalInvocationID.x;
+    if (slot >= PARAMETERS.body_count)
+    {
+        return;
+    }
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
+    if (!body_moves(flags) || (flags & BODY_DYNAMIC) == 0U)
+    {
+        return;
+    }
+    const float h = PARAMETERS.gravity.w;
+    gpu_vectors[PARAMETERS.body_linear_velocities].values[slot].xyz = gpu_vectors[PARAMETERS.body_displacements].values[slot].xyz / h;
+    gpu_vectors[PARAMETERS.body_angular_velocities].values[slot].xyz = gpu_vectors[PARAMETERS.body_rotations].values[slot].xyz / h;
+}

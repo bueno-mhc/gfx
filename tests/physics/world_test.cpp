@@ -85,6 +85,16 @@ TEST(PhysicsFactoryTest, EachBackendReportsWhetherItWasBuiltAndCanRun)
         expected.push_back(PhysicsBackendKind::BOX3D);
     }
     expected.push_back(PhysicsBackendKind::REFERENCE);
+    const PhysicsBackendAvailability gpu = physics_backend_availability(PhysicsBackendKind::GPU_XPBD);
+    EXPECT_EQ(gpu.available, gpu.reason.empty());
+    if (!gpu.built)
+    {
+        EXPECT_NE(gpu.reason.find("GFX_PHYSICS_BACKEND_GPU_XPBD"), std::string::npos) << gpu.reason;
+    }
+    if (gpu.available)
+    {
+        expected.push_back(PhysicsBackendKind::GPU_XPBD);
+    }
     expected.push_back(PhysicsBackendKind::NULL_BACKEND);
     EXPECT_EQ(available_physics_backends(), expected) << "simulating backends first";
     EXPECT_TRUE(create_physics_world({}, PhysicsBackendKind::REFERENCE)->backend() == PhysicsBackendKind::REFERENCE);

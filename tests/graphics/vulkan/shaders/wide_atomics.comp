@@ -1,0 +1,57 @@
+#version 460
+// 64-bit atomics (DeviceFeature::SHADER_INTEGER64_ATOMICS) and the memory model (SHADER_MEMORY_MODEL): every invocation
+// keeps the largest key (a value in the high word, its index in the low word) in one 64-bit word; the workgroups count
+// themselves with acquire-release semantics at device scope, and the last one to finish copies the largest key out.
+#pragma use_vulkan_memory_model
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 3) buffer GfxWideBuffer
+{
+    uint64_t values[];
+} gfx_wide_buffers[];
+
+layout(set = 0, binding = 3) buffer GfxStorageBuffer
+{
+    uint words[];
+} gfx_storage_buffers[];
+
+layout(push_constant) uniform Push
+{
+    uint keys;    // bindless index of the buffer whose first 64-bit word holds the largest key
+    uint counter; // bindless index of the buffer whose first word counts the finished workgroups
+    uint result;  // bindless index of the buffer receiving the largest key (low word, then high word)
+    uint count;   // invocations with a key
+} push;
+
+shared bool last_workgroup;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index < push.count)
+    {
+        const uint64_t key = (uint64_t((index * 7U) % push.count) << 32) | uint64_t(index);
+        atomicMax(gfx_wide_buffers[push.keys].values[0], key);
+    }
+
+    // Every invocation's key before the workgroup counts itself; the last workgroup sees every other's.
+    controlBarrier(gl_ScopeWorkgroup, gl_ScopeDevice, gl_StorageSemanticsBuffer | gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+    if (gl_LocalInvocationIndex == 0U)
+    {
+        const uint finished = atomicAdd(gfx_storage_buffers[push.counter].words[0], 1U, gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                                        gl_SemanticsAcquireRelease);
+        last_workgroup = finished == gl_NumWorkGroups.x - 1U;
+        if (last_workgroup)
+        {
+            const uint64_t largest = atomicLoad(gfx_wide_buffers[push.keys].values[0], gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                                                gl_SemanticsAcquire);
+            gfx_storage_buffers[push.result].words[0] = uint(largest & 0xFFFFFFFFUL);
+            gfx_storage_buffers[push.result].words[1] = uint(largest >> 32);
+        }
+    }
+}

@@ -75,6 +75,8 @@ class CMakeBuilder:
             f"-DCMAKE_CXX_COMPILER={self._compiler_path(self.arguments.compiler)}",
             f"-DGFX_BUILD_TESTS={'ON' if self.arguments.build_tests else 'OFF'}",
             f"-DGFX_WARNINGS_AS_ERRORS={'ON' if self.arguments.warnings_as_errors else 'OFF'}",
+            # Development builds build every backend (the GPU physics backend is OFF by default for consumers).
+            "-DGFX_PHYSICS_BACKEND_GPU_XPBD=ON",
         ]
         if self.arguments.import_std_gate:
             command.append(f"-DGFX_IMPORT_STD_GATE={self.arguments.import_std_gate}")

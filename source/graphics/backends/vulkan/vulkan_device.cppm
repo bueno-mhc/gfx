@@ -608,7 +608,7 @@ public:
     }
 
     /// @brief Whether @p feature is enabled on this device.
-    [[nodiscard]] auto enabled(DeviceFeature feature) const noexcept -> bool
+    [[nodiscard]] auto enabled(DeviceFeature feature) const noexcept -> bool override
     {
         return m_enabled_features[static_cast<std::size_t>(std::to_underlying(feature))];
     }

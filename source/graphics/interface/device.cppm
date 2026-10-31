@@ -56,6 +56,11 @@ public:
     /// @brief Physical device it was created from.
     [[nodiscard]] virtual auto physical_device() const noexcept -> const PhysicalDevice& = 0;
 
+    /// @brief Whether @p feature is enabled: CORE_FEATURES and DeviceDescription::required_features always are, and a
+    ///        backend enables the features that cost nothing whenever the physical device supports them (others, such
+    ///        as SHADER_INTEGER64_ATOMICS or RAY_TRACING, only when required).
+    [[nodiscard]] virtual auto enabled(DeviceFeature feature) const noexcept -> bool = 0;
+
     /// @brief Queue @p index of type @p type (as requested in DeviceDescription::queues).
     /// @throws InvalidUsageError when no such queue was requested.
     [[nodiscard]] virtual auto queue(QueueType type, std::uint32_t index = 0) -> Queue& = 0;

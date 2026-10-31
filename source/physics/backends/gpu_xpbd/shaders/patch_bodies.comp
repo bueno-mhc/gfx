@@ -1,0 +1,27 @@
+#version 460
+// Writes this step's body patches into the body arrays: one invocation per patch (the CPU never has two patches of one
+// slot in a step).
+#extension GL_GOOGLE_include_directive : require
+#include "step.glsl"
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= PARAMETERS.patch_count)
+    {
+        return;
+    }
+    const BodyPatch body = gpu_body_patches[PARAMETERS.body_patches].patches[index];
+    const uint slot = body.slot;
+    gpu_words[PARAMETERS.body_flags].words[slot] = body.flags;
+    gpu_vectors[PARAMETERS.body_centers].values[slot] = body.center;
+    gpu_vectors[PARAMETERS.body_orientations].values[slot] = body.orientation;
+    gpu_vectors[PARAMETERS.body_linear_velocities].values[slot] = body.linear_velocity;
+    gpu_vectors[PARAMETERS.body_angular_velocities].values[slot] = body.angular_velocity;
+    gpu_vectors[PARAMETERS.body_inverse_inertias].values[2U * slot] = body.inverse_inertia_diagonal;
+    gpu_vectors[PARAMETERS.body_inverse_inertias].values[2U * slot + 1U] = body.inverse_inertia_off;
+    gpu_vectors[PARAMETERS.body_inertias].values[2U * slot] = body.inertia_diagonal;
+    gpu_vectors[PARAMETERS.body_inertias].values[2U * slot + 1U] = body.inertia_off;
+    gpu_vectors[PARAMETERS.body_forces].values[slot] = body.force;
+    gpu_vectors[PARAMETERS.body_torques].values[slot] = body.torque;
+}

@@ -1,5 +1,6 @@
 # Checks that the C++ sources under a directory import only allowed gfx modules.
-#   cmake -DDIRECTORY=<path> "-DALLOWED=<module prefix>;..." -P GfxCheckModuleImports.cmake
+#   cmake -DDIRECTORY=<path> "-DALLOWED=<module prefix>;..." ["-DEXCLUDE=<subdirectory>;..."] -P GfxCheckModuleImports.cmake
+# EXCLUDE names subdirectories of DIRECTORY (relative paths) that another check covers.
 # A module is allowed when its name is an allowed prefix or starts with one followed by "." or ":" (partitions are
 # always allowed). Every `import gfx...;` line of every .cppm, .cpp and .hpp file is checked; the script fails with the
 # list of the offending lines.
@@ -8,6 +9,9 @@ if(NOT DIRECTORY OR NOT ALLOWED)
 endif()
 
 file(GLOB_RECURSE sources LIST_DIRECTORIES false "${DIRECTORY}/*.cppm" "${DIRECTORY}/*.cpp" "${DIRECTORY}/*.hpp")
+foreach(excluded IN LISTS EXCLUDE)
+    list(FILTER sources EXCLUDE REGEX "^${DIRECTORY}/${excluded}/")
+endforeach()
 set(violations "")
 set(checked 0)
 foreach(source IN LISTS sources)

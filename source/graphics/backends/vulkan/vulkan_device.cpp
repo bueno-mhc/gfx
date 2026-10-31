@@ -43,6 +43,7 @@ constexpr std::array AUTOMATIC_FEATURES{
     DeviceFeature::DEPTH_BOUNDS,               DeviceFeature::MULTIVIEW,
     DeviceFeature::SAMPLER_FILTER_MINMAX,      DeviceFeature::MEMORY_BUDGET,
     DeviceFeature::PRESENTATION,               DeviceFeature::FRAME_LATENCY_WAIT,
+    DeviceFeature::SHADER_MEMORY_MODEL,
 };
 
 /// @brief Most native queues a device uses (the deleter records the progress of each).
@@ -262,6 +263,19 @@ VulkanDevice::create_device(const DeviceDescription& description)
     VkPhysicalDeviceVulkan12Features features12 = capabilities.features12;
     features12.bufferDeviceAddressCaptureReplay = VK_FALSE;
     features12.bufferDeviceAddressMultiDevice = VK_FALSE;
+    if (!enabled(DeviceFeature::SHADER_INTEGER64_ATOMICS))
+    {
+        // Required only: shaders using them without the request are then refused by the validation layers, as on
+        // devices without them.
+        features12.shaderBufferInt64Atomics = VK_FALSE;
+        features12.shaderSharedInt64Atomics = VK_FALSE;
+    }
+    if (!enabled(DeviceFeature::SHADER_MEMORY_MODEL))
+    {
+        features12.vulkanMemoryModel = VK_FALSE;
+        features12.vulkanMemoryModelDeviceScope = VK_FALSE;
+        features12.vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
+    }
     VkPhysicalDeviceVulkan13Features features13 = capabilities.features13;
     features13.robustImageAccess = VK_FALSE;
     features.pNext = &features11;

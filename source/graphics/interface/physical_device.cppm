@@ -36,6 +36,9 @@ struct DeviceLimits
     std::uint32_t maximum_draw_indirect_count = 1;                    ///< Largest draw count of one indirect draw.
     std::uint32_t minimum_subgroup_size = 1;                          ///< Smallest subgroup (wave) size.
     std::uint32_t maximum_subgroup_size = 1;                          ///< Largest subgroup (wave) size.
+    SubgroupOperation subgroup_operations = SubgroupOperation::NONE;  ///< Subgroup operations compute shaders may use.
+    std::uint64_t maximum_storage_buffer_range = 0;                   ///< Bytes of a storage buffer a shader may address.
+    std::uint32_t maximum_compute_shared_memory_size = 0;             ///< Bytes of shared memory per compute workgroup.
     std::array<std::uint32_t, ENUMERATOR_COUNT<BindlessResourceKind>> maximum_bindless_resources{}; ///< Bindless capacity
                                                                                                     ///< the device allows, by kind.
     std::uint32_t maximum_multiview_view_count = 1;                   ///< Views of a multiview pass.

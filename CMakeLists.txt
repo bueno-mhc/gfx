@@ -44,6 +44,10 @@ cmake_dependent_option(GFX_PLATFORM_BACKEND_GLFW "Build the GLFW platform backen
 option(GFX_BUILD_PHYSICS "Build the physics and camera libraries (decoupled from graphics, platform and UI)" ON)
 cmake_dependent_option(GFX_PHYSICS_BACKEND_BOX3D "Build the Box3D physics backend (Box3D fetched, pinned and linked statically)" ON
                        "GFX_BUILD_PHYSICS" OFF)
+# The GPU physics backend (docs/gpu-xpbd-design.md): XPBD on the graphics library's compute. Off by default: with it,
+# gfx::physics depends on graphics through this backend (the rest of the physics library still does not).
+cmake_dependent_option(GFX_PHYSICS_BACKEND_GPU_XPBD "Build the GPU physics backend (XPBD on the graphics library's Vulkan compute)" OFF
+                       "GFX_BUILD_PHYSICS;GFX_BACKEND_VULKAN" OFF)
 
 # The SIMD instruction set the math (gfx.core.math) and everything built on it compile for: SSE2 (every
 # x86-64 processor; NEON on 64-bit ARM, WASM SIMD on WebAssembly), AVX2 (with FMA: Intel Haswell, AMD

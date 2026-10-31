@@ -959,6 +959,31 @@ from_vulkan_queue_flags(VkQueueFlags flags) noexcept -> QueueCapability
     return capabilities;
 }
 
+/// @brief gfx subgroup operations of Vulkan subgroup feature flags (the NV and partitioned ones have no gfx name).
+[[nodiscard]] constexpr auto
+from_vulkan_subgroup_operations(VkSubgroupFeatureFlags flags) noexcept -> SubgroupOperation
+{
+    constexpr std::array<std::pair<VkSubgroupFeatureFlags, SubgroupOperation>, 8> OPERATIONS{{
+        {VK_SUBGROUP_FEATURE_BASIC_BIT, SubgroupOperation::BASIC},
+        {VK_SUBGROUP_FEATURE_VOTE_BIT, SubgroupOperation::VOTE},
+        {VK_SUBGROUP_FEATURE_ARITHMETIC_BIT, SubgroupOperation::ARITHMETIC},
+        {VK_SUBGROUP_FEATURE_BALLOT_BIT, SubgroupOperation::BALLOT},
+        {VK_SUBGROUP_FEATURE_SHUFFLE_BIT, SubgroupOperation::SHUFFLE},
+        {VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT, SubgroupOperation::SHUFFLE_RELATIVE},
+        {VK_SUBGROUP_FEATURE_CLUSTERED_BIT, SubgroupOperation::CLUSTERED},
+        {VK_SUBGROUP_FEATURE_QUAD_BIT, SubgroupOperation::QUAD},
+    }};
+    SubgroupOperation operations = SubgroupOperation::NONE;
+    for (const auto& [bit, operation] : OPERATIONS)
+    {
+        if ((flags & bit) != 0)
+        {
+            operations |= operation;
+        }
+    }
+    return operations;
+}
+
 /// @brief gfx memory properties of Vulkan memory property flags.
 [[nodiscard]] constexpr auto
 from_vulkan_memory_properties(VkMemoryPropertyFlags flags) noexcept -> MemoryProperty

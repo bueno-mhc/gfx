@@ -20,7 +20,8 @@
       },
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_CXX_COMPILER": "g++"
+        "CMAKE_CXX_COMPILER": "g++",
+        "GFX_PHYSICS_BACKEND_GPU_XPBD": "ON"
       }
     },
     {

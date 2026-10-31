@@ -291,6 +291,8 @@ VulkanPhysicalDevice::fill_properties()
     gfx_limits.minimum_texel_buffer_offset_alignment = limits.minTexelBufferOffsetAlignment;
     gfx_limits.non_coherent_atom_size = limits.nonCoherentAtomSize;
     gfx_limits.maximum_draw_indirect_count = limits.maxDrawIndirectCount;
+    gfx_limits.maximum_storage_buffer_range = limits.maxStorageBufferRange;
+    gfx_limits.maximum_compute_shared_memory_size = limits.maxComputeSharedMemorySize;
 
     // Limits of Vulkan 1.1 to 1.3 (devices without them cannot run the backend anyway).
     if (capabilities.has_vulkan_1_3())
@@ -299,6 +301,10 @@ VulkanPhysicalDevice::fill_properties()
         gfx_limits.maximum_multiview_view_count = capabilities.properties11.maxMultiviewViewCount;
         gfx_limits.minimum_subgroup_size = capabilities.properties13.minSubgroupSize;
         gfx_limits.maximum_subgroup_size = capabilities.properties13.maxSubgroupSize;
+        if ((capabilities.properties11.subgroupSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0)
+        {
+            gfx_limits.subgroup_operations = from_vulkan_subgroup_operations(capabilities.properties11.subgroupSupportedOperations);
+        }
 
         // Bindless arrays are visible to every stage: the per-stage limits apply too.
         const VkPhysicalDeviceVulkan12Properties& properties12 = capabilities.properties12;
@@ -499,6 +505,10 @@ VulkanPhysicalDevice::supports(DeviceFeature feature) const noexcept -> bool
             return supports(DeviceFeature::PRESENTATION) && capabilities.has_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 capabilities.has_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME) &&
                 capabilities.present_id_features.presentId == VK_TRUE && capabilities.present_wait_features.presentWait == VK_TRUE;
+        case DeviceFeature::SHADER_INTEGER64_ATOMICS:
+            return features12.shaderBufferInt64Atomics == VK_TRUE && features12.shaderSharedInt64Atomics == VK_TRUE;
+        case DeviceFeature::SHADER_MEMORY_MODEL:
+            return features12.vulkanMemoryModel == VK_TRUE && features12.vulkanMemoryModelDeviceScope == VK_TRUE;
     }
     return false;
 }

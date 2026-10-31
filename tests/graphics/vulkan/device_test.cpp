@@ -1,11 +1,14 @@
 #include "vulkan_test.hpp"
 
+import gfx.tests.vulkan_shaders;
+
 namespace
 {
 
 using namespace gfx;
 using gfx::tests::VulkanDeviceTest;
 using gfx::tests::VulkanInstanceTest;
+namespace shaders = gfx::tests::vulkan_shaders;
 
 auto
 contains(std::string_view text, std::string_view part) -> bool
@@ -218,6 +221,85 @@ TEST_F(VulkanDeviceTest, DevicesOfBothGpusCanCoexist)
         device->queue(QueueType::GRAPHICS).submit({});
         device->wait_idle();
     }
+}
+
+TEST_F(VulkanDeviceTest, ComputeLimitsAndFeaturesAreReported)
+{
+    // Vulkan's guaranteed minimums; subgroups of compute shaders have their basic operations (Vulkan 1.1).
+    const DeviceLimits& limits = m_physical_device->properties().limits;
+    EXPECT_GE(limits.maximum_storage_buffer_range, std::uint64_t{1} << 27U);
+    EXPECT_GE(limits.maximum_compute_shared_memory_size, 16384U);
+    EXPECT_TRUE(has_all(limits.subgroup_operations, SubgroupOperation::BASIC)) << to_string(limits.subgroup_operations);
+
+    // The memory model costs nothing (enabled when supported); 64-bit atomics only when required.
+    EXPECT_EQ(m_device->enabled(DeviceFeature::SHADER_MEMORY_MODEL), m_physical_device->supports(DeviceFeature::SHADER_MEMORY_MODEL));
+    EXPECT_FALSE(m_device->enabled(DeviceFeature::SHADER_INTEGER64_ATOMICS));
+    EXPECT_TRUE(m_device->enabled(DeviceFeature::TIMELINE_SEMAPHORE)) << "core features are always enabled";
+    EXPECT_FALSE(m_device->enabled(DeviceFeature::RAY_TRACING)) << "costly features only when required";
+}
+
+/// @brief A device with 64-bit atomics and the memory model.
+class VulkanWideAtomicsTest : public VulkanDeviceTest
+{
+protected:
+    [[nodiscard]] auto required_features() const -> std::vector<DeviceFeature> override
+    {
+        return {DeviceFeature::SHADER_INTEGER64_ATOMICS, DeviceFeature::SHADER_MEMORY_MODEL};
+    }
+};
+
+/// @brief Push constants of wide_atomics.comp.
+struct WideAtomicsPush
+{
+    std::uint32_t keys = 0;
+    std::uint32_t counter = 0;
+    std::uint32_t result = 0;
+    std::uint32_t count = 0;
+};
+
+TEST_F(VulkanWideAtomicsTest, WorkgroupsExchangeSixtyFourBitKeysWithinADispatch)
+{
+    EXPECT_TRUE(m_device->enabled(DeviceFeature::SHADER_INTEGER64_ATOMICS));
+    EXPECT_TRUE(m_device->enabled(DeviceFeature::SHADER_MEMORY_MODEL));
+    std::unique_ptr<ShaderModule> module = m_device->create_shader_module(shaders::wide_atomics_comp);
+    std::unique_ptr<ComputePipeline> pipeline = m_device->create_compute_pipeline({.shader = module->handle(), .debug_name = "wide atomics"});
+    const auto storage = [this](std::string_view name) {
+        return m_device->create_buffer({.size = 16, .usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION,
+                                        .debug_name = name});
+    };
+    std::unique_ptr<Buffer> keys = storage("keys");
+    std::unique_ptr<Buffer> counter = storage("counter");
+    std::unique_ptr<Buffer> result = storage("result");
+
+    // Enough workgroups to run on every compute unit at once.
+    constexpr std::uint32_t COUNT = 64 * 1000 + 13;
+    run<QueueType::COMPUTE>([&](ComputeRecorder& recorder)
+    {
+        recorder.fill_buffer(keys->handle(), 0, WHOLE_SIZE, 0);
+        recorder.fill_buffer(counter->handle(), 0, WHOLE_SIZE, 0);
+        const GlobalMemoryBarrier filled{.source_stages = PipelineStage::TRANSFER,
+                                         .source_access = MemoryAccess::TRANSFER_WRITE,
+                                         .destination_stages = PipelineStage::COMPUTE_SHADER,
+                                         .destination_access = MemoryAccess::SHADER_STORAGE_READ | MemoryAccess::SHADER_STORAGE_WRITE};
+        recorder.barrier({.memory_barriers = std::span{&filled, 1}});
+        recorder.bind_pipeline(pipeline->handle());
+        recorder.push_constants(WideAtomicsPush{.keys = keys->bindless_index().value(),
+                                                .counter = counter->bindless_index().value(),
+                                                .result = result->bindless_index().value(),
+                                                .count = COUNT});
+        recorder.dispatch((COUNT + 63) / 64);
+    });
+
+    // The largest (index · 7 mod COUNT) is COUNT - 1, reached once: at the index whose product is COUNT - 1.
+    std::uint64_t expected = 0;
+    for (std::uint64_t index = 0; index < COUNT; ++index)
+    {
+        expected = std::max(expected, (((index * 7) % COUNT) << 32U) | index);
+    }
+    const std::vector<std::uint32_t> words = read_buffer<std::uint32_t>(*result, 2, ResourceState::COMPUTE_SHADER_STORAGE_WRITE);
+    EXPECT_EQ(words[0], static_cast<std::uint32_t>(expected & 0xFFFFFFFFU));
+    EXPECT_EQ(words[1], static_cast<std::uint32_t>(expected >> 32U));
+    EXPECT_EQ(read_buffer<std::uint32_t>(*counter, 1, ResourceState::COMPUTE_SHADER_STORAGE_WRITE)[0], (COUNT + 63) / 64);
 }
 
 } // namespace

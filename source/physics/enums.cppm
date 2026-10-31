@@ -39,6 +39,29 @@ enum class PhysicsBackendKind : std::uint8_t
     REFERENCE,    ///< The abstraction's own components: spatial broad phase, GJK/EPA, sequential impulses, integrators.
     NULL_BACKEND, ///< A world that throws BackendCapabilityError for everything: the template of custom backends.
     CUSTOM,       ///< The backend of GFX_PHYSICS_CUSTOM_BACKEND_TARGET (module gfx.physics.backends.custom).
+    GPU_XPBD,     ///< Extended position-based dynamics on the GPU, through the graphics library's compute (option
+                  ///< GFX_PHYSICS_BACKEND_GPU_XPBD; module gfx.physics.gpu_xpbd for the application's own device).
+};
+
+/// @brief How the GPU backend chooses between a pass that uses an optional GPU feature and its portable variant
+///        (GpuXpbdVariants).
+enum class GpuVariantChoice : std::uint8_t
+{
+    AUTOMATIC, ///< The variant using the feature when the device has it, the portable one otherwise.
+    PORTABLE,  ///< The portable variant, whatever the device has (shared memory instead of subgroups, two 32-bit
+               ///< passes instead of 64-bit atomics): what a device without the feature runs.
+};
+
+/// @brief The state of a body on the GPU backend: the bits of its flags word, which the backend's shaders receive as
+///        specialization constants (its motion locks follow, MotionLock's bits shifted by GPU_XPBD_BODY_LOCK_SHIFT).
+///        Bitmask.
+enum class GpuBodyFlag : std::uint32_t
+{
+    NONE      = 0,        ///< No bit: a free slot.
+    SIMULATED = 1U << 0,  ///< A live body (static unless DYNAMIC or KINEMATIC).
+    DYNAMIC   = 1U << 1,  ///< Moved by gravity, forces, impulses and constraints.
+    KINEMATIC = 1U << 2,  ///< Moved by its velocity only.
+    AWAKE     = 1U << 3,  ///< Simulated (asleep bodies keep their pose and have no velocity).
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -493,6 +516,43 @@ inline constexpr float MAXIMUM_ANGULAR_CORRECTION = 0.13962634F;
 /// @brief The fraction of a position error a correction iteration removes (non-linear Gauss–Seidel).
 inline constexpr float POSITION_CORRECTION_FACTOR = 0.2F;
 
+/// @brief Invocations per workgroup of every pass of the GPU backend (given to its shaders as a specialization
+///        constant; every Vulkan device runs workgroups of at least 128).
+inline constexpr std::uint32_t GPU_XPBD_WORKGROUP_SIZE = 64;
+
+/// @brief Where a body's motion locks (MotionLock's six bits) start in its flags word on the GPU backend (GpuBodyFlag).
+inline constexpr std::uint32_t GPU_XPBD_BODY_LOCK_SHIFT = 8;
+
+/// @brief Bytes of shared memory a workgroup of the GPU backend uses at most (Vulkan's guaranteed minimum).
+inline constexpr std::uint32_t GPU_XPBD_SHARED_MEMORY_SIZE = 16384;
+
+/// @brief Bytes of a storage buffer the GPU backend needs its shaders to address (Vulkan's guaranteed minimum, 128 MiB).
+inline constexpr std::uint64_t GPU_XPBD_STORAGE_BUFFER_RANGE = std::uint64_t{1} << 27U;
+
+/// @brief Bindless storage buffers a world of the GPU backend needs free in its device's table.
+inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 64;
+
+/// @brief Elements each invocation of the GPU backend's scans, reductions and sorts handles: a workgroup's tile holds
+///        GPU_XPBD_WORKGROUP_SIZE times as many.
+inline constexpr std::uint32_t GPU_XPBD_ITEMS_PER_INVOCATION = 8;
+
+/// @brief Elements of a workgroup's tile in the GPU backend's scans, reductions and sorts.
+inline constexpr std::uint32_t GPU_XPBD_TILE_SIZE = GPU_XPBD_WORKGROUP_SIZE * GPU_XPBD_ITEMS_PER_INVOCATION;
+
+/// @brief Elements a primitive of the GPU backend processes at most (a tile per workgroup, 65535 workgroups: the
+///        dispatch size every Vulkan device allows).
+inline constexpr std::uint32_t GPU_XPBD_MAXIMUM_ELEMENTS = 65535 * GPU_XPBD_TILE_SIZE;
+
+/// @brief Bits of a key each pass of the GPU backend's radix sort orders (2⁸ digits).
+inline constexpr std::uint32_t GPU_XPBD_RADIX_BITS = 8;
+
+/// @brief Keys up to which the GPU backend sorts by rank (each key counts the keys before it: one pass) instead of by radix.
+inline constexpr std::uint32_t GPU_XPBD_RANK_SORT_LIMIT = 4096;
+
+/// @brief The smallest subgroup the GPU backend's subgroup variant runs with (the subgroups of a workgroup are scanned by
+///        one subgroup: at most as many as it has invocations).
+inline constexpr std::uint32_t GPU_XPBD_MINIMUM_SUBGROUP_SIZE = 8;
+
 } // namespace gfx::physics
 
 export namespace gfx::camera
@@ -577,6 +637,29 @@ struct EnumerationTraits<physics::PhysicsBackendKind>
         EnumeratorName{physics::PhysicsBackendKind::REFERENCE, "REFERENCE"},
         EnumeratorName{physics::PhysicsBackendKind::NULL_BACKEND, "NULL_BACKEND"},
         EnumeratorName{physics::PhysicsBackendKind::CUSTOM, "CUSTOM"},
+        EnumeratorName{physics::PhysicsBackendKind::GPU_XPBD, "GPU_XPBD"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuVariantChoice>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuVariantChoice::AUTOMATIC, "AUTOMATIC"},
+        EnumeratorName{physics::GpuVariantChoice::PORTABLE, "PORTABLE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuBodyFlag>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuBodyFlag::SIMULATED, "SIMULATED"},
+        EnumeratorName{physics::GpuBodyFlag::DYNAMIC, "DYNAMIC"},
+        EnumeratorName{physics::GpuBodyFlag::KINEMATIC, "KINEMATIC"},
+        EnumeratorName{physics::GpuBodyFlag::AWAKE, "AWAKE"},
     };
 };
 
@@ -1132,6 +1215,8 @@ namespace gfx::enumeration_verification
 {
 
 static_assert(verify<physics::PhysicsBackendKind>(), "EnumerationTraits<physics::PhysicsBackendKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuVariantChoice>(), "EnumerationTraits<physics::GpuVariantChoice>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuBodyFlag>(), "EnumerationTraits<physics::GpuBodyFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsSubsystem>(), "EnumerationTraits<physics::PhysicsSubsystem>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsCapability>(), "EnumerationTraits<physics::PhysicsCapability>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::BodyKind>(), "EnumerationTraits<physics::BodyKind>::NAMES is out of sync with the enumeration");

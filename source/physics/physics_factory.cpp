@@ -13,6 +13,9 @@ import gfx.physics.backends.box3d;
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)
 import gfx.physics.backends.custom;
 #endif
+#if defined(GFX_WITH_PHYSICS_GPU_XPBD_BACKEND)
+import gfx.physics.gpu_xpbd;
+#endif
 
 namespace gfx::physics
 {
@@ -59,6 +62,16 @@ physics_backend_availability(PhysicsBackendKind backend) -> PhysicsBackendAvaila
             const bool available = reason.empty();
             return {.backend = backend, .built = true, .available = available, .reason = std::move(reason)};
         }
+        case PhysicsBackendKind::GPU_XPBD:
+        {
+#if defined(GFX_WITH_PHYSICS_GPU_XPBD_BACKEND)
+            std::string reason = gpu_xpbd::unavailable_reason();
+            const bool available = reason.empty();
+            return {.backend = backend, .built = true, .available = available, .reason = std::move(reason)};
+#else
+            return {.backend = backend, .built = false, .available = false, .reason = "the GPU backend was not built (the CMake option GFX_PHYSICS_BACKEND_GPU_XPBD is OFF)"};
+#endif
+        }
         case PhysicsBackendKind::CUSTOM:
         {
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)
@@ -81,7 +94,8 @@ available_physics_backends() -> std::vector<PhysicsBackendKind>
 {
     // Simulating backends first, the null backend last.
     std::vector<PhysicsBackendKind> backends;
-    for (const PhysicsBackendKind backend : {PhysicsBackendKind::BOX3D, PhysicsBackendKind::REFERENCE, PhysicsBackendKind::CUSTOM, PhysicsBackendKind::NULL_BACKEND})
+    for (const PhysicsBackendKind backend : {PhysicsBackendKind::BOX3D, PhysicsBackendKind::REFERENCE, PhysicsBackendKind::GPU_XPBD, PhysicsBackendKind::CUSTOM,
+                                              PhysicsBackendKind::NULL_BACKEND})
     {
         if (physics_backend_availability(backend).available)
         {
@@ -113,6 +127,10 @@ create_physics_world(const PhysicsWorldDescription& description,
 #if defined(GFX_WITH_PHYSICS_CUSTOM_BACKEND)
         case PhysicsBackendKind::CUSTOM:
             return custom_backend::create_physics_world(description);
+#endif
+#if defined(GFX_WITH_PHYSICS_GPU_XPBD_BACKEND)
+        case PhysicsBackendKind::GPU_XPBD:
+            return gpu_xpbd::create_physics_world(description);
 #endif
         default:
             reject_backend(availability);
