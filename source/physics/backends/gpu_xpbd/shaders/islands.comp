@@ -1,13 +1,13 @@
 #version 460
-// Islands of a step: dynamic bodies joined by contact constraints, by label propagation (each label the smallest body
-// index of its island, whatever the order the edges are hooked in: deterministic once converged). Modes:
-//   0 (bodies)  labels to themselves (dynamic bodies), island flags cleared, island timers to +inf;
-//   1 (slots)   hook: the roots of an edge's two bodies, the larger one pointed at the smaller (atomic minimum); with
-//               argument 1, the changes counted (the last round: none left means converged);
-//   2 (bodies)  pointer jumping: each label replaced by its root;
-//   3 (bodies)  awake bodies mark their island awake;
-//   4 (slots)   a dynamic body touching a moving kinematic one marks its island awake and kept awake;
-//   5 (bodies)  bodies asleep in an awake island wake up at rest (their sleep timer cleared).
+// Islands of a step: dynamic bodies joined by contact constraints and joints, by label propagation (each label the
+// smallest body index of its island, whatever the order the edges are hooked in: deterministic once converged). Modes:
+//   0 (bodies)       labels to themselves (dynamic bodies), island flags cleared, island timers to +inf;
+//   1 (constraints)  hook: the roots of an edge's two bodies, the larger one pointed at the smaller (atomic minimum);
+//                    with argument 1, the changes counted (the last round: none left means converged);
+//   2 (bodies)       pointer jumping: each label replaced by its root;
+//   3 (bodies)       awake bodies mark their island awake;
+//   4 (constraints)  a dynamic body touching or joined to a moving kinematic one marks its island awake and kept awake;
+//   5 (bodies)       bodies asleep in an awake island wake up at rest (their sleep timer cleared).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -16,7 +16,7 @@ const uint ISLAND_KEPT_AWAKE = 2U;
 
 bool is_dynamic(uint body)
 {
-    const uint flags = gpu_words[PARAMETERS.body_flags].words[body];
+    const uint flags = body_flags_of(body);
     return (flags & BODY_SIMULATED) != 0U && (flags & BODY_DYNAMIC) != 0U;
 }
 
@@ -37,7 +37,7 @@ uint root_of(uint body)
 
 bool moving_kinematic(uint body)
 {
-    const uint flags = gpu_words[PARAMETERS.body_flags].words[body];
+    const uint flags = body_flags_of(body);
     if ((flags & BODY_KINEMATIC) == 0U)
     {
         return false;
@@ -50,8 +50,8 @@ bool moving_kinematic(uint body)
 void main()
 {
     const uint index = gl_GlobalInvocationID.x;
-    const bool per_slot = push.mode == 1U || push.mode == 4U;
-    if (per_slot ? index >= slot_count() : index >= SOLVER.body_count)
+    const bool per_constraint = push.mode == 1U || push.mode == 4U;
+    if (per_constraint ? index >= constraint_count() : index >= SOLVER.body_count)
     {
         return;
     }
@@ -62,23 +62,23 @@ void main()
         gpu_words[SOLVER.island_timers].words[index] = floatBitsToUint(infinity());
         return;
     }
-    if (per_slot)
+    if (per_constraint)
     {
-        const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[contact_base(index)];
-        if ((header.w & CONTACT_ACTIVE) == 0U)
+        const Constraint loaded = load_constraint(index);
+        if (!loaded.in_use)
         {
             return;
         }
-        const bool first_dynamic = is_dynamic(header.x);
-        const bool second_dynamic = is_dynamic(header.y);
+        const bool first_dynamic = is_dynamic(loaded.first);
+        const bool second_dynamic = is_dynamic(loaded.second);
         if (push.mode == 1U)
         {
             if (!first_dynamic || !second_dynamic)
             {
                 return;
             }
-            const uint first = root_of(header.x);
-            const uint second = root_of(header.y);
+            const uint first = root_of(loaded.first);
+            const uint second = root_of(loaded.second);
             if (first != second)
             {
                 atomicMin(gpu_words[SOLVER.labels].words[max(first, second)], min(first, second));
@@ -89,13 +89,13 @@ void main()
             }
             return;
         }
-        if (first_dynamic && !second_dynamic && moving_kinematic(header.y))
+        if (first_dynamic && !second_dynamic && moving_kinematic(loaded.second))
         {
-            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(header.x)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
+            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(loaded.first)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
         }
-        if (second_dynamic && !first_dynamic && moving_kinematic(header.x))
+        if (second_dynamic && !first_dynamic && moving_kinematic(loaded.first))
         {
-            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(header.y)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
+            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(loaded.second)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
         }
         return;
     }

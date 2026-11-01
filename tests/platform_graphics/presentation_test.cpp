@@ -259,7 +259,7 @@ protected:
         const std::array batches{gfx::SubmitDescription{.command_buffers = command_buffers, .waits = waits, .signals = signals}};
         queue.submit(batches, fence->handle());
         const gfx::SwapchainStatus status = presentation.present(queue, *frame);
-        EXPECT_EQ(fence->wait(10s), gfx::WaitStatus::SIGNALED);
+        EXPECT_EQ(fence->wait(gfx::tests::GPU_WORK_TIMEOUT), gfx::WaitStatus::SIGNALED);
 
         // What the window shows.
         readback->invalidate_mapped_range();

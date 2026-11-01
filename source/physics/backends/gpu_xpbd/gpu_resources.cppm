@@ -85,8 +85,9 @@ struct GpuBodyReadback
 /// phase's shape kinds, contact algorithms, limits (face vertices, GJK iterations, EPA storage), the absent sub-shape,
 /// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity; the
 /// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
-/// compounds descended at once, the triangles' edge-on tolerance.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 48> SPECIALIZATION_CONSTANTS{{
+/// compounds descended at once, the triangles' edge-on tolerance; the solver's sleeping flag and colors; the joint part
+/// kinds, the absent body (the world), the joint flags.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 60> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -135,6 +136,18 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 48> SPECIAL
     {45, std::bit_cast<std::uint32_t>(TRIANGLE_FACE_TOLERANCE)},
     {46, std::to_underlying(GpuBodyFlag::SLEEPS)},
     {47, MAXIMUM_GPU_XPBD_COLORS},
+    {48, std::to_underlying(GpuJointPartKind::ANCHORS)},
+    {49, std::to_underlying(GpuJointPartKind::DISTANCE)},
+    {50, std::to_underlying(GpuJointPartKind::ALIGNED_AXIS)},
+    {51, std::to_underlying(GpuJointPartKind::ORIENTATION)},
+    {52, std::to_underlying(GpuJointPartKind::ANGLE)},
+    {53, std::to_underlying(GpuJointPartKind::SWING)},
+    {54, std::to_underlying(GpuJointPartKind::LINEAR_MOTOR)},
+    {55, std::to_underlying(GpuJointPartKind::ANGULAR_MOTOR)},
+    {56, NO_SOLVER_BODY},
+    {57, std::to_underlying(GpuJointFlag::ACTIVE)},
+    {58, std::to_underlying(GpuJointFlag::SOLVED)},
+    {59, std::to_underlying(GpuJointFlag::BROKEN)},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");

@@ -510,7 +510,7 @@ TEST_F(VulkanSubmissionAllocationTest, SubmissionsWaitsAndDeletionsAllocateNothi
         // Deletions (as many as batches), the CPU's value, the compute work waited for through its fence.
         enqueue_deletions(batch_count);
         host->signal(frame);
-        const WaitStatus compute_status = compute_done->wait(std::chrono::seconds{10});
+        const WaitStatus compute_status = compute_done->wait(tests::GPU_WORK_TIMEOUT);
         compute_done->reset();
         g_counting = false;
         ASSERT_EQ(compute_status, WaitStatus::SIGNALED) << "frame " << frame;

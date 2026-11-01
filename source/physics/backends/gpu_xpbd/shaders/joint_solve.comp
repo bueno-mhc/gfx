@@ -1,0 +1,337 @@
+#version 460
+// An iteration of the joints' position projection for one color (or the overflow set), one invocation per joint (Müller
+// et al. 2020, §3.3; XPBD, Macklin et al. 2016): the joint's parts in order (gpu_joints.cpp lists them: motors, springs,
+// angular parts, the anchors last), each from the joint's geometry as the earlier parts left it:
+//   - ANCHORS: the anchors' separation along the first frame's axes, each axis within its bounds (locked: 0; free: any);
+//   - DISTANCE: the anchors' distance within the bounds, along the line between them;
+//   - ALIGNED_AXIS: an axis of the two frames (a hinge's z) kept aligned: the rotation between them along the two other
+//     axes of the first frame;
+//   - ORIENTATION: the rotation from the first frame to the second, along the world's axes;
+//   - ANGLE: the second frame's angle about an axis of the first (twice the angle of the relative rotation's component
+//     and w, as the reference backend measures it) within the bounds, with its exact gradient (joint_rows.cpp's);
+//   - SWING: the angle between the frames' z axes at most the limit, about their common normal;
+//   - motors: the anchors' (the frames') relative motion along (about) an axis of the first frame over the substep driven
+//     to the target speed × h, the multiplier within ± the largest force (torque) × h² (a force is λ / h²).
+// A part constrains one to three axes together (a block: the parts of several axes solve their axes at once, through the
+// generalized inverse mass matrix A = Bᵀ K B of their axes B, K the bodies' at the anchors or about them — corrected along
+// one direction, a small body far from its anchor took the correction as a turn that moved the anchor sideways, and
+// pendulums stretched): Δλ = −(A⁻¹ (C + γ ∇C·Δx) + a λ) / (1 + γ + a), a spring's a = 1 / (ω h)² (its compliance α̃ =
+// a A: a frequency whatever the masses) and γ = 2ζ / (ω h) (ω = 2π × its frequency; rigid: 0), ∇C·Δx the error's
+// change by the bodies' motion over the substep; one axis gives XPBD's Δλ = (−C − α̃λ − γ ∇C·Δx) / ((1 + γ) w + α̃).
+// In a joint whose anchors are locked rigidly (a pivot: ball, hinge, cone-twist, rigid weld, six-DOF with its translations
+// locked), the angular parts turn the bodies about the pivot: the anchors' block eliminated (its Schur complement), each
+// angular correction comes with the anchors' impulse that keeps them together. Turned about their centers instead, small
+// bodies far from their pivot gave the turn back to the anchors at their next projection (turning them is cheaper than
+// moving them): a cone's limit converged by under 1 % per iteration and swings passed it.
+// The multipliers reset at the substep's first iteration (mode bit 0); the joint's impulses on the second body (summed
+// over the step) give its force and torque (joint_forces.comp). Colored joints write their bodies at once (no two of a
+// color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+const float PI = 3.14159265358979;
+
+// The joint's frames in the world now, the levers from the centers to the anchors, the anchors' separation (first to
+// second), the second frame in the first (w ≥ 0).
+struct Geometry
+{
+    vec4 frame_first;
+    vec4 frame_second;
+    vec4 relative;
+    vec3 lever_first;
+    vec3 lever_second;
+    vec3 separation;
+};
+
+Geometry joint_geometry(Body first, Body second, uint base)
+{
+    Geometry geometry;
+    geometry.frame_first = quaternion_multiply(first.orientation, gpu_vectors[SOLVER.joints].values[base + 3U]);
+    geometry.frame_second = quaternion_multiply(second.orientation, gpu_vectors[SOLVER.joints].values[base + 5U]);
+    const vec4 relative = quaternion_multiply(quaternion_conjugate(geometry.frame_first), geometry.frame_second);
+    geometry.relative = relative.w < 0.0 ? -relative : relative;
+    geometry.lever_first = rotate_by(first.orientation, gpu_vectors[SOLVER.joints].values[base + 2U].xyz);
+    geometry.lever_second = rotate_by(second.orientation, gpu_vectors[SOLVER.joints].values[base + 4U].xyz);
+    geometry.separation = (second.center + geometry.lever_second) - (first.center + geometry.lever_first);
+    return geometry;
+}
+
+// The unit vector of axis 0 (x), 1 (y) or 2 (z) (selected, not indexed: components are never indexed at run time).
+vec3 unit_axis(uint axis)
+{
+    return vec3(axis == 0U ? 1.0 : 0.0, axis == 1U ? 1.0 : 0.0, axis == 2U ? 1.0 : 0.0);
+}
+
+// What a part asks now: positional (at the anchors) or angular, along up to three axes (the basis' columns: unit
+// directions, or a gradient for a single axis) of which the mask's are constrained, its error along each (0: nothing to
+// correct), whether it is a motor (a single axis whose error is added to the bodies' motion along it, its multiplier
+// bounded), its spring.
+struct Row
+{
+    bool angular;
+    mat3 basis;
+    vec3 mask;
+    vec3 error;
+    bool motor;
+    float lowest;
+    float highest;
+    float frequency;
+    float damping_ratio;
+};
+
+Row joint_row(uint part, Geometry geometry, float h)
+{
+    const uint record = JOINT_PART_VECTORS * part;
+    const uvec4 header = gpu_word_vectors[SOLVER.joint_parts].values[record];
+    const vec4 lower = gpu_vectors[SOLVER.joint_parts].values[record + 1U];
+    const vec4 upper = gpu_vectors[SOLVER.joint_parts].values[record + 2U];
+    const uint kind = header.x;
+    const vec3 unit = unit_axis(header.y);
+    const mat3 frame = rotation_matrix(geometry.frame_first);
+    Row row = Row(false, mat3(0.0), vec3(1.0, 0.0, 0.0), vec3(0.0), false, -infinity(), infinity(), lower.w, upper.w);
+    if (kind == JOINT_ANCHORS)
+    {
+        // The separation along the first frame's axes beyond their bounds; locked axes (equal bounds) are constrained even
+        // when they hold (the others' corrections leave them as they are), bounded ones only when passed.
+        const vec3 local = transpose(frame) * geometry.separation;
+        const vec3 outside = local - clamp(local, lower.xyz, upper.xyz);
+        row.basis = frame;
+        row.mask = max(vec3(notEqual(outside, vec3(0.0))), vec3(equal(lower.xyz, upper.xyz)));
+        row.error = outside;
+    }
+    else if (kind == JOINT_DISTANCE)
+    {
+        const float distance = length(geometry.separation);
+        row.basis[0] = distance > 1e-9 ? geometry.separation / distance : vec3(0.0, 1.0, 0.0);
+        row.error.x = distance - clamp(distance, lower.x, upper.x);
+    }
+    else if (kind == JOINT_ALIGNED_AXIS || kind == JOINT_SWING)
+    {
+        // The angle between the frames' axes; a rotation of the second about their common normal opens it.
+        const vec3 first_axis = frame * unit;
+        const vec3 second_axis = rotate_by(geometry.frame_second, unit);
+        const vec3 bend = cross(first_axis, second_axis);
+        const float size = length(bend);
+        const float angle = atan(size, dot(first_axis, second_axis));
+        const vec3 normal = size > 1e-9 ? bend / size : frame * unit_axis((header.y + 1U) % 3U);
+        row.angular = true;
+        if (kind == JOINT_SWING)
+        {
+            row.basis[0] = normal;
+            row.error.x = max(angle - upper.x, 0.0);
+        }
+        else
+        {
+            // The rotation between the axes along the first frame's two other axes.
+            row.basis = mat3(frame * unit_axis((header.y + 1U) % 3U), frame * unit_axis((header.y + 2U) % 3U), vec3(0.0));
+            row.mask = vec3(1.0, 1.0, 0.0);
+            row.error = transpose(row.basis) * (normal * angle);
+        }
+    }
+    else if (kind == JOINT_ORIENTATION)
+    {
+        // The rotation from the first frame to the second, in the world (the shorter way), along the world's axes.
+        const vec4 world = quaternion_multiply(geometry.frame_second, quaternion_conjugate(geometry.frame_first));
+        const vec4 shorter = world.w < 0.0 ? -world : world;
+        const float size = length(shorter.xyz);
+        row.angular = true;
+        row.basis = mat3(1.0);
+        row.mask = vec3(1.0);
+        row.error = size > 1e-9 ? shorter.xyz * (2.0 * atan(size, shorter.w) / size) : vec3(0.0);
+    }
+    else if (kind == JOINT_ANGLE)
+    {
+        // 2 atan2(v · e, w) and the world axis along which the relative angular velocity changes it:
+        // ((e w + v × e) w + v (v · e)) / ((v · e)² + w²) in the first frame (exactly e for a turn about e alone).
+        const vec3 vector_part = geometry.relative.xyz;
+        const float component = dot(vector_part, unit);
+        const float w = geometry.relative.w;
+        const float scale = component * component + w * w;
+        float angle = 0.0;
+        vec3 gradient = frame * unit;
+        if (scale > 1e-12)
+        {
+            angle = 2.0 * atan(component, w);
+            angle = angle > PI ? angle - 2.0 * PI : angle;
+            gradient = frame * (((unit * w + cross(vector_part, unit)) * w + vector_part * component) / scale);
+        }
+        row.angular = true;
+        row.basis[0] = gradient;
+        row.error.x = angle - clamp(angle, lower.x, upper.x);
+    }
+    else
+    {
+        // A motor: the relative motion along (about) the axis over the substep driven to speed × h, with at most the
+        // largest force (torque).
+        row.angular = kind == JOINT_ANGULAR_MOTOR;
+        row.basis[0] = frame * unit;
+        row.error.x = -lower.x * h;
+        row.motor = true;
+        row.lowest = -upper.x * h * h;
+        row.highest = upper.x * h * h;
+        row.frequency = 0.0;
+    }
+    row.error *= row.mask;
+    return row;
+}
+
+// The cross product's matrix: cross_matrix(r) v = r × v.
+mat3 cross_matrix(vec3 r)
+{
+    return mat3(vec3(0.0, r.z, -r.y), vec3(-r.z, 0.0, r.x), vec3(r.y, -r.x, 0.0));
+}
+
+// Projects a row: its multipliers' change applied to both bodies (the second along the axes, the first against them),
+// the impulse on the second summed (positional: a force at its lever; angular: a torque).
+void project(Row row,
+             Geometry geometry,
+             float h,
+             bool pinned,
+             inout Body first,
+             inout Body second,
+             inout vec3 multipliers,
+             inout vec3 linear_impulse,
+             inout vec3 angular_impulse)
+{
+    // The bodies' generalized inverse mass matrix at the anchors (an impulse p there moves the second anchor by K p) or
+    // about them, and the anchors' (frames') relative motion over the substep. About a pivot, an angular impulse q comes
+    // with the anchors' impulse −K⁻¹ G q that keeps them together (G q: what q alone moves them by), and the angular
+    // matrix is the Schur complement I₁⁻¹ + I₂⁻¹ − Gᵀ K⁻¹ G.
+    const mat3 first_lever = cross_matrix(geometry.lever_first);
+    const mat3 second_lever = cross_matrix(geometry.lever_second);
+    const vec3 linear = first.inverse_mass + second.inverse_mass;
+    const mat3 point_masses = mat3(vec3(linear.x, 0.0, 0.0), vec3(0.0, linear.y, 0.0), vec3(0.0, 0.0, linear.z)) - first_lever * first.inverse_inertia * first_lever -
+                              second_lever * second.inverse_inertia * second_lever;
+    mat3 inverse_masses = point_masses;
+    mat3 pivot = mat3(0.0);
+    vec3 motion_world = (second.displacement + cross(second.rotation, geometry.lever_second)) - (first.displacement + cross(first.rotation, geometry.lever_first));
+    if (row.angular)
+    {
+        inverse_masses = first.inverse_inertia + second.inverse_inertia;
+        motion_world = second.rotation - first.rotation;
+        const float point_determinant = determinant(point_masses);
+        if (pinned && point_determinant > 0.0)
+        {
+            const mat3 moved = -first_lever * first.inverse_inertia - second_lever * second.inverse_inertia;
+            pivot = -inverse(point_masses) * moved;
+            inverse_masses += transpose(moved) * pivot;
+        }
+    }
+
+    // Along the row's axes: axes nothing moves along are left out; the others solved together.
+    mat3 matrix = transpose(row.basis) * inverse_masses * row.basis;
+    vec3 mask = row.mask * vec3(greaterThan(vec3(matrix[0][0], matrix[1][1], matrix[2][2]), vec3(0.0)));
+    const vec3 motion = mask * (transpose(row.basis) * motion_world);
+    const vec3 error = mask * (row.motor ? vec3(motion.x + row.error.x, 0.0, 0.0) : row.error);
+    if (!row.motor && all(equal(error, vec3(0.0))))
+    {
+        return;
+    }
+    const mat3 kept = mat3(vec3(mask.x, 0.0, 0.0), vec3(0.0, mask.y, 0.0), vec3(0.0, 0.0, mask.z));
+    matrix = kept * matrix * kept + mat3(1.0) - kept;
+    const float diagonal = matrix[0][0] * matrix[1][1] * matrix[2][2];
+    const mat3 solved = abs(determinant(matrix)) > 1e-6 * abs(diagonal)
+                            ? inverse(matrix)
+                            : mat3(vec3(1.0 / matrix[0][0], 0.0, 0.0), vec3(0.0, 1.0 / matrix[1][1], 0.0), vec3(0.0, 0.0, 1.0 / matrix[2][2]));
+
+    // XPBD with the spring's compliance and damping, the motor's bound.
+    float compliance = 0.0;
+    float damping = 0.0;
+    if (row.frequency > 0.0)
+    {
+        const float omega_h = 2.0 * PI * row.frequency * h;
+        compliance = 1.0 / (omega_h * omega_h);
+        damping = 2.0 * row.damping_ratio / omega_h;
+    }
+    vec3 delta = mask * (-(solved * (error + damping * motion) + compliance * multipliers) / (1.0 + damping + compliance));
+    if (row.motor)
+    {
+        delta.x = clamp(multipliers.x + delta.x, row.lowest, row.highest) - multipliers.x;
+    }
+    multipliers += delta;
+    if (all(equal(delta, vec3(0.0))))
+    {
+        return;
+    }
+    const vec3 impulse = row.basis * delta;
+    if (row.angular)
+    {
+        correct_rotation(second, impulse);
+        correct_rotation(first, -impulse);
+        angular_impulse += impulse;
+        const vec3 held = pivot * impulse;
+        if (any(notEqual(held, vec3(0.0))))
+        {
+            correct_position(second, geometry.lever_second, held);
+            correct_position(first, geometry.lever_first, -held);
+            linear_impulse += held;
+            angular_impulse += cross(geometry.lever_second, held);
+        }
+        return;
+    }
+    correct_position(second, geometry.lever_second, impulse);
+    correct_position(first, geometry.lever_first, -impulse);
+    linear_impulse += impulse;
+    angular_impulse += cross(geometry.lever_second, impulse);
+}
+
+void main()
+{
+    const uint key = push.argument;
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= color_count(key))
+    {
+        return;
+    }
+    const uint joint = color_constraint(key, index);
+    const uint base = joint_base(joint);
+    const uvec4 header = gpu_word_vectors[SOLVER.joints].values[base];
+    if ((header.z & JOINT_ACTIVE) == 0U)
+    {
+        return;
+    }
+    const uint first_part = gpu_word_vectors[SOLVER.joints].values[base + 1U].x;
+    Body first = load_body(header.x);
+    Body second = load_body(header.y);
+    const vec3 first_center = first.center;
+    const vec3 first_rotation = first.rotation;
+    const vec3 second_center = second.center;
+    const vec3 second_rotation = second.rotation;
+    const float h = PARAMETERS.gravity.w;
+    const bool reset = (push.mode & 1U) != 0U;
+
+    // Whether its anchors are locked rigidly (a pivot the angular parts turn the bodies about).
+    bool pinned = false;
+    for (uint part = first_part; part < first_part + header.w; ++part)
+    {
+        const uint record = JOINT_PART_VECTORS * part;
+        const vec4 lower = gpu_vectors[SOLVER.joint_parts].values[record + 1U];
+        const vec4 upper = gpu_vectors[SOLVER.joint_parts].values[record + 2U];
+        pinned = pinned || (gpu_word_vectors[SOLVER.joint_parts].values[record].x == JOINT_ANCHORS && all(equal(lower, vec4(0.0))) && all(equal(upper.xyz, vec3(0.0))));
+    }
+
+    // The parts in order, each from the geometry the earlier ones left.
+    vec3 linear_impulse = vec3(0.0);
+    vec3 angular_impulse = vec3(0.0);
+    for (uint part = first_part; part < first_part + header.w; ++part)
+    {
+        vec3 multipliers = reset ? vec3(0.0) : gpu_vectors[SOLVER.joint_multipliers].values[part].xyz;
+        const Geometry geometry = joint_geometry(first, second, base);
+        const Row row = joint_row(part, geometry, h);
+        project(row, geometry, h, pinned, first, second, multipliers, linear_impulse, angular_impulse);
+        gpu_vectors[SOLVER.joint_multipliers].values[part] = vec4(multipliers, 0.0);
+    }
+    gpu_vectors[SOLVER.joint_impulses].values[2U * joint].xyz += linear_impulse;
+    gpu_vectors[SOLVER.joint_impulses].values[2U * joint + 1U].xyz += angular_impulse;
+
+    if ((push.mode & 2U) != 0U)
+    {
+        gpu_vectors[SOLVER.corrections].values[4U * joint] = vec4(first.center - first_center, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 1U] = vec4(first.rotation - first_rotation, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 2U] = vec4(second.center - second_center, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 3U] = vec4(second.rotation - second_rotation, 0.0);
+        return;
+    }
+    store_body_pose(header.x, first);
+    store_body_pose(header.y, second);
+}

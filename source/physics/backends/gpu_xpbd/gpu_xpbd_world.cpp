@@ -1,7 +1,8 @@
-// GpuXpbdBackend: the edits become patches of the GPU body arrays and the colliders' data; a step is one command buffer
-// (patches, the step's start backed up, the contacts' detection and coloring, substeps of prediction, contact projection
-// and velocity update with the contacts' velocity pass, sleep), submitted and waited for on the stepping thread, replayed
-// from its backed-up start when a buffer or the recorded passes overflowed, and read back into the pending snapshot.
+// GpuXpbdBackend: the edits become patches of the GPU body arrays, the colliders' data and the joints' data; a step is one
+// command buffer (patches, the step's start backed up, the contacts' detection and the coloring of joints and contacts,
+// substeps of prediction, joint and contact projection and velocity update with the contacts' velocity pass, the joints'
+// forces, sleep), submitted and waited for on the stepping thread, replayed from its backed-up start when a buffer or the
+// recorded passes overflowed, and read back into the pending snapshot (bodies, joint states, broken joints).
 module gfx.physics.gpu_xpbd;
 
 import std;
@@ -177,10 +178,12 @@ same_bytes(std::span<const Element> first,
 
 // ===================================================================================================== the edits
 
-/// Marks what each edit changed of the bodies and colliders (forces and impulses come after: they need the final centers).
+/// Marks what each edit changed of the bodies, colliders and joints (forces and impulses come after: they need the final
+/// centers).
 struct ChangeMarker
 {
     GpuXpbdBackend& backend;
+    const WorldSnapshot& pending;
 
     void operator()(const edits::CreateRigidBody& change) const
     {
@@ -319,6 +322,37 @@ struct ChangeMarker
         collider_changed(change.collider, false);
     }
 
+    // Joints: their frames, fixed at their creation from their bodies' poses (their parts and states come from the records
+    // each step); a joint created, changed or enabled wakes its bodies.
+    void operator()(const edits::CreateJoint& change) const
+    {
+        const auto [first, second] = joint_bodies(change.description);
+        const auto pose_of = [this](RigidBodyHandle body) {
+            const RigidBodyRecord* record = body ? find(pending, body) : nullptr;
+            return record != nullptr ? record->state.pose : Transform{};
+        };
+        backend.joint_entry(change.joint) = {.handle = change.joint, .frames = joint_frames(change.description, pose_of(first), pose_of(second))};
+        wake(change.description);
+    }
+
+    void operator()(const edits::DestroyJoint& change) const
+    {
+        backend.joint_entry(change.joint) = {};
+    }
+
+    void operator()(const edits::UpdateJoint& change) const
+    {
+        wake(change.description);
+    }
+
+    void operator()(const edits::SetJointEnabled& change) const
+    {
+        if (const JointRecord* record = find(pending, change.joint))
+        {
+            wake(record->configuration);
+        }
+    }
+
     // The rest: the records are all the backend needs (the world's settings, motion quality, contact events...).
     template<class Change>
     void operator()(const Change& /*change*/) const
@@ -339,6 +373,18 @@ private:
         BodyEntry& entry = backend.body_entry(body);
         entry.reconfigured = true;
         entry.woken = entry.woken || wakes;
+    }
+
+    void wake(const JointDescription& joint) const
+    {
+        const auto [first, second] = joint_bodies(joint);
+        for (const RigidBodyHandle body : {first, second})
+        {
+            if (body)
+            {
+                backend.body_entry(body).woken = true;
+            }
+        }
     }
 
     void push(RigidBodyHandle body) const
@@ -466,16 +512,11 @@ void
 GpuXpbdBackend::check(const WorldEdit& edit,
                       const RecordedWorld& /*recorded*/) const
 {
-    // What later phases bring is refused when recorded, never ignored; user constraints are refused for good.
+    // What later phases bring is refused when recorded, never ignored; user constraints are refused for good. Every joint
+    // kind is simulated.
     if (const auto* collider = std::get_if<edits::CreateCollider>(&edit))
     {
         GpuNarrowPhase::check_shape(*collider->description.shape);
-    }
-    if (std::holds_alternative<edits::CreateJoint>(edit))
-    {
-        throw_unsupported(identity(), "PhysicsWorld::create_joint", PhysicsCapability::WORLD_OBJECTS,
-                          "the GPU backend does not simulate joints yet (they arrive with phase G6 of docs/gpu-xpbd-design.md)",
-                          "use another backend");
     }
     if (std::holds_alternative<edits::CreateTrigger>(edit))
     {
@@ -519,6 +560,17 @@ GpuXpbdBackend::collider_entry(ColliderHandle collider) -> ColliderEntry&
     return m_colliders[index];
 }
 
+auto
+GpuXpbdBackend::joint_entry(JointHandle joint) -> JointEntry&
+{
+    const std::uint32_t index = slot(joint);
+    if (m_joints.size() <= index)
+    {
+        m_joints.resize(index + 1);
+    }
+    return m_joints[index];
+}
+
 void
 GpuXpbdBackend::colliders_changed(bool lists,
                                   bool statics) noexcept
@@ -547,7 +599,7 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
                       WorldSnapshot& pending)
 {
     // What changed first, then the forces and impulses about the centers the patches will have.
-    const ChangeMarker marker{.backend = *this};
+    const ChangeMarker marker{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
     {
         std::visit(marker, edit);
@@ -736,6 +788,69 @@ GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
     m_statics_dirty = false;
 }
 
+void
+GpuXpbdBackend::update_joints(const WorldSnapshot& pending)
+{
+    // Each joint's bodies, flags (active while enabled), frames about its bodies' centers of mass, breaking thresholds and
+    // parts; the bodies joints keep apart (enabled joints between two bodies), sorted.
+    const auto joint_count = static_cast<std::uint32_t>(pending.joints.size());
+    std::vector<GpuJoint> joints(joint_count);
+    std::vector<GpuJointPart> parts;
+    std::vector<std::array<std::uint32_t, 2>> joined;
+    for (std::uint32_t joint_slot = 0; joint_slot < joint_count; ++joint_slot)
+    {
+        const JointRecord& record = pending.joints[joint_slot];
+        if (!record.handle || joint_slot >= m_joints.size())
+        {
+            continue;
+        }
+        const auto [first, second] = joint_bodies(record.configuration);
+        const RigidBodyRecord* first_record = find(pending, first);
+        const RigidBodyRecord* second_record = second ? find(pending, second) : nullptr;
+        if (first_record == nullptr || (second && second_record == nullptr))
+        {
+            continue;
+        }
+        const JointFrames& frames = m_joints[joint_slot].frames;
+        const Vector3 first_center = effective_mass(*first_record).center_of_mass;
+        const Vector3 second_center = second_record != nullptr ? effective_mass(*second_record).center_of_mass : Vector3{};
+        const JointBreaking breaking = std::visit([](const auto& description) { return description.breaking; }, record.configuration);
+        const auto first_part = static_cast<std::uint32_t>(parts.size());
+        append_joint_parts(record.configuration, parts);
+        joints[joint_slot] = {.first = slot(first),
+                              .second = second ? slot(second) : NO_SOLVER_BODY,
+                              .flags = record.state.enabled ? std::to_underlying(GpuJointFlag::ACTIVE) : 0U,
+                              .part_count = static_cast<std::uint32_t>(parts.size()) - first_part,
+                              .first_part = first_part,
+                              .reserved = {},
+                              .first_position = vector(frames.first.position - first_center, breaking.force),
+                              .first_orientation = vector(frames.first.orientation),
+                              .second_position = vector(frames.second.position - second_center, breaking.torque),
+                              .second_orientation = vector(frames.second.orientation)};
+        if (record.state.enabled && second && keeps_apart(record.configuration))
+        {
+            const std::uint32_t first_slot = slot(first);
+            const std::uint32_t second_slot = slot(second);
+            joined.push_back({std::min(first_slot, second_slot), std::max(first_slot, second_slot)});
+        }
+    }
+    std::ranges::sort(joined);
+    const auto [duplicates, end] = std::ranges::unique(joined);
+    joined.erase(duplicates, end);
+
+    // Uploaded when anything changed.
+    const bool changed = !same_bytes(std::span<const GpuJoint>{joints}, std::span<const GpuJoint>{m_joint_data}) ||
+                         !same_bytes(std::span<const GpuJointPart>{parts}, std::span<const GpuJointPart>{m_part_data}) ||
+                         !same_bytes(std::span<const std::array<std::uint32_t, 2>>{joined}, std::span<const std::array<std::uint32_t, 2>>{m_joined_data});
+    if (changed)
+    {
+        m_solver.set_joints(joints, parts, joined);
+        m_joint_data = std::move(joints);
+        m_part_data = std::move(parts);
+        m_joined_data = std::move(joined);
+    }
+}
+
 auto
 GpuXpbdBackend::step_motion(const WorldSnapshot& pending,
                             float seconds) const noexcept -> float
@@ -781,6 +896,7 @@ GpuXpbdBackend::simulate(float seconds,
     try
     {
         update_colliders(pending);
+        update_joints(pending);
         m_substep_seconds = seconds / static_cast<float>(substeps);
 
         // The step, replayed from its start while a buffer or the recorded passes overflowed (each time with room for
@@ -846,7 +962,11 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     const auto patch_count = static_cast<std::uint32_t>(m_body_patches.size());
     m_parameters.reserve(m_device, sizeof(GpuStepParameters), m_retired);
     m_patches.reserve(m_device, std::max<std::size_t>(patch_count, 1) * sizeof(GpuBodyPatch), m_retired);
-    m_readback.reserve(m_device, std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts), m_retired);
+    const std::uint32_t joint_count = m_solver.joint_count();
+    m_readback.reserve(m_device,
+                       std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts) +
+                           std::uint64_t{joint_count} * 2 * sizeof(GpuVector),
+                       m_retired);
 
     m_command_pool->reset();
     ComputeRecorder recorder{*m_command_buffer};
@@ -961,9 +1081,10 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
             m_solver.record_velocities(recorder, iteration == 0);
         }
     }
+    m_solver.record_joint_forces(recorder);
     m_solver.record_sleep(recorder);
 
-    // The results into the readback buffer: the bodies' arrays, their flags, the contacts' counts.
+    // The results into the readback buffer: the bodies' arrays, their flags, the solver's counts, the joints' results.
     recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
     std::uint64_t offset = 0;
     for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
@@ -977,6 +1098,13 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     offset += words;
     const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
     recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
+    offset += sizeof(GpuSolverCounts);
+    if (joint_count > 0)
+    {
+        const std::array joint_regions{
+            BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{joint_count} * 2 * sizeof(GpuVector)}};
+        recorder.copy_buffer(m_solver.joint_results_buffer().handle(), m_readback.buffer().handle(), joint_regions);
+    }
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
 }
 
@@ -994,7 +1122,8 @@ GpuXpbdBackend::read_counts() -> GpuSolverCounts
 void
 GpuXpbdBackend::read_back(WorldSnapshot& pending)
 {
-    // Arrays of centers, orientations, linear and angular velocities, then flags; sleep changes reported in slot order.
+    // Arrays of centers, orientations, linear and angular velocities, then flags; sleep changes reported in slot order;
+    // after the counts, the joints' results.
     m_readback.buffer().invalidate_mapped_range();
     const std::span<const std::byte> bytes = m_readback.bytes();
     const std::size_t vectors = std::size_t{m_body_count} * sizeof(GpuVector);
@@ -1024,6 +1153,31 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
         {
             state.awake = awake;
             pending.sleep_events.push_back({.kind = awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+        }
+    }
+
+    // The joints solved in the step: their force and torque (the step's averages); those that broke are disabled and
+    // reported (in slot order).
+    const std::size_t results = 4 * vectors + std::size_t{m_body_count} * sizeof(std::uint32_t) + sizeof(GpuSolverCounts);
+    const std::uint32_t joint_count = std::min(m_solver.joint_count(), static_cast<std::uint32_t>(pending.joints.size()));
+    for (std::uint32_t joint_slot = 0; joint_slot < joint_count; ++joint_slot)
+    {
+        JointRecord& record = pending.joints[joint_slot];
+        const GpuVector force = read_vector(bytes, results, 2 * std::size_t{joint_slot});
+        const auto flags = std::bit_cast<std::uint32_t>(force[3]);
+        if (!record.handle || (flags & std::to_underlying(GpuJointFlag::SOLVED)) == 0)
+        {
+            continue;
+        }
+        JointState& state = record.state;
+        state.force = vector3(force);
+        state.torque = vector3(read_vector(bytes, results, 2 * std::size_t{joint_slot} + 1));
+        if ((flags & std::to_underlying(GpuJointFlag::BROKEN)) != 0 && state.enabled)
+        {
+            state.enabled = false;
+            state.broken = true;
+            pending.joint_events.push_back(
+                {.kind = JointEventKind::BROKEN, .joint = record.handle, .force = length(state.force), .torque = length(state.torque), .constraint = {}});
         }
     }
 }

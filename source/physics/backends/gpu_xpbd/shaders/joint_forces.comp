@@ -1,0 +1,34 @@
+#version 460
+// The joints' forces and torques of a step and which broke, one invocation per joint slot. A joint solved in the step
+// (colored, or in the overflow set) reports its impulses on the second body summed over the step's substeps and
+// iterations, divided by substeps × h² (a force is λ / h²: the step's average, as the reference backend reports it), and
+// BROKEN when they pass its breaking force or torque (the backend then disables it: the CPU reads the result back and
+// uploads the joint inactive for the next step, so a replayed step breaks it again from the same start). A joint not
+// solved (inactive, or its bodies asleep) keeps its last force and torque, without flags.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+void main()
+{
+    const uint joint = gl_GlobalInvocationID.x;
+    if (joint >= SOLVER.joint_count)
+    {
+        return;
+    }
+    const uint result = 2U * joint;
+    if ((gpu_words[SOLVER.color_keys].words[joint] >> 1U) > OVERFLOW_COLOR)
+    {
+        gpu_word_vectors[SOLVER.joint_results].values[result].w = 0U;
+        return;
+    }
+    const float h = PARAMETERS.gravity.w;
+    const float scale = 1.0 / (float(PARAMETERS.substeps) * h * h);
+    const vec3 force = gpu_vectors[SOLVER.joint_impulses].values[result].xyz * scale;
+    const vec3 torque = gpu_vectors[SOLVER.joint_impulses].values[result + 1U].xyz * scale;
+    const uint base = joint_base(joint);
+    const float breaking_force = gpu_vectors[SOLVER.joints].values[base + 2U].w;
+    const float breaking_torque = gpu_vectors[SOLVER.joints].values[base + 4U].w;
+    const bool broken = length(force) > breaking_force || length(torque) > breaking_torque;
+    gpu_word_vectors[SOLVER.joint_results].values[result] = uvec4(floatBitsToUint(force), JOINT_SOLVED | (broken ? JOINT_BROKEN : 0U));
+    gpu_vectors[SOLVER.joint_results].values[result + 1U] = vec4(torque, 0.0);
+}

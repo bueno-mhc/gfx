@@ -52,6 +52,23 @@ mass_of(float mass,
             .inertia = gfx::Matrix3{.columns = {gfx::Vector3{.x = inertia.x}, gfx::Vector3{.y = inertia.y}, gfx::Vector3{.z = inertia.z}}}};
 }
 
+/// A user constraint of one row (the GPU backend refuses them all).
+class OneRowConstraint final : public UserConstraint
+{
+public:
+    [[nodiscard]] auto row_count() const noexcept -> std::uint32_t override
+    {
+        return 1;
+    }
+
+    void rows(const ConstraintFrame& /*first*/,
+              const ConstraintFrame& /*second*/,
+              std::span<ConstraintRow> rows) const noexcept override
+    {
+        rows[0] = {};
+    }
+};
+
 /// A world on each GPU (with 64-bit atomics when the GPU has them), with the validation layers.
 class GpuXpbdTest : public gfx::tests::VulkanDeviceTest,
                     public testing::WithParamInterface<std::size_t>
@@ -309,7 +326,7 @@ TEST_P(GpuXpbdTest, WhatLaterPhasesBringIsRefusedNow)
         nested = make_shape(CompoundShape{{CompoundChild{.shape = nested}}});
     }
     refused([&] { return body->add_collider({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
-    refused([&] { return simulated->create_joint(ball_and_socket_joint({.first = body->handle()})); }, "phase G6");
+    refused([&] { return simulated->create_constraint({.first = body->handle(), .constraint = std::make_shared<OneRowConstraint>()}); }, "USER_CONSTRAINTS");
     refused([&] { return simulated->create_soft_body(rope_preset({})); }, "phase G7");
     refused([&] { return simulated->create_trigger({.shape = make_shape(SphereShape{.radius = 1})}); }, "phase G8");
 }
@@ -357,7 +374,7 @@ TEST(GpuXpbdCapabilityTest, DevicesLackingRequiredCapabilitiesAreRefusedWithEach
             EXPECT_TRUE(contains(message, "maximum_compute_shared_memory_size: required 16384, reported 0")) << message;
             EXPECT_TRUE(contains(message, "maximum_storage_buffer_range: required 134217728, reported 0")) << message;
             EXPECT_TRUE(contains(message, "DeviceFeature::SHADER_MEMORY_MODEL")) << message;
-            EXPECT_TRUE(contains(message, "free bindless storage buffers: required 160, reported 0")) << message;
+            EXPECT_TRUE(contains(message, std::format("free bindless storage buffers: required {}, reported 0", GPU_XPBD_STORAGE_BUFFERS))) << message;
             EXPECT_FALSE(contains(message, "TIMELINE_SEMAPHORE")) << "the fake device has the core features: " << message;
         }
     }

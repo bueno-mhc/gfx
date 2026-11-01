@@ -54,6 +54,7 @@ if(GFX_BUILD_TESTS)
             set_tests_properties(UiEditorExample.${_gfx_backend} PROPERTIES
                 ENVIRONMENT "${_gfx_example_environment}"
                 LABELS example)
+            gfx_use_gpu_in_tests(UiEditorExample.${_gfx_backend})
         endif()
     endforeach()
 endif()

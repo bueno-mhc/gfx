@@ -1,8 +1,9 @@
 #version 460
 // The Jacobi gather of the overflow set (every active constraint in the Jacobi solver mode): each awake dynamic body adds
 // the corrections the overflow set's constraints computed for it, averaged over how many there are (mass splitting), in
-// its graph order — no floating-point atomics, the same sum every run. Mode 0: positions (the center moves, the orientation
-// turns, the substep's displacement and rotation take them); mode 1: velocities.
+// its graph order — no floating-point atomics, the same sum every run. Mode 0: positions, the joints' and the contacts' (the
+// center moves, the orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the
+// contacts' only (joints have no velocity pass).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -20,14 +21,15 @@ void main()
     for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < end; ++entry)
     {
         const uint value = gpu_words[SOLVER.graph_sorted_values].words[entry];
-        const uint slot = value >> 1U;
-        if (gpu_words[SOLVER.color_keys].words[slot] != OVERFLOW_COLOR)
+        const uint constraint = value >> 1U;
+        const uint key = gpu_words[SOLVER.color_keys].words[constraint];
+        if ((key >> 1U) != OVERFLOW_COLOR || (push.mode == 1U && (key & 1U) == 0U))
         {
             continue;
         }
         const uint side = value & 1U;
-        first_sum += gpu_vectors[SOLVER.corrections].values[4U * slot + 2U * side].xyz;
-        second_sum += gpu_vectors[SOLVER.corrections].values[4U * slot + 2U * side + 1U].xyz;
+        first_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side].xyz;
+        second_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side + 1U].xyz;
         ++count;
     }
     if (count == 0U)

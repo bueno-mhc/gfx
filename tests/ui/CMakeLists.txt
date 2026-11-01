@@ -118,7 +118,8 @@ gfx_add_test(gfx_ui_context_tests
     SOURCES context_test.cpp context_render_test.cpp input_widgets_test.cpp structure_test.cpp table_test.cpp docking_test.cpp
             navigation_test.cpp shortcut_test.cpp accessibility_test.cpp
     MODULES context_test_support.cppm
-    LIBRARIES gfx::ui)
+    LIBRARIES gfx::ui
+    GPU_TESTS ^Gpu/)
 gfx_add_ui_atlas(gfx_ui_context_tests
     NAME context_latin
     FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf
@@ -134,7 +135,8 @@ target_compile_definitions(gfx_ui_context_tests PRIVATE GFX_TEST_VULKAN_LAYER_DI
 if(TARGET gfx_ui_platform AND TARGET gfx_platform_graphics)
     gfx_add_test(gfx_ui_platform_tests
         SOURCES ui_platform_test.cpp accessibility_platform_test.cpp navigation_input_test.cpp
-        LIBRARIES gfx::ui_platform gfx::platform_graphics)
+        LIBRARIES gfx::ui_platform gfx::platform_graphics
+        GPU_TESTS UiWindowTest)
     if(WIN32)
         # The UI Automation client of accessibility_platform_test.cpp.
         target_link_libraries(gfx_ui_platform_tests PRIVATE ole32 oleaut32 uuid uiautomationcore)
@@ -153,7 +155,8 @@ endif()
 # the Vulkan validation layers (found by tests/graphics/vulkan; its fixtures in vulkan_test.hpp).
 gfx_add_test(gfx_ui_draw_tests
     SOURCES draw_list_test.cpp renderer_test.cpp
-    LIBRARIES gfx::ui)
+    LIBRARIES gfx::ui
+    GPU_TESTS ^Gpu/)
 gfx_add_ui_atlas(gfx_ui_draw_tests
     NAME draw_latin
     FONT ${GFX_UI_TEST_FONT_DIRECTORY}/NotoSans.ttf

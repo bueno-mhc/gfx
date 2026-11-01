@@ -1453,6 +1453,8 @@ its version, its license and what of it ends up in a program.
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one and the UI editor need the platform library and Vulkan, the UI editor the UI library and its atlas tools too; the physics one needs the physics library) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
+| `GFX_TEST_TIMEOUT` | `300` | Seconds a test may run before CTest stops it and reports it as failed |
+| `GFX_TEST_GPU_SLOTS` | `8` | How many tests using a GPU CTest runs at once |
 
 ## Project layout
 
@@ -1605,6 +1607,14 @@ cmake --workflow --preset debug
 Tests run in parallel through CTest (`ctest --preset debug`). Each GoogleTest case is registered as
 its own CTest test. Compilation tests (label `compilation`) build snippets that must be rejected and
 run one at a time; run only them with `ctest --preset debug -L compilation`.
+
+Every test has a time limit (`GFX_TEST_TIMEOUT`, 300 s by default): a test that hangs fails instead of
+holding the run. Tests that use a GPU take a slot of the CTest resource `gpus` while they run, so at
+most `GFX_TEST_GPU_SLOTS` of them run at once (8 by default) while CPU tests fill the other jobs: with
+every GPU test at once, the GPUs were shared so finely that tests waited minutes for their work. The
+setup test `GfxTestResources.Gpus` writes the resource file CTest reads; it runs first, and with any
+GPU test selected by `-R`. A new test executable names its GPU tests with `gfx_add_test(... GPU_TESTS
+<regex>)`, other tests with `gfx_use_gpu_in_tests(<test>...)`.
 
 The Vulkan tests (`gfx_vulkan_tests`) run on a real GPU with the validation layers; any validation
 error fails the test, and tests whose feature the GPU lacks are skipped. Environment variables:

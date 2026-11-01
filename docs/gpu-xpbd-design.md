@@ -3,7 +3,8 @@
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
 as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
 (§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
-with its 5 (§B "G4 as built"; committed ac87393). **G5 implemented** (§B "G5 as built", 9 deviations), awaiting validation.
+with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323).
+**G6 implemented** (§B "G6 as built", 7 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -863,6 +864,105 @@ woken by a push wakes within two steps, a lone box stays asleep; eight shape kin
 rounded box, hull, compound) come to rest on a triangle mesh and on a height field; two worlds with the same 40-body pile give
 the same bits every 30 steps; 400 balls dropped at once (replays) end finite and above the floor. `GpuXpbdTest`'s refusals
 now name the compound depth instead of colliders.
+
+### G6 as built (2026-11-01)
+
+**Joints in the world.** `create_joint()` is accepted for every joint kind; user constraints stay refused (`USER_CONSTRAINTS`,
+§A9). A joint's **frames** are fixed when it is created, from its bodies' poses, as the reference backend fixes them (a
+hinge's and a cone-twist's axis is their z, a slider's their x; a distance joint's anchors are in its bodies' frames) and kept
+by joint slot; each step the backend rebuilds from the records a 96-byte `GpuJoint` per joint slot (bodies — the second
+`NO_SOLVER_BODY` for the world —, `GpuJointFlag::ACTIVE` while enabled, its frames about its bodies' current centers of mass,
+its breaking force and torque, its parts), the parts, and the sorted pairs of bodies joined without `collide_connected`, and
+uploads them only when their bytes changed. Creating, updating or enabling a joint wakes its bodies.
+
+**Each joint kind is a list of parts** (`GpuJointPart`, 48 bytes: a `GpuJointPartKind`, an axis of the first frame, bounds,
+a spring), made on the CPU by `append_joint_parts()` (new unit `gpu_joints.cpp`) and projected in order by one shader: motors
+first, then springs, angular parts, and the anchors last (the last projected is the best kept).
+
+| Kind | Parts |
+|---|---|
+| distance | ROD: DISTANCE [length, length]; ROPE: DISTANCE [minimum, length]; SPRING: DISTANCE [length, length] soft (when its frequency is not 0) and DISTANCE [minimum, maximum] (when bounded); STUB: ANCHORS locked |
+| hinge | ANGULAR_MOTOR z, ANGLE z [0, 0] soft (its spring), ALIGNED_AXIS z, ANGLE z [lower, upper] (its limits), ANCHORS locked |
+| ball and socket | ANCHORS locked |
+| slider | LINEAR_MOTOR x, ANCHORS x [0, 0] soft (its spring), ORIENTATION, ANCHORS x within its limits, y and z locked |
+| fixed | ORIENTATION soft by its angular spring, ANCHORS locked soft by its linear spring |
+| cone-twist | SWING (the angle between the frames' z axes at most the limit), ANGLE z (its twist limits), ANCHORS locked |
+| six DOF | a motor per axis that has one; ORIENTATION when the three rotations are locked, else ANGLE per locked (0) or limited axis; ANCHORS per axis: locked 0, limited, free unbounded |
+
+Angles are measured as the reference backend measures them (`2 atan2(v·e, w)` of the second frame in the first, with its exact
+gradient), so limits and motors mean the same on both backends; motors drive the second body relative to the first.
+
+**Constraints numbered joints first.** `GpuContactSolver` became **`GpuConstraintSolver`**: constraints 0 … J − 1 are the joint
+slots, then the manifold slots, through the graph, the islands (joints join islands: a push on a chain's last link wakes the
+first), the Jones–Plassmann coloring (a joint's priority hashes its slot) and the Jacobi gather. A constraint's **color key** is
+its color × 2 + its kind (joints 0, contacts 1); the lists by key give each pass one color's joints or contacts. Each position
+iteration runs, per color, `joint_solve` and `contact_solve` without a barrier between them (a color's joints and contacts move
+different bodies), then the overflow sets and the gather; the velocity iterations stay contacts-only (joints have no velocity
+pass). `pairs_filter` leaves out pairs of bodies a joint keeps apart (a binary search of the joined pairs).
+
+**`joint_solve.comp`**, one invocation per joint per color: each part from the geometry the earlier parts left, XPBD with
+the multipliers reset at each substep (§A2), Δλ = −(A⁻¹(C + γ∇C·Δx) + aλ)/(1 + γ + a) along the part's one to three axes
+— A = BᵀKB the bodies' generalized inverse mass matrix along them, a spring's compliance α̃ = aA with a = 1/(ωh)² (a frequency
+whatever the masses), γ = 2ζ/(ωh) its damping, ∇C·Δx the error's change by the bodies' substep motion; one axis is XPBD's
+scalar update. Motors drive the relative motion over the substep (the substep's displacement and rotation accumulators) to the
+target speed × h, the multiplier within ± the largest force × h². **`joint_forces.comp`** after the last substep: a joint
+solved in the step reports the impulses it gave the second body over the step ÷ (substeps × h²) — the step's average force
+and torque (about the second body's center; the world's origin for the world), as the reference backend reports them since
+PH8 — and BROKEN past its thresholds. The CPU reads the results back (two vectors per joint slot after the counts) into
+`JointState`, and a BROKEN joint is disabled and reported as a `JointEvent` in slot order.
+
+**Deviations (for validation).**
+1. **Multi-axis parts are solved as blocks** (ANCHORS, ALIGNED_AXIS, ORIENTATION), not along their error's direction as
+   Müller et al. 2020 §3.3 write them (one scalar along Δx/|Δx|). Along one direction, the correction's split between moving and
+   turning a body follows that direction's generalized inverse mass: a small body far from its anchor (the pendulum's 0.67 kg bob
+   1 m below its hinge: turning it about 6000 times cheaper than moving it) took nearly radial corrections as turns that moved
+   its anchor sideways — the bob drifted to 1.27 m from the hinge and its period ran 4 % long. Solved with A = BᵀKB, the anchors
+   move exactly by their error (to first order).
+2. **Angular parts turn the bodies about the pivot** of a joint whose anchors are locked rigidly (ball, hinge, cone-twist, rigid
+   weld, six DOF with its translations locked): the anchors' block is eliminated (its Schur complement I₁⁻¹ + I₂⁻¹ − GᵀK⁻¹G, each
+   angular correction q with the anchors' impulse −K⁻¹Gq that keeps them together). Turned about their centers, small bodies far
+   from their pivot gave the turn back to the anchors at their next projection: a cone's limit converged by under 1 % per
+   iteration and a swing reached 0.37 rad past a limit of 0.3 (the reference solver, too, solves a limit's row apart from its
+   point's block).
+3. **Breaking is decided on the GPU, applied by the next upload**: `joint_forces` flags BROKEN in the joint's result; the CPU
+   disables the record and the next upload makes the joint inactive (rather than the GPU clearing the joint's enabled bit), so a
+   replayed step starts from the same joints. As on the reference backend, the joint still acted in the step it broke.
+4. **Motors drive the substep's relative motion** (the target is where the substep started plus speed × h), not a target
+   advanced from step to step: a motor held back by its force limit does not fall ever further behind.
+5. **Joints have no velocity pass**: springs damp through XPBD's γ term in the projection (as §A2's joints bullet says); the
+   interface has no other joint damping.
+6. **Forces in the overflow set** (every joint in the Jacobi mode, joints left without a color otherwise): the gather averages a
+   body's corrections over its overflow constraints, while a joint's force counts its whole multiplier — a joint sharing a body
+   with other overflow constraints reports up to that many times its load. Joints alone on their bodies (the tests' hooks)
+   report it exactly.
+7. **A joint not solved in a step** (its bodies asleep, or none of them dynamic) keeps its last force and torque (a sleeping
+   hanging body still reports its weight).
+
+**Enumerations and constants.** `GpuJointPartKind` {ANCHORS, DISTANCE, ALIGNED_AXIS, ORIENTATION, ANGLE, SWING, LINEAR_MOTOR,
+ANGULAR_MOTOR}, `GpuJointFlag` {ACTIVE, SOLVED, BROKEN} (bitmask); specialization constants 48–59 (the part kinds,
+`NO_SOLVER_BODY`, the joint flags); `GPU_XPBD_STORAGE_BUFFERS` 160 → 176 (six joint arrays). Shaders: `joint_solve`,
+`joint_forces` (new); `solver.glsl` (joint layouts, `Constraint` / `load_constraint()`, the world as an absent body,
+`correct_rotation()`, color keys, `hash_words()` moved there), `graph`, `color`, `islands`, `jacobi_gather`, `contact_solve`,
+`contact_velocity`, `contact_prepare` (counts the constraints), `pairs_filter` (joined bodies).
+
+**Measured** (`GpuXpbdJointMeasurementTest`: 50 chains of 20 boxes on 1000 ball joints swinging from the world, sleep off,
+default solver settings; Release without the validation layers): **graph coloring 2.1 ms per step on the RTX 5060, 5.0 ms on
+the Intel GPU; Jacobi 1.4 and 4.1 ms.** G5's pyramid did not slow down (coloring 3.6 / 4.2 ms, Jacobi 1.3 / 2.3 ms).
+
+**Found.**
+- The two coupling problems of deviations 1 and 2 (by the pendulum and cone-twist tests).
+- `std::minmax` of two temporaries returns references to them (GCC 16's `-Wdangling-reference` caught it).
+
+**Tests** (`gpu_xpbd_joint_test.cpp` in `gfx_physics_gpu_xpbd_tests`, each on both GPUs in both solver modes with the validation
+layers): the reference backend's scenarios — a pendulum's period (within 2 %) and length (1 cm); a hinge's limit (0.05 rad), a
+rope's length, a weak weld breaking (BROKEN event, disabled, the block falls), a wheel's motor speed (−3 rad/s within 0.05);
+a crate's lid breaking its hinge in the landing step on 1, 4 and 8 substeps while a hook reports its block's weight within 1 %;
+a six-DOF joint's locked axes and its limited angle (0.3 rad within 0.03) — then a slider's motor force (1000 N on 64 kg) and
+speed, its limit and axis; cone-twist swing and twist limits (0.3 and 0.2 rad within 0.03, reached); springs at their frequencies
+(a distance spring's and a hinge spring's periods 1 s within 3 %, the hinge's amplitude ω₀/ω, a soft weld's sag g/ω² within
+10 %); rods and stubs within 1 cm; joined bodies kept apart (no contact) unless `collide_connected`; a chain of four boxes
+sleeping together and woken through its joints by a push on its last link; the same jointed scene (hinge chain with a motor, a
+rope, a slider) giving the same bits twice. `GpuXpbdTest`'s refusals: user constraints instead of joints.
 
 ---
 

@@ -4,7 +4,8 @@
 if(GFX_BACKEND_VULKAN AND (GFX_PLATFORM_BACKEND_SDL3 OR GFX_PLATFORM_BACKEND_GLFW))
     gfx_add_test(gfx_presentation_tests
         SOURCES presentation_test.cpp
-        LIBRARIES gfx::platform_graphics)
+        LIBRARIES gfx::platform_graphics
+        GPU_TESTS .*)
     set(_gfx_layer_directory "")
     if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
         set(_gfx_layer_directory "${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")

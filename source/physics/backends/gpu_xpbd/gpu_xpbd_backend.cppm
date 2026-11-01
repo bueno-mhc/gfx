@@ -1,5 +1,6 @@
 // The GPU backend's internal partition: GpuXpbdBackend, a SteppedWorldBackend whose bodies live in GPU arrays (a CPU
-// mirror of what the last step read back, by slot), stepped by one command buffer per step on a compute-capable queue.
+// mirror of what the last step read back, by slot), stepped by one command buffer per step on a compute-capable queue;
+// its colliders and joints are uploaded when they change.
 module gfx.physics.gpu_xpbd:backend;
 
 import std;
@@ -26,6 +27,13 @@ struct ColliderEntry
     ColliderHandle handle{};  ///< Null: a free slot.
     RigidBodyHandle body{};   ///< Its body.
     std::uint32_t shape = 0;  ///< Its shape in the narrow phase's table.
+};
+
+/// What the backend keeps of a joint (by slot): its frames, fixed when it was created.
+struct JointEntry
+{
+    JointHandle handle{}; ///< Null: a free slot.
+    JointFrames frames{}; ///< In its bodies' frames.
 };
 
 /// What the backend keeps of a body: what the last step read back (exactly: patches of untouched values reuse them) and
@@ -125,9 +133,15 @@ public:
     /// The entry of @p collider's slot (grown when needed).
     [[nodiscard]] auto collider_entry(ColliderHandle collider) -> ColliderEntry&;
 
+    /// The entry of @p joint's slot (grown when needed).
+    [[nodiscard]] auto joint_entry(JointHandle joint) -> JointEntry&;
+
 private:
     /// The colliders' GPU data and lists from the records, when they changed; the bodies' radii.
     void update_colliders(const WorldSnapshot& pending);
+
+    /// The joints' GPU data, their parts and the bodies they keep apart from the records, when they changed.
+    void update_joints(const WorldSnapshot& pending);
 
     /// How far a body may move in a step of @p seconds at most (the boxes' and contacts' speculative margin).
     [[nodiscard]] auto step_motion(const WorldSnapshot& pending,
@@ -148,7 +162,7 @@ private:
     /// The contact counts the last step read back.
     [[nodiscard]] auto read_counts() -> GpuSolverCounts;
 
-    /// Reads the step's results back into @p pending and the entries (sleep transitions as events).
+    /// Reads the step's results back into @p pending and the entries (sleep transitions and broken joints as events).
     void read_back(WorldSnapshot& pending);
 
     // Declared first: destroyed last, after every resource of the device.
@@ -161,7 +175,7 @@ private:
     std::unique_ptr<TimelineSemaphore> m_timeline{};
     std::uint64_t m_submitted = 0;
     GpuPipelines m_pipelines;
-    GpuContactSolver m_solver;
+    GpuConstraintSolver m_solver;
 
     // The body arrays (one storage buffer each).
     GpuArray m_centers{"body centers", sizeof(GpuVector)};
@@ -211,6 +225,12 @@ private:
     bool m_lists_dirty = false;                                        ///< Which colliders are moving or static changed.
     bool m_statics_dirty = false;                                      ///< The static tree must be rebuilt.
     bool m_lists_changed = false;                                      ///< Since the last completed step (no anchors kept).
+
+    // Joints.
+    std::vector<JointEntry> m_joints{};                            ///< By joint slot.
+    std::vector<GpuJoint> m_joint_data{};                          ///< As last uploaded, by joint slot.
+    std::vector<GpuJointPart> m_part_data{};                       ///< As last uploaded.
+    std::vector<std::array<std::uint32_t, 2>> m_joined_data{};     ///< As last uploaded.
 };
 
 } // namespace gfx::physics::gpu_xpbd

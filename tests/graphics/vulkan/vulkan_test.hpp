@@ -15,6 +15,11 @@ import gfx;
 namespace gfx::tests
 {
 
+/// @brief How long a test waits for GPU work it submitted: far longer than any test's work takes, since the GPU may be
+///        waking from idle or running other test processes' work (a 10 s wait expired once for the first GPU tests of a
+///        full CTest run); a GPU that never finishes still fails the test.
+inline constexpr std::chrono::seconds GPU_WORK_TIMEOUT{60};
+
 /// @brief Validation messages received by the debug callback (which may run on any thread).
 class ValidationMessages
 {
@@ -226,7 +231,7 @@ protected:
         const std::array command_buffers{command_buffer};
         const std::array batches{SubmitDescription{.command_buffers = command_buffers}};
         queue.submit(batches, fence->handle());
-        ASSERT_EQ(fence->wait(std::chrono::seconds{10}), WaitStatus::SIGNALED);
+        ASSERT_EQ(fence->wait(GPU_WORK_TIMEOUT), WaitStatus::SIGNALED);
     }
 
     /// @brief The first @p count elements of @p buffer (left in state @p state), copied through a

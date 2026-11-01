@@ -28,7 +28,8 @@ gfx_add_test(gfx_vulkan_tests
         diagnostics_test.cpp
         frame_resources_test.cpp
         mesh_test.cpp
-    LIBRARIES gfx::gfx)
+    LIBRARIES gfx::gfx
+    GPU_TESTS .*)
 target_compile_definitions(gfx_vulkan_tests PRIVATE
     GFX_TEST_VULKAN_LAYER_DIRECTORY="${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
 target_include_directories(gfx_vulkan_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -61,7 +62,8 @@ target_compile_definitions(gfx_vulkan_tests PRIVATE
 # therefore holds no other test).
 gfx_add_test(gfx_vulkan_allocation_tests
     SOURCES command_allocation_test.cpp
-    LIBRARIES gfx::gfx)
+    LIBRARIES gfx::gfx
+    GPU_TESTS .*)
 target_compile_definitions(gfx_vulkan_allocation_tests PRIVATE
     GFX_TEST_VULKAN_LAYER_DIRECTORY="${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
 target_include_directories(gfx_vulkan_allocation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -70,6 +72,7 @@ target_include_directories(gfx_vulkan_allocation_tests PRIVATE ${CMAKE_CURRENT_S
 # single hardware queue every queue type then shares: submissions go through the checks of shared hardware queues).
 add_test(NAME VulkanAllocation.FirstPhysicalDevice COMMAND gfx_vulkan_allocation_tests)
 set_tests_properties(VulkanAllocation.FirstPhysicalDevice PROPERTIES ENVIRONMENT "GFX_TEST_PHYSICAL_DEVICE=0")
+gfx_use_gpu_in_tests(VulkanAllocation.FirstPhysicalDevice)
 
 # A capture through RenderDoc's in-application API, when RenderDoc is installed: renderdoccmd injects
 # RenderDoc into the test process, which captures its own work and checks that the capture was written.
@@ -86,4 +89,5 @@ if(GFX_RENDERDOC_COMMAND)
         ENVIRONMENT "GFX_TEST_EXPECT_RENDERDOC=1;GFX_TEST_CAPTURE_DIRECTORY=${_gfx_capture_directory}"
         PASS_REGULAR_EXPRESSION "[[]  PASSED  []] 1 test"
         FAIL_REGULAR_EXPRESSION "[[]  FAILED  []]|[[]  SKIPPED []]")
+    gfx_use_gpu_in_tests(VulkanCapture.RenderDoc)
 endif()

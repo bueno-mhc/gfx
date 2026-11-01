@@ -1,6 +1,7 @@
-// What the contact solver's passes share (GpuContactSolver in gpu_solver.cppm): the solver's parameters and push
-// constants, the words of its counts, the layouts of colliders, instances, manifolds and contact constraints, and the
-// bodies as the constraint projections and the velocity pass see them.
+// What the solver's passes share (GpuConstraintSolver in gpu_solver.cppm): the solver's parameters and push constants,
+// the words of its counts, the layouts of colliders, instances, manifolds, contact constraints and joints, the
+// constraints (joints first, then contacts) as the graph, the coloring and the islands see them, and the bodies as the
+// constraint projections and the velocity pass see them.
 #ifndef GPU_XPBD_SOLVER_GLSL
 #define GPU_XPBD_SOLVER_GLSL
 
@@ -9,6 +10,20 @@
 
 layout(constant_id = 46) const uint BODY_SLEEPS = 0U;
 layout(constant_id = 47) const uint MAXIMUM_COLORS = 32U;
+
+// GpuJointPartKind, the absent body (NO_SOLVER_BODY: the world), GpuJointFlag.
+layout(constant_id = 48) const uint JOINT_ANCHORS = 0U;
+layout(constant_id = 49) const uint JOINT_DISTANCE = 0U;
+layout(constant_id = 50) const uint JOINT_ALIGNED_AXIS = 0U;
+layout(constant_id = 51) const uint JOINT_ORIENTATION = 0U;
+layout(constant_id = 52) const uint JOINT_ANGLE = 0U;
+layout(constant_id = 53) const uint JOINT_SWING = 0U;
+layout(constant_id = 54) const uint JOINT_LINEAR_MOTOR = 0U;
+layout(constant_id = 55) const uint JOINT_ANGULAR_MOTOR = 0U;
+layout(constant_id = 56) const uint NO_BODY = 0U;
+layout(constant_id = 57) const uint JOINT_ACTIVE = 0U;
+layout(constant_id = 58) const uint JOINT_SOLVED = 0U;
+layout(constant_id = 59) const uint JOINT_BROKEN = 0U;
 
 // ===================================================================================================== layouts
 // GpuSolverParameters in gpu_solver.cppm.
@@ -61,6 +76,14 @@ struct SolverParameters
     uint island_flags;
     uint island_timers;
     uint corrections;
+    uint joint_count;
+    uint joined_count;
+    uint joints;
+    uint joint_parts;
+    uint joint_multipliers;
+    uint joint_impulses;
+    uint joint_results;
+    uint joined_pairs;
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -72,7 +95,7 @@ layout(push_constant) uniform Push
 {
     uint parameters; // bindless index of the step's parameters
     uint solver;     // and of the solver's
-    uint argument;   // the pass's: a color, a round
+    uint argument;   // the pass's: a color key, a round
     uint mode;       // the pass's mode bits
 } push;
 
@@ -90,6 +113,7 @@ const uint COUNT_ACTIVE_CONSTRAINTS = 7U;
 const uint COUNT_CONTACT_POINTS = 8U;
 const uint COUNT_SLOTS = 9U;
 const uint COUNT_GRAPH_ENTRIES = 10U;
+const uint COUNT_CONSTRAINTS = 11U;
 
 uint count_word(uint word)
 {
@@ -102,11 +126,41 @@ uint slot_count()
     return count_word(COUNT_SLOTS);
 }
 
-// Colors: 0 .. MAXIMUM_COLORS - 1, then the overflow set (solved Jacobi-style), then inactive slots; uncolored while
-// the coloring runs.
+// The constraints of this step: the joint slots (constraints 0 .. joint_count - 1), then the manifold slots.
+uint constraint_count()
+{
+    return count_word(COUNT_CONSTRAINTS);
+}
+
+// Colors: 0 .. MAXIMUM_COLORS - 1, then the overflow set (solved Jacobi-style), then inactive constraints; uncolored
+// while the coloring runs. A constraint's color key is its color × 2 + its kind (joints 0, contacts 1): the lists by key
+// give each pass the constraints of one color and kind.
 const uint UNCOLORED = 0xFFFFFFFFU;
 const uint OVERFLOW_COLOR = MAXIMUM_COLORS;
 const uint INACTIVE_COLOR = MAXIMUM_COLORS + 1U;
+
+uint color_key(uint color, uint constraint)
+{
+    return 2U * color + (constraint < SOLVER.joint_count ? 0U : 1U);
+}
+
+// A hash of words (a murmur finalizer chain): the coloring's priority of a constraint, from what identifies it.
+uint hash_words(uvec4 words)
+{
+    uint hash = 0x9E3779B9U;
+    for (uint index = 0U; index < 4U; ++index)
+    {
+        uint value = words[index] * 0xCC9E2D51U;
+        value = (value << 15U) | (value >> 17U);
+        hash ^= value * 0x1B873593U;
+        hash = ((hash << 13U) | (hash >> 19U)) * 5U + 0xE6546B64U;
+    }
+    hash ^= hash >> 16U;
+    hash *= 0x85EBCA6BU;
+    hash ^= hash >> 13U;
+    hash *= 0xC2B2AE35U;
+    return hash ^ (hash >> 16U);
+}
 
 // A collider (GpuCollider): its pose relative to its body's center of mass, in the body's frame (the shape in the first
 // vector's w); its body, flags, group; its filter (category and mask, two words each); its material.
@@ -150,6 +204,48 @@ uint contact_base(uint slot)
     return CONTACT_VECTORS * slot;
 }
 
+// A joint (GpuJoint), by joint slot: its bodies (the second NO_BODY for the world), flags and part count; its first part;
+// its frame on the first body (position about the center of mass, body frame; w: the breaking force) and orientation;
+// its frame on the second (w: the breaking torque) and orientation.
+const uint JOINT_VECTORS = 6U;
+
+uint joint_base(uint joint)
+{
+    return JOINT_VECTORS * joint;
+}
+
+// A joint's part (GpuJointPart): its kind and axis; its lower bounds (w: spring frequency); its upper bounds (w: spring
+// damping ratio).
+const uint JOINT_PART_VECTORS = 3U;
+
+// What the graph, the coloring and the islands see of a constraint: its two bodies (the second NO_BODY for the world),
+// whether it is in use, its coloring priority.
+struct Constraint
+{
+    uint first;
+    uint second;
+    bool in_use;
+    uint priority;
+};
+
+Constraint load_constraint(uint constraint)
+{
+    if (constraint < SOLVER.joint_count)
+    {
+        const uvec4 header = gpu_word_vectors[SOLVER.joints].values[joint_base(constraint)];
+        return Constraint(header.x, header.y, (header.z & JOINT_ACTIVE) != 0U, hash_words(uvec4(constraint, 0xFFFFFFFFU, 0xFFFFFFFFU, 0x4A4F494EU)));
+    }
+    const uint base = contact_base(constraint - SOLVER.joint_count);
+    const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
+    return Constraint(header.x, header.y, (header.w & CONTACT_ACTIVE) != 0U, gpu_word_vectors[SOLVER.contacts].values[base + 2U].w);
+}
+
+// A body's flags (none for the world).
+uint body_flags_of(uint body)
+{
+    return body == NO_BODY ? 0U : gpu_words[PARAMETERS.body_flags].words[body];
+}
+
 // The body that moves through constraints: awake and dynamic (asleep and other bodies keep still: infinite mass).
 struct Body
 {
@@ -182,6 +278,11 @@ mat3 world_inverse_inertia(uint slot, uint flags, vec4 orientation)
 
 Body load_body(uint slot)
 {
+    if (slot == NO_BODY)
+    {
+        // The world: at the origin, unturned, still.
+        return Body(vec3(0.0), vec4(0.0, 0.0, 0.0, 1.0), vec3(0.0), mat3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), false);
+    }
     const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
     const vec4 center = gpu_vectors[PARAMETERS.body_centers].values[slot];
     const vec4 orientation = gpu_vectors[PARAMETERS.body_orientations].values[slot];
@@ -253,6 +354,14 @@ void correct_position(inout Body body, vec3 r, vec3 p)
     body.rotation += turn;
 }
 
+// An angular correction p (a multiplier times a gradient, an axis): the orientation turns, the substep's rotation takes it.
+void correct_rotation(inout Body body, vec3 p)
+{
+    const vec3 turn = body.inverse_inertia * p;
+    body.orientation = turned(body.orientation, turn);
+    body.rotation += turn;
+}
+
 // An impulse p applied at the lever r.
 void correct_velocity(inout Body body, vec3 r, vec3 p)
 {
@@ -260,15 +369,16 @@ void correct_velocity(inout Body body, vec3 r, vec3 p)
     body.angular_velocity += body.inverse_inertia * cross(r, p);
 }
 
-// The constraint list of a pass: the constraints of color push.argument (the overflow set for OVERFLOW_COLOR).
-uint color_count(uint color)
+// The constraint list of a pass: the constraints of color key push.argument (a color's joints or contacts; the overflow
+// set's for OVERFLOW_COLOR).
+uint color_count(uint key)
 {
-    return gpu_words[SOLVER.color_end].words[color] - gpu_words[SOLVER.color_begin].words[color];
+    return gpu_words[SOLVER.color_end].words[key] - gpu_words[SOLVER.color_begin].words[key];
 }
 
-uint color_constraint(uint color, uint index)
+uint color_constraint(uint key, uint index)
 {
-    return gpu_words[SOLVER.color_lists].words[gpu_words[SOLVER.color_begin].words[color] + index];
+    return gpu_words[SOLVER.color_lists].words[gpu_words[SOLVER.color_begin].words[key] + index];
 }
 
 #endif

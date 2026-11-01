@@ -1,26 +1,22 @@
 #version 460
-// Jones-Plassmann coloring of the contact constraints (two constraints conflict when they move a common body). Modes:
-//   0 (slots)  the first colors: uncolored for active constraints that move a body (the overflow set for all of them in
-//              the Jacobi solver mode: argument 1), inactive for the others;
-//   1 (slots)  a round, from one color buffer into the other (argument: the round; even rounds read the first): an
-//              uncolored constraint whose priority beats every uncolored neighbor's (ties: the larger slot) takes the
-//              smallest color no colored neighbor has (the overflow set when all are taken). Decisions read the previous
-//              round's colors only, so the result does not depend on the order invocations run in;
-//   2 (slots)  the sort keys: each constraint's color (still uncolored: the overflow set), the slots as values, from the
-//              buffer argument names (0: the first);
-//   3 (colors) the indirect dispatch arguments of each color and of the overflow set (argument: their buffer).
+// Jones-Plassmann coloring of the constraints, joints and contacts together (two constraints conflict when they move a
+// common body). Modes:
+//   0 (constraints) the first colors: uncolored for constraints in use that move a body (the overflow set for all of
+//                   them in the Jacobi solver mode: argument 1), inactive for the others;
+//   1 (constraints) a round, from one color buffer into the other (argument: the round; even rounds read the first): an
+//                   uncolored constraint whose priority beats every uncolored neighbor's (ties: the larger index) takes the
+//                   smallest color no colored neighbor has (the overflow set when all are taken). Decisions read the
+//                   previous round's colors only, so the result does not depend on the order invocations run in;
+//   2 (constraints) the sort keys: each constraint's color (still uncolored: the overflow set) × 2 + its kind, the
+//                   constraints as values, from the buffer argument names (0: the first);
+//   3 (keys)        the indirect dispatch arguments of each color key, the overflow set's included (argument: their
+//                   buffer).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
-uint priority_of(uint slot)
+bool moves_a_body(Constraint loaded)
 {
-    return floatBitsToUint(gpu_vectors[SOLVER.contacts].values[contact_base(slot) + 2U].w);
-}
-
-bool moves_a_body(uvec4 header)
-{
-    return body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[header.x]) ||
-           body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[header.y]);
+    return body_is_dynamic_awake(body_flags_of(loaded.first)) || body_is_dynamic_awake(body_flags_of(loaded.second));
 }
 
 void main()
@@ -28,7 +24,7 @@ void main()
     const uint index = gl_GlobalInvocationID.x;
     if (push.mode == 3U)
     {
-        if (index <= OVERFLOW_COLOR)
+        if (index < 2U * (OVERFLOW_COLOR + 1U))
         {
             const uint workgroup_count = (color_count(index) + gl_WorkGroupSize.x - 1U) / gl_WorkGroupSize.x;
             gpu_words[push.argument].words[3U * index] = workgroup_count;
@@ -37,24 +33,24 @@ void main()
         }
         return;
     }
-    if (index >= slot_count())
+    if (index >= constraint_count())
     {
         return;
     }
     if (push.mode == 0U)
     {
-        const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[contact_base(index)];
-        const bool in_use = (header.w & CONTACT_ACTIVE) != 0U && moves_a_body(header);
+        const Constraint loaded = load_constraint(index);
+        const bool in_use = loaded.in_use && moves_a_body(loaded);
         gpu_words[SOLVER.colors_first].words[index] = in_use ? (push.argument == 1U ? OVERFLOW_COLOR : UNCOLORED) : INACTIVE_COLOR;
         return;
     }
     if (push.mode == 2U)
     {
         const uint color = gpu_words[push.argument == 0U ? SOLVER.colors_first : SOLVER.colors_second].words[index];
-        const uint key = color == UNCOLORED ? OVERFLOW_COLOR : color;
-        gpu_words[SOLVER.color_keys].words[index] = key;
+        const uint settled = color == UNCOLORED ? OVERFLOW_COLOR : color;
+        gpu_words[SOLVER.color_keys].words[index] = color_key(settled, index);
         gpu_words[SOLVER.color_values].words[index] = index;
-        if (key == OVERFLOW_COLOR)
+        if (settled == OVERFLOW_COLOR)
         {
             atomicAdd(gpu_words[SOLVER.counts].words[COUNT_OVERFLOW_CONSTRAINTS], 1U);
         }
@@ -70,14 +66,13 @@ void main()
         gpu_words[target].words[index] = color;
         return;
     }
-    const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[contact_base(index)];
-    const uint priority = priority_of(index);
+    const Constraint loaded = load_constraint(index);
     bool blocked = false;
     uint used = 0U;
     for (uint side = 0U; side < 2U && !blocked; ++side)
     {
-        const uint body = side == 0U ? header.x : header.y;
-        if (!body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[body]))
+        const uint body = side == 0U ? loaded.first : loaded.second;
+        if (!body_is_dynamic_awake(body_flags_of(body)))
         {
             continue;
         }
@@ -92,8 +87,8 @@ void main()
             const uint other_color = gpu_words[source].words[other];
             if (other_color == UNCOLORED)
             {
-                const uint other_priority = priority_of(other);
-                blocked = other_priority > priority || (other_priority == priority && other > index);
+                const uint other_priority = load_constraint(other).priority;
+                blocked = other_priority > loaded.priority || (other_priority == loaded.priority && other > index);
             }
             else if (other_color < MAXIMUM_COLORS)
             {

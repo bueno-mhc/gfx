@@ -67,12 +67,14 @@ if(GFX_BUILD_TESTS)
             set_tests_properties(PhysicsSandbox.${_gfx_backend} PROPERTIES
                 ENVIRONMENT "${_gfx_sandbox_environment}"
                 LABELS example)
+            gfx_use_gpu_in_tests(PhysicsSandbox.${_gfx_backend})
             if(NOT TEST PhysicsSandbox.Tour)
                 add_test(NAME PhysicsSandbox.Tour
                          COMMAND gfx_physics_sandbox --backend ${_gfx_backend_name} --tour ${_gfx_sandbox_validation})
                 set_tests_properties(PhysicsSandbox.Tour PROPERTIES
                     ENVIRONMENT "${_gfx_sandbox_environment}"
                     LABELS example)
+                gfx_use_gpu_in_tests(PhysicsSandbox.Tour)
             endif()
         endif()
     endforeach()

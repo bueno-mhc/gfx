@@ -344,7 +344,7 @@ TEST_P(UiWindowTest, AUiInAVisibleWindowIsDrawnAndClicked)
         const std::array batches{gfx::SubmitDescription{.command_buffers = command_buffers, .waits = waits, .signals = signals}};
         queue.submit(batches, fence->handle());
         static_cast<void>(presentation.present(queue, *image));
-        ASSERT_EQ(fence->wait(10s), gfx::WaitStatus::SIGNALED);
+        ASSERT_EQ(fence->wait(gfx::tests::GPU_WORK_TIMEOUT), gfx::WaitStatus::SIGNALED);
         if (last)
         {
             readback->invalidate_mapped_range();

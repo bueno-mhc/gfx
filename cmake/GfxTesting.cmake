@@ -10,16 +10,66 @@ include(GfxDependencies)
 include(GfxRuntimeDeployment)
 gfx_require_googletest()
 
+# Every test has a CTest TIMEOUT, so a test that hangs fails the run within minutes instead of blocking it (a UI Automation
+# client call that never returned once held a run for 8 hours). Tests of gfx_add_test() get it when they are discovered,
+# the other tests from _gfx_apply_test_timeouts() when the top-level directory ends; a test may set its own.
+set(GFX_TEST_TIMEOUT 300 CACHE STRING "Seconds a CTest test may run before CTest stops it and reports it as failed")
+
+# Tests using a GPU share the machine's GPUs through the CTest resource `gpus` (resource allocation): CTest runs at most
+# GFX_TEST_GPU_SLOTS of them at once, whatever its -j, and CPU tests run beside them. With every GPU test at once (about
+# 110 processes), the GPUs were time-sliced so finely that tests taking 0.4 s alone took 90 s, a harness's 10 s fence wait
+# expired, and the NVIDIA driver refused devices (VK_ERROR_INITIALIZATION_FAILED). CTest reads resources only from a spec
+# file that a setup test generates (GENERATED_RESOURCE_SPEC_FILE), so plain `ctest` runs (presets, build.py, IDEs) use it:
+# the test GfxTestResources.Gpus copies the spec written here, and every GPU test requires its fixture. Without a spec
+# (`ctest --resource-spec-file` is refused next to a generated one), CTest would ignore the GPU tests' RESOURCE_GROUPS.
+set(GFX_TEST_GPU_SLOTS 8 CACHE STRING "How many tests using a GPU CTest runs at once (the CTest resource gpus)")
+file(WRITE "${PROJECT_BINARY_DIR}/gfx_test_resources/resources.json"
+     "{\n  \"version\": {\"major\": 1, \"minor\": 0},\n  \"local\": [{\"gpus\": [{\"id\": \"0\", \"slots\": ${GFX_TEST_GPU_SLOTS}}]}]\n}\n")
+add_test(NAME GfxTestResources.Gpus
+         COMMAND ${CMAKE_COMMAND} -E copy "${PROJECT_BINARY_DIR}/gfx_test_resources/resources.json"
+                 "${PROJECT_BINARY_DIR}/gfx_test_resources/generated.json")
+set_tests_properties(GfxTestResources.Gpus PROPERTIES
+    FIXTURES_SETUP gfx_test_resources
+    GENERATED_RESOURCE_SPEC_FILE "${PROJECT_BINARY_DIR}/gfx_test_resources/generated.json")
+
+# gfx_use_gpu_in_tests(<test>...)
+#   Marks tests registered with add_test() (examples, extra runs of a test executable) as GPU tests: they take one slot of
+#   the CTest resource gpus while they run. Tests of gfx_add_test() name theirs with its GPU_TESTS argument.
+function(gfx_use_gpu_in_tests)
+    set_tests_properties(${ARGN} PROPERTIES RESOURCE_GROUPS gpus:1)
+    set_property(TEST ${ARGN} APPEND PROPERTY FIXTURES_REQUIRED gfx_test_resources)
+endfunction()
+
+# Gives every test registered with add_test() under <directory> that sets no TIMEOUT the default one (tests discovered
+# from GoogleTest executables are not registered yet: gfx_add_test() gives theirs).
+function(_gfx_apply_test_timeouts directory)
+    get_property(tests DIRECTORY "${directory}" PROPERTY TESTS)
+    foreach(test IN LISTS tests)
+        get_property(has_timeout TEST "${test}" DIRECTORY "${directory}" PROPERTY TIMEOUT SET)
+        if(NOT has_timeout)
+            set_property(TEST "${test}" DIRECTORY "${directory}" PROPERTY TIMEOUT ${GFX_TEST_TIMEOUT})
+        endif()
+    endforeach()
+    get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(subdirectory IN LISTS subdirectories)
+        _gfx_apply_test_timeouts("${subdirectory}")
+    endforeach()
+endfunction()
+cmake_language(DEFER DIRECTORY ${PROJECT_SOURCE_DIR} CALL _gfx_apply_test_timeouts ${PROJECT_SOURCE_DIR})
+
 # gfx_add_test(<name> SOURCES <file>... [MODULES <file>...] [MODULE_BASE_DIRECTORY <directory>]
-#              [LIBRARIES <target>...])
+#              [LIBRARIES <target>...] [GPU_TESTS <regex>] [TIMEOUT <seconds>])
 #   SOURCES               : regular translation units (may `#include <gtest/gtest.h>` and `import` modules)
 #   MODULES               : test-only C++ module interface units, compiled into this executable
 #   MODULE_BASE_DIRECTORY : a directory above the current one that MODULES may come from (test modules
 #                           shared by sibling test folders; each executable builds its own copy, as
 #                           module libraries shared between test targets mix `import std` builds)
 #   LIBRARIES             : additional targets to link
+#   GPU_TESTS             : the test cases that use a GPU (a regular expression matched against the CTest test name,
+#                           e.g. `^Gpu/` or `.*`): each takes one slot of the CTest resource gpus while it runs
+#   TIMEOUT               : seconds each test case may run (default GFX_TEST_TIMEOUT)
 function(gfx_add_test name)
-    cmake_parse_arguments(PARSE_ARGV 1 argument "" "MODULE_BASE_DIRECTORY" "SOURCES;MODULES;LIBRARIES")
+    cmake_parse_arguments(PARSE_ARGV 1 argument "" "MODULE_BASE_DIRECTORY;GPU_TESTS;TIMEOUT" "SOURCES;MODULES;LIBRARIES")
     add_executable(${name})
     target_sources(${name} PRIVATE ${argument_SOURCES})
     if(argument_MODULES)
@@ -51,9 +101,27 @@ function(gfx_add_test name)
     # 5 s, and a timed-out discovery fails the build. Listings also slow down while the parallel build
     # loads every core (other executables took up to 2.7 s with the GPU awake), so the limit is
     # generous: it only bounds an executable that hangs.
+    # A changed timeout changes the discovery command, so the next build discovers the tests again.
+    if(NOT argument_TIMEOUT)
+        set(argument_TIMEOUT ${GFX_TEST_TIMEOUT})
+    endif()
     gtest_discover_tests(${name}
         DISCOVERY_MODE POST_BUILD
-        DISCOVERY_TIMEOUT 60)
+        DISCOVERY_TIMEOUT 60
+        PROPERTIES TIMEOUT ${argument_TIMEOUT})
+    # The GPU tests are chosen by name when CTest reads the tests, after the discovered list that defines <name>_TESTS.
+    # GoogleTest leaves names with square brackets out of that list (typed tests over types printed with brackets): a GPU
+    # test needs a name without them.
+    if(DEFINED argument_GPU_TESTS)
+        set(properties "${CMAKE_CURRENT_BINARY_DIR}/${name}_gpu_resources.cmake")
+        file(WRITE "${properties}"
+            "foreach(test IN LISTS ${name}_TESTS)\n"
+            "    if(test MATCHES [==[${argument_GPU_TESTS}]==])\n"
+            "        set_tests_properties(\"\${test}\" PROPERTIES RESOURCE_GROUPS gpus:1 FIXTURES_REQUIRED gfx_test_resources)\n"
+            "    endif()\n"
+            "endforeach()\n")
+        set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${properties}")
+    endif()
     # CMake 4.4 writes no target name into the POST_BUILD discovery script, so the test executables of one directory
     # list their tests into the same JSON file, and two linked at once clobber each other's listing ("JSON failed
     # parsing"; it broke a build once six physics test executables linked together). The links of a directory's test

@@ -435,7 +435,7 @@ TEST_F(VulkanCommandTest, ComputeAndGraphicsQueuesSynchronizeThroughTimelines)
         m_device->queue(QueueType::GRAPHICS).submit(graphics_batch);
         m_device->queue(QueueType::COMPUTE).submit(compute_batch);
     }
-    ASSERT_EQ(timeline->wait(2, std::chrono::seconds{10}), WaitStatus::SIGNALED);
+    ASSERT_EQ(timeline->wait(2, tests::GPU_WORK_TIMEOUT), WaitStatus::SIGNALED);
 
     const std::vector<std::uint32_t> result = read_buffer<std::uint32_t>(*copy, 64);
     EXPECT_EQ(result[0], 1000U);

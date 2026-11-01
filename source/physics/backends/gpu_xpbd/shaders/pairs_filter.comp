@@ -2,8 +2,9 @@
 // The candidate pairs worth a narrow phase (one invocation per pair slot of the two searches: the moving tree's own
 // pairs, then its pairs with the static tree): colliders of different bodies, at least one of them dynamic, at least one
 // of them awake (or kinematic), whose filters let them collide (should_collide(): a common non-zero group decides alone,
-// else each one's category in the other's mask). A flag per slot (the compaction keeps the flagged ones, in order); with
-// mode 1, the kept pairs' instances are written at their compacted places instead (pairs_gather).
+// else each one's category in the other's mask), not joined by a joint that keeps them apart (a binary search of the
+// sorted joined pairs). A flag per slot (the compaction keeps the flagged ones, in order); with mode 1, the kept pairs'
+// instances are written at their compacted places instead (pairs_gather).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -34,6 +35,32 @@ bool should_collide(Collider first, Collider second)
     return first_in_second && second_in_first;
 }
 
+// Whether a joint keeps the bodies @p first and @p second apart (the joined pairs: the smaller body first, sorted).
+bool joined(uint first, uint second)
+{
+    const uvec2 key = uvec2(min(first, second), max(first, second));
+    uint low = 0U;
+    uint high = SOLVER.joined_count;
+    while (low < high)
+    {
+        const uint middle = (low + high) / 2U;
+        const uvec2 pair = uvec2(gpu_words[SOLVER.joined_pairs].words[2U * middle], gpu_words[SOLVER.joined_pairs].words[2U * middle + 1U]);
+        if (pair == key)
+        {
+            return true;
+        }
+        if (pair.x < key.x || (pair.x == key.x && pair.y < key.y))
+        {
+            low = middle + 1U;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return false;
+}
+
 bool keeps(uvec2 instances)
 {
     const Collider first = load_collider(instance_collider(instances.x));
@@ -46,7 +73,7 @@ bool keeps(uvec2 instances)
     const uint second_flags = gpu_words[PARAMETERS.body_flags].words[second.body];
     const bool dynamic = ((first_flags | second_flags) & BODY_DYNAMIC) != 0U;
     const bool awake = body_moves(first_flags) || body_moves(second_flags);
-    return dynamic && awake && should_collide(first, second);
+    return dynamic && awake && should_collide(first, second) && !joined(first.body, second.body);
 }
 
 void main()

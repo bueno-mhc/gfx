@@ -73,6 +73,30 @@ enum class GpuSolverMode : std::uint8_t
     JACOBI,         ///< Every constraint from the same positions, each body's corrections averaged in a fixed order.
 };
 
+/// @brief A part of a joint as the GPU backend solves it: each joint becomes a list of parts (an XPBD constraint each,
+///        measured in the joint's two frames), whose kinds the backend's shaders receive as specialization constants.
+enum class GpuJointPartKind : std::uint8_t
+{
+    ANCHORS,       ///< The anchors' separation along each axis of the first frame within bounds (0 for a locked axis).
+    DISTANCE,      ///< The anchors' distance within bounds.
+    ALIGNED_AXIS,  ///< An axis of the two frames kept aligned (a hinge's).
+    ORIENTATION,   ///< The two frames' orientations kept equal.
+    ANGLE,         ///< The second frame's angle about an axis of the first within bounds (limits, locks, springs).
+    SWING,         ///< The angle between the two frames' z axes at most a limit (a cone).
+    LINEAR_MOTOR,  ///< The anchors' relative speed along an axis of the first frame driven, with at most a force.
+    ANGULAR_MOTOR, ///< The relative angular speed about an axis of the first frame driven, with at most a torque.
+};
+
+/// @brief The state of a joint on the GPU backend: the bits of its flags word and of its step's result, which the
+///        backend's shaders receive as specialization constants. Bitmask.
+enum class GpuJointFlag : std::uint32_t
+{
+    NONE   = 0,       ///< No bit: a free slot, a disabled or broken joint.
+    ACTIVE = 1U << 0, ///< Solved whenever it moves a body.
+    SOLVED = 1U << 1, ///< A result: solved in the step (its force and torque are the step's).
+    BROKEN = 1U << 2, ///< A result: its force or torque passed its threshold in the step.
+};
+
 /// @brief The nodes a BVH of the GPU backend is traversed by (GpuBvhDescription::layout).
 enum class GpuBvhLayout : std::uint8_t
 {
@@ -558,7 +582,7 @@ inline constexpr std::uint32_t GPU_XPBD_SHARED_MEMORY_SIZE = 16384;
 inline constexpr std::uint64_t GPU_XPBD_STORAGE_BUFFER_RANGE = std::uint64_t{1} << 27U;
 
 /// @brief Bindless storage buffers a world of the GPU backend needs free in its device's table.
-inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 160;
+inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 176;
 
 /// @brief Elements each invocation of the GPU backend's scans, reductions and sorts handles: a workgroup's tile holds
 ///        GPU_XPBD_WORKGROUP_SIZE times as many.
@@ -745,6 +769,33 @@ struct EnumerationTraits<physics::GpuSolverMode>
     static constexpr std::array NAMES{
         EnumeratorName{physics::GpuSolverMode::GRAPH_COLORING, "GRAPH_COLORING"},
         EnumeratorName{physics::GpuSolverMode::JACOBI, "JACOBI"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuJointPartKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuJointPartKind::ANCHORS, "ANCHORS"},
+        EnumeratorName{physics::GpuJointPartKind::DISTANCE, "DISTANCE"},
+        EnumeratorName{physics::GpuJointPartKind::ALIGNED_AXIS, "ALIGNED_AXIS"},
+        EnumeratorName{physics::GpuJointPartKind::ORIENTATION, "ORIENTATION"},
+        EnumeratorName{physics::GpuJointPartKind::ANGLE, "ANGLE"},
+        EnumeratorName{physics::GpuJointPartKind::SWING, "SWING"},
+        EnumeratorName{physics::GpuJointPartKind::LINEAR_MOTOR, "LINEAR_MOTOR"},
+        EnumeratorName{physics::GpuJointPartKind::ANGULAR_MOTOR, "ANGULAR_MOTOR"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuJointFlag>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuJointFlag::ACTIVE, "ACTIVE"},
+        EnumeratorName{physics::GpuJointFlag::SOLVED, "SOLVED"},
+        EnumeratorName{physics::GpuJointFlag::BROKEN, "BROKEN"},
     };
 };
 
@@ -1322,6 +1373,8 @@ static_assert(verify<physics::PhysicsBackendKind>(), "EnumerationTraits<physics:
 static_assert(verify<physics::GpuVariantChoice>(), "EnumerationTraits<physics::GpuVariantChoice>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBodyFlag>(), "EnumerationTraits<physics::GpuBodyFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuSolverMode>(), "EnumerationTraits<physics::GpuSolverMode>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuJointPartKind>(), "EnumerationTraits<physics::GpuJointPartKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuJointFlag>(), "EnumerationTraits<physics::GpuJointFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhLayout>(), "EnumerationTraits<physics::GpuBvhLayout>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhFlag>(), "EnumerationTraits<physics::GpuBvhFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsSubsystem>(), "EnumerationTraits<physics::PhysicsSubsystem>::NAMES is out of sync with the enumeration");

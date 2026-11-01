@@ -10,24 +10,6 @@
 
 const uint MANIFOLD_VECTORS = 11U;
 
-// A hash of words (a murmur finalizer chain): the coloring's priority of a constraint, from what identifies it.
-uint hash_words(uvec4 words)
-{
-    uint hash = 0x9E3779B9U;
-    for (uint index = 0U; index < 4U; ++index)
-    {
-        uint value = words[index] * 0xCC9E2D51U;
-        value = (value << 15U) | (value >> 17U);
-        hash ^= value * 0x1B873593U;
-        hash = ((hash << 13U) | (hash >> 19U)) * 5U + 0xE6546B64U;
-    }
-    hash ^= hash >> 16U;
-    hash *= 0x85EBCA6BU;
-    hash ^= hash >> 13U;
-    hash *= 0xC2B2AE35U;
-    return hash ^ (hash >> 16U);
-}
-
 void main()
 {
     const uint slot = gl_GlobalInvocationID.x;
@@ -35,7 +17,8 @@ void main()
     if (slot == 0U)
     {
         gpu_words[SOLVER.counts].words[COUNT_SLOTS] = slots;
-        gpu_words[SOLVER.counts].words[COUNT_GRAPH_ENTRIES] = 2U * slots;
+        gpu_words[SOLVER.counts].words[COUNT_CONSTRAINTS] = SOLVER.joint_count + slots;
+        gpu_words[SOLVER.counts].words[COUNT_GRAPH_ENTRIES] = 2U * (SOLVER.joint_count + slots);
     }
     if (slot >= slots)
     {

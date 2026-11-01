@@ -28,13 +28,14 @@ void start_velocities(uint slot, Body body, out vec3 linear, out vec3 angular)
 
 void main()
 {
-    const uint color = push.argument;
+    const uint key = push.argument;
     const uint index = gl_GlobalInvocationID.x;
-    if (index >= color_count(color))
+    if (index >= color_count(key))
     {
         return;
     }
-    const uint slot = color_constraint(color, index);
+    const uint constraint = color_constraint(key, index);
+    const uint slot = constraint - SOLVER.joint_count;
     const uint base = contact_base(slot);
     const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
     if ((header.w & CONTACT_ACTIVE) == 0U)
@@ -141,10 +142,10 @@ void main()
     gpu_vectors[SOLVER.multipliers].values[4U * slot + 3U] = rolling_used;
     if ((push.mode & 2U) != 0U)
     {
-        gpu_vectors[SOLVER.corrections].values[4U * slot] = vec4(first.linear_velocity - first_linear, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * slot + 1U] = vec4(first.angular_velocity - first_angular, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * slot + 2U] = vec4(second.linear_velocity - second_linear, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * slot + 3U] = vec4(second.angular_velocity - second_angular, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * constraint] = vec4(first.linear_velocity - first_linear, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * constraint + 1U] = vec4(first.angular_velocity - first_angular, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U] = vec4(second.linear_velocity - second_linear, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * constraint + 3U] = vec4(second.angular_velocity - second_angular, 0.0);
         return;
     }
     store_body_velocities(header.x, first);
