@@ -303,7 +303,12 @@ TEST_P(GpuXpbdTest, WhatLaterPhasesBringIsRefusedNow)
             EXPECT_TRUE(contains(error.what(), part)) << error.what();
         }
     };
-    refused([&] { return body->add_collider({.shape = make_shape(SphereShape{.radius = 1})}); }, "phases G2 to G5");
+    std::shared_ptr<const Shape> nested = make_shape(SphereShape{.radius = 1});
+    for (std::uint32_t depth = 0; depth <= GPU_XPBD_COMPOUND_DEPTH; ++depth)
+    {
+        nested = make_shape(CompoundShape{{CompoundChild{.shape = nested}}});
+    }
+    refused([&] { return body->add_collider({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
     refused([&] { return simulated->create_joint(ball_and_socket_joint({.first = body->handle()})); }, "phase G6");
     refused([&] { return simulated->create_soft_body(rope_preset({})); }, "phase G7");
     refused([&] { return simulated->create_trigger({.shape = make_shape(SphereShape{.radius = 1})}); }, "phase G8");
@@ -352,7 +357,7 @@ TEST(GpuXpbdCapabilityTest, DevicesLackingRequiredCapabilitiesAreRefusedWithEach
             EXPECT_TRUE(contains(message, "maximum_compute_shared_memory_size: required 16384, reported 0")) << message;
             EXPECT_TRUE(contains(message, "maximum_storage_buffer_range: required 134217728, reported 0")) << message;
             EXPECT_TRUE(contains(message, "DeviceFeature::SHADER_MEMORY_MODEL")) << message;
-            EXPECT_TRUE(contains(message, "free bindless storage buffers: required 64, reported 0")) << message;
+            EXPECT_TRUE(contains(message, "free bindless storage buffers: required 160, reported 0")) << message;
             EXPECT_FALSE(contains(message, "TIMELINE_SEMAPHORE")) << "the fake device has the core features: " << message;
         }
     }

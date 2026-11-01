@@ -496,6 +496,16 @@ GpuNarrowPhase::~GpuNarrowPhase() = default;
 auto
 GpuNarrowPhase::add_shape(const Shape& shape) -> std::uint32_t
 {
+    check_shape(shape);
+    std::unordered_map<const Shape*, std::uint32_t> added;
+    const std::uint32_t index = m_state->add(shape, added);
+    m_state->pending_upload = true;
+    return index;
+}
+
+void
+GpuNarrowPhase::check_shape(const Shape& shape)
+{
     if (const std::uint32_t depth = compound_depth(shape); depth > GPU_XPBD_COMPOUND_DEPTH)
     {
         throw_unsupported(PhysicsBackendKind::GPU_XPBD, "GpuNarrowPhase::add_shape", PhysicsCapability::WORLD_OBJECTS,
@@ -503,10 +513,6 @@ GpuNarrowPhase::add_shape(const Shape& shape) -> std::uint32_t
                                       GPU_XPBD_COMPOUND_DEPTH, depth),
                           "flatten the compound (children holding the shapes of its inner compounds at their composed poses), or use another backend");
     }
-    std::unordered_map<const Shape*, std::uint32_t> added;
-    const std::uint32_t index = m_state->add(shape, added);
-    m_state->pending_upload = true;
-    return index;
 }
 
 auto

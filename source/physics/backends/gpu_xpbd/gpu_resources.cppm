@@ -41,10 +41,14 @@ struct GpuStepParameters
     std::uint32_t body_displacements = 0;          ///< displacements of the centers in the substep,
     std::uint32_t body_rotations = 0;              ///< rotation vectors of the substep,
     std::uint32_t body_flags = 0;                  ///< flags (GpuBodyFlag, then the motion locks),
-    std::uint32_t body_patches = 0;                ///< and of this step's patches.
+    std::uint32_t body_patches = 0;                ///< of this step's patches,
+    std::uint32_t body_previous_linear = 0;        ///< the linear velocities at the substep's start,
+    std::uint32_t body_previous_angular = 0;       ///< the angular velocities at the substep's start,
+    std::uint32_t sleep_timers = 0;                ///< and the seconds each body stayed slow.
+    std::uint32_t reserved_1 = 0;                  ///< (Alignment.)
 };
-static_assert(sizeof(GpuStepParameters) == 80 && offsetof(GpuStepParameters, body_count) == 16 && offsetof(GpuStepParameters, body_centers) == 32 &&
-              offsetof(GpuStepParameters, body_patches) == 76);
+static_assert(sizeof(GpuStepParameters) == 96 && offsetof(GpuStepParameters, body_count) == 16 && offsetof(GpuStepParameters, body_centers) == 32 &&
+              offsetof(GpuStepParameters, body_patches) == 76 && offsetof(GpuStepParameters, sleep_timers) == 88);
 
 /// A body written whole by the patch pass (BodyPatch in step.glsl): created, edited, woken or put to sleep, given
 /// forces or impulses.
@@ -82,7 +86,7 @@ struct GpuBodyReadback
 /// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity; the
 /// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
 /// compounds descended at once, the triangles' edge-on tolerance.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 46> SPECIALIZATION_CONSTANTS{{
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 48> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -129,6 +133,8 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 46> SPECIAL
     {43, static_cast<std::uint32_t>(StaticBvh::MAXIMUM_DEPTH)},
     {44, 2 * GPU_XPBD_COMPOUND_DEPTH},
     {45, std::bit_cast<std::uint32_t>(TRIANGLE_FACE_TOLERANCE)},
+    {46, std::to_underlying(GpuBodyFlag::SLEEPS)},
+    {47, MAXIMUM_GPU_XPBD_COLORS},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");
@@ -147,8 +153,10 @@ workgroups(std::uint32_t count) noexcept -> std::uint32_t
 class GpuArray
 {
 public:
+    /// @param usage What the buffer is used for beyond storage and copies (INDIRECT for dispatch arguments).
     GpuArray(std::string_view name,
-             std::uint32_t element_size);
+             std::uint32_t element_size,
+             BufferUsage usage = BufferUsage::NONE);
 
     /// Makes room for @p count elements: a larger buffer, the first @p kept elements of the old one copied into it by
     /// @p recorder, the old buffer moved into @p retired (the copy reads it: it lives until the step completes).
@@ -167,6 +175,7 @@ public:
 private:
     std::string m_name{};
     std::uint32_t m_element_size = 0;
+    BufferUsage m_usage = BufferUsage::NONE;
     std::uint32_t m_capacity = 0;
     std::unique_ptr<Buffer> m_buffer{};
 };
@@ -235,6 +244,13 @@ inline constexpr GlobalMemoryBarrier BEFORE_PASSES{.source_stages = PipelineStag
                                                     .destination_stages = PipelineStage::COMPUTE_SHADER | PipelineStage::TRANSFER,
                                                     .destination_access = MemoryAccess::SHADER_STORAGE_READ | MemoryAccess::SHADER_STORAGE_WRITE |
                                                                           MemoryAccess::TRANSFER_READ | MemoryAccess::TRANSFER_WRITE};
+
+/// The copies and fills of arrays that grew (GpuArray::reserve()), before other copies and fills write the same arrays
+/// (the step's cleared forces, the colliders' upload): transfers write in no particular order without it.
+inline constexpr GlobalMemoryBarrier TRANSFER_TO_TRANSFER{.source_stages = PipelineStage::TRANSFER,
+                                                           .source_access = MemoryAccess::TRANSFER_WRITE,
+                                                           .destination_stages = PipelineStage::TRANSFER,
+                                                           .destination_access = MemoryAccess::TRANSFER_READ | MemoryAccess::TRANSFER_WRITE};
 
 /// The passes' writes, before the copies into the readback buffer and the fills that clear this step's forces.
 inline constexpr GlobalMemoryBarrier COMPUTE_TO_TRANSFER{.source_stages = PipelineStage::COMPUTE_SHADER,

@@ -1,0 +1,40 @@
+#version 460
+// Sleep at the end of a step (SleepDescription): mode 0 — each awake dynamic body's timer grows by the step while it is
+// slower than the thresholds (and may sleep), else restarts, and its island keeps the smallest timer (atomic minimum of the
+// bits of non-negative floats: their order); mode 1 — the bodies of an island whose smallest timer reached the sleep time
+// (and that touches no moving kinematic body) fall asleep, without velocity.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+void main()
+{
+    const uint body = gl_GlobalInvocationID.x;
+    if (body >= SOLVER.body_count)
+    {
+        return;
+    }
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[body];
+    if (!body_is_dynamic_awake(flags))
+    {
+        return;
+    }
+    const uint island = gpu_words[SOLVER.labels].words[body];
+    if (push.mode == 0U)
+    {
+        const vec3 linear = gpu_vectors[PARAMETERS.body_linear_velocities].values[body].xyz;
+        const vec3 angular = gpu_vectors[PARAMETERS.body_angular_velocities].values[body].xyz;
+        const bool slow = length(linear) < SOLVER.sleep_linear_threshold && length(angular) < SOLVER.sleep_angular_threshold;
+        const bool may_sleep = SOLVER.sleep_enabled != 0U && (flags & BODY_SLEEPS) != 0U;
+        const float timer = may_sleep && slow ? uintBitsToFloat(gpu_words[PARAMETERS.sleep_timers].words[body]) + SOLVER.step_seconds : 0.0;
+        gpu_words[PARAMETERS.sleep_timers].words[body] = floatBitsToUint(timer);
+        atomicMin(gpu_words[SOLVER.island_timers].words[island], floatBitsToUint(timer));
+        return;
+    }
+    const bool kept_awake = (gpu_words[SOLVER.island_flags].words[island] & 2U) != 0U;
+    if (SOLVER.sleep_enabled != 0U && !kept_awake && uintBitsToFloat(gpu_words[SOLVER.island_timers].words[island]) >= SOLVER.sleep_time)
+    {
+        gpu_words[PARAMETERS.body_flags].words[body] = flags & ~BODY_AWAKE;
+        gpu_vectors[PARAMETERS.body_linear_velocities].values[body].xyz = vec3(0.0);
+        gpu_vectors[PARAMETERS.body_angular_velocities].values[body].xyz = vec3(0.0);
+    }
+}

@@ -1,0 +1,50 @@
+#version 460
+// The range of each key in a list sorted by key: mode 0 clears `maximum` begin and end words (keys without entries have
+// empty ranges); mode 1, one invocation per sorted entry, writes where each key's run begins and ends (keys equal to
+// `skipped` form no range).
+#extension GL_GOOGLE_include_directive : require
+#include "primitives.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint keys;         // the sorted keys
+    uint begin_buffer; // a word per key: its first entry
+    uint end_buffer;   // and one past its last
+    uint maximum;      // mode 0: keys to clear; mode 1: entries at most
+    uint count_buffer; // the entries' count word (mode 1)
+    uint count_word;
+    uint mode;
+    uint skipped;
+} push;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 0U)
+    {
+        if (index < push.maximum)
+        {
+            gpu_words[push.begin_buffer].words[index] = 0U;
+            gpu_words[push.end_buffer].words[index] = 0U;
+        }
+        return;
+    }
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    if (index >= count)
+    {
+        return;
+    }
+    const uint key = gpu_words[push.keys].words[index];
+    if (key == push.skipped)
+    {
+        return;
+    }
+    if (index == 0U || gpu_words[push.keys].words[index - 1U] != key)
+    {
+        gpu_words[push.begin_buffer].words[key] = index;
+    }
+    if (index + 1U == count || gpu_words[push.keys].words[index + 1U] != key)
+    {
+        gpu_words[push.end_buffer].words[key] = index + 1U;
+    }
+}

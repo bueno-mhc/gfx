@@ -1,0 +1,25 @@
+#version 460
+// The body-to-constraint graph's entries (two per manifold slot): an active constraint's side whose body moves
+// through constraints (awake and dynamic) is keyed by that body, its value the slot × 2 + the side; other entries are
+// keyed 0xFFFFFFFF (they sort last and form no range). Sorted stably by key, the entries of a body are its constraints
+// in slot order: what the coloring's neighbors and the Jacobi gathers read.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+void main()
+{
+    const uint slot = gl_GlobalInvocationID.x;
+    if (slot >= slot_count())
+    {
+        return;
+    }
+    const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[contact_base(slot)];
+    const bool in_use = (header.w & CONTACT_ACTIVE) != 0U;
+    for (uint side = 0U; side < 2U; ++side)
+    {
+        const uint body = side == 0U ? header.x : header.y;
+        const bool keyed = in_use && body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[body]);
+        gpu_words[SOLVER.graph_keys].words[2U * slot + side] = keyed ? body : 0xFFFFFFFFU;
+        gpu_words[SOLVER.graph_values].words[2U * slot + side] = 2U * slot + side;
+    }
+}

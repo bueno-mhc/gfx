@@ -62,6 +62,15 @@ enum class GpuBodyFlag : std::uint32_t
     DYNAMIC   = 1U << 1,  ///< Moved by gravity, forces, impulses and constraints.
     KINEMATIC = 1U << 2,  ///< Moved by its velocity only.
     AWAKE     = 1U << 3,  ///< Simulated (asleep bodies keep their pose and have no velocity).
+    SLEEPS    = 1U << 4,  ///< May fall asleep (the world's sleep enabled and the body's allow_sleep).
+};
+
+/// @brief How the GPU backend projects its contact constraints (GpuXpbdDescription::solver_mode).
+enum class GpuSolverMode : std::uint8_t
+{
+    GRAPH_COLORING, ///< Gauss-Seidel by colors (Jones-Plassmann every step); constraints left without a color solved
+                    ///< Jacobi-style after the colors.
+    JACOBI,         ///< Every constraint from the same positions, each body's corrections averaged in a fixed order.
 };
 
 /// @brief The nodes a BVH of the GPU backend is traversed by (GpuBvhDescription::layout).
@@ -549,7 +558,7 @@ inline constexpr std::uint32_t GPU_XPBD_SHARED_MEMORY_SIZE = 16384;
 inline constexpr std::uint64_t GPU_XPBD_STORAGE_BUFFER_RANGE = std::uint64_t{1} << 27U;
 
 /// @brief Bindless storage buffers a world of the GPU backend needs free in its device's table.
-inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 64;
+inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 160;
 
 /// @brief Elements each invocation of the GPU backend's scans, reductions and sorts handles: a workgroup's tile holds
 ///        GPU_XPBD_WORKGROUP_SIZE times as many.
@@ -598,6 +607,25 @@ inline constexpr float GPU_XPBD_BVH_LEAF_COST = 1.0F;
 /// @brief Compounds the GPU backend's narrow phase descends at most on each side of a pair: a compound holds compounds at most
 ///        this deep (a compound of convex shapes is 1 deep).
 inline constexpr std::uint32_t GPU_XPBD_COMPOUND_DEPTH = 4;
+
+/// @brief Colors the GPU backend gives the contact constraints of a step at most (Jones-Plassmann); constraints needing
+///        more are solved Jacobi-style after the colors.
+inline constexpr std::uint32_t MAXIMUM_GPU_XPBD_COLORS = 32;
+
+/// @brief Jones-Plassmann rounds of the GPU backend's coloring per step: constraints still uncolored after them are solved
+///        Jacobi-style after the colors.
+inline constexpr std::uint32_t GPU_XPBD_COLORING_ROUNDS = 24;
+
+/// @brief Colors the GPU backend records the solver's passes for in a world's first step (later steps: the colors the
+///        previous step used, and a replay when a step needs more).
+inline constexpr std::uint32_t GPU_XPBD_INITIAL_COLORS = 8;
+
+/// @brief Times the GPU backend replays a step at most when its buffers or recorded passes overflowed (each replay with
+///        room for what the previous attempt counted).
+inline constexpr std::uint32_t GPU_XPBD_MAXIMUM_REPLAYS = 4;
+
+/// @brief The steps the GPU backend gives contact and pair buffers room for beyond what they hold (a fraction more).
+inline constexpr float GPU_XPBD_CAPACITY_HEADROOM = 0.5F;
 
 } // namespace gfx::physics
 
@@ -706,6 +734,17 @@ struct EnumerationTraits<physics::GpuBodyFlag>
         EnumeratorName{physics::GpuBodyFlag::DYNAMIC, "DYNAMIC"},
         EnumeratorName{physics::GpuBodyFlag::KINEMATIC, "KINEMATIC"},
         EnumeratorName{physics::GpuBodyFlag::AWAKE, "AWAKE"},
+        EnumeratorName{physics::GpuBodyFlag::SLEEPS, "SLEEPS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuSolverMode>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuSolverMode::GRAPH_COLORING, "GRAPH_COLORING"},
+        EnumeratorName{physics::GpuSolverMode::JACOBI, "JACOBI"},
     };
 };
 
@@ -1282,6 +1321,7 @@ namespace gfx::enumeration_verification
 static_assert(verify<physics::PhysicsBackendKind>(), "EnumerationTraits<physics::PhysicsBackendKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuVariantChoice>(), "EnumerationTraits<physics::GpuVariantChoice>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBodyFlag>(), "EnumerationTraits<physics::GpuBodyFlag>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuSolverMode>(), "EnumerationTraits<physics::GpuSolverMode>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhLayout>(), "EnumerationTraits<physics::GpuBvhLayout>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhFlag>(), "EnumerationTraits<physics::GpuBvhFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsSubsystem>(), "EnumerationTraits<physics::PhysicsSubsystem>::NAMES is out of sync with the enumeration");

@@ -1,0 +1,152 @@
+#version 460
+// An iteration of the contacts' velocity pass for one color (or the overflow set), after the substep's velocity update
+// (Müller et al. 2020, §3.6), one invocation per constraint. Per point that pushed this substep (λ > 0):
+//   - dynamic friction: an impulse against the tangential relative velocity of at most μd λ / h over the substep (the
+//     normal impulse; what earlier iterations of the substep applied counts against it), at most what stops the sliding;
+//   - restitution: the normal relative velocity set to −e times the approach speed the point had at the substep's start
+//     (e = 0 below restitution_threshold), which also removes the separation speed the projection gave;
+// the change applied as an impulse through the points' generalized inverse masses. Then rolling resistance: the relative
+// turn opposed by an angular impulse up to the rolling coefficient (a lever, as the reference solver has it) times the
+// manifold's normal impulse. Points that did not push are marked slipped (their friction anchors renew next step). Mode
+// bit 0: the substep's first iteration (budgets reset); bit 1: the overflow set (corrections for the Jacobi gather).
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+// The velocities a body had at the substep's start (its current ones when constraints and gravity do not move it).
+void start_velocities(uint slot, Body body, out vec3 linear, out vec3 angular)
+{
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
+    if (body_moves(flags))
+    {
+        linear = gpu_vectors[PARAMETERS.body_previous_linear].values[slot].xyz;
+        angular = gpu_vectors[PARAMETERS.body_previous_angular].values[slot].xyz;
+        return;
+    }
+    linear = body.linear_velocity;
+    angular = body.angular_velocity;
+}
+
+void main()
+{
+    const uint color = push.argument;
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= color_count(color))
+    {
+        return;
+    }
+    const uint slot = color_constraint(color, index);
+    const uint base = contact_base(slot);
+    const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
+    if ((header.w & CONTACT_ACTIVE) == 0U)
+    {
+        return;
+    }
+    Body first = load_body(header.x);
+    Body second = load_body(header.y);
+    const vec3 first_linear = first.linear_velocity;
+    const vec3 first_angular = first.angular_velocity;
+    const vec3 second_linear = second.linear_velocity;
+    const vec3 second_angular = second.angular_velocity;
+    vec3 first_start_linear;
+    vec3 first_start_angular;
+    vec3 second_start_linear;
+    vec3 second_start_angular;
+    start_velocities(header.x, first, first_start_linear, first_start_angular);
+    start_velocities(header.y, second, second_start_linear, second_start_angular);
+
+    const vec4 normal_restitution = gpu_vectors[SOLVER.contacts].values[base + 1U];
+    const vec3 normal = normal_restitution.xyz;
+    const vec4 material = gpu_vectors[SOLVER.contacts].values[base + 2U];
+    const vec4 normal_multipliers = gpu_vectors[SOLVER.multipliers].values[4U * slot];
+    const bool reset = (push.mode & 1U) != 0U;
+    vec4 friction_used = reset ? vec4(0.0) : gpu_vectors[SOLVER.multipliers].values[4U * slot + 2U];
+    vec4 rolling_used = reset ? vec4(0.0) : gpu_vectors[SOLVER.multipliers].values[4U * slot + 3U];
+    const float h = PARAMETERS.gravity.w;
+
+    float total_normal = 0.0;
+    for (uint point = 0U; point < header.z; ++point)
+    {
+        const uint anchors = base + 3U + 4U * point;
+        if (normal_multipliers[point] <= 0.0)
+        {
+            gpu_vectors[SOLVER.contacts].values[anchors + 2U].w = 1.0;
+            continue;
+        }
+        total_normal += normal_multipliers[point];
+        const vec3 lever_first = rotate_by(first.orientation, gpu_vectors[SOLVER.contacts].values[anchors].xyz);
+        const vec3 lever_second = rotate_by(second.orientation, gpu_vectors[SOLVER.contacts].values[anchors + 1U].xyz);
+        const vec3 relative = (second.linear_velocity + cross(second.angular_velocity, lever_second)) -
+                              (first.linear_velocity + cross(first.angular_velocity, lever_first));
+        const float normal_speed = dot(relative, normal);
+        const vec3 tangential = relative - normal * normal_speed;
+        const vec3 start = (second_start_linear + cross(second_start_angular, lever_second)) - (first_start_linear + cross(first_start_angular, lever_first));
+        const float start_normal_speed = dot(start, normal);
+
+        // Dynamic friction: an impulse against the sliding, at most μd times the normal impulse λ / h over the substep
+        // (what earlier iterations of the substep applied counts against it), at most what stops the sliding.
+        vec3 impulse = vec3(0.0);
+        const float tangential_speed = length(tangential);
+        const float budget = material.y * normal_multipliers[point] / h - friction_used[point];
+        if (tangential_speed > 0.0 && budget > 0.0)
+        {
+            const vec3 tangent = tangential / tangential_speed;
+            const float tangential_mass = generalized_inverse_mass(first, lever_first, tangent) + generalized_inverse_mass(second, lever_second, tangent);
+            if (tangential_mass > 0.0)
+            {
+                const float amount = min(budget, tangential_speed / tangential_mass);
+                impulse -= tangent * amount;
+                friction_used[point] += amount;
+            }
+        }
+
+        // Restitution: the normal speed changed to what the approach speed and e give, through the normal mass.
+        const float restitution = -start_normal_speed > SOLVER.restitution_threshold ? normal_restitution.w : 0.0;
+        const float normal_change = -normal_speed + max(-restitution * start_normal_speed, 0.0);
+        const float normal_mass = generalized_inverse_mass(first, lever_first, normal) + generalized_inverse_mass(second, lever_second, normal);
+        if (normal_mass > 0.0)
+        {
+            impulse += normal * (normal_change / normal_mass);
+        }
+        if (any(notEqual(impulse, vec3(0.0))))
+        {
+            correct_velocity(second, lever_second, impulse);
+            correct_velocity(first, lever_first, -impulse);
+        }
+    }
+
+    // Rolling resistance.
+    if (material.z > 0.0 && total_normal > 0.0)
+    {
+        const mat3 combined = first.inverse_inertia + second.inverse_inertia;
+        if (abs(determinant(combined)) > 1e-30)
+        {
+            vec3 impulse = -(inverse(combined) * (second.angular_velocity - first.angular_velocity));
+            const float limit = material.z * total_normal / h - rolling_used.x;
+            const float size = length(impulse);
+            if (limit <= 0.0)
+            {
+                impulse = vec3(0.0);
+            }
+            else if (size > limit)
+            {
+                impulse *= limit / size;
+            }
+            rolling_used.x += length(impulse);
+            first.angular_velocity -= first.inverse_inertia * impulse;
+            second.angular_velocity += second.inverse_inertia * impulse;
+        }
+    }
+
+    gpu_vectors[SOLVER.multipliers].values[4U * slot + 2U] = friction_used;
+    gpu_vectors[SOLVER.multipliers].values[4U * slot + 3U] = rolling_used;
+    if ((push.mode & 2U) != 0U)
+    {
+        gpu_vectors[SOLVER.corrections].values[4U * slot] = vec4(first.linear_velocity - first_linear, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 1U] = vec4(first.angular_velocity - first_angular, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 2U] = vec4(second.linear_velocity - second_linear, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 3U] = vec4(second.angular_velocity - second_angular, 0.0);
+        return;
+    }
+    store_body_velocities(header.x, first);
+    store_body_velocities(header.y, second);
+}

@@ -1,0 +1,130 @@
+#version 460
+// Islands of a step: dynamic bodies joined by contact constraints, by label propagation (each label the smallest body
+// index of its island, whatever the order the edges are hooked in: deterministic once converged). Modes:
+//   0 (bodies)  labels to themselves (dynamic bodies), island flags cleared, island timers to +inf;
+//   1 (slots)   hook: the roots of an edge's two bodies, the larger one pointed at the smaller (atomic minimum); with
+//               argument 1, the changes counted (the last round: none left means converged);
+//   2 (bodies)  pointer jumping: each label replaced by its root;
+//   3 (bodies)  awake bodies mark their island awake;
+//   4 (slots)   a dynamic body touching a moving kinematic one marks its island awake and kept awake;
+//   5 (bodies)  bodies asleep in an awake island wake up at rest (their sleep timer cleared).
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+const uint ISLAND_AWAKE = 1U;
+const uint ISLAND_KEPT_AWAKE = 2U;
+
+bool is_dynamic(uint body)
+{
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[body];
+    return (flags & BODY_SIMULATED) != 0U && (flags & BODY_DYNAMIC) != 0U;
+}
+
+uint root_of(uint body)
+{
+    uint current = body;
+    for (uint step = 0U; step < 64U; ++step)
+    {
+        const uint parent = gpu_words[SOLVER.labels].words[current];
+        if (parent == current)
+        {
+            break;
+        }
+        current = parent;
+    }
+    return current;
+}
+
+bool moving_kinematic(uint body)
+{
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[body];
+    if ((flags & BODY_KINEMATIC) == 0U)
+    {
+        return false;
+    }
+    const vec3 linear = gpu_vectors[PARAMETERS.body_linear_velocities].values[body].xyz;
+    const vec3 angular = gpu_vectors[PARAMETERS.body_angular_velocities].values[body].xyz;
+    return any(notEqual(linear, vec3(0.0))) || any(notEqual(angular, vec3(0.0)));
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    const bool per_slot = push.mode == 1U || push.mode == 4U;
+    if (per_slot ? index >= slot_count() : index >= SOLVER.body_count)
+    {
+        return;
+    }
+    if (push.mode == 0U)
+    {
+        gpu_words[SOLVER.labels].words[index] = is_dynamic(index) ? index : 0xFFFFFFFFU;
+        gpu_words[SOLVER.island_flags].words[index] = 0U;
+        gpu_words[SOLVER.island_timers].words[index] = floatBitsToUint(infinity());
+        return;
+    }
+    if (per_slot)
+    {
+        const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[contact_base(index)];
+        if ((header.w & CONTACT_ACTIVE) == 0U)
+        {
+            return;
+        }
+        const bool first_dynamic = is_dynamic(header.x);
+        const bool second_dynamic = is_dynamic(header.y);
+        if (push.mode == 1U)
+        {
+            if (!first_dynamic || !second_dynamic)
+            {
+                return;
+            }
+            const uint first = root_of(header.x);
+            const uint second = root_of(header.y);
+            if (first != second)
+            {
+                atomicMin(gpu_words[SOLVER.labels].words[max(first, second)], min(first, second));
+                if (push.argument == 1U)
+                {
+                    atomicAdd(gpu_words[SOLVER.counts].words[COUNT_ISLAND_CHANGES], 1U);
+                }
+            }
+            return;
+        }
+        if (first_dynamic && !second_dynamic && moving_kinematic(header.y))
+        {
+            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(header.x)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
+        }
+        if (second_dynamic && !first_dynamic && moving_kinematic(header.x))
+        {
+            atomicOr(gpu_words[SOLVER.island_flags].words[root_of(header.y)], ISLAND_AWAKE | ISLAND_KEPT_AWAKE);
+        }
+        return;
+    }
+
+    // Per body.
+    if (!is_dynamic(index))
+    {
+        return;
+    }
+    if (push.mode == 2U)
+    {
+        gpu_words[SOLVER.labels].words[index] = root_of(index);
+        return;
+    }
+    const uint flags = gpu_words[PARAMETERS.body_flags].words[index];
+    const uint island = root_of(index);
+    if (push.mode == 3U)
+    {
+        if ((flags & BODY_AWAKE) != 0U)
+        {
+            atomicOr(gpu_words[SOLVER.island_flags].words[island], ISLAND_AWAKE);
+        }
+        return;
+    }
+    if ((flags & BODY_AWAKE) == 0U && (gpu_words[SOLVER.island_flags].words[island] & ISLAND_AWAKE) != 0U)
+    {
+        gpu_words[PARAMETERS.body_flags].words[index] = flags | BODY_AWAKE;
+        gpu_vectors[PARAMETERS.body_linear_velocities].values[index].xyz = vec3(0.0);
+        gpu_vectors[PARAMETERS.body_angular_velocities].values[index].xyz = vec3(0.0);
+        gpu_words[PARAMETERS.sleep_timers].words[index] = 0U;
+    }
+}

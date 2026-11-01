@@ -24,4 +24,5 @@ void main()
     gpu_vectors[PARAMETERS.body_inertias].values[2U * slot + 1U] = body.inertia_off;
     gpu_vectors[PARAMETERS.body_forces].values[slot] = body.force;
     gpu_vectors[PARAMETERS.body_torques].values[slot] = body.torque;
+    gpu_words[PARAMETERS.sleep_timers].words[slot] = 0U; // a patched body (woken, pushed, edited) starts its sleep timer again
 }

@@ -12,11 +12,21 @@ import gfx.physics.enums;
 import gfx.physics.handles;
 import gfx.physics.interface;
 import gfx.physics.world;
+import gfx.physics.shapes;
 import :settings;
 import :resources;
+import :solver;
 
 namespace gfx::physics::gpu_xpbd
 {
+
+/// What the backend keeps of a collider (by slot).
+struct ColliderEntry
+{
+    ColliderHandle handle{};  ///< Null: a free slot.
+    RigidBodyHandle body{};   ///< Its body.
+    std::uint32_t shape = 0;  ///< Its shape in the narrow phase's table.
+};
 
 /// What the backend keeps of a body: what the last step read back (exactly: patches of untouched values reuse them) and
 /// what the edits since then changed.
@@ -104,19 +114,41 @@ public:
     /// The entry of @p body's slot (grown when needed).
     [[nodiscard]] auto body_entry(RigidBodyHandle body) -> BodyEntry&;
 
+    /// Marks the colliders changed (their data uploaded again); @p lists: which colliders are moving or static changed;
+    /// @p statics: the static tree is rebuilt.
+    void colliders_changed(bool lists,
+                           bool statics) noexcept;
+
+    /// The table index of @p shape (added the first time).
+    [[nodiscard]] auto shape_index(const std::shared_ptr<const Shape>& shape) -> std::uint32_t;
+
+    /// The entry of @p collider's slot (grown when needed).
+    [[nodiscard]] auto collider_entry(ColliderHandle collider) -> ColliderEntry&;
+
 private:
+    /// The colliders' GPU data and lists from the records, when they changed; the bodies' radii.
+    void update_colliders(const WorldSnapshot& pending);
+
+    /// How far a body may move in a step of @p seconds at most (the boxes' and contacts' speculative margin).
+    [[nodiscard]] auto step_motion(const WorldSnapshot& pending,
+                                   float seconds) const noexcept -> float;
     /// The patch of the body in @p slot from its record and entry (impulses applied, changes cleared).
     [[nodiscard]] auto make_patch(std::uint32_t slot,
                                   RigidBodyRecord* record,
                                   WorldSnapshot& pending) -> GpuBodyPatch;
 
-    /// Records the step's command buffer: this step's patches into the arrays of @p body_count slots, then @p substeps
-    ///        substeps under @p gravity, then the copies into the readback buffer.
+    /// Records the step's command buffer: this step's patches into the arrays of @p body_count slots (or, replaying,
+    ///        the step's start restored), the contacts' detection, then the substeps, sleep, and the copies into the
+    ///        readback buffer.
     void record_step(std::uint32_t body_count,
-                     std::uint32_t substeps,
-                     Vector3 gravity);
+                     const WorldSnapshot& pending,
+                     float seconds,
+                     bool replay);
 
-    /// Reads the step's results back into @p pending and the entries.
+    /// The contact counts the last step read back.
+    [[nodiscard]] auto read_counts() -> GpuSolverCounts;
+
+    /// Reads the step's results back into @p pending and the entries (sleep transitions as events).
     void read_back(WorldSnapshot& pending);
 
     // Declared first: destroyed last, after every resource of the device.
@@ -129,6 +161,7 @@ private:
     std::unique_ptr<TimelineSemaphore> m_timeline{};
     std::uint64_t m_submitted = 0;
     GpuPipelines m_pipelines;
+    GpuContactSolver m_solver;
 
     // The body arrays (one storage buffer each).
     GpuArray m_centers{"body centers", sizeof(GpuVector)};
@@ -142,6 +175,15 @@ private:
     GpuArray m_displacements{"body displacements", sizeof(GpuVector)};
     GpuArray m_rotations{"body rotations", sizeof(GpuVector)};
     GpuArray m_flags{"body flags", sizeof(std::uint32_t)};
+    GpuArray m_previous_linear{"body linear velocities at the substep's start", sizeof(GpuVector)};
+    GpuArray m_previous_angular{"body angular velocities at the substep's start", sizeof(GpuVector)};
+    GpuArray m_sleep_timers{"body sleep timers", sizeof(std::uint32_t)};
+
+    // The step's start (after its patches), restored when it is replayed: centers, orientations, linear and angular
+    // velocities, flags, sleep timers.
+    std::array<GpuArray, 6> m_backups{GpuArray{"body backup", sizeof(GpuVector)}, GpuArray{"body backup", sizeof(GpuVector)},
+                                      GpuArray{"body backup", sizeof(GpuVector)}, GpuArray{"body backup", sizeof(GpuVector)},
+                                      GpuArray{"body backup", sizeof(std::uint32_t)}, GpuArray{"body backup", sizeof(std::uint32_t)}};
 
     // Host buffers: the step's parameters and patches, the readback.
     HostBuffer m_parameters{"step parameters", MemoryLocation::HOST_UPLOAD, BufferUsage::STORAGE};
@@ -154,6 +196,21 @@ private:
     std::vector<GpuBodyPatch> m_body_patches{}; ///< This step's (scratch).
     std::uint32_t m_body_count = 0;             ///< Body slots on the GPU.
     float m_substep_seconds = 0.0F;             ///< This step's substep duration.
+
+    // Colliders and shapes.
+    std::vector<ColliderEntry> m_colliders{};                          ///< By collider slot.
+    std::unordered_map<const Shape*, std::uint32_t> m_shape_indices{}; ///< Shapes in the narrow phase's table.
+    std::vector<std::shared_ptr<const Shape>> m_shapes{};              ///< Kept alive (the table holds copies; the keys are their addresses).
+    std::vector<GpuCollider> m_collider_data{};                        ///< By collider slot (scratch).
+    std::vector<std::uint32_t> m_moving_list{};                        ///< Colliders of dynamic and kinematic bodies.
+    std::vector<std::uint32_t> m_static_list{};                        ///< Colliders of static bodies.
+    std::vector<std::byte> m_static_signature{};                       ///< The static colliders and their bodies' poses
+                                                                       ///< the static tree was last built for.
+    std::vector<float> m_body_radii{};                                 ///< How far each body's colliders reach from its center.
+    bool m_colliders_dirty = false;                                    ///< Their data changed.
+    bool m_lists_dirty = false;                                        ///< Which colliders are moving or static changed.
+    bool m_statics_dirty = false;                                      ///< The static tree must be rebuilt.
+    bool m_lists_changed = false;                                      ///< Since the last completed step (no anchors kept).
 };
 
 } // namespace gfx::physics::gpu_xpbd

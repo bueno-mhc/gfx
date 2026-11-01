@@ -2,8 +2,8 @@
 
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
 as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
-(§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9). **G4 implemented**
-(§B "G4 as built", 5 deviations), awaiting validation.
+(§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
+with its 5 (§B "G4 as built"; committed ac87393). **G5 implemented** (§B "G5 as built", 9 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -755,6 +755,114 @@ that fit are whole, pairs past it have none, the slot after the capacity untouch
 manifolds; the end-to-end run above; misuses (compounds five deep, reserves above the maximum, a table not uploaded, invalid
 settings, counts and capacities above the reserve, a cache above its reserve). `GpuNarrowPhaseMeasurementTest` prints both
 throughputs.
+
+### G5 as built (2026-11-01)
+
+**Colliders in the world.** `add_collider()` is accepted for every shape kind (a compound nested deeper than
+`GPU_XPBD_COMPOUND_DEPTH` is refused when recorded, through the new `GpuNarrowPhase::check_shape()`). The backend keeps each
+distinct shape once in the narrow phase's table (by address, the shape kept alive), a 80-byte `GpuCollider` per collider
+(its pose relative to its body's center of mass, its body, shape, filter words and material) and two lists of collider
+slots — colliders of dynamic and kinematic bodies, colliders of static bodies — rebuilt from the records each step and
+uploaded only when their bytes changed; the static tree is rebuilt only when a static collider or a static body's pose
+changed (compared as bytes).
+
+**`GpuContactSolver`** (internal partition `:solver`, unit `gpu_solver.cpp`; it owns its `GpuPrimitives`, a `GpuNarrowPhase`
+and two `GpuBvh`s) records a step's contact work into the backend's command buffer:
+1. **Detection** — the instances (`collider_poses`: the moving list, then the static one, at their bodies' poses), their
+   boxes (`GpuNarrowPhase::bounds`), the moving tree (every step) and the static tree (when it changed), their pairs (within
+   the moving tree, then between the two, at fixed regions), **filtered** (`pairs_filter`: different bodies, at least one
+   dynamic, at least one awake or kinematic, `should_collide()`), compacted in order, the manifolds (`collide()`), each point's
+   predecessor (`match()`).
+2. **Contact constraints** (`contact_prepare`, one per manifold slot): bodies, normal, materials mixed as the reference
+   backend mixes them (friction √(a·b), rolling and restitution the larger), per point the anchors on both bodies and the
+   friction anchors — the matched point's of the previous step when static friction held it, else new.
+3. **Islands** (`islands`): label propagation over constraints between dynamic bodies (atomic minimum, pointer jumping; the
+   smallest body slot labels its island), islands with an awake body (or touching a moving kinematic one) wake their asleep
+   bodies at rest.
+4. **Graph and colors**: the body→constraint entries (two per slot) sorted by body (each body's constraints in slot order),
+   their ranges; **Jones–Plassmann** in `GPU_XPBD_COLORING_ROUNDS` (24) rounds from one color buffer into the other (each
+   round decides from the previous round's colors only; priorities hash the colliders and sub-shapes), constraints still
+   uncolored — or needing a 33rd color — form the overflow set; lists by color (a stable sort), indirect dispatch arguments
+   per color.
+5. **Each substep**: G0's prediction (now also keeping the velocities at the substep's start), `position_iterations`
+   iterations of `contact_solve` per color then the overflow set (Jacobi: corrections per side, then `jacobi_gather` averages
+   each body's in graph order — no floating-point atomics), G0's velocity update, `velocity_iterations` iterations of
+   `contact_velocity` the same way.
+6. **Sleep** (`sleep`): each awake dynamic body's timer grows while it is slower than the thresholds (and may sleep), its
+   island keeps the smallest (atomic minimum of non-negative float bits); islands past `SleepDescription::time` that touch no
+   moving kinematic body fall asleep without velocity. The CPU reports FELL_ASLEEP / WOKE_UP from the flags read back, in slot
+   order.
+
+**The contact model** (Müller et al. 2020 §3.5–3.6 on bodies moved through their substep displacement and rotation, as G0's
+velocity update reads them): non-penetration Δλ = (−C − α̃λ)/(w + α̃), λ ≥ 0, the depth at most `maximum_push_speed`·h,
+compliance from `contact_hertz` (α̃ = w/(ωh)², 0 Hz rigid); **static friction** positional at the friction anchors while the
+tangential multiplier stays within μs·λ (beyond: the point slips and its anchors renew next step — so a box held on a slope
+does not creep); **dynamic friction** as an impulse of at most μd·λ/h per substep through the tangential generalized inverse
+mass; **restitution** setting the normal relative speed to −e times the approach speed at the substep's start (e = 0 below
+`restitution_threshold`); **rolling resistance** as an angular impulse up to the rolling coefficient (a lever) times the
+normal impulse, as the reference solver has it.
+
+**Overflow is replayed.** The step's start (after its patches) is copied to backups; when the counts read back show more
+pairs or manifold slots than reserved, more colors than the passes were recorded for, or islands still changing in the last
+round, the capacities grow to what was counted (with `GPU_XPBD_CAPACITY_HEADROOM` 50 %), the backups are restored and the
+step runs again (at most `GPU_XPBD_MAXIMUM_REPLAYS` 4 times; then a `PhysicsError`). Results are never truncated. A step's
+forces are now cleared at its start (not its end) so a replay keeps them.
+
+**Deviations (for validation).**
+1. **`contact_damping_ratio` is not used** (§A9 mapped it to XPBD damping). With the default ratio 10, XPBD's damping term
+   (γ = 2ζ/(ωh) ≈ 25) left about 1/26 of each correction: a column of six boxes leaned 0.48 m in 4 s and a pile of 400 balls
+   sank 0.57 m below the floor; without it the column settles 1.5 cm (its springs' compression) and stands, the pile rests
+   3 mm deep. The velocity pass's restitution sets each contact's normal speed, which is the damping these contacts need.
+   `contact_hertz` is honored as the compliance.
+2. **Dynamic friction bounded as an impulse.** Müller's equation compares h·μd·f with a speed; taken literally (as written
+   first) it made friction about the body's mass times too strong — a box on a 30° slope with μ = 0.2 slid 5 mm in 0.75 s
+   instead of 1.5 m.
+3. **One speculative margin per step**: the world's speculative distance plus the farthest a moving body gets in the step
+   (its speed and its turn at its colliders' reach, gravity's growth), from the CPU's mirror — for every pair's boxes and
+   speculative contacts. Per-body margins can come later.
+4. **Sleeping islands wake one contact layer per step**: pairs of two asleep bodies are not detected, so a push on a
+   sleeping stack's top wakes the box under it in the same step and the next one in the next step.
+5. **`static_friction_speed` is not used**: static friction is positional (held within μs·λ), without a speed threshold.
+6. **Colors recorded per step** = the colors the previous step used + 2 (at least `GPU_XPBD_INITIAL_COLORS` 8), a replay when
+   a step needs more — rather than all 32 in every iteration (each recorded color is a dispatch per iteration).
+7. **Contact events and `contacts_of()`** wait for G8 (statistics `pairs` and `contacts` are filled).
+8. **Shapes stay in the table until the world ends** (a world making a new shape object for every collider grows it).
+9. **`velocity_iterations` respected** (default 8, the sequential-impulse default): each is (colors + 2) dispatches per
+   substep, most of a small scene's step; one is what Müller uses.
+
+**Graphics and enumerations.** `GpuBodyFlag::SLEEPS`; `GpuSolverMode` {GRAPH_COLORING, JACOBI}; constants
+`MAXIMUM_GPU_XPBD_COLORS` 32, `GPU_XPBD_COLORING_ROUNDS` 24, `GPU_XPBD_INITIAL_COLORS` 8, `GPU_XPBD_MAXIMUM_REPLAYS` 4,
+`GPU_XPBD_CAPACITY_HEADROOM` 0.5; `GPU_XPBD_STORAGE_BUFFERS` 64 → 160 (the solver's arrays); `GpuXpbdDescription::solver_mode`
+and `bvh_layout` (FOUR_WIDE by default, G2's measurements); specialization constants 46–47; `GpuArray` takes an extra buffer
+usage (INDIRECT for the color dispatches). Shaders: `solver.glsl`, `collider_poses`, `pairs_filter`, `contact_prepare`,
+`islands`, `graph`, `ranges`, `color`, `contact_solve`, `contact_velocity`, `jacobi_gather`, `sleep` (`.comp`); `patch_bodies`
+restarts a patched body's sleep timer; `xpbd_integrate` keeps the substep's starting velocities.
+
+**Measured** (`GpuXpbdRigidMeasurementTest`: a pyramid of 210 boxes, 1600 contact points, sleep off, default solver settings
+— 4 substeps of 3 position and 8 velocity iterations; recording, submission, waiting and readback included; Release without
+the validation layers): **graph coloring 3.9 ms per step on the RTX 5060, 4.2 ms on the Intel GPU; Jacobi 1.3 and 3.7 ms.**
+
+**Found.**
+- **A race between transfers** (introduced here, caught by G0's `IdenticalEditsGiveIdenticalBits`, 1 run in 10 on the RTX 5060):
+  a growing array's copy of its old contents and the fill clearing the step's forces were recorded with no barrier between
+  them; when the fill ran first, a body kept the previous step's force. A transfer-to-transfer barrier now follows the arrays'
+  growth (`TRANSFER_TO_TRANSFER`, recorded by `GpuContactSolver::record_uploads()`), before the fills and the colliders'
+  upload (which had the same hazard against a new array's zeroing). 30 of 30 runs identical after it.
+- `active` is a GLSL reserved word too (renamed).
+- Under a full parallel CTest run the NVIDIA driver once refused a device (`vkCreateDevice` → `VK_ERROR_INITIALIZATION_FAILED`)
+  to one of the new GPU tests; it passes alone (3 of 3).
+- Unrelated to this phase: the UI Automation platform test (`AUiAutomationClientFindsTheNodesAndInvokesAButton/SDL3`) hung
+  again in a Release run (8 hours; its client thread blocked inside one UI Automation call while the main thread kept pumping).
+
+**Tests** (`gpu_xpbd_rigid_test.cpp` in `gfx_physics_gpu_xpbd_tests`, each on both GPUs in both solver modes with the
+validation layers): a box dropped turned lands on a face 0.5 m up and stops; a column of six boxes leans less than 1 cm and
+falls asleep (six FELL_ASLEEP); a pyramid of 21 boxes moves less than 2 cm in 4 s; static friction holds a box on a 20° slope
+(μ 0.6) within 1 cm over 3 s; dynamic friction slides one on 30° (μ 0.2) as g(sin θ − μ cos θ) predicts (within 10 %); a ball
+dropped from 2 m with e = 0.5 rebounds to e²·2 m (within 15 %; measured 0.481 m) and with e = 0 does not; a sleeping stack
+woken by a push wakes within two steps, a lone box stays asleep; eight shape kinds (sphere, capsule, cylinder, cone, box,
+rounded box, hull, compound) come to rest on a triangle mesh and on a height field; two worlds with the same 40-body pile give
+the same bits every 30 steps; 400 balls dropped at once (replays) end finite and above the floor. `GpuXpbdTest`'s refusals
+now name the compound depth instead of colliders.
 
 ---
 

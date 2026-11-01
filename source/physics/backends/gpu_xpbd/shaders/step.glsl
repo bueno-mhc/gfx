@@ -26,6 +26,10 @@ struct StepParameters
     uint body_rotations;
     uint body_flags;
     uint body_patches;
+    uint body_previous_linear;  // the velocities at the substep's start (restitution reads them)
+    uint body_previous_angular;
+    uint sleep_timers;          // seconds each body stayed slow
+    uint reserved_1;
 };
 
 // GpuBodyPatch in gpu_resources.cppm.
@@ -57,10 +61,13 @@ layout(set = 0, binding = 3, std430) readonly buffer GpuBodyPatchBuffer
     BodyPatch patches[];
 } gpu_body_patches[];
 
+// The solver's passes declare their own push constants (solver.glsl), the step's parameters first.
+#ifndef GPU_XPBD_SOLVER_PUSH
 layout(push_constant) uniform Push
 {
     uint parameters; // bindless index of the step's parameters
 } push;
+#endif
 
 #define PARAMETERS gpu_parameters[push.parameters].parameters
 

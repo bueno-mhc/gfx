@@ -1,0 +1,21 @@
+#version 460
+// The instances of a step (GpuInstance: what the narrow phase and the boxes read): each collider of the lists (the moving
+// colliders, then the static ones) at its body's pose — the body's center of mass and orientation, the collider's pose
+// relative to the center — with its shape.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+void main()
+{
+    const uint instance = gl_GlobalInvocationID.x;
+    if (instance >= SOLVER.moving_count + SOLVER.static_count)
+    {
+        return;
+    }
+    const Collider collider = load_collider(instance_collider(instance));
+    const vec3 center = gpu_vectors[PARAMETERS.body_centers].values[collider.body].xyz;
+    const vec4 orientation = gpu_vectors[PARAMETERS.body_orientations].values[collider.body];
+    const vec3 position = center + rotate_by(orientation, collider.position);
+    gpu_word_vectors[SOLVER.instances].values[2U * instance] = uvec4(floatBitsToUint(position), collider.shape);
+    gpu_vectors[SOLVER.instances].values[2U * instance + 1U] = quaternion_multiply(orientation, collider.orientation);
+}

@@ -1,0 +1,126 @@
+#version 460
+// An iteration of the contact constraints' position projection for one color (or the overflow set), one invocation per
+// constraint (Müller et al. 2020, §3.5; XPBD, Macklin et al. 2016). Per point of the manifold, in order:
+//   - non-penetration: C = the anchors' separation along the normal, at most maximum_push_speed · h deep (depenetration
+//     bounded); Δλ = (−C − α̃λ) / (w + α̃), λ kept ≥ 0, with the contact's compliance from contact_hertz (k = m_eff ω²,
+//     α̃ = w / (ω h)²; 0 Hz: rigid). contact_damping_ratio is not used: the velocity pass sets each contact's normal
+//     speed (restitution), which is the damping these contacts need — XPBD's damping term (γ = 2ζ / (ω h), 25 for the
+//     default ratio 10) left so little of each correction that columns of boxes leaned over and piles sank;
+//   - static friction while the point touches: the friction anchors' tangential drift corrected to zero (α = 0) as long
+//     as the tangential multiplier stays within μs λ; beyond, the point slips (its friction anchors are renewed next step)
+//     and dynamic friction acts in the velocity pass.
+// The multipliers reset at the substep's first iteration (mode bit 0). Colored constraints write their bodies at once (no
+// two of a color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+const float PI = 3.14159265358979;
+
+void main()
+{
+    const uint color = push.argument;
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= color_count(color))
+    {
+        return;
+    }
+    const uint slot = color_constraint(color, index);
+    const uint base = contact_base(slot);
+    const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
+    if ((header.w & CONTACT_ACTIVE) == 0U)
+    {
+        return;
+    }
+    Body first = load_body(header.x);
+    Body second = load_body(header.y);
+    const vec3 first_center = first.center;
+    const vec3 first_rotation = first.rotation;
+    const vec3 second_center = second.center;
+    const vec3 second_rotation = second.rotation;
+    const vec3 normal = gpu_vectors[SOLVER.contacts].values[base + 1U].xyz;
+    const float static_friction = gpu_vectors[SOLVER.contacts].values[base + 2U].x;
+    const bool reset = (push.mode & 1U) != 0U;
+    vec4 normal_multipliers = reset ? vec4(0.0) : gpu_vectors[SOLVER.multipliers].values[4U * slot];
+    vec4 friction_multipliers = reset ? vec4(0.0) : gpu_vectors[SOLVER.multipliers].values[4U * slot + 1U];
+
+    // The contact's softness.
+    const float h = PARAMETERS.gravity.w;
+    const float omega_h = 2.0 * PI * SOLVER.contact_hertz * h;
+    const float compliance_factor = SOLVER.contact_hertz > 0.0 ? 1.0 / (omega_h * omega_h) : 0.0;
+
+    for (uint point = 0U; point < header.z; ++point)
+    {
+        const uint anchors = base + 3U + 4U * point;
+        const vec4 anchor_first = gpu_vectors[SOLVER.contacts].values[anchors];
+        const vec4 anchor_second = gpu_vectors[SOLVER.contacts].values[anchors + 1U];
+
+        // Non-penetration.
+        const vec3 lever_first = rotate_by(first.orientation, anchor_first.xyz);
+        const vec3 lever_second = rotate_by(second.orientation, anchor_second.xyz);
+        const float separation = dot((second.center + lever_second) - (first.center + lever_first), normal);
+        const float inverse_mass = generalized_inverse_mass(first, lever_first, normal) + generalized_inverse_mass(second, lever_second, normal);
+        if (inverse_mass > 0.0)
+        {
+            const float compliance = inverse_mass * compliance_factor;
+            const float bounded = max(separation, -SOLVER.maximum_push_speed * h);
+            const float delta = (-bounded - compliance * normal_multipliers[point]) / (inverse_mass + compliance);
+            const float multiplier = max(normal_multipliers[point] + delta, 0.0);
+            const float applied = multiplier - normal_multipliers[point];
+            normal_multipliers[point] = multiplier;
+            if (applied != 0.0)
+            {
+                correct_position(second, lever_second, applied * normal);
+                correct_position(first, lever_first, -applied * normal);
+            }
+        }
+
+        // Static friction at the friction anchors.
+        if (normal_multipliers[point] <= 0.0 || static_friction <= 0.0)
+        {
+            continue;
+        }
+        const vec4 friction_first = gpu_vectors[SOLVER.contacts].values[anchors + 2U];
+        const vec4 friction_second = gpu_vectors[SOLVER.contacts].values[anchors + 3U];
+        const vec3 held_first = first.center + rotate_by(first.orientation, friction_first.xyz);
+        const vec3 held_second = second.center + rotate_by(second.orientation, friction_second.xyz);
+        const vec3 drift = held_second - held_first;
+        const vec3 tangential = drift - normal * dot(drift, normal);
+        const float length_tangential = length(tangential);
+        if (length_tangential <= 1e-7)
+        {
+            continue;
+        }
+        const vec3 tangent = tangential / length_tangential;
+        const vec3 friction_lever_first = held_first - first.center;
+        const vec3 friction_lever_second = held_second - second.center;
+        const float tangential_mass = generalized_inverse_mass(first, friction_lever_first, tangent) + generalized_inverse_mass(second, friction_lever_second, tangent);
+        if (tangential_mass <= 0.0)
+        {
+            continue;
+        }
+        const float delta = -length_tangential / tangential_mass;
+        if (abs(friction_multipliers[point] + delta) <= static_friction * normal_multipliers[point])
+        {
+            friction_multipliers[point] += delta;
+            correct_position(second, friction_lever_second, delta * tangent);
+            correct_position(first, friction_lever_first, -delta * tangent);
+        }
+        else
+        {
+            gpu_vectors[SOLVER.contacts].values[anchors + 2U].w = 1.0;
+        }
+    }
+
+    gpu_vectors[SOLVER.multipliers].values[4U * slot] = normal_multipliers;
+    gpu_vectors[SOLVER.multipliers].values[4U * slot + 1U] = friction_multipliers;
+    if ((push.mode & 2U) != 0U)
+    {
+        gpu_vectors[SOLVER.corrections].values[4U * slot] = vec4(first.center - first_center, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 1U] = vec4(first.rotation - first_rotation, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 2U] = vec4(second.center - second_center, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * slot + 3U] = vec4(second.rotation - second_rotation, 0.0);
+        return;
+    }
+    store_body_pose(header.x, first);
+    store_body_pose(header.y, second);
+}

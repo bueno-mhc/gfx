@@ -1,0 +1,100 @@
+#version 460
+// A contact constraint per manifold slot of the step (GpuContact): its bodies (the colliders' bodies), its normal, its
+// materials (friction as the geometric mean of the colliders', rolling resistance and restitution as the larger, as the
+// reference backend mixes them), per point the anchors on both bodies (the point less and plus half its separation along
+// the normal, relative to the centers of mass, in the body frames) and the friction anchors — the matched point's of the
+// previous step when static friction held it there (the contact cache found it), else the anchors. With mode 1 (the
+// collider lists changed: instance indices name other colliders) no previous anchor is used.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+const uint MANIFOLD_VECTORS = 11U;
+
+// A hash of words (a murmur finalizer chain): the coloring's priority of a constraint, from what identifies it.
+uint hash_words(uvec4 words)
+{
+    uint hash = 0x9E3779B9U;
+    for (uint index = 0U; index < 4U; ++index)
+    {
+        uint value = words[index] * 0xCC9E2D51U;
+        value = (value << 15U) | (value >> 17U);
+        hash ^= value * 0x1B873593U;
+        hash = ((hash << 13U) | (hash >> 19U)) * 5U + 0xE6546B64U;
+    }
+    hash ^= hash >> 16U;
+    hash *= 0x85EBCA6BU;
+    hash ^= hash >> 13U;
+    hash *= 0xC2B2AE35U;
+    return hash ^ (hash >> 16U);
+}
+
+void main()
+{
+    const uint slot = gl_GlobalInvocationID.x;
+    const uint slots = min(count_word(COUNT_MANIFOLD_SLOTS), SOLVER.manifold_capacity);
+    if (slot == 0U)
+    {
+        gpu_words[SOLVER.counts].words[COUNT_SLOTS] = slots;
+        gpu_words[SOLVER.counts].words[COUNT_GRAPH_ENTRIES] = 2U * slots;
+    }
+    if (slot >= slots)
+    {
+        return;
+    }
+    const uint base = contact_base(slot);
+    const uvec4 header = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot];
+    if (header.z == 0U)
+    {
+        gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(0U);
+        return;
+    }
+
+    // The bodies and the mixed materials.
+    const uint first_collider = instance_collider(header.x);
+    const uint second_collider = instance_collider(header.y);
+    const Collider first = load_collider(first_collider);
+    const Collider second = load_collider(second_collider);
+    const vec3 normal = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 2U].xyz;
+    const uvec2 sub_shapes = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 1U].xy;
+    const uint priority = hash_words(uvec4(first_collider, second_collider, sub_shapes));
+    const vec4 material = vec4(sqrt(first.material.x * second.material.x), sqrt(first.material.y * second.material.y),
+                               max(first.material.z, second.material.z), uintBitsToFloat(priority));
+    const uint points = min(header.z, 4U);
+    gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(first.body, second.body, points, CONTACT_ACTIVE);
+    gpu_vectors[SOLVER.contacts].values[base + 1U] = vec4(normal, max(first.material.w, second.material.w));
+    gpu_vectors[SOLVER.contacts].values[base + 2U] = material;
+
+    // The anchors, and the friction anchors kept or new.
+    const vec3 first_center = gpu_vectors[PARAMETERS.body_centers].values[first.body].xyz;
+    const vec4 first_orientation = gpu_vectors[PARAMETERS.body_orientations].values[first.body];
+    const vec3 second_center = gpu_vectors[PARAMETERS.body_centers].values[second.body].xyz;
+    const vec4 second_orientation = gpu_vectors[PARAMETERS.body_orientations].values[second.body];
+    for (uint point = 0U; point < points; ++point)
+    {
+        const vec4 contact = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 3U + 2U * point];
+        const vec3 on_first = contact.xyz - normal * (0.5 * contact.w);
+        const vec3 on_second = contact.xyz + normal * (0.5 * contact.w);
+        const vec3 anchor_first = rotate_by(quaternion_conjugate(first_orientation), on_first - first_center);
+        const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second - second_center);
+        vec4 friction_first = vec4(anchor_first, 0.0);
+        vec4 friction_second = vec4(anchor_second, 0.0);
+        const uint predecessor = push.mode == 0U ? gpu_words[SOLVER.predecessors].words[4U * slot + point] : 0xFFFFFFFFU;
+        if (predecessor != 0xFFFFFFFFU)
+        {
+            const uint previous = contact_base(predecessor / 4U) + 3U + 4U * (predecessor % 4U);
+            const vec4 kept_first = gpu_vectors[SOLVER.previous_contacts].values[previous + 2U];
+            if (kept_first.w == 0.0)
+            {
+                friction_first = vec4(kept_first.xyz, 0.0);
+                friction_second = vec4(gpu_vectors[SOLVER.previous_contacts].values[previous + 3U].xyz, 0.0);
+            }
+        }
+        const uint anchors = base + 3U + 4U * point;
+        gpu_vectors[SOLVER.contacts].values[anchors] = vec4(anchor_first, contact.w);
+        gpu_vectors[SOLVER.contacts].values[anchors + 1U] = vec4(anchor_second, 0.0);
+        gpu_vectors[SOLVER.contacts].values[anchors + 2U] = friction_first;
+        gpu_vectors[SOLVER.contacts].values[anchors + 3U] = friction_second;
+    }
+    atomicAdd(gpu_words[SOLVER.counts].words[COUNT_ACTIVE_CONSTRAINTS], 1U);
+    atomicAdd(gpu_words[SOLVER.counts].words[COUNT_CONTACT_POINTS], points);
+}

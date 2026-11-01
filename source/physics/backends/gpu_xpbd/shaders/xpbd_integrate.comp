@@ -25,6 +25,8 @@ void main()
     vec4 linear = gpu_vectors[PARAMETERS.body_linear_velocities].values[slot];
     vec4 angular = gpu_vectors[PARAMETERS.body_angular_velocities].values[slot];
     const float h = PARAMETERS.gravity.w;
+    gpu_vectors[PARAMETERS.body_previous_linear].values[slot] = linear;
+    gpu_vectors[PARAMETERS.body_previous_angular].values[slot] = angular;
 
     if ((flags & BODY_DYNAMIC) != 0U)
     {

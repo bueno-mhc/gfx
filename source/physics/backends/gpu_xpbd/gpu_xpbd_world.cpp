@@ -1,6 +1,7 @@
-// GpuXpbdBackend: the edits become patches of the GPU body arrays, a step is one command buffer (patches, then substeps
-// of prediction and velocity update), submitted and waited for on the stepping thread, and read back into the pending
-// snapshot.
+// GpuXpbdBackend: the edits become patches of the GPU body arrays and the colliders' data; a step is one command buffer
+// (patches, the step's start backed up, the contacts' detection and coloring, substeps of prediction, contact projection
+// and velocity update with the contacts' velocity pass, sleep), submitted and waited for on the stepping thread, replayed
+// from its backed-up start when a buffer or the recorded passes overflowed, and read back into the pending snapshot.
 module gfx.physics.gpu_xpbd;
 
 import std;
@@ -15,9 +16,12 @@ import gfx.physics.enums;
 import gfx.physics.errors;
 import gfx.physics.handles;
 import gfx.physics.interface;
+import gfx.physics.shapes;
 import gfx.physics.world;
 import :settings;
 import :resources;
+import :narrow_phase;
+import :solver;
 import :backend;
 
 namespace gfx::physics::gpu_xpbd
@@ -25,9 +29,6 @@ namespace gfx::physics::gpu_xpbd
 
 namespace
 {
-
-/// The design document's phases that bring what G0 refuses.
-constexpr std::string_view COLLISIONS_PHASE = "collisions arrive with phases G2 to G5 of docs/gpu-xpbd-design.md";
 
 /// The mass properties a body moves with: a dynamic body's (a unit mass and inertia when its colliders give none), none
 /// for the others (as the reference backend).
@@ -146,11 +147,37 @@ phase(StepPhase value) noexcept -> std::size_t
     return static_cast<std::size_t>(std::to_underlying(value));
 }
 
+/// How far a shape reaches from its frame's origin.
+[[nodiscard]] auto
+reach(const Shape& shape) noexcept -> float
+{
+    const Aabb bounds = shape.bounds();
+    return length(component_maximum(component_absolute(bounds.minimum), component_absolute(bounds.maximum)));
+}
+
+/// What decides the static tree: a static collider's data and its body's pose (no padding: compared as bytes).
+struct StaticSignature
+{
+    GpuCollider collider{};
+    GpuVector center{};
+    GpuVector orientation{};
+};
+static_assert(sizeof(StaticSignature) == sizeof(GpuCollider) + 2 * sizeof(GpuVector));
+
+/// The bytes of a span (comparisons of GPU data, which has no padding).
+template<class Element>
+[[nodiscard]] auto
+same_bytes(std::span<const Element> first,
+           std::span<const Element> second) noexcept -> bool
+{
+    return first.size() == second.size() && (first.empty() || std::memcmp(first.data(), second.data(), first.size_bytes()) == 0);
+}
+
 } // namespace
 
 // ===================================================================================================== the edits
 
-/// Marks what each edit changed of the bodies (forces and impulses come after: they need the final centers).
+/// Marks what each edit changed of the bodies and colliders (forces and impulses come after: they need the final centers).
 struct ChangeMarker
 {
     GpuXpbdBackend& backend;
@@ -168,6 +195,7 @@ struct ChangeMarker
         BodyEntry& entry = backend.body_entry(change.body);
         entry = {};
         entry.destroyed = true;
+        backend.colliders_changed(true, true);
     }
 
     void operator()(const edits::SetBodyPose& change) const
@@ -195,11 +223,13 @@ struct ChangeMarker
     void operator()(const edits::SetBodyKind& change) const
     {
         reconfigure(change.body, true);
+        backend.colliders_changed(true, true);
     }
 
     void operator()(const edits::SetBodyMassProperties& change) const
     {
         reconfigure(change.body, true);
+        backend.colliders_changed(false, false);
     }
 
     void operator()(const edits::SetBodyDamping& change) const
@@ -213,6 +243,11 @@ struct ChangeMarker
     }
 
     void operator()(const edits::SetBodyMotionLocks& change) const
+    {
+        reconfigure(change.body, false);
+    }
+
+    void operator()(const edits::SetBodySleepAllowed& change) const
     {
         reconfigure(change.body, false);
     }
@@ -244,7 +279,47 @@ struct ChangeMarker
         push(change.body);
     }
 
-    // The rest: the records are all the backend needs (the world's settings, motion quality, sleep permission...).
+    // Colliders: their data and lists; a body's mass (center) follows its colliders.
+    void operator()(const edits::CreateCollider& change) const
+    {
+        ColliderEntry& entry = backend.collider_entry(change.collider);
+        entry = {.handle = change.collider, .body = change.body, .shape = backend.shape_index(change.description.shape)};
+        reconfigure(change.body, true);
+        backend.colliders_changed(true, false);
+    }
+
+    void operator()(const edits::DestroyCollider& change) const
+    {
+        ColliderEntry& entry = backend.collider_entry(change.collider);
+        if (entry.body)
+        {
+            reconfigure(entry.body, true);
+        }
+        entry = {};
+        backend.colliders_changed(true, false);
+    }
+
+    void operator()(const edits::SetColliderPose& change) const
+    {
+        collider_changed(change.collider, true);
+    }
+
+    void operator()(const edits::SetColliderDensity& change) const
+    {
+        collider_changed(change.collider, true);
+    }
+
+    void operator()(const edits::SetColliderMaterial& change) const
+    {
+        collider_changed(change.collider, false);
+    }
+
+    void operator()(const edits::SetColliderFilter& change) const
+    {
+        collider_changed(change.collider, false);
+    }
+
+    // The rest: the records are all the backend needs (the world's settings, motion quality, contact events...).
     template<class Change>
     void operator()(const Change& /*change*/) const
     {
@@ -271,6 +346,17 @@ private:
         BodyEntry& entry = backend.body_entry(body);
         entry.pushed = true;
         entry.woken = true;
+    }
+
+    void collider_changed(ColliderHandle collider,
+                          bool mass) const
+    {
+        const ColliderEntry& entry = backend.collider_entry(collider);
+        if (mass && entry.body)
+        {
+            reconfigure(entry.body, true);
+        }
+        backend.colliders_changed(false, false);
     }
 };
 
@@ -350,6 +436,7 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
     , m_command_buffer{m_command_pool->allocate(CommandBufferLevel::PRIMARY, "GPU physics step")}
     , m_timeline{device.create_timeline_semaphore({.initial_value = 0, .debug_name = "GPU physics steps"})}
     , m_pipelines{device}
+    , m_solver{device, m_capabilities, settings}
 {
 }
 
@@ -379,13 +466,10 @@ void
 GpuXpbdBackend::check(const WorldEdit& edit,
                       const RecordedWorld& /*recorded*/) const
 {
-    // What phase G0 cannot simulate yet is refused when recorded, never ignored; user constraints are refused for good.
+    // What later phases bring is refused when recorded, never ignored; user constraints are refused for good.
     if (const auto* collider = std::get_if<edits::CreateCollider>(&edit))
     {
-        throw_unsupported(identity(), "RigidBody::add_collider", PhysicsCapability::WORLD_OBJECTS,
-                          std::format("the GPU backend does not simulate colliders yet ({})", COLLISIONS_PHASE),
-                          "give the body its mass properties (RigidBodyDescription::mass_properties), or use another backend",
-                          {.rigid_body = collider->body});
+        GpuNarrowPhase::check_shape(*collider->description.shape);
     }
     if (std::holds_alternative<edits::CreateJoint>(edit))
     {
@@ -422,6 +506,40 @@ GpuXpbdBackend::body_entry(RigidBodyHandle body) -> BodyEntry&
         m_bodies.resize(index + 1);
     }
     return m_bodies[index];
+}
+
+auto
+GpuXpbdBackend::collider_entry(ColliderHandle collider) -> ColliderEntry&
+{
+    const std::uint32_t index = slot(collider);
+    if (m_colliders.size() <= index)
+    {
+        m_colliders.resize(index + 1);
+    }
+    return m_colliders[index];
+}
+
+void
+GpuXpbdBackend::colliders_changed(bool lists,
+                                  bool statics) noexcept
+{
+    m_colliders_dirty = true;
+    m_lists_dirty = m_lists_dirty || lists;
+    m_statics_dirty = m_statics_dirty || statics;
+}
+
+auto
+GpuXpbdBackend::shape_index(const std::shared_ptr<const Shape>& shape) -> std::uint32_t
+{
+    // Each distinct shape once (kept alive: its address is the key); the narrow phase uploads the table before the step.
+    if (const auto known = m_shape_indices.find(shape.get()); known != m_shape_indices.end())
+    {
+        return known->second;
+    }
+    const std::uint32_t index = m_solver.narrow_phase().add_shape(*shape);
+    m_shape_indices.emplace(shape.get(), index);
+    m_shapes.push_back(shape);
+    return index;
 }
 
 void
@@ -514,11 +632,12 @@ GpuXpbdBackend::make_patch(std::uint32_t slot,
         state.angular_velocity = {};
     }
 
-    // The flags: kind, awake, locks.
+    // The flags: kind, awake, may sleep, locks (the patch also restarts the body's sleep timer).
     GpuBodyFlag flags = GpuBodyFlag::SIMULATED;
     flags |= dynamic ? GpuBodyFlag::DYNAMIC : GpuBodyFlag::NONE;
     flags |= kinematic ? GpuBodyFlag::KINEMATIC : GpuBodyFlag::NONE;
     flags |= moves ? GpuBodyFlag::AWAKE : GpuBodyFlag::NONE;
+    flags |= configuration.allow_sleep ? GpuBodyFlag::SLEEPS : GpuBodyFlag::NONE;
     const std::uint32_t word = std::to_underlying(flags) | (std::uint32_t{std::to_underlying(configuration.locks)} << GPU_XPBD_BODY_LOCK_SHIFT);
     const bool pushed = dynamic && state.awake;
     const GpuBodyPatch patch{
@@ -548,6 +667,100 @@ GpuXpbdBackend::make_patch(std::uint32_t slot,
 }
 
 void
+GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
+{
+    // The colliders' data (poses about their bodies' centers of mass), the moving and static lists, the bodies' radii.
+    const auto collider_count = static_cast<std::uint32_t>(pending.colliders.size());
+    std::vector<GpuCollider> data(collider_count);
+    std::vector<std::uint32_t> moving;
+    std::vector<std::uint32_t> statics;
+    std::vector<StaticSignature> signature;
+    m_body_radii.assign(pending.rigid_bodies.size(), 0.0F);
+    if (m_colliders.size() < collider_count)
+    {
+        m_colliders.resize(collider_count);
+    }
+    for (std::uint32_t collider = 0; collider < collider_count; ++collider)
+    {
+        const ColliderRecord& record = pending.colliders[collider];
+        const RigidBodyRecord* body = record.handle ? find(pending, record.body) : nullptr;
+        if (body == nullptr)
+        {
+            continue;
+        }
+        const ColliderDescription& configuration = record.configuration;
+        const Vector3 position = configuration.pose.position - effective_mass(*body).center_of_mass;
+        const auto category = std::to_underlying(configuration.filter.category);
+        const auto mask = std::to_underlying(configuration.filter.mask);
+        const Friction& friction = configuration.material.friction;
+        const std::uint32_t body_slot = slot(record.body);
+        data[collider] = {.position = vector(position),
+                          .orientation = vector(configuration.pose.orientation),
+                          .body = body_slot,
+                          .shape = m_colliders[collider].shape,
+                          .flags = 1,
+                          .group = configuration.filter.group,
+                          .filter = {static_cast<std::uint32_t>(category), static_cast<std::uint32_t>(category >> 32U), static_cast<std::uint32_t>(mask),
+                                     static_cast<std::uint32_t>(mask >> 32U)},
+                          .material = {friction.static_coefficient, friction.dynamic_coefficient, friction.rolling, configuration.material.restitution}};
+        m_body_radii[body_slot] = std::max(m_body_radii[body_slot], length(position) + reach(*configuration.shape));
+        if (body->configuration.kind == BodyKind::STATIC)
+        {
+            statics.push_back(collider);
+            const BodyEntry& entry = m_bodies[body_slot];
+            signature.push_back({.collider = data[collider], .center = vector(entry.center), .orientation = vector(entry.orientation)});
+        }
+        else
+        {
+            moving.push_back(collider);
+        }
+    }
+
+    // Uploaded when anything changed; the static tree rebuilt when a static collider or a static body's pose changed.
+    const std::span<const std::byte> signature_bytes = std::as_bytes(std::span{signature});
+    const bool lists_changed = !same_bytes(std::span<const std::uint32_t>{moving}, std::span<const std::uint32_t>{m_moving_list}) ||
+                               !same_bytes(std::span<const std::uint32_t>{statics}, std::span<const std::uint32_t>{m_static_list});
+    const bool data_changed = !same_bytes(std::span<const GpuCollider>{data}, std::span<const GpuCollider>{m_collider_data});
+    const bool statics_changed = lists_changed || m_statics_dirty || !same_bytes(signature_bytes, std::span<const std::byte>{m_static_signature});
+    if (lists_changed || data_changed || statics_changed)
+    {
+        m_solver.set_colliders(data, moving, statics, statics_changed);
+        m_collider_data = std::move(data);
+        m_moving_list = std::move(moving);
+        m_static_list = std::move(statics);
+        m_static_signature.assign(signature_bytes.begin(), signature_bytes.end());
+    }
+    m_lists_changed = m_lists_changed || lists_changed;
+    m_colliders_dirty = false;
+    m_lists_dirty = false;
+    m_statics_dirty = false;
+}
+
+auto
+GpuXpbdBackend::step_motion(const WorldSnapshot& pending,
+                            float seconds) const noexcept -> float
+{
+    // The farthest a moving body's colliders get in the step (its speed and its turn at its radius, gravity's growth):
+    // the margin the boxes and the speculative contacts grow by, so that what a step brings into contact is found.
+    float farthest = 0.0F;
+    const float gravity = length(pending.configuration.gravity) * seconds * seconds;
+    for (std::uint32_t slot = 0; slot < m_body_radii.size() && slot < pending.rigid_bodies.size(); ++slot)
+    {
+        const RigidBodyRecord& record = pending.rigid_bodies[slot];
+        const bool moves = record.handle && (record.configuration.kind == BodyKind::KINEMATIC || (record.configuration.kind == BodyKind::DYNAMIC && record.state.awake));
+        if (!moves || slot >= m_bodies.size())
+        {
+            continue;
+        }
+        const BodyEntry& entry = m_bodies[slot];
+        const float speed = length(entry.linear_velocity) + length(entry.angular_velocity) * m_body_radii[slot];
+        const float scale = record.configuration.kind == BodyKind::DYNAMIC ? std::abs(record.configuration.gravity_scale) : 0.0F;
+        farthest = std::max(farthest, speed * seconds + gravity * scale);
+    }
+    return farthest;
+}
+
+void
 GpuXpbdBackend::simulate(float seconds,
                          WorldSnapshot& pending)
 {
@@ -567,22 +780,49 @@ GpuXpbdBackend::simulate(float seconds,
     std::string_view stage = "recording the step";
     try
     {
+        update_colliders(pending);
         m_substep_seconds = seconds / static_cast<float>(substeps);
-        record_step(body_count, substeps, pending.configuration.gravity);
-        stage = "running the step on the GPU";
-        const std::array command_buffers{m_command_buffer->handle()};
-        const std::array signals{TimelineSemaphoreSignal{.semaphore = m_timeline->handle(), .value = m_submitted + 1}};
-        const std::array batches{SubmitDescription{.command_buffers = command_buffers, .timeline_signals = signals}};
-        m_queue->submit(batches);
-        ++m_submitted;
-        if (m_timeline->wait(m_submitted) != WaitStatus::SIGNALED)
+
+        // The step, replayed from its start while a buffer or the recorded passes overflowed (each time with room for
+        // what was counted).
+        GpuSolverCounts counts{};
+        for (std::uint32_t attempt = 0;; ++attempt)
         {
-            throw PhysicsError({.backend = identity(), .operation = "PhysicsWorld::step", .problem = "the GPU step did not complete", .suggestion = {}});
+            stage = "recording the step";
+            record_step(body_count, pending, seconds, attempt > 0);
+            stage = "running the step on the GPU";
+            const std::array command_buffers{m_command_buffer->handle()};
+            const std::array signals{TimelineSemaphoreSignal{.semaphore = m_timeline->handle(), .value = m_submitted + 1}};
+            const std::array batches{SubmitDescription{.command_buffers = command_buffers, .timeline_signals = signals}};
+            m_queue->submit(batches);
+            ++m_submitted;
+            if (m_timeline->wait(m_submitted) != WaitStatus::SIGNALED)
+            {
+                throw PhysicsError({.backend = identity(), .operation = "PhysicsWorld::step", .problem = "the GPU step did not complete", .suggestion = {}});
+            }
+            counts = read_counts();
+            if (!m_solver.overflowed(counts))
+            {
+                break;
+            }
+            if (attempt == GPU_XPBD_MAXIMUM_REPLAYS)
+            {
+                throw PhysicsError({.backend = identity(),
+                                    .operation = "PhysicsWorld::step",
+                                    .problem = std::format("the step still overflowed after {} replays ({} pairs, {} manifold slots, {} colors)",
+                                                           GPU_XPBD_MAXIMUM_REPLAYS, counts.within_pairs + counts.between_pairs, counts.manifold_slots,
+                                                           counts.colors),
+                                    .suggestion = "the world's state is that of the last completed step"});
+            }
         }
         const Clock::time_point solved = Clock::now();
         pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, solved);
         stage = "reading the step back";
         read_back(pending);
+        m_solver.complete_step(counts);
+        m_lists_changed = false;
+        pending.statistics.pairs = counts.candidates;
+        pending.statistics.contacts = counts.contact_points;
         m_retired.clear();
         (void)m_device.deleter().collect();
         pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] = seconds_between(solved, Clock::now());
@@ -598,33 +838,39 @@ GpuXpbdBackend::simulate(float seconds,
 
 void
 GpuXpbdBackend::record_step(std::uint32_t body_count,
-                            std::uint32_t substeps,
-                            Vector3 gravity)
+                            const WorldSnapshot& pending,
+                            float seconds,
+                            bool replay)
 {
     // Host buffers large enough (before recording: their bindless indices go into the parameters).
     const auto patch_count = static_cast<std::uint32_t>(m_body_patches.size());
     m_parameters.reserve(m_device, sizeof(GpuStepParameters), m_retired);
     m_patches.reserve(m_device, std::max<std::size_t>(patch_count, 1) * sizeof(GpuBodyPatch), m_retired);
-    m_readback.reserve(m_device, std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)), m_retired);
+    m_readback.reserve(m_device, std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts), m_retired);
 
     m_command_pool->reset();
     ComputeRecorder recorder{*m_command_buffer};
 
-    // The arrays hold every slot (grown ones keep the slots the GPU had).
+    // The arrays hold every slot (grown ones keep the slots the GPU had); the contacts' arrays and uploads.
     const std::uint32_t kept = m_body_count;
     for (GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities, &m_inverse_inertias, &m_inertias, &m_forces,
-                            &m_torques, &m_displacements, &m_rotations, &m_flags})
+                            &m_torques, &m_displacements, &m_rotations, &m_flags, &m_previous_linear, &m_previous_angular, &m_sleep_timers})
     {
         (void)array->reserve(m_device, recorder, body_count, kept, m_retired);
     }
+    for (GpuArray& backup : m_backups)
+    {
+        (void)backup.reserve(m_device, recorder, body_count, kept, m_retired);
+    }
     m_body_count = body_count;
+    m_solver.record_uploads(recorder, body_count, m_retired);
 
-    // The parameters and the patches.
+    // The parameters and the patches; this step's forces start from zero (the patches give some).
     const GpuStepParameters parameters{
-        .gravity = vector(gravity, m_substep_seconds),
+        .gravity = vector(pending.configuration.gravity, m_substep_seconds),
         .body_count = body_count,
         .patch_count = patch_count,
-        .substeps = substeps,
+        .substeps = std::max(pending.configuration.solver.sub_steps, 1U),
         .body_centers = m_centers.index(),
         .body_orientations = m_orientations.index(),
         .body_linear_velocities = m_linear_velocities.index(),
@@ -637,13 +883,23 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         .body_rotations = m_rotations.index(),
         .body_flags = m_flags.index(),
         .body_patches = m_patches.index(),
+        .body_previous_linear = m_previous_linear.index(),
+        .body_previous_angular = m_previous_angular.index(),
+        .sleep_timers = m_sleep_timers.index(),
     };
     std::memcpy(m_parameters.bytes().data(), &parameters, sizeof(parameters));
     m_parameters.buffer().flush_mapped_range();
-    if (patch_count > 0)
+    const std::uint64_t vectors = std::uint64_t{body_count} * sizeof(GpuVector);
+    const std::uint64_t words = std::uint64_t{body_count} * sizeof(std::uint32_t);
+    if (!replay)
     {
-        std::memcpy(m_patches.bytes().data(), m_body_patches.data(), m_body_patches.size() * sizeof(GpuBodyPatch));
-        m_patches.buffer().flush_mapped_range();
+        if (patch_count > 0)
+        {
+            std::memcpy(m_patches.bytes().data(), m_body_patches.data(), m_body_patches.size() * sizeof(GpuBodyPatch));
+            m_patches.buffer().flush_mapped_range();
+        }
+        recorder.fill_buffer(m_forces.buffer().handle(), 0, vectors, 0);
+        recorder.fill_buffer(m_torques.buffer().handle(), 0, vectors, 0);
     }
     const std::uint32_t parameters_index = m_parameters.index();
     const auto pass = [&recorder, parameters_index](ComputePipelineHandle pipeline, std::uint32_t count) {
@@ -653,21 +909,62 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_COMPUTE, 1}});
     };
 
-    // The passes: patches, then the substeps.
+    // The step's start: patched and backed up, or (replaying) restored.
+    const std::array<const GpuArray*, 6> state_arrays{&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities, &m_flags, &m_sleep_timers};
+    const auto copy_state = [&](bool restore) {
+        for (std::size_t array = 0; array < state_arrays.size(); ++array)
+        {
+            const Buffer& live = state_arrays[array]->buffer();
+            const Buffer& backup = m_backups[array].buffer();
+            const std::array regions{BufferCopyRegion{.size = std::uint64_t{body_count} * state_arrays[array]->element_size()}};
+            recorder.copy_buffer(restore ? backup.handle() : live.handle(), restore ? live.handle() : backup.handle(), regions);
+        }
+    };
     recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
-    if (patch_count > 0)
+    if (!replay)
     {
-        pass(m_pipelines.patch_bodies(), patch_count);
+        if (patch_count > 0)
+        {
+            pass(m_pipelines.patch_bodies(), patch_count);
+        }
+        recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
+        copy_state(false);
     }
-    for (std::uint32_t substep = 0; substep < substeps; ++substep)
+    else
+    {
+        copy_state(true);
+    }
+    recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
+
+    // The contacts, then the substeps: prediction, the position iterations, the velocity update, the velocity
+    // iterations; then sleep.
+    const SolverDescription& solver = pending.configuration.solver;
+    const ContactStep step{.step_parameters = parameters_index,
+                           .body_count = body_count,
+                           .step_seconds = seconds,
+                           .speculative_distance = pending.configuration.collision.speculative_distance + step_motion(pending, seconds),
+                           .solver = solver,
+                           .sleep = pending.configuration.sleep,
+                           .collision = pending.configuration.collision,
+                           .lists_changed = m_lists_changed};
+    m_solver.record_detection(recorder, step);
+    for (std::uint32_t substep = 0; substep < parameters.substeps; ++substep)
     {
         pass(m_pipelines.integrate(), body_count);
+        for (std::uint32_t iteration = 0; iteration < std::max(solver.position_iterations, 1U); ++iteration)
+        {
+            m_solver.record_positions(recorder, iteration == 0);
+        }
         pass(m_pipelines.update_velocities(), body_count);
+        for (std::uint32_t iteration = 0; iteration < std::max(solver.velocity_iterations, 1U); ++iteration)
+        {
+            m_solver.record_velocities(recorder, iteration == 0);
+        }
     }
+    m_solver.record_sleep(recorder);
 
-    // The results into the readback buffer; this step's forces cleared.
+    // The results into the readback buffer: the bodies' arrays, their flags, the contacts' counts.
     recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
-    const std::uint64_t vectors = std::uint64_t{body_count} * sizeof(GpuVector);
     std::uint64_t offset = 0;
     for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
     {
@@ -675,17 +972,29 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
         offset += vectors;
     }
-    const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{body_count} * sizeof(std::uint32_t)}};
+    const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
     recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
-    recorder.fill_buffer(m_forces.buffer().handle(), 0, vectors, 0);
-    recorder.fill_buffer(m_torques.buffer().handle(), 0, vectors, 0);
+    offset += words;
+    const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
+    recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+}
+
+auto
+GpuXpbdBackend::read_counts() -> GpuSolverCounts
+{
+    m_readback.buffer().invalidate_mapped_range();
+    const std::span<const std::byte> bytes = m_readback.bytes();
+    GpuSolverCounts counts{};
+    const std::size_t offset = std::size_t{m_body_count} * (4 * sizeof(GpuVector) + sizeof(std::uint32_t));
+    std::memcpy(&counts, bytes.data() + offset, sizeof(counts));
+    return counts;
 }
 
 void
 GpuXpbdBackend::read_back(WorldSnapshot& pending)
 {
-    // Arrays of centers, orientations, linear and angular velocities, then flags.
+    // Arrays of centers, orientations, linear and angular velocities, then flags; sleep changes reported in slot order.
     m_readback.buffer().invalidate_mapped_range();
     const std::span<const std::byte> bytes = m_readback.bytes();
     const std::size_t vectors = std::size_t{m_body_count} * sizeof(GpuVector);
@@ -698,10 +1007,7 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
         }
         std::uint32_t flags = 0;
         std::memcpy(&flags, bytes.data() + 4 * vectors + slot * sizeof(std::uint32_t), sizeof(flags));
-        if ((flags & std::to_underlying(GpuBodyFlag::AWAKE)) == 0)
-        {
-            continue;
-        }
+        const bool awake = (flags & std::to_underlying(GpuBodyFlag::AWAKE)) != 0;
 
         // The GPU's values, exactly, in the mirror; the frame's pose and velocities in the record.
         BodyEntry& entry = m_bodies[slot];
@@ -714,6 +1020,11 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
         state.pose.position = entry.center - rotate(entry.orientation, effective_mass(record).center_of_mass);
         state.linear_velocity = entry.linear_velocity + cross(entry.angular_velocity, state.pose.position - entry.center);
         state.angular_velocity = entry.angular_velocity;
+        if (record.configuration.kind == BodyKind::DYNAMIC && awake != state.awake)
+        {
+            state.awake = awake;
+            pending.sleep_events.push_back({.kind = awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+        }
     }
 }
 

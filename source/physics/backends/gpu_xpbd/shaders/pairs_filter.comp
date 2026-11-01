@@ -1,0 +1,73 @@
+#version 460
+// The candidate pairs worth a narrow phase (one invocation per pair slot of the two searches: the moving tree's own
+// pairs, then its pairs with the static tree): colliders of different bodies, at least one of them dynamic, at least one
+// of them awake (or kinematic), whose filters let them collide (should_collide(): a common non-zero group decides alone,
+// else each one's category in the other's mask). A flag per slot (the compaction keeps the flagged ones, in order); with
+// mode 1, the kept pairs' instances are written at their compacted places instead (pairs_gather).
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+// Instance indices of pair slot index (the second of a between pair is a static instance, after the moving ones).
+uvec2 pair_instances(uint index)
+{
+    const uvec2 pair = uvec2(gpu_words[SOLVER.raw_pairs].words[2U * index], gpu_words[SOLVER.raw_pairs].words[2U * index + 1U]);
+    return index < SOLVER.within_capacity ? pair : uvec2(pair.x, pair.y + SOLVER.moving_count);
+}
+
+bool slot_valid(uint index)
+{
+    if (index < SOLVER.within_capacity)
+    {
+        return index < count_word(COUNT_WITHIN_PAIRS);
+    }
+    return index - SOLVER.within_capacity < count_word(COUNT_BETWEEN_PAIRS);
+}
+
+bool should_collide(Collider first, Collider second)
+{
+    if (first.group == second.group && first.group != 0)
+    {
+        return first.group > 0;
+    }
+    const bool first_in_second = ((first.filter_words.x & second.filter_words.z) | (first.filter_words.y & second.filter_words.w)) != 0U;
+    const bool second_in_first = ((second.filter_words.x & first.filter_words.z) | (second.filter_words.y & first.filter_words.w)) != 0U;
+    return first_in_second && second_in_first;
+}
+
+bool keeps(uvec2 instances)
+{
+    const Collider first = load_collider(instance_collider(instances.x));
+    const Collider second = load_collider(instance_collider(instances.y));
+    if (first.body == second.body || (first.flags & 1U) == 0U || (second.flags & 1U) == 0U)
+    {
+        return false;
+    }
+    const uint first_flags = gpu_words[PARAMETERS.body_flags].words[first.body];
+    const uint second_flags = gpu_words[PARAMETERS.body_flags].words[second.body];
+    const bool dynamic = ((first_flags | second_flags) & BODY_DYNAMIC) != 0U;
+    const bool awake = body_moves(first_flags) || body_moves(second_flags);
+    return dynamic && awake && should_collide(first, second);
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 0U)
+    {
+        if (index >= SOLVER.within_capacity + SOLVER.between_capacity)
+        {
+            return;
+        }
+        gpu_words[SOLVER.pair_flags].words[index] = slot_valid(index) && keeps(pair_instances(index)) ? 1U : 0U;
+        return;
+    }
+
+    // Gather: the kept pairs' instances, in order.
+    if (index >= count_word(COUNT_CANDIDATES))
+    {
+        return;
+    }
+    const uvec2 instances = pair_instances(gpu_words[SOLVER.pair_indices].words[index]);
+    gpu_words[SOLVER.pairs].words[2U * index] = instances.x;
+    gpu_words[SOLVER.pairs].words[2U * index + 1U] = instances.y;
+}

@@ -94,6 +94,10 @@ public:
     /// @throws BackendCapabilityError for compounds holding compounds deeper than GPU_XPBD_COMPOUND_DEPTH.
     auto add_shape(const Shape& shape) -> std::uint32_t;
 
+    /// @brief Throws what add_shape() would for @p shape (BackendCapabilityError for compounds holding compounds deeper
+    ///        than GPU_XPBD_COMPOUND_DEPTH), without adding it.
+    static void check_shape(const Shape& shape);
+
     /// @brief Shapes in the table (a compound's children count).
     [[nodiscard]] auto shape_count() const noexcept -> std::uint32_t;
 

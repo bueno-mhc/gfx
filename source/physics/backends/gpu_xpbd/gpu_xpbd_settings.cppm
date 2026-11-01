@@ -20,7 +20,10 @@ struct GpuXpbdVariants
 ///        the defaults.
 struct GpuXpbdDescription
 {
-    GpuXpbdVariants variants{}; ///< Which variants the passes use.
+    GpuXpbdVariants variants{};                               ///< Which variants the passes use.
+    GpuSolverMode solver_mode = GpuSolverMode::GRAPH_COLORING; ///< How contact constraints are projected.
+    GpuBvhLayout bvh_layout = GpuBvhLayout::FOUR_WIDE;        ///< The collider trees' traversal layout (four-wide: G2's
+                                                              ///< measurements, 38 to 59 % fewer pair-search steps).
 };
 
 /// @brief What the backend found on a device and chose to run there.

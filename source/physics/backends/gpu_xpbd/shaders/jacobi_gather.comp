@@ -1,0 +1,51 @@
+#version 460
+// The Jacobi gather of the overflow set (every active constraint in the Jacobi solver mode): each awake dynamic body adds
+// the corrections the overflow set's constraints computed for it, averaged over how many there are (mass splitting), in
+// its graph order — no floating-point atomics, the same sum every run. Mode 0: positions (the center moves, the orientation
+// turns, the substep's displacement and rotation take them); mode 1: velocities.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+void main()
+{
+    const uint body = gl_GlobalInvocationID.x;
+    if (body >= SOLVER.body_count || !body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[body]))
+    {
+        return;
+    }
+    vec3 first_sum = vec3(0.0);
+    vec3 second_sum = vec3(0.0);
+    uint count = 0U;
+    const uint end = gpu_words[SOLVER.body_end].words[body];
+    for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < end; ++entry)
+    {
+        const uint value = gpu_words[SOLVER.graph_sorted_values].words[entry];
+        const uint slot = value >> 1U;
+        if (gpu_words[SOLVER.color_keys].words[slot] != OVERFLOW_COLOR)
+        {
+            continue;
+        }
+        const uint side = value & 1U;
+        first_sum += gpu_vectors[SOLVER.corrections].values[4U * slot + 2U * side].xyz;
+        second_sum += gpu_vectors[SOLVER.corrections].values[4U * slot + 2U * side + 1U].xyz;
+        ++count;
+    }
+    if (count == 0U)
+    {
+        return;
+    }
+    const vec3 linear = first_sum / float(count);
+    const vec3 angular = second_sum / float(count);
+    if (push.mode == 0U)
+    {
+        vec4 center = gpu_vectors[PARAMETERS.body_centers].values[body];
+        center.xyz += linear;
+        gpu_vectors[PARAMETERS.body_centers].values[body] = center;
+        gpu_vectors[PARAMETERS.body_orientations].values[body] = turned(gpu_vectors[PARAMETERS.body_orientations].values[body], angular);
+        gpu_vectors[PARAMETERS.body_displacements].values[body].xyz += linear;
+        gpu_vectors[PARAMETERS.body_rotations].values[body].xyz += angular;
+        return;
+    }
+    gpu_vectors[PARAMETERS.body_linear_velocities].values[body].xyz += linear;
+    gpu_vectors[PARAMETERS.body_angular_velocities].values[body].xyz += angular;
+}

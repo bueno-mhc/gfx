@@ -28,9 +28,11 @@ grown_capacity(std::uint64_t count,
 // ===================================================================================================== GpuArray
 
 GpuArray::GpuArray(std::string_view name,
-                   std::uint32_t element_size)
+                   std::uint32_t element_size,
+                   BufferUsage usage)
     : m_name{name}
     , m_element_size{element_size}
+    , m_usage{usage}
 {
 }
 
@@ -49,7 +51,7 @@ GpuArray::reserve(Device& device,
     // A buffer twice as large at least; the kept elements copied, the rest zeroed (free slots, no force).
     const auto capacity = static_cast<std::uint32_t>(grown_capacity(count, 64));
     std::unique_ptr<Buffer> buffer = device.create_buffer({.size = std::uint64_t{capacity} * m_element_size,
-                                                           .usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION,
+                                                           .usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION | m_usage,
                                                            .debug_name = m_name});
     const std::uint32_t copied = m_buffer != nullptr ? std::min(kept, m_capacity) : 0;
     if (copied > 0)
