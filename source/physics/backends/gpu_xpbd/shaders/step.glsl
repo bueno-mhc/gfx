@@ -13,7 +13,7 @@ struct StepParameters
     uint body_count;
     uint patch_count;
     uint substeps;
-    uint reserved;
+    uint particle_count; // soft-body particles (constraint nodes body_count + p)
     uint body_centers;
     uint body_orientations;
     uint body_linear_velocities;
@@ -29,7 +29,15 @@ struct StepParameters
     uint body_previous_linear;  // the velocities at the substep's start (restitution reads them)
     uint body_previous_angular;
     uint sleep_timers;          // seconds each body stayed slow
+    uint particle_positions;    // the particles' positions,
+    uint particle_velocities;   // velocities,
+    uint particle_displacements; // displacements in the substep,
+    uint particle_previous_velocities; // velocities at the substep's start,
+    uint particles;             // what changes only with edits (GpuParticle: three vectors each),
+    uint soft_bodies;           // the soft bodies' settings (GpuSoftBody: two vectors each)
+    uint reserved_0;
     uint reserved_1;
+    uint reserved_2;
 };
 
 // GpuBodyPatch in gpu_resources.cppm.
@@ -79,6 +87,13 @@ vec4 quaternion_multiply(vec4 a, vec4 b)
     return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+// The vector v turned by the unit quaternion q.
+vec3 rotate_by(vec4 q, vec3 v)
+{
+    const vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
 // The conjugate (the inverse rotation of a unit quaternion).
 vec4 quaternion_conjugate(vec4 q)
 {
@@ -122,5 +137,6 @@ bool body_moves(uint flags)
 {
     return (flags & BODY_SIMULATED) != 0U && (flags & BODY_AWAKE) != 0U && (flags & (BODY_DYNAMIC | BODY_KINEMATIC)) != 0U;
 }
+
 
 #endif

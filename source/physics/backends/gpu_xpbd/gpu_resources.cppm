@@ -29,7 +29,7 @@ struct GpuStepParameters
     std::uint32_t body_count = 0;                  ///< Body slots on the GPU.
     std::uint32_t patch_count = 0;                 ///< Body patches of this step.
     std::uint32_t substeps = 1;                    ///< Substeps of this step.
-    std::uint32_t reserved = 0;                    ///< (Alignment.)
+    std::uint32_t particle_count = 0;              ///< Soft-body particles on the GPU (constraint nodes body_count + p).
     std::uint32_t body_centers = 0;                ///< Bindless indices of the body arrays: centers of mass (w: inverse mass),
     std::uint32_t body_orientations = 0;           ///< orientations,
     std::uint32_t body_linear_velocities = 0;      ///< linear velocities of the centers (w: linear damping),
@@ -44,11 +44,18 @@ struct GpuStepParameters
     std::uint32_t body_patches = 0;                ///< of this step's patches,
     std::uint32_t body_previous_linear = 0;        ///< the linear velocities at the substep's start,
     std::uint32_t body_previous_angular = 0;       ///< the angular velocities at the substep's start,
-    std::uint32_t sleep_timers = 0;                ///< and the seconds each body stayed slow.
-    std::uint32_t reserved_1 = 0;                  ///< (Alignment.)
+    std::uint32_t sleep_timers = 0;                ///< the seconds each body stayed slow;
+    std::uint32_t particle_positions = 0;          ///< the particles' positions,
+    std::uint32_t particle_velocities = 0;         ///< velocities,
+    std::uint32_t particle_displacements = 0;      ///< displacements in the substep,
+    std::uint32_t particle_previous_velocities = 0; ///< velocities at the substep's start,
+    std::uint32_t particles = 0;                   ///< what changes only with edits (GpuParticle),
+    std::uint32_t soft_bodies = 0;                 ///< and the soft bodies' settings (GpuSoftBody).
+    std::array<std::uint32_t, 3> reserved{};       ///< (Alignment.)
 };
-static_assert(sizeof(GpuStepParameters) == 96 && offsetof(GpuStepParameters, body_count) == 16 && offsetof(GpuStepParameters, body_centers) == 32 &&
-              offsetof(GpuStepParameters, body_patches) == 76 && offsetof(GpuStepParameters, sleep_timers) == 88);
+static_assert(sizeof(GpuStepParameters) == 128 && offsetof(GpuStepParameters, body_count) == 16 && offsetof(GpuStepParameters, body_centers) == 32 &&
+              offsetof(GpuStepParameters, body_patches) == 76 && offsetof(GpuStepParameters, sleep_timers) == 88 &&
+              offsetof(GpuStepParameters, soft_bodies) == 112);
 
 /// A body written whole by the patch pass (BodyPatch in step.glsl): created, edited, woken or put to sleep, given
 /// forces or impulses.
@@ -86,8 +93,8 @@ struct GpuBodyReadback
 /// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity; the
 /// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
 /// compounds descended at once, the triangles' edge-on tolerance; the solver's sleeping flag and colors; the joint part
-/// kinds, the absent body (the world), the joint flags.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 60> SPECIALIZATION_CONSTANTS{{
+/// kinds, the absent body (the world), the joint flags; the pin part, the soft-body constraint kinds.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 67> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -148,6 +155,13 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 60> SPECIAL
     {57, std::to_underlying(GpuJointFlag::ACTIVE)},
     {58, std::to_underlying(GpuJointFlag::SOLVED)},
     {59, std::to_underlying(GpuJointFlag::BROKEN)},
+    {60, std::to_underlying(GpuJointPartKind::PIN)},
+    {61, std::to_underlying(SoftBodyConstraintKind::STRETCH)},
+    {62, std::to_underlying(SoftBodyConstraintKind::SHEAR)},
+    {63, std::to_underlying(SoftBodyConstraintKind::BENDING)},
+    {64, std::to_underlying(SoftBodyConstraintKind::VOLUME)},
+    {65, std::to_underlying(SoftBodyConstraintKind::DIHEDRAL)},
+    {66, std::to_underlying(SoftBodyConstraintKind::TETHER)},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");

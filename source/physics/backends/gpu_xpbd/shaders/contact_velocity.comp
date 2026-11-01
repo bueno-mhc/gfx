@@ -8,14 +8,21 @@
 // the change applied as an impulse through the points' generalized inverse masses. Then rolling resistance: the relative
 // turn opposed by an angular impulse up to the rolling coefficient (a lever, as the reference solver has it) times the
 // manifold's normal impulse. Points that did not push are marked slipped (their friction anchors renew next step). Mode
-// bit 0: the substep's first iteration (budgets reset); bit 1: the overflow set (corrections for the Jacobi gather).
+// bit 0: the substep's first iteration (budgets reset); bit 1: the overflow set (corrections for the Jacobi gather, with the
+// sides' parts: split_node()).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
 // The velocities a body had at the substep's start (its current ones when constraints and gravity do not move it).
 void start_velocities(uint slot, Body body, out vec3 linear, out vec3 angular)
 {
-    const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
+    const uint flags = body_flags_of(slot);
+    if (body_moves(flags) && is_particle(slot))
+    {
+        linear = gpu_vectors[PARAMETERS.particle_previous_velocities].values[particle_of(slot)].xyz;
+        angular = vec3(0.0);
+        return;
+    }
     if (body_moves(flags))
     {
         linear = gpu_vectors[PARAMETERS.body_previous_linear].values[slot].xyz;
@@ -44,6 +51,11 @@ void main()
     }
     Body first = load_body(header.x);
     Body second = load_body(header.y);
+    if ((push.mode & 2U) != 0U)
+    {
+        split_node(first, header.x, true);
+        split_node(second, header.y, true);
+    }
     const vec3 first_linear = first.linear_velocity;
     const vec3 first_angular = first.angular_velocity;
     const vec3 second_linear = second.linear_velocity;

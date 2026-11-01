@@ -1,0 +1,171 @@
+#version 460
+// An iteration of the soft constraints of one color (no two of a color move one particle), one invocation per constraint
+// (XPBD, Macklin et al. 2016; the constraint functions of the abstraction's soft-body solver): STRETCH, SHEAR and BENDING
+// keep two particles at their rest distance, TETHER keeps its first particle within it of its anchor (moving the first
+// only), VOLUME keeps six times a tetrahedron's signed volume, DIHEDRAL the angle between two triangles sharing an edge
+// (Bridson et al. 2003). Δλ = (−C − α̃λ) / (Σ wᵢ|∇ᵢC|² + α̃), α̃ = compliance / h²; the multipliers reset at the substep's
+// first iteration; a soft body that needs fewer iterations per substep than this one skips it. The corrections move the
+// particles and their substep's displacement (the velocity update divides it by the substep).
+#extension GL_GOOGLE_include_directive : require
+#define GPU_XPBD_SOLVER_PUSH
+#include "step.glsl"
+
+layout(constant_id = 61) const uint SOFT_STRETCH = 0U;
+layout(constant_id = 62) const uint SOFT_SHEAR = 0U;
+layout(constant_id = 63) const uint SOFT_BENDING = 0U;
+layout(constant_id = 64) const uint SOFT_VOLUME = 0U;
+layout(constant_id = 65) const uint SOFT_DIHEDRAL = 0U;
+layout(constant_id = 66) const uint SOFT_TETHER = 0U;
+
+layout(push_constant) uniform Push
+{
+    uint parameters;  // bindless index of the step's parameters
+    uint constraints; // of the soft constraints (two vectors each: particles; kind, compliance, rest)
+    uint multipliers; // of their multipliers (a float each)
+    uint first;       // the color's first constraint
+    uint count;       // its constraints
+    uint iteration;   // the substep's iteration
+} push;
+
+#include "particles.glsl"
+
+const float PI = 3.14159265358979;
+const float TINY = 1e-9;
+
+// The dihedral angle at the edge a–b between the triangles (a, b, c) and (b, a, d), signed about the edge, and its
+// gradients (the abstraction's xpbd::dihedral: Bridson's bending modes, negated).
+bool dihedral(vec3 a, vec3 b, vec3 c, vec3 d, out float angle, out vec3 gradient_a, out vec3 gradient_b, out vec3 gradient_c, out vec3 gradient_d)
+{
+    angle = 0.0;
+    gradient_a = vec3(0.0);
+    gradient_b = vec3(0.0);
+    gradient_c = vec3(0.0);
+    gradient_d = vec3(0.0);
+    const vec3 edge = b - a;
+    const float edge_length = length(edge);
+    const vec3 first_normal = cross(c - a, c - b);
+    const vec3 second_normal = cross(d - b, d - a);
+    const float first_squared = dot(first_normal, first_normal);
+    const float second_squared = dot(second_normal, second_normal);
+    if (!(edge_length > TINY) || !(first_squared > TINY * TINY) || !(second_squared > TINY * TINY))
+    {
+        return false;
+    }
+    const vec3 first_unit = first_normal / sqrt(first_squared);
+    const vec3 second_unit = second_normal / sqrt(second_squared);
+    angle = atan(dot(cross(first_unit, second_unit), edge / edge_length), dot(first_unit, second_unit));
+    const vec3 first_mode = first_normal / first_squared;
+    const vec3 second_mode = second_normal / second_squared;
+    gradient_c = -(first_mode * edge_length);
+    gradient_d = -(second_mode * edge_length);
+    gradient_a = -(first_mode * (dot(c - b, edge) / edge_length) + second_mode * (dot(d - b, edge) / edge_length));
+    gradient_b = first_mode * (dot(c - a, edge) / edge_length) + second_mode * (dot(d - a, edge) / edge_length);
+    return true;
+}
+
+// The particle of a corner (selected, not indexed: vector components are never indexed at run time).
+uint corner_particle(uvec4 particles, uint corner)
+{
+    return corner == 0U ? particles.x : (corner == 1U ? particles.y : (corner == 2U ? particles.z : particles.w));
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= push.count)
+    {
+        return;
+    }
+    const uint constraint = push.first + index;
+    const uvec4 particles = gpu_word_vectors[push.constraints].values[2U * constraint];
+    const uvec4 data = gpu_word_vectors[push.constraints].values[2U * constraint + 1U];
+    const uint kind = data.x;
+    const float compliance = uintBitsToFloat(data.y);
+    const float rest = uintBitsToFloat(data.z);
+
+    // Its soft body's iterations.
+    const uint soft_body = particle_header(particles.x).z;
+    if (push.iteration >= gpu_word_vectors[PARAMETERS.soft_bodies].values[SOFT_BODY_VECTORS * soft_body + 1U].x)
+    {
+        return;
+    }
+    float multiplier = push.iteration == 0U ? 0.0 : uintBitsToFloat(gpu_words[push.multipliers].words[constraint]);
+    const float h = PARAMETERS.gravity.w;
+    const float scaled_compliance = compliance / (h * h);
+
+    // Its particles, their inverse masses (a tether's anchor does not move).
+    const bool four = kind == SOFT_VOLUME || kind == SOFT_DIHEDRAL;
+    const uint corners = four ? 4U : 2U;
+    vec3 positions[4];
+    float weights[4];
+    vec3 gradients[4];
+    for (uint corner = 0U; corner < 4U; ++corner)
+    {
+        positions[corner] = vec3(0.0);
+        weights[corner] = 0.0;
+        gradients[corner] = vec3(0.0);
+    }
+    for (uint corner = 0U; corner < corners; ++corner)
+    {
+        const uint particle = corner_particle(particles, corner);
+        positions[corner] = gpu_vectors[PARAMETERS.particle_positions].values[particle].xyz;
+        weights[corner] = particle_inverse_mass(particle);
+    }
+    if (kind == SOFT_TETHER)
+    {
+        weights[1] = 0.0;
+    }
+
+    // Its function and gradients.
+    float value = 0.0;
+    bool valid = true;
+    if (kind == SOFT_VOLUME)
+    {
+        const vec3 origin = positions[0];
+        gradients[1] = cross(positions[2] - origin, positions[3] - origin);
+        gradients[2] = cross(positions[3] - origin, positions[1] - origin);
+        gradients[3] = cross(positions[1] - origin, positions[2] - origin);
+        gradients[0] = -(gradients[1] + gradients[2] + gradients[3]);
+        value = dot(cross(positions[1] - origin, positions[2] - origin), positions[3] - origin) - rest;
+    }
+    else if (kind == SOFT_DIHEDRAL)
+    {
+        float angle;
+        valid = dihedral(positions[0], positions[1], positions[2], positions[3], angle, gradients[0], gradients[1], gradients[2], gradients[3]);
+        value = angle - rest;
+        value = value > PI ? value - 2.0 * PI : (value <= -PI ? value + 2.0 * PI : value);
+    }
+    else
+    {
+        const vec3 offset = positions[0] - positions[1];
+        const float size = length(offset);
+        valid = size > TINY;
+        value = size - rest;
+        gradients[0] = valid ? offset / size : vec3(0.0);
+        gradients[1] = -gradients[0];
+        valid = valid && (kind != SOFT_TETHER || value > 0.0);
+    }
+
+    // The correction.
+    float denominator = scaled_compliance;
+    for (uint corner = 0U; corner < corners; ++corner)
+    {
+        denominator += weights[corner] * dot(gradients[corner], gradients[corner]);
+    }
+    if (valid && denominator > TINY)
+    {
+        const float delta = (-value - scaled_compliance * multiplier) / denominator;
+        multiplier += delta;
+        for (uint corner = 0U; corner < corners; ++corner)
+        {
+            const vec3 correction = gradients[corner] * (weights[corner] * delta);
+            if (weights[corner] > 0.0)
+            {
+                const uint particle = corner_particle(particles, corner);
+                gpu_vectors[PARAMETERS.particle_positions].values[particle].xyz = positions[corner] + correction;
+                gpu_vectors[PARAMETERS.particle_displacements].values[particle].xyz += correction;
+            }
+        }
+    }
+    gpu_words[push.multipliers].words[constraint] = floatBitsToUint(multiplier);
+}

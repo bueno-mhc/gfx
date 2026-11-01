@@ -327,7 +327,6 @@ TEST_P(GpuXpbdTest, WhatLaterPhasesBringIsRefusedNow)
     }
     refused([&] { return body->add_collider({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
     refused([&] { return simulated->create_constraint({.first = body->handle(), .constraint = std::make_shared<OneRowConstraint>()}); }, "USER_CONSTRAINTS");
-    refused([&] { return simulated->create_soft_body(rope_preset({})); }, "phase G7");
     refused([&] { return simulated->create_trigger({.shape = make_shape(SphereShape{.radius = 1})}); }, "phase G8");
 }
 

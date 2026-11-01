@@ -66,6 +66,7 @@ gfx_add_test(gfx_physics_reference_tests
 if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     gfx_add_test(gfx_physics_gpu_xpbd_tests
         SOURCES gpu_xpbd_test.cpp gpu_primitives_test.cpp gpu_bvh_test.cpp gpu_narrow_phase_test.cpp gpu_xpbd_rigid_test.cpp gpu_xpbd_joint_test.cpp
+            gpu_xpbd_soft_body_test.cpp
         MODULES ${PROJECT_SOURCE_DIR}/tests/graphics/interface/fake_backend.cppm
         MODULE_BASE_DIRECTORY ${PROJECT_SOURCE_DIR}/tests/graphics/interface
         LIBRARIES gfx::physics gfx::physics_gpu_xpbd gfx::gfx

@@ -3,8 +3,15 @@
 // pairs, then its pairs with the static tree): colliders of different bodies, at least one of them dynamic, at least one
 // of them awake (or kinematic), whose filters let them collide (should_collide(): a common non-zero group decides alone,
 // else each one's category in the other's mask), not joined by a joint that keeps them apart (a binary search of the
-// sorted joined pairs). A flag per slot (the compaction keeps the flagged ones, in order); with mode 1, the kept pairs'
-// instances are written at their compacted places instead (pairs_gather).
+// sorted joined pairs). Two particles' spheres are kept only within a soft body that collides with itself, and not when
+// they start within two radii (neighbors of a cloth, a rope); soft bodies do not collide with each other (as in the
+// abstraction's soft-body solver). The trees grew every box by the step's speculative distance — the world's plus the
+// farthest any body or particle gets in the step —, so a pair is kept only when its colliders' own reach covers the gap
+// between their boxes (the boxes shrunk back): each one's speed, its turn at its box's farthest corner and gravity's pull
+// over the step, plus the world's speculative distance. Else a few fast particles (a cloth's edges whipping past a sphere)
+// gave thousands of others margins they never use: millions of candidates. A flag per slot (the compaction keeps the
+// flagged ones, in order); with mode 1, the kept pairs' instances are written at their compacted places instead
+// (pairs_gather).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -61,6 +68,67 @@ bool joined(uint first, uint second)
     return false;
 }
 
+// Whether two particles collide: of one soft body that collides with itself, further apart than two radii at the start.
+bool self_collides(uint first, uint second)
+{
+    const uint soft_body = particle_header(first).z;
+    if (particle_header(second).z != soft_body)
+    {
+        return false;
+    }
+    const vec4 settings = gpu_vectors[PARAMETERS.soft_bodies].values[SOFT_BODY_VECTORS * soft_body];
+    if ((gpu_word_vectors[PARAMETERS.soft_bodies].values[SOFT_BODY_VECTORS * soft_body + 1U].y & 1U) == 0U)
+    {
+        return false;
+    }
+    const vec3 offset = gpu_vectors[PARAMETERS.particles].values[PARTICLE_VECTORS * first + 1U].xyz - gpu_vectors[PARAMETERS.particles].values[PARTICLE_VECTORS * second + 1U].xyz;
+    return dot(offset, offset) > 4.0 * settings.z * settings.z * 1.0001;
+}
+
+// The instance's box as its shape bounds it (the trees' box less the step's speculative distance).
+void tight_box(uint instance, out vec3 minimum, out vec3 maximum)
+{
+    minimum = gpu_vectors[SOLVER.boxes].values[2U * instance].xyz + vec3(SOLVER.speculative_distance);
+    maximum = gpu_vectors[SOLVER.boxes].values[2U * instance + 1U].xyz - vec3(SOLVER.speculative_distance);
+}
+
+// How far a collider of @p node bounded by the box can get in the step: its body's speed, its turn at the box's
+// farthest corner from the body's center, and gravity's pull (dynamic bodies, asleep too: a contact may wake them).
+float reach(uint node, vec3 minimum, vec3 maximum)
+{
+    if (node == NO_BODY)
+    {
+        return 0.0;
+    }
+    const uint flags = body_flags_of(node);
+    const Body body = load_body(node);
+    const float seconds = SOLVER.step_seconds;
+    const vec3 middle = 0.5 * (minimum + maximum);
+    const float radius = length(middle - body.center) + 0.5 * length(maximum - minimum);
+    float scale = 0.0;
+    if ((flags & BODY_DYNAMIC) != 0U)
+    {
+        scale = is_particle(node) ? gpu_vectors[PARAMETERS.soft_bodies].values[SOFT_BODY_VECTORS * particle_header(particle_of(node)).z].x
+                                  : gpu_vectors[PARAMETERS.body_inverse_inertias].values[2U * node].w;
+    }
+    return (length(body.linear_velocity) + length(body.angular_velocity) * radius) * seconds +
+           length(PARAMETERS.gravity.xyz) * abs(scale) * seconds * seconds;
+}
+
+// Whether the colliders can meet in the step: the gap between their boxes within their reaches.
+bool within_reach(uvec2 instances, Collider first, Collider second)
+{
+    vec3 first_minimum;
+    vec3 first_maximum;
+    vec3 second_minimum;
+    vec3 second_maximum;
+    tight_box(instances.x, first_minimum, first_maximum);
+    tight_box(instances.y, second_minimum, second_maximum);
+    const vec3 gap = max(max(second_minimum - first_maximum, first_minimum - second_maximum), vec3(0.0));
+    return length(gap) <= reach(first.body, first_minimum, first_maximum) + reach(second.body, second_minimum, second_maximum) +
+                              SOLVER.world_speculative_distance;
+}
+
 bool keeps(uvec2 instances)
 {
     const Collider first = load_collider(instance_collider(instances.x));
@@ -69,11 +137,15 @@ bool keeps(uvec2 instances)
     {
         return false;
     }
-    const uint first_flags = gpu_words[PARAMETERS.body_flags].words[first.body];
-    const uint second_flags = gpu_words[PARAMETERS.body_flags].words[second.body];
+    if ((first.flags & second.flags & COLLIDER_PARTICLE) != 0U && !self_collides(particle_of(first.body), particle_of(second.body)))
+    {
+        return false;
+    }
+    const uint first_flags = body_flags_of(first.body);
+    const uint second_flags = body_flags_of(second.body);
     const bool dynamic = ((first_flags | second_flags) & BODY_DYNAMIC) != 0U;
     const bool awake = body_moves(first_flags) || body_moves(second_flags);
-    return dynamic && awake && should_collide(first, second) && !joined(first.body, second.body);
+    return dynamic && awake && should_collide(first, second) && !joined(first.body, second.body) && within_reach(instances, first, second);
 }
 
 void main()
@@ -89,8 +161,8 @@ void main()
         return;
     }
 
-    // Gather: the kept pairs' instances, in order.
-    if (index >= count_word(COUNT_CANDIDATES))
+    // Gather: the kept pairs' instances, in order (as many as there is room for: the step replays with more).
+    if (index >= min(count_word(COUNT_CANDIDATES), SOLVER.pair_capacity))
     {
         return;
     }

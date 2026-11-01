@@ -1,12 +1,14 @@
 #version 460
 // Islands of a step: dynamic bodies joined by contact constraints and joints, by label propagation (each label the
-// smallest body index of its island, whatever the order the edges are hooked in: deterministic once converged). Modes:
+// smallest body index of its island, whatever the order the edges are hooked in: deterministic once converged). Particles
+// are in no island (soft bodies never sleep): a body touching or holding one is kept awake. Modes:
 //   0 (bodies)       labels to themselves (dynamic bodies), island flags cleared, island timers to +inf;
 //   1 (constraints)  hook: the roots of an edge's two bodies, the larger one pointed at the smaller (atomic minimum);
 //                    with argument 1, the changes counted (the last round: none left means converged);
 //   2 (bodies)       pointer jumping: each label replaced by its root;
 //   3 (bodies)       awake bodies mark their island awake;
-//   4 (constraints)  a dynamic body touching or joined to a moving kinematic one marks its island awake and kept awake;
+//   4 (constraints)  a dynamic body touching or joined to a moving kinematic one, or a particle, marks its island awake
+//                    and kept awake;
 //   5 (bodies)       bodies asleep in an awake island wake up at rest (their sleep timer cleared).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
@@ -16,6 +18,10 @@ const uint ISLAND_KEPT_AWAKE = 2U;
 
 bool is_dynamic(uint body)
 {
+    if (is_particle(body))
+    {
+        return false;
+    }
     const uint flags = body_flags_of(body);
     return (flags & BODY_SIMULATED) != 0U && (flags & BODY_DYNAMIC) != 0U;
 }
@@ -37,6 +43,10 @@ uint root_of(uint body)
 
 bool moving_kinematic(uint body)
 {
+    if (is_particle(body))
+    {
+        return true;
+    }
     const uint flags = body_flags_of(body);
     if ((flags & BODY_KINEMATIC) == 0U)
     {

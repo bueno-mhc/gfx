@@ -140,6 +140,7 @@ struct GpuConstraintSolver::State
         return settings.solver_mode == GpuSolverMode::GRAPH_COLORING;
     }
 
+    /// The trees' pair slots (the within search's, then the between search's).
     [[nodiscard]] auto candidates() const noexcept -> std::uint32_t
     {
         return within_capacity + between_capacity;
@@ -248,8 +249,10 @@ struct GpuConstraintSolver::State
 
     // Capacities, recorded passes, the current half of the double buffers.
     std::uint32_t body_count = 0;
+    std::uint32_t node_count = 0;
     std::uint32_t within_capacity = 0;
     std::uint32_t between_capacity = 0;
+    std::uint32_t pair_capacity = 0;
     std::uint32_t manifold_capacity = 0;
     std::uint32_t previous_capacity = 0;
     std::uint32_t recorded_colors = GPU_XPBD_INITIAL_COLORS;
@@ -299,6 +302,7 @@ struct GpuConstraintSolver::State
     GpuArray joint_impulses{"GPU physics: joint impulses", 2 * sizeof(GpuVector)};
     GpuArray joint_results{"GPU physics: joint results", 2 * sizeof(GpuVector)};
     GpuArray joined_pairs{"GPU physics: joined bodies", 2 * sizeof(std::uint32_t)};
+    GpuArray overflow_counts{"GPU physics: overflow counts", 2 * sizeof(std::uint32_t)};
 };
 
 // ===================================================================================================== GpuConstraintSolver
@@ -356,14 +360,19 @@ GpuConstraintSolver::joint_count() const noexcept -> std::uint32_t
 void
 GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
                                     std::uint32_t body_count,
+                                    std::uint32_t node_count,
                                     std::vector<std::unique_ptr<Buffer>>& retired)
 {
-    // Capacities: what earlier steps counted (overflowed() grows them), at least room for the moving colliders.
+    // Capacities: what earlier steps counted (overflowed() grows them), at least room for the moving colliders. The kept
+    // pairs and the manifold slots follow their own counts, not the trees' pairs: the trees' boxes grow by the step's
+    // farthest motion, and most of their pairs are dropped by pairs_filter (a cloth's particles: millions).
     State& state = *m_state;
     state.body_count = body_count;
+    state.node_count = node_count;
     state.within_capacity = std::max(state.within_capacity, with_headroom(2 * state.moving));
     state.between_capacity = std::max(state.between_capacity, with_headroom(2 * state.moving));
-    state.manifold_capacity = std::max(state.manifold_capacity, with_headroom(state.candidates()));
+    state.pair_capacity = std::max(state.pair_capacity, with_headroom(2 * state.moving));
+    state.manifold_capacity = std::max(state.manifold_capacity, state.pair_capacity);
     const std::uint32_t candidates = state.candidates();
     const std::uint32_t slots = state.manifold_capacity;
     const std::uint32_t constraints = state.constraint_capacity();
@@ -372,8 +381,8 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     const auto joined_count = static_cast<std::uint32_t>(state.joined_data.size());
 
     // The components' room (before any of their commands is recorded).
-    state.primitives.reserve(std::max({candidates, 2 * constraints, body_count, instances, 64U}));
-    state.narrow_phase.reserve(candidates, slots);
+    state.primitives.reserve(std::max({candidates, 2 * constraints, node_count, instances, 64U}));
+    state.narrow_phase.reserve(state.pair_capacity, slots);
     state.moving_tree.reserve(std::max(state.moving, 1U));
     state.static_tree.reserve(std::max(state.statics, 1U));
 
@@ -386,10 +395,12 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     grow(state.collider_list, instances);
     grow(state.instances, instances);
     grow(state.boxes, instances);
-    for (GpuArray* array : {&state.raw_pairs, &state.pair_flags, &state.pair_indices, &state.pairs, &state.pair_ranges})
+    for (GpuArray* array : {&state.raw_pairs, &state.pair_flags, &state.pair_indices})
     {
         grow(*array, candidates);
     }
+    grow(state.pairs, state.pair_capacity);
+    grow(state.pair_ranges, state.pair_capacity);
     grow(state.manifolds[current], slots);
     grow(state.manifolds[previous], slots, state.previous_capacity);
     grow(state.contacts[current], slots);
@@ -407,7 +418,10 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     {
         grow(*array, 2 * constraints);
     }
-    for (GpuArray* array : {&state.body_begin, &state.body_end, &state.labels, &state.island_flags, &state.island_timers})
+    grow(state.body_begin, node_count);
+    grow(state.body_end, node_count);
+    grow(state.overflow_counts, node_count);
+    for (GpuArray* array : {&state.labels, &state.island_flags, &state.island_timers})
     {
         grow(*array, body_count);
     }
@@ -547,6 +561,11 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         .joint_impulses = state.joint_impulses.index(),
         .joint_results = state.joint_results.index(),
         .joined_pairs = state.joined_pairs.index(),
+        .node_count = step.node_count,
+        .overflow_counts = state.overflow_counts.index(),
+        .world_speculative_distance = step.collision.speculative_distance,
+        .boxes = state.boxes.index(),
+        .pair_capacity = state.pair_capacity,
     };
     std::memcpy(state.solver_parameters.bytes().data(), &parameters, sizeof(parameters));
     state.solver_parameters.buffer().flush_mapped_range();
@@ -586,7 +605,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     state.pass(recorder, *state.pairs_filter, 0, 1, candidates);
     CollisionSettings collision = step.collision;
     collision.speculative_distance = step.speculative_distance;
-    state.narrow_phase.collide(recorder, span_of(state.instances.buffer()), span_of(state.pairs.buffer()), {.maximum = candidates, .word = state.count(CANDIDATES)},
+    state.narrow_phase.collide(recorder, span_of(state.instances.buffer()), span_of(state.pairs.buffer()), {.maximum = state.pair_capacity, .word = state.count(CANDIDATES)},
                                {.manifolds = span_of(state.manifolds[current].buffer()),
                                 .ranges = span_of(state.pair_ranges.buffer()),
                                 .total = state.count(MANIFOLD_SLOTS),
@@ -620,7 +639,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     state.pass(recorder, *state.graph, 0, 0, constraints);
     state.primitives.sort(recorder, span_of(state.graph_keys.buffer()), span_of(state.graph_values.buffer()), span_of(state.graph_sorted_keys.buffer()),
                           span_of(state.graph_sorted_values.buffer()), {.maximum = 2 * constraints, .word = state.count(GRAPH_ENTRIES)});
-    state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.body_count, 2 * constraints, GRAPH_ENTRIES);
+    state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.node_count, 2 * constraints, GRAPH_ENTRIES);
 
     // The colors (the overflow set only, in the Jacobi mode), the lists by color and kind, their dispatch arguments.
     const bool coloring = state.coloring();
@@ -631,6 +650,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         state.pass(recorder, *state.coloring_pass, round, 1, constraints);
     }
     state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
+    state.pass(recorder, *state.jacobi_gather, 0, 2, step.node_count);
     state.primitives.sort(recorder, span_of(state.color_keys.buffer()), span_of(state.color_values.buffer()), span_of(state.color_sorted_keys.buffer()),
                           span_of(state.color_lists.buffer()), {.maximum = constraints, .word = state.count(CONSTRAINTS)}, key_bits(COLOR_KEYS - 1));
     state.ranges(recorder, state.color_sorted_keys, state.color_begin, state.color_end, COLOR_KEYS, constraints, CONSTRAINTS);
@@ -660,7 +680,7 @@ GpuConstraintSolver::record_positions(ComputeRecorder& recorder,
         state.color_pass(recorder, *state.joint_solve, joint_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U, false);
     }
     state.color_pass(recorder, *state.contact_solve, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
-    state.pass(recorder, *state.jacobi_gather, 0, 0, state.body_count);
+    state.pass(recorder, *state.jacobi_gather, 0, 0, state.node_count);
 }
 
 void
@@ -676,7 +696,7 @@ GpuConstraintSolver::record_velocities(ComputeRecorder& recorder,
         state.color_pass(recorder, *state.contact_velocity, contact_key(color), reset);
     }
     state.color_pass(recorder, *state.contact_velocity, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
-    state.pass(recorder, *state.jacobi_gather, 0, 1, state.body_count);
+    state.pass(recorder, *state.jacobi_gather, 0, 1, state.node_count);
 }
 
 void
@@ -724,6 +744,7 @@ GpuConstraintSolver::overflowed(const GpuSolverCounts& counts) -> bool
     };
     room(counts.within_pairs, state.within_capacity);
     room(counts.between_pairs, state.between_capacity);
+    room(counts.candidates, state.pair_capacity);
     room(counts.manifold_slots, state.manifold_capacity);
     if (state.coloring() && counts.colors > state.recorded_colors)
     {

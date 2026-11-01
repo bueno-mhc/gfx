@@ -4,7 +4,12 @@
 // reference backend mixes them), per point the anchors on both bodies (the point less and plus half its separation along
 // the normal, relative to the centers of mass, in the body frames) and the friction anchors — the matched point's of the
 // previous step when static friction held it there (the contact cache found it), else the anchors. With mode 1 (the
-// collider lists changed: instance indices name other colliders) no previous anchor is used.
+// collider lists changed: instance indices name other colliders) no previous anchor is used. A particle's contacts have no
+// restitution nor rolling resistance, and two particles of a soft body none of their friction (the abstraction's soft-body
+// solver has none). A contact is flagged touching when a point overlaps at the step's start or could within the step: its
+// gap closed at the sum of the two points' speeds and gravity's pull (not their approach speed: a body stopped by another
+// contact meets what was falling along with it). The speculative margin is the farthest motion of any body, so most of a
+// pile's candidates keep a gap; the Jacobi gather splits the nodes among their touching contacts only.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -40,23 +45,32 @@ void main()
     const vec3 normal = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 2U].xyz;
     const uvec2 sub_shapes = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 1U].xy;
     const uint priority = hash_words(uvec4(first_collider, second_collider, sub_shapes));
-    const vec4 material = vec4(sqrt(first.material.x * second.material.x), sqrt(first.material.y * second.material.y),
-                               max(first.material.z, second.material.z), uintBitsToFloat(priority));
+    const bool particle = ((first.flags | second.flags) & COLLIDER_PARTICLE) != 0U;
+    const float friction = (first.flags & second.flags & COLLIDER_PARTICLE) != 0U ? 0.0 : 1.0;
+    const vec4 material = vec4(sqrt(first.material.x * second.material.x) * friction, sqrt(first.material.y * second.material.y) * friction,
+                               particle ? 0.0 : max(first.material.z, second.material.z), uintBitsToFloat(priority));
     const uint points = min(header.z, 4U);
-    gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(first.body, second.body, points, CONTACT_ACTIVE);
-    gpu_vectors[SOLVER.contacts].values[base + 1U] = vec4(normal, max(first.material.w, second.material.w));
+    gpu_vectors[SOLVER.contacts].values[base + 1U] = vec4(normal, particle ? 0.0 : max(first.material.w, second.material.w));
     gpu_vectors[SOLVER.contacts].values[base + 2U] = material;
 
     // The anchors, and the friction anchors kept or new.
-    const vec3 first_center = gpu_vectors[PARAMETERS.body_centers].values[first.body].xyz;
-    const vec4 first_orientation = gpu_vectors[PARAMETERS.body_orientations].values[first.body];
-    const vec3 second_center = gpu_vectors[PARAMETERS.body_centers].values[second.body].xyz;
-    const vec4 second_orientation = gpu_vectors[PARAMETERS.body_orientations].values[second.body];
+    const vec3 first_center = node_center(first.body);
+    const vec4 first_orientation = node_orientation(first.body);
+    const vec3 second_center = node_center(second.body);
+    const vec4 second_orientation = node_orientation(second.body);
+    const Body first_body = load_body(first.body);
+    const Body second_body = load_body(second.body);
+    const float step = PARAMETERS.gravity.w * float(PARAMETERS.substeps);
+    const float pull = length(PARAMETERS.gravity.xyz) * step * step;
+    bool touching = false;
     for (uint point = 0U; point < points; ++point)
     {
         const vec4 contact = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 3U + 2U * point];
         const vec3 on_first = contact.xyz - normal * (0.5 * contact.w);
         const vec3 on_second = contact.xyz + normal * (0.5 * contact.w);
+        const float closing = length(second_body.linear_velocity + cross(second_body.angular_velocity, on_second - second_center)) +
+                              length(first_body.linear_velocity + cross(first_body.angular_velocity, on_first - first_center));
+        touching = touching || contact.w - closing * step - pull <= 0.0;
         const vec3 anchor_first = rotate_by(quaternion_conjugate(first_orientation), on_first - first_center);
         const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second - second_center);
         vec4 friction_first = vec4(anchor_first, 0.0);
@@ -78,6 +92,7 @@ void main()
         gpu_vectors[SOLVER.contacts].values[anchors + 2U] = friction_first;
         gpu_vectors[SOLVER.contacts].values[anchors + 3U] = friction_second;
     }
+    gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(first.body, second.body, points, CONTACT_ACTIVE | (touching ? CONTACT_TOUCHING : 0U));
     atomicAdd(gpu_words[SOLVER.counts].words[COUNT_ACTIVE_CONSTRAINTS], 1U);
     atomicAdd(gpu_words[SOLVER.counts].words[COUNT_CONTACT_POINTS], points);
 }

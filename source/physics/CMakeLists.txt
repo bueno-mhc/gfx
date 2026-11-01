@@ -200,6 +200,7 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
                 backends/gpu_xpbd/gpu_probing.cppm
                 backends/gpu_xpbd/gpu_resources.cppm
                 backends/gpu_xpbd/gpu_solver.cppm
+                backends/gpu_xpbd/gpu_soft_bodies.cppm
                 backends/gpu_xpbd/gpu_xpbd_backend.cppm
         PRIVATE
             backends/gpu_xpbd/gpu_xpbd.cpp
@@ -210,6 +211,7 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/gpu_narrow_phase.cpp
             backends/gpu_xpbd/gpu_solver.cpp
             backends/gpu_xpbd/gpu_joints.cpp
+            backends/gpu_xpbd/gpu_soft_bodies.cpp
             backends/gpu_xpbd/gpu_xpbd_world.cpp)
     target_compile_features(gfx_physics_gpu_xpbd PUBLIC cxx_std_23)
     target_link_libraries(gfx_physics_gpu_xpbd
@@ -258,6 +260,9 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/shaders/contact_velocity.comp
             backends/gpu_xpbd/shaders/joint_solve.comp
             backends/gpu_xpbd/shaders/joint_forces.comp
+            backends/gpu_xpbd/shaders/particle_integrate.comp
+            backends/gpu_xpbd/shaders/particle_velocity_update.comp
+            backends/gpu_xpbd/shaders/soft_solve.comp
             backends/gpu_xpbd/shaders/jacobi_gather.comp
             backends/gpu_xpbd/shaders/sleep.comp
         INCLUDE_DIRECTORIES backends/gpu_xpbd/shaders)

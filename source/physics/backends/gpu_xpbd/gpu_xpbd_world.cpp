@@ -1,8 +1,9 @@
-// GpuXpbdBackend: the edits become patches of the GPU body arrays, the colliders' data and the joints' data; a step is one
-// command buffer (patches, the step's start backed up, the contacts' detection and the coloring of joints and contacts,
-// substeps of prediction, joint and contact projection and velocity update with the contacts' velocity pass, the joints'
-// forces, sleep), submitted and waited for on the stepping thread, replayed from its backed-up start when a buffer or the
-// recorded passes overflowed, and read back into the pending snapshot (bodies, joint states, broken joints).
+// GpuXpbdBackend: the edits become patches of the GPU body arrays, the colliders' data, the joints' data and the soft
+// bodies' particles; a step is one command buffer (patches, the step's start backed up, the contacts' detection and the
+// coloring of joints and contacts, substeps of prediction, soft-constraint, joint and contact projection and velocity
+// update with the contacts' velocity pass, the joints' forces, sleep), submitted and waited for on the stepping thread,
+// replayed from its backed-up start when a buffer or the recorded passes overflowed, and read back into the pending
+// snapshot (bodies, joint states, broken joints, particles).
 module gfx.physics.gpu_xpbd;
 
 import std;
@@ -177,6 +178,80 @@ same_bytes(std::span<const Element> first,
 } // namespace
 
 // ===================================================================================================== the edits
+
+/// The entry of a soft body made of @p description: its model, its constraints for the GPU color after color — the
+/// model's colors, then its tethers' (a tether moves its first particle only: two conflict when they move the same
+/// particle or one moves the other's anchor; colored greedily in order, 64 colors at a time, as the model colors the
+/// others).
+[[nodiscard]] auto
+make_soft_body_entry(SoftBodyHandle handle,
+                     const SoftBodyDescription& description) -> SoftBodyEntry
+{
+    SoftBodyEntry entry{.handle = handle, .model = std::make_shared<const SoftBodyModel>(description), .constraints = {}, .color_starts = {}, .first_particle = 0};
+    const SoftBodyModel& model = *entry.model;
+    const auto converted = [](const SoftBodyModel::Constraint& constraint) {
+        return GpuSoftConstraint{.particles = constraint.particles, .kind = std::to_underlying(constraint.kind), .compliance = constraint.compliance, .rest = constraint.rest,
+                                 .reserved = 0};
+    };
+    for (const SoftBodyModel::Constraint& constraint : model.constraints())
+    {
+        entry.constraints.push_back(converted(constraint));
+    }
+    entry.color_starts.assign(model.color_starts().begin(), model.color_starts().end());
+
+    // The tethers' colors.
+    const std::span<const SoftBodyModel::Constraint> tethers = model.tethers();
+    std::vector<std::uint32_t> colors(tethers.size(), 0);
+    std::vector<std::uint32_t> remaining(tethers.size());
+    std::ranges::iota(remaining, 0U);
+    std::vector<std::uint32_t> next;
+    std::vector<std::uint64_t> held(model.particle_count(), 0);
+    std::vector<std::uint64_t> anchored(model.particle_count(), 0);
+    std::uint32_t color_count = 0;
+    for (std::uint32_t base = 0; !remaining.empty(); base += 64)
+    {
+        std::ranges::fill(held, std::uint64_t{0});
+        std::ranges::fill(anchored, std::uint64_t{0});
+        next.clear();
+        for (const std::uint32_t index : remaining)
+        {
+            const std::uint32_t moved = tethers[index].particles[0];
+            const std::uint32_t anchor = tethers[index].particles[1];
+            const std::uint64_t taken = held[moved] | anchored[moved] | held[anchor];
+            if (taken == ~std::uint64_t{0})
+            {
+                next.push_back(index);
+                continue;
+            }
+            const auto bit = static_cast<std::uint32_t>(std::countr_one(taken));
+            colors[index] = base + bit;
+            color_count = std::max(color_count, base + bit + 1);
+            held[moved] |= std::uint64_t{1} << bit;
+            anchored[anchor] |= std::uint64_t{1} << bit;
+        }
+        remaining.swap(next);
+    }
+
+    // The tethers color after color, in order within each, after the model's colors.
+    std::vector<std::uint32_t> starts(color_count + 1, 0);
+    for (const std::uint32_t color : colors)
+    {
+        ++starts[color + 1];
+    }
+    std::partial_sum(starts.begin(), starts.end(), starts.begin());
+    const auto first = static_cast<std::uint32_t>(entry.constraints.size());
+    entry.constraints.resize(first + tethers.size());
+    std::vector<std::uint32_t> cursor(starts.begin(), starts.end() - 1);
+    for (std::size_t index = 0; index < tethers.size(); ++index)
+    {
+        entry.constraints[first + cursor[colors[index]]++] = converted(tethers[index]);
+    }
+    for (std::uint32_t color = 0; color < color_count; ++color)
+    {
+        entry.color_starts.push_back(first + starts[color + 1]);
+    }
+    return entry;
+}
 
 /// Marks what each edit changed of the bodies, colliders and joints (forces and impulses come after: they need the final
 /// centers).
@@ -353,6 +428,27 @@ struct ChangeMarker
         }
     }
 
+    // Soft bodies: made or destroyed, their particles are laid out again (their spheres among the moving colliders); a
+    // particle moved, their state is uploaded again; pins and settings come from the records each step.
+    void operator()(const edits::CreateSoftBody& change) const
+    {
+        backend.soft_body_entry(change.soft_body) = make_soft_body_entry(change.soft_body, change.description);
+        backend.soft_bodies_changed(true);
+        backend.colliders_changed(true, false);
+    }
+
+    void operator()(const edits::DestroySoftBody& change) const
+    {
+        backend.soft_body_entry(change.soft_body) = {};
+        backend.soft_bodies_changed(true);
+        backend.colliders_changed(true, false);
+    }
+
+    void operator()(const edits::MoveParticle& /*change*/) const
+    {
+        backend.soft_bodies_changed(false);
+    }
+
     // The rest: the records are all the backend needs (the world's settings, motion quality, contact events...).
     template<class Change>
     void operator()(const Change& /*change*/) const
@@ -483,6 +579,7 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
     , m_timeline{device.create_timeline_semaphore({.initial_value = 0, .debug_name = "GPU physics steps"})}
     , m_pipelines{device}
     , m_solver{device, m_capabilities, settings}
+    , m_soft_bodies{device}
 {
 }
 
@@ -513,7 +610,7 @@ GpuXpbdBackend::check(const WorldEdit& edit,
                       const RecordedWorld& /*recorded*/) const
 {
     // What later phases bring is refused when recorded, never ignored; user constraints are refused for good. Every joint
-    // kind is simulated.
+    // kind and soft bodies are simulated.
     if (const auto* collider = std::get_if<edits::CreateCollider>(&edit))
     {
         GpuNarrowPhase::check_shape(*collider->description.shape);
@@ -522,12 +619,6 @@ GpuXpbdBackend::check(const WorldEdit& edit,
     {
         throw_unsupported(identity(), "PhysicsWorld::create_trigger", PhysicsCapability::WORLD_OBJECTS,
                           "the GPU backend does not simulate triggers yet (they arrive with phase G8 of docs/gpu-xpbd-design.md)",
-                          "use another backend");
-    }
-    if (std::holds_alternative<edits::CreateSoftBody>(edit))
-    {
-        throw_unsupported(identity(), "PhysicsWorld::create_soft_body", PhysicsCapability::SOFT_BODIES,
-                          "the GPU backend does not simulate soft bodies yet (they arrive with phase G7 of docs/gpu-xpbd-design.md)",
                           "use another backend");
     }
     if (std::holds_alternative<edits::CreateConstraint>(edit))
@@ -569,6 +660,38 @@ GpuXpbdBackend::joint_entry(JointHandle joint) -> JointEntry&
         m_joints.resize(index + 1);
     }
     return m_joints[index];
+}
+
+auto
+GpuXpbdBackend::soft_body_entry(SoftBodyHandle soft_body) -> SoftBodyEntry&
+{
+    const std::uint32_t index = slot(soft_body);
+    if (m_soft_body_entries.size() <= index)
+    {
+        m_soft_body_entries.resize(index + 1);
+    }
+    return m_soft_body_entries[index];
+}
+
+void
+GpuXpbdBackend::soft_bodies_changed(bool layout) noexcept
+{
+    m_soft_layout_changed = m_soft_layout_changed || layout;
+    m_particle_state_dirty = true;
+}
+
+auto
+GpuXpbdBackend::particle_shape(float radius) -> std::uint32_t
+{
+    // One sphere per radius (kept alive with the colliders' shapes).
+    const auto key = std::bit_cast<std::uint32_t>(radius);
+    if (const auto known = m_sphere_shapes.find(key); known != m_sphere_shapes.end())
+    {
+        return known->second;
+    }
+    const std::uint32_t index = shape_index(make_shape(SphereShape{.radius = radius}));
+    m_sphere_shapes.emplace(key, index);
+    return index;
 }
 
 void
@@ -750,7 +873,7 @@ GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
                           .orientation = vector(configuration.pose.orientation),
                           .body = body_slot,
                           .shape = m_colliders[collider].shape,
-                          .flags = 1,
+                          .flags = GPU_COLLIDER_LIVE,
                           .group = configuration.filter.group,
                           .filter = {static_cast<std::uint32_t>(category), static_cast<std::uint32_t>(category >> 32U), static_cast<std::uint32_t>(mask),
                                      static_cast<std::uint32_t>(mask >> 32U)},
@@ -765,6 +888,35 @@ GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
         else
         {
             moving.push_back(collider);
+        }
+    }
+
+    // The particles' spheres: moving colliders after the colliders' slots, their nodes after the bodies' slots (soft bodies
+    // laid out by update_soft_bodies()).
+    const auto body_count = static_cast<std::uint32_t>(pending.rigid_bodies.size());
+    for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size(); ++soft_slot)
+    {
+        const SoftBodyEntry& entry = m_soft_body_entries[soft_slot];
+        if (!entry.handle)
+        {
+            continue;
+        }
+        const SoftBodyDescription& settings = pending.soft_bodies[soft_slot].configuration;
+        const std::uint32_t shape = particle_shape(settings.particle_radius);
+        const auto category = std::to_underlying(settings.filter.category);
+        const auto mask = std::to_underlying(settings.filter.mask);
+        for (std::uint32_t particle = 0; particle < entry.model->particle_count(); ++particle)
+        {
+            moving.push_back(static_cast<std::uint32_t>(data.size()));
+            data.push_back({.position = {},
+                            .orientation = {0.0F, 0.0F, 0.0F, 1.0F},
+                            .body = body_count + entry.first_particle + particle,
+                            .shape = shape,
+                            .flags = GPU_COLLIDER_LIVE | GPU_COLLIDER_PARTICLE,
+                            .group = settings.filter.group,
+                            .filter = {static_cast<std::uint32_t>(category), static_cast<std::uint32_t>(category >> 32U), static_cast<std::uint32_t>(mask),
+                                       static_cast<std::uint32_t>(mask >> 32U)},
+                            .material = {settings.friction, settings.friction, 0.0F, 0.0F}});
         }
     }
 
@@ -838,6 +990,46 @@ GpuXpbdBackend::update_joints(const WorldSnapshot& pending)
     const auto [duplicates, end] = std::ranges::unique(joined);
     joined.erase(duplicates, end);
 
+    // The pins that share their corrections with a body (a dynamic one with mass) or are compliant: joints of a PIN part
+    // from the particle's node to the point of the body (about its center of mass) or of the world, after the joints'
+    // slots (rigid pins to the world or to other bodies make their particles kinematic instead).
+    const auto body_count = static_cast<std::uint32_t>(pending.rigid_bodies.size());
+    constexpr float NEVER = std::numeric_limits<float>::infinity();
+    for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size(); ++soft_slot)
+    {
+        const SoftBodyEntry& entry = m_soft_body_entries[soft_slot];
+        if (!entry.handle)
+        {
+            continue;
+        }
+        for (const ParticlePin& pin : pending.soft_bodies[soft_slot].configuration.pins)
+        {
+            const RigidBodyRecord* body = pin.body ? find(pending, pin.body) : nullptr;
+            if (pin.particle >= entry.model->particle_count() || (pin.body && body == nullptr))
+            {
+                continue;
+            }
+            const bool shared = body != nullptr && effective_mass(*body).mass > 0.0F;
+            if (!shared && pin.compliance == 0.0F)
+            {
+                continue;
+            }
+            const auto first_part = static_cast<std::uint32_t>(parts.size());
+            parts.push_back({.kind = std::to_underlying(GpuJointPartKind::PIN), .axis = 0, .reserved = {}, .lower = {0.0F, 0.0F, 0.0F, pin.compliance}, .upper = {}});
+            const Vector3 point = body != nullptr ? pin.point - effective_mass(*body).center_of_mass : pin.point;
+            joints.push_back({.first = body_count + entry.first_particle + pin.particle,
+                              .second = body != nullptr ? slot(pin.body) : NO_SOLVER_BODY,
+                              .flags = std::to_underlying(GpuJointFlag::ACTIVE),
+                              .part_count = 1,
+                              .first_part = first_part,
+                              .reserved = {},
+                              .first_position = {0.0F, 0.0F, 0.0F, NEVER},
+                              .first_orientation = {0.0F, 0.0F, 0.0F, 1.0F},
+                              .second_position = vector(point, NEVER),
+                              .second_orientation = {0.0F, 0.0F, 0.0F, 1.0F}});
+        }
+    }
+
     // Uploaded when anything changed.
     const bool changed = !same_bytes(std::span<const GpuJoint>{joints}, std::span<const GpuJoint>{m_joint_data}) ||
                          !same_bytes(std::span<const GpuJointPart>{parts}, std::span<const GpuJointPart>{m_part_data}) ||
@@ -848,6 +1040,139 @@ GpuXpbdBackend::update_joints(const WorldSnapshot& pending)
         m_joint_data = std::move(joints);
         m_part_data = std::move(parts);
         m_joined_data = std::move(joined);
+    }
+}
+
+void
+GpuXpbdBackend::update_soft_bodies(const WorldSnapshot& pending)
+{
+    // Laid out again when soft bodies were made or destroyed: each live one's particles after the previous one's, in slot
+    // order; their constraints (particle indices shifted) gathered color by color — a color of every soft body in one
+    // pass.
+    if (m_soft_layout_changed)
+    {
+        std::uint32_t first = 0;
+        std::size_t colors = 0;
+        for (SoftBodyEntry& entry : m_soft_body_entries)
+        {
+            if (entry.handle)
+            {
+                entry.first_particle = first;
+                first += entry.model->particle_count();
+                colors = std::max(colors, entry.color_starts.size() - 1);
+            }
+        }
+        m_particle_count = first;
+        std::vector<GpuSoftConstraint> constraints;
+        std::vector<std::uint32_t> color_starts{0};
+        for (std::size_t color = 0; color < colors; ++color)
+        {
+            for (const SoftBodyEntry& entry : m_soft_body_entries)
+            {
+                if (!entry.handle || color + 1 >= entry.color_starts.size())
+                {
+                    continue;
+                }
+                for (std::uint32_t index = entry.color_starts[color]; index < entry.color_starts[color + 1]; ++index)
+                {
+                    GpuSoftConstraint constraint = entry.constraints[index];
+                    for (std::uint32_t& particle : constraint.particles)
+                    {
+                        particle += entry.first_particle;
+                    }
+                    constraints.push_back(constraint);
+                }
+            }
+            color_starts.push_back(static_cast<std::uint32_t>(constraints.size()));
+        }
+        m_soft_bodies.set_constraints(constraints, color_starts);
+        m_soft_layout_changed = false;
+        m_particle_state_dirty = true;
+    }
+
+    // Their state from the records, when laid out again or when an edit moved a particle (the records hold what the GPU
+    // computed, exactly).
+    if (m_particle_state_dirty)
+    {
+        std::vector<GpuVector> positions(m_particle_count);
+        std::vector<GpuVector> velocities(m_particle_count);
+        for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size(); ++soft_slot)
+        {
+            const SoftBodyEntry& entry = m_soft_body_entries[soft_slot];
+            if (!entry.handle)
+            {
+                continue;
+            }
+            const SoftBodyRecord& record = pending.soft_bodies[soft_slot];
+            for (std::uint32_t particle = 0; particle < entry.model->particle_count(); ++particle)
+            {
+                positions[entry.first_particle + particle] = vector(record.positions[particle]);
+                velocities[entry.first_particle + particle] = vector(record.velocities[particle]);
+            }
+        }
+        m_soft_bodies.set_state(positions, velocities);
+        m_particle_state_dirty = false;
+    }
+
+    // The particles (inverse masses, pins) and the soft bodies' settings, uploaded when they changed: a particle pinned
+    // rigidly to the world or to a body that takes no correction follows its point (kinematic, as the abstraction's
+    // soft-body solver holds it); its soft body's constraints iterate its sub-steps over the world's substeps per substep.
+    const std::uint32_t substeps = std::max(pending.configuration.solver.sub_steps, 1U);
+    std::vector<GpuParticle> particles(m_particle_count);
+    std::vector<GpuSoftBody> soft_bodies;
+    std::uint32_t iterations = 0;
+    const GpuBodyFlag simulated = GpuBodyFlag::SIMULATED | GpuBodyFlag::AWAKE;
+    for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size(); ++soft_slot)
+    {
+        const SoftBodyEntry& entry = m_soft_body_entries[soft_slot];
+        if (!entry.handle)
+        {
+            continue;
+        }
+        const SoftBodyDescription& settings = pending.soft_bodies[soft_slot].configuration;
+        const SoftBodyModel& model = *entry.model;
+        const auto index = static_cast<std::uint32_t>(soft_bodies.size());
+        const std::uint32_t soft_iterations = (std::max(settings.sub_steps, 1U) + substeps - 1) / substeps;
+        iterations = std::max(iterations, soft_iterations);
+        soft_bodies.push_back({.gravity_scale = settings.gravity_scale,
+                               .damping = settings.damping,
+                               .radius = settings.particle_radius,
+                               .friction = settings.friction,
+                               .iterations = soft_iterations,
+                               .flags = settings.self_collision ? GPU_SOFT_BODY_SELF_COLLISION : 0U,
+                               .first_particle = entry.first_particle,
+                               .particle_count = model.particle_count()});
+        for (std::uint32_t particle = 0; particle < model.particle_count(); ++particle)
+        {
+            const float inverse_mass = model.inverse_masses()[particle];
+            particles[entry.first_particle + particle] = {.inverse_mass = inverse_mass,
+                                                          .flags = std::to_underlying(simulated | (inverse_mass > 0.0F ? GpuBodyFlag::DYNAMIC : GpuBodyFlag::NONE)),
+                                                          .soft_body = index,
+                                                          .pin_body = NO_SOLVER_BODY,
+                                                          .rest = vector(model.rest_positions()[particle]),
+                                                          .pin_point = {}};
+        }
+        for (const ParticlePin& pin : settings.pins)
+        {
+            const RigidBodyRecord* body = pin.body ? find(pending, pin.body) : nullptr;
+            if (pin.particle >= model.particle_count() || pin.compliance != 0.0F || (pin.body && (body == nullptr || effective_mass(*body).mass > 0.0F)))
+            {
+                continue;
+            }
+            GpuParticle& held = particles[entry.first_particle + pin.particle];
+            held.inverse_mass = 0.0F;
+            held.flags = std::to_underlying(simulated | GpuBodyFlag::KINEMATIC);
+            held.pin_body = body != nullptr ? slot(pin.body) : NO_SOLVER_BODY;
+            held.pin_point = vector(pin.point);
+        }
+    }
+    m_soft_bodies.set_iterations(iterations);
+    if (!same_bytes(std::span<const GpuParticle>{particles}, std::span<const GpuParticle>{m_particle_data}) ||
+        !same_bytes(std::span<const GpuSoftBody>{soft_bodies}, std::span<const GpuSoftBody>{m_soft_body_data}))
+    {
+        m_soft_bodies.set_particles(particles, soft_bodies);
+        m_particle_data = std::move(particles);
+        m_soft_body_data = std::move(soft_bodies);
     }
 }
 
@@ -872,6 +1197,21 @@ GpuXpbdBackend::step_motion(const WorldSnapshot& pending,
         const float scale = record.configuration.kind == BodyKind::DYNAMIC ? std::abs(record.configuration.gravity_scale) : 0.0F;
         farthest = std::max(farthest, speed * seconds + gravity * scale);
     }
+
+    // And the particles: their speed and gravity's growth.
+    for (const SoftBodyRecord& record : pending.soft_bodies)
+    {
+        if (!record.handle)
+        {
+            continue;
+        }
+        float fastest = 0.0F;
+        for (const Vector3 velocity : record.velocities)
+        {
+            fastest = std::max(fastest, length(velocity));
+        }
+        farthest = std::max(farthest, fastest * seconds + gravity * std::abs(record.configuration.gravity_scale));
+    }
     return farthest;
 }
 
@@ -883,7 +1223,8 @@ GpuXpbdBackend::simulate(float seconds,
     using Clock = std::chrono::steady_clock;
     const Clock::time_point start = Clock::now();
     const auto body_count = static_cast<std::uint32_t>(pending.rigid_bodies.size());
-    if (body_count == 0)
+    const bool soft_bodies = std::ranges::any_of(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); });
+    if (body_count == 0 && !soft_bodies && m_particle_count == 0)
     {
         m_body_count = 0;
         return;
@@ -895,6 +1236,7 @@ GpuXpbdBackend::simulate(float seconds,
     std::string_view stage = "recording the step";
     try
     {
+        update_soft_bodies(pending);
         update_colliders(pending);
         update_joints(pending);
         m_substep_seconds = seconds / static_cast<float>(substeps);
@@ -963,9 +1305,10 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     m_parameters.reserve(m_device, sizeof(GpuStepParameters), m_retired);
     m_patches.reserve(m_device, std::max<std::size_t>(patch_count, 1) * sizeof(GpuBodyPatch), m_retired);
     const std::uint32_t joint_count = m_solver.joint_count();
+    const std::uint32_t particle_count = m_soft_bodies.particle_count();
     m_readback.reserve(m_device,
                        std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts) +
-                           std::uint64_t{joint_count} * 2 * sizeof(GpuVector),
+                           (std::uint64_t{joint_count} + particle_count) * 2 * sizeof(GpuVector),
                        m_retired);
 
     m_command_pool->reset();
@@ -983,7 +1326,8 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         (void)backup.reserve(m_device, recorder, body_count, kept, m_retired);
     }
     m_body_count = body_count;
-    m_solver.record_uploads(recorder, body_count, m_retired);
+    m_solver.record_uploads(recorder, body_count, body_count + particle_count, m_retired);
+    m_soft_bodies.record_uploads(recorder, m_retired);
 
     // The parameters and the patches; this step's forces start from zero (the patches give some).
     const GpuStepParameters parameters{
@@ -991,6 +1335,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         .body_count = body_count,
         .patch_count = patch_count,
         .substeps = std::max(pending.configuration.solver.sub_steps, 1U),
+        .particle_count = particle_count,
         .body_centers = m_centers.index(),
         .body_orientations = m_orientations.index(),
         .body_linear_velocities = m_linear_velocities.index(),
@@ -1006,6 +1351,13 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         .body_previous_linear = m_previous_linear.index(),
         .body_previous_angular = m_previous_angular.index(),
         .sleep_timers = m_sleep_timers.index(),
+        .particle_positions = m_soft_bodies.positions().index(),
+        .particle_velocities = m_soft_bodies.velocities().index(),
+        .particle_displacements = m_soft_bodies.displacements().index(),
+        .particle_previous_velocities = m_soft_bodies.previous_velocities().index(),
+        .particles = m_soft_bodies.particles().index(),
+        .soft_bodies = m_soft_bodies.soft_bodies().index(),
+        .reserved = {},
     };
     std::memcpy(m_parameters.bytes().data(), &parameters, sizeof(parameters));
     m_parameters.buffer().flush_mapped_range();
@@ -1018,8 +1370,11 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
             std::memcpy(m_patches.bytes().data(), m_body_patches.data(), m_body_patches.size() * sizeof(GpuBodyPatch));
             m_patches.buffer().flush_mapped_range();
         }
-        recorder.fill_buffer(m_forces.buffer().handle(), 0, vectors, 0);
-        recorder.fill_buffer(m_torques.buffer().handle(), 0, vectors, 0);
+        if (body_count > 0)
+        {
+            recorder.fill_buffer(m_forces.buffer().handle(), 0, vectors, 0);
+            recorder.fill_buffer(m_torques.buffer().handle(), 0, vectors, 0);
+        }
     }
     const std::uint32_t parameters_index = m_parameters.index();
     const auto pass = [&recorder, parameters_index](ComputePipelineHandle pipeline, std::uint32_t count) {
@@ -1032,7 +1387,8 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     // The step's start: patched and backed up, or (replaying) restored.
     const std::array<const GpuArray*, 6> state_arrays{&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities, &m_flags, &m_sleep_timers};
     const auto copy_state = [&](bool restore) {
-        for (std::size_t array = 0; array < state_arrays.size(); ++array)
+        m_soft_bodies.record_backup(recorder, restore);
+        for (std::size_t array = 0; array < state_arrays.size() && body_count > 0; ++array)
         {
             const Buffer& live = state_arrays[array]->buffer();
             const Buffer& backup = m_backups[array].buffer();
@@ -1061,6 +1417,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     const SolverDescription& solver = pending.configuration.solver;
     const ContactStep step{.step_parameters = parameters_index,
                            .body_count = body_count,
+                           .node_count = body_count + particle_count,
                            .step_seconds = seconds,
                            .speculative_distance = pending.configuration.collision.speculative_distance + step_motion(pending, seconds),
                            .solver = solver,
@@ -1068,14 +1425,24 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                            .collision = pending.configuration.collision,
                            .lists_changed = m_lists_changed};
     m_solver.record_detection(recorder, step);
+    const std::uint32_t position_iterations = std::max(solver.position_iterations, 1U);
+    const std::uint32_t iterations = std::max(position_iterations, m_soft_bodies.iterations());
     for (std::uint32_t substep = 0; substep < parameters.substeps; ++substep)
     {
+        // The bodies' prediction, then the particles' (they may follow a body); each iteration the soft constraints, then
+        // the joints and contacts (soft bodies may ask for more iterations than the world's, rigid ones fewer).
         pass(m_pipelines.integrate(), body_count);
-        for (std::uint32_t iteration = 0; iteration < std::max(solver.position_iterations, 1U); ++iteration)
+        m_soft_bodies.record_integrate(recorder, parameters_index);
+        for (std::uint32_t iteration = 0; iteration < iterations; ++iteration)
         {
-            m_solver.record_positions(recorder, iteration == 0);
+            m_soft_bodies.record_iteration(recorder, parameters_index, iteration);
+            if (iteration < position_iterations)
+            {
+                m_solver.record_positions(recorder, iteration == 0);
+            }
         }
         pass(m_pipelines.update_velocities(), body_count);
+        m_soft_bodies.record_velocity_update(recorder, parameters_index);
         for (std::uint32_t iteration = 0; iteration < std::max(solver.velocity_iterations, 1U); ++iteration)
         {
             m_solver.record_velocities(recorder, iteration == 0);
@@ -1089,12 +1456,18 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     std::uint64_t offset = 0;
     for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
     {
-        const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
-        recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+        if (vectors > 0)
+        {
+            const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
+            recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+        }
         offset += vectors;
     }
-    const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
-    recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
+    if (words > 0)
+    {
+        const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
+        recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
+    }
     offset += words;
     const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
     recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
@@ -1104,6 +1477,17 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         const std::array joint_regions{
             BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{joint_count} * 2 * sizeof(GpuVector)}};
         recorder.copy_buffer(m_solver.joint_results_buffer().handle(), m_readback.buffer().handle(), joint_regions);
+    }
+    offset += std::uint64_t{joint_count} * 2 * sizeof(GpuVector);
+    for (const GpuArray* array : {&m_soft_bodies.positions(), &m_soft_bodies.velocities()})
+    {
+        if (particle_count > 0)
+        {
+            const std::array regions{
+                BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{particle_count} * sizeof(GpuVector)}};
+            recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+        }
+        offset += std::uint64_t{particle_count} * sizeof(GpuVector);
     }
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
 }
@@ -1178,6 +1562,24 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
             state.broken = true;
             pending.joint_events.push_back(
                 {.kind = JointEventKind::BROKEN, .joint = record.handle, .force = length(state.force), .torque = length(state.torque), .constraint = {}});
+        }
+    }
+
+    // The particles' positions and velocities, after the joints' results.
+    const std::size_t particles = results + std::size_t{m_solver.joint_count()} * 2 * sizeof(GpuVector);
+    const std::size_t particle_vectors = std::size_t{m_soft_bodies.particle_count()} * sizeof(GpuVector);
+    for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size() && soft_slot < pending.soft_bodies.size(); ++soft_slot)
+    {
+        const SoftBodyEntry& entry = m_soft_body_entries[soft_slot];
+        SoftBodyRecord& record = pending.soft_bodies[soft_slot];
+        if (!entry.handle || !record.handle || record.positions.size() != entry.model->particle_count())
+        {
+            continue;
+        }
+        for (std::uint32_t particle = 0; particle < entry.model->particle_count(); ++particle)
+        {
+            record.positions[particle] = vector3(read_vector(bytes, particles, entry.first_particle + particle));
+            record.velocities[particle] = vector3(read_vector(bytes, particles + particle_vectors, entry.first_particle + particle));
         }
     }
 }

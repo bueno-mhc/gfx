@@ -1,0 +1,48 @@
+#version 460
+// The prediction of a substep for the particles (after the bodies'): a dynamic particle's velocity takes gravity (times its
+// soft body's scale) and moves it; a particle pinned rigidly follows its point — of the world, or of its body where the
+// body's prediction placed it —, its velocity what that motion makes. The velocities at the substep's start are kept (the
+// contacts' velocity pass reads them) and the substep's displacement starts from the motion (the projections add to it;
+// the velocity update divides it by the substep, as for the bodies).
+#extension GL_GOOGLE_include_directive : require
+#include "step.glsl"
+#include "particles.glsl"
+
+void main()
+{
+    const uint particle = gl_GlobalInvocationID.x;
+    if (particle >= PARAMETERS.particle_count)
+    {
+        return;
+    }
+    const uvec4 header = particle_header(particle);
+    const uint flags = header.y;
+    vec4 position = gpu_vectors[PARAMETERS.particle_positions].values[particle];
+    vec4 velocity = gpu_vectors[PARAMETERS.particle_velocities].values[particle];
+    const float h = PARAMETERS.gravity.w;
+    gpu_vectors[PARAMETERS.particle_previous_velocities].values[particle] = velocity;
+    vec3 displacement = vec3(0.0);
+    if ((flags & BODY_KINEMATIC) != 0U)
+    {
+        // Its point: of the world, or of its body (the world's absent body is past every body slot).
+        vec3 target = gpu_vectors[PARAMETERS.particles].values[PARTICLE_VECTORS * particle + 2U].xyz;
+        if (header.w < PARAMETERS.body_count)
+        {
+            const vec3 center = gpu_vectors[PARAMETERS.body_centers].values[header.w].xyz;
+            const vec4 orientation = gpu_vectors[PARAMETERS.body_orientations].values[header.w];
+            target = center + rotate_by(orientation, target);
+        }
+        displacement = target - position.xyz;
+        velocity.xyz = displacement / h;
+    }
+    else if ((flags & BODY_DYNAMIC) != 0U)
+    {
+        const float gravity_scale = gpu_vectors[PARAMETERS.soft_bodies].values[SOFT_BODY_VECTORS * header.z].x;
+        velocity.xyz += PARAMETERS.gravity.xyz * (gravity_scale * h);
+        displacement = velocity.xyz * h;
+    }
+    position.xyz += displacement;
+    gpu_vectors[PARAMETERS.particle_positions].values[particle] = position;
+    gpu_vectors[PARAMETERS.particle_velocities].values[particle] = velocity;
+    gpu_vectors[PARAMETERS.particle_displacements].values[particle] = vec4(displacement, 0.0);
+}

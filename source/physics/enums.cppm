@@ -85,6 +85,7 @@ enum class GpuJointPartKind : std::uint8_t
     SWING,         ///< The angle between the two frames' z axes at most a limit (a cone).
     LINEAR_MOTOR,  ///< The anchors' relative speed along an axis of the first frame driven, with at most a force.
     ANGULAR_MOTOR, ///< The relative angular speed about an axis of the first frame driven, with at most a torque.
+    PIN,           ///< The anchors together with an XPBD compliance (a soft body's particle held to a body or the world).
 };
 
 /// @brief The state of a joint on the GPU backend: the bits of its flags word and of its step's result, which the
@@ -582,7 +583,7 @@ inline constexpr std::uint32_t GPU_XPBD_SHARED_MEMORY_SIZE = 16384;
 inline constexpr std::uint64_t GPU_XPBD_STORAGE_BUFFER_RANGE = std::uint64_t{1} << 27U;
 
 /// @brief Bindless storage buffers a world of the GPU backend needs free in its device's table.
-inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 176;
+inline constexpr std::uint32_t GPU_XPBD_STORAGE_BUFFERS = 192;
 
 /// @brief Elements each invocation of the GPU backend's scans, reductions and sorts handles: a workgroup's tile holds
 ///        GPU_XPBD_WORKGROUP_SIZE times as many.
@@ -785,6 +786,7 @@ struct EnumerationTraits<physics::GpuJointPartKind>
         EnumeratorName{physics::GpuJointPartKind::SWING, "SWING"},
         EnumeratorName{physics::GpuJointPartKind::LINEAR_MOTOR, "LINEAR_MOTOR"},
         EnumeratorName{physics::GpuJointPartKind::ANGULAR_MOTOR, "ANGULAR_MOTOR"},
+        EnumeratorName{physics::GpuJointPartKind::PIN, "PIN"},
     };
 };
 

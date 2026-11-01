@@ -3,8 +3,9 @@
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
 as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
 (§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
-with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323).
-**G6 implemented** (§B "G6 as built", 7 deviations), awaiting validation.
+with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323), **G6
+accepted** with its 7 (§B "G6 as built"; committed cad9b8e). **G7 implemented** (§B "G7 as built", 6 deviations), awaiting
+validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -934,7 +935,7 @@ PH8 — and BROKEN past its thresholds. The CPU reads the results back (two vect
 6. **Forces in the overflow set** (every joint in the Jacobi mode, joints left without a color otherwise): the gather averages a
    body's corrections over its overflow constraints, while a joint's force counts its whole multiplier — a joint sharing a body
    with other overflow constraints reports up to that many times its load. Joints alone on their bodies (the tests' hooks)
-   report it exactly.
+   report it exactly. (Resolved in G7 by mass splitting: §B "G7 as built", Found.)
 7. **A joint not solved in a step** (its bodies asleep, or none of them dynamic) keeps its last force and torque (a sleeping
    hanging body still reports its weight).
 
@@ -965,6 +966,131 @@ sleeping together and woken through its joints by a push on its last link; the s
 rope, a slider) giving the same bits twice. `GpuXpbdTest`'s refusals: user constraints instead of joints.
 
 ---
+
+### G7 as built (2026-11-01)
+
+**Soft bodies in the world.** `create_soft_body()` is accepted. The backend keeps, per soft body slot, the abstraction's
+`SoftBodyModel` (rest values from the starting positions, inverse masses, the static greedy coloring of its constraints) and
+its constraints for the GPU color after color: the model's colors, then its **tethers'** (a tether moves its first particle
+only: two conflict when they move the same particle or one moves the other's anchor; colored greedily as the model colors the
+others, so the usual long-range attachments to a pin take one or two colors, not one each). When soft bodies are made or
+destroyed, their particles are laid out again (each soft body's after the previous one's, in slot order), their constraints
+gathered color by color (a color of every soft body in one pass) and the particles' state uploaded from the records (which
+hold what the GPU computed, exactly); otherwise the GPU keeps them. Each step the particles (inverse masses, pins) and the
+soft bodies' settings are rebuilt from the records and uploaded when their bytes changed.
+
+**Particles are constraint nodes.** The solver's nodes are the body slots, then the particles (node = body count + p): a
+particle is a body without orientation or inertia to `load_body()`/`store_body_*()`, the graph, the coloring, the joints,
+the contacts and the Jacobi gather, which therefore needed no new code beyond reading the node's arrays. Each particle has a
+**sphere collider** (one shape per radius) among the moving colliders, after the colliders' slots, with its soft body's
+filter and friction: the moving tree, the pairs, the narrow phase (G3–G4: every shape kind, meshes, height fields,
+compounds), the contact cache and the contact constraints (G5) give particle–collider contacts — two-way by construction,
+the correction shared by the generalized inverse masses — and, for a soft body that collides with itself, particle–particle
+contacts. `pairs_filter` keeps two particles' spheres only within one soft body that collides with itself and not when they
+start within two radii (the CPU solver's rule); soft bodies do not collide with each other. A particle's contacts have no
+restitution nor rolling resistance, two particles' no friction (as the CPU solver has them).
+
+**`GpuSoftBodies`** (internal partition `:soft_bodies`, unit `gpu_soft_bodies.cpp`) owns the particle arrays — positions,
+velocities, substep displacements, starting velocities, `GpuParticle` (48 B: inverse mass, flags, soft body, the body a
+kinematic pin follows, starting position, pin point), `GpuSoftBody` (32 B: gravity scale, damping, radius, friction,
+iterations, flags, particle range), the soft constraints (32 B) with a multiplier each, backups for replays — and records
+three passes per substep: `particle_integrate` after the bodies' prediction (gravity times the soft body's scale; a particle
+pinned rigidly follows its point, of the world or of its body where the body's prediction placed it), `soft_solve` per color
+(STRETCH, SHEAR, BENDING, TETHER — its first particle only, beyond its rest length only —, VOLUME, DIHEDRAL with Bridson's
+gradients, as the CPU solver's functions, Δλ = (−C − α̃λ)/(Σwᵢ|∇ᵢC|² + α̃), α̃ = compliance/h², the multipliers reset at each
+substep), `particle_velocity_update` (the substep's displacement over h, damped by (1 − d)^h). Each iteration of a substep runs
+the soft colors, then the joints and contacts: a soft body's sub-steps become ⌈its sub-steps / the world's substeps⌉
+iterations per substep (§D9), the world's `position_iterations` the dynamic constraints'.
+
+**Pins.** A pin rigid (compliance 0) to the world, or to a body that takes no correction (static, kinematic, without mass),
+makes its particle **kinematic**: it follows the point (as the CPU solver holds it). A pin to a dynamic body, or a compliant
+one, is a **joint of one `PIN` part** (`GpuJointPartKind::PIN`: the anchors together along the world's axes with an XPBD
+compliance c, its block's compliance (c/h²) I) from the particle's node to the body's point (about its center of mass) or the
+world's, after the joints' slots: two-way like any joint, colored with the joints and contacts.
+
+**Deviations (for validation).**
+1. **No separate particle tree**: particles are spheres of the moving tree, rebuilt every step like it (§A6 planned a particle
+   tree refit every step and rebuilt every `particle_rebuild_period` steps; no such setting was added).
+2. **Particle contacts are rigid contacts** (G5's): found once per step with the speculative margin, soft at `contact_hertz`,
+   with static friction at their anchors and dynamic friction in the velocity pass. The CPU solver finds them at every sub-step,
+   rigid, and undoes overlaps a sub-step starts with without velocity. A volume of four particle layers rests up to about 3 mm
+   into the floor (each bottom particle holds the column above it: g/ω² = 0.3 mm per particle's weight at 30 Hz, and the
+   Gauss–Seidel residual).
+3. **One-sided meshes collide from their front only**, for particles as for rigid shapes (the narrow phase's rule); the CPU
+   solver pushes a particle behind a one-sided triangle out in front.
+4. **Self-collision skips the pairs that start within two radii** (the CPU solver's rule) rather than the pairs a constraint
+   joins (§A3).
+5. **Soft constraints keep XPBD multipliers** within a substep (the CPU solver, one iteration per sub-step, needs none: the
+   same update for one iteration).
+6. **Bodies touching or pinned to particles stay awake**: particles are in no island (soft bodies never sleep), so their
+   constraints keep the rigid side's island awake.
+
+**Found.**
+- **G5's Jacobi gather lost momentum; now mass splitting** (Tonge et al. 2012). The overflow set's constraints were each
+  solved with the whole bodies and every body took the *average* of its corrections: a body with more overflow constraints than
+  its partners took a fraction of the impulses they took — in the Jacobi mode, a soft cube thrown at a floating box (the box
+  touched by about nine particles) kept 18 % of the momentum (1.96 of 10.8 kg·m/s). Now `jacobi_gather` counts each node's
+  overflow constraints after the coloring (joints and touching contacts for the position passes, touching contacts for the
+  velocity pass: next item), the overflow passes solve with each side's part (inverse mass and inertia times its count:
+  `split_node()`), and the gather divides the sum of the parts' corrections by the same count — the sum of the impulses its
+  constraints gave it: momentum is kept (within float rounding). G6's deviation 6 no longer holds: a joint in the overflow
+  set reports its own load.
+- **Split among the touching contacts only.** Counting every overflow constraint, mass splitting converged more slowly than
+  the plain average (a contact moves both sides C/(n₁ + n₂) instead of C/2n₁ and C/2n₂), and most of a pile's candidates
+  never touch (the speculative margin is the farthest motion of any body in the step): G5's 400 balls dropped in a pile, in
+  the Jacobi mode, sank to 0.12 m (13 cm into the floor) and were back to only 0.18–0.20 m after 3 s (the plain average:
+  0.16 m, back to 0.239 m). `contact_prepare` now flags a contact **touching** when a point overlaps at the step's start or
+  will within the step at its bodies' approach speed and half gravity's pull (`CONTACT_TOUCHING`); the counts are the joints
+  and the touching contacts, and the gather divides by the same counts (momentum only needs the split and the divisor to
+  agree; a contact that touches unforeseen corrects with a larger part, as a Jacobi step does): 0.185–0.19 m, back to 0.24 m
+  after 1.5 s. Tried first and dropped: over-relaxing the averaged positions by 1.5 (both sides alike, so momentum held) —
+  the multipliers then no longer equal the impulses: a hook reported 1/1.5 of its block's weight, a particle and a box
+  held by static friction slid.
+- **Pairs within their own reach; manifolds sized by the kept pairs** (G5's sizing, found by the cloth measurement: out of
+  device memory on both GPUs). The trees grow every box by the step's speculative distance — the world's plus the farthest
+  any body or particle gets in the step — and the manifold slots were sized from the trees' pair slots: a 64 × 64 cloth
+  whose edges whip past a sphere at 9 m/s gave every particle a 15 cm margin, millions of tree pairs, and manifolds and
+  contacts (176 and 304 bytes per slot, two halves each) past 1.4 GB. Now `pairs_filter` keeps a pair only when the gap
+  between its boxes (shrunk back) is within the two colliders' own reach — each one's speed, its turn at its box's farthest
+  corner from its body's center, gravity's pull — plus the world's speculative distance; the kept pairs have their own
+  capacity (`pair_capacity`, grown by their count with a replay, like the others), and the manifold slots follow theirs
+  (no longer at least the trees' pairs). The cloth's world holds 726 MiB (the test asserts under 1 GiB).
+- **Light ropes hold heavy bodies loosely at the default substeps**: Gauss–Seidel couples a 0.2 kg rope and the 4 kg box it
+  holds slowly (each projection moves the box by the mass ratio), and the sag left falls with the substep's square; a soft
+  body's sub-steps taken as iterations converge only linearly. At the world's default 4 substeps the box hangs 3.5 cm low, at
+  8 substeps 1.9 cm (the CPU solver, 8 true sub-steps of the rope, holds it within 3 cm). The test runs the world at 8
+  substeps.
+- `PARAMETERS` names the push constants of the pass: helpers reading particles live in `particles.glsl`, included after them.
+- Bash heredocs in this shell turn `\\n` into a newline (patch scripts through the Write tool).
+
+**Tests** (`gpu_xpbd_soft_body_test.cpp` in `gfx_physics_gpu_xpbd_tests`, each on both GPUs in both solver modes with the
+validation layers): a rope pinned at one end swings down and settles under its pin, stretching under 3 % (1 % with long-range
+attachments), in a world without rigid bodies; a cloth hanging from two pins settles in its plane (distance and dihedral
+bending); a bent hinge returns to its rest angle (0 and 1 rad within 0.01); a tetrahedral volume rests on the floor keeping its
+volume within 2 %; a particle comes to rest on each of ten shape kinds a radius above (within 1 mm), a two-sided mesh pushes an
+overlapping particle out below, a one-sided one does not touch it; friction holds a particle on a 30° slope at μ 0.8 and lets it
+slide as g(sin θ − μ cos θ) predicts at 0.2 (within 5 %); self-collision keeps two particles thrown at each other apart, and
+without it they pass; a soft cube thrown at a floating 2 kg box pushes it and the momentum is kept within 1 %; a rope holds a
+4 kg box at its end and lets it fall when unpinned; a cloth falls onto a table and rests on it, never through it; edits reach
+the particles (gravity scale, a moved particle, damping, a pin to a kinematic body followed); two worlds of a cloth and a rope
+holding a body give the same bits. `GpuXpbdTest`'s refusals no longer include soft bodies.
+
+**Enumerations and constants.** `GpuJointPartKind::PIN`; `GPU_XPBD_STORAGE_BUFFERS` 176 → 192 (ten particle arrays);
+specialization constants 60 (PIN) and 61–66 (`SoftBodyConstraintKind`); contact flag `CONTACT_TOUCHING`.
+`GpuStepParameters` is 128 bytes (the particle arrays' indices, the particle count); `GpuSolverParameters` 240 bytes
+(`node_count`, `overflow_counts`, `world_speculative_distance`, `boxes`, `pair_capacity`); collider flags `GPU_COLLIDER_LIVE`,
+`GPU_COLLIDER_PARTICLE`.
+Shaders: `particle_integrate`, `particle_velocity_update`, `soft_solve` (new), `particles.glsl` (new); `rotate_by()` moved to
+`step.glsl`; node support in `solver.glsl` (`is_particle()`, `node_center()`, `node_orientation()`, particles in
+`body_flags_of()`, `load_body()`, `store_body_*()`), `collider_poses`, `contact_prepare`, `contact_velocity`, `pairs_filter`,
+`islands`, `jacobi_gather`, `joint_solve` (PIN).
+
+**Measured** (`GpuXpbdSoftBodyMeasurementTest`: a 64 × 64 cloth — 4096 particles, self-collision on — falling onto a sphere on a
+floor; Release without the validation layers): **graph coloring 14.2 ms per step on the RTX 5060, 84 ms on the Intel GPU;
+Jacobi 7.5 and 74 ms** (about 28 000 contact points, 726 MiB of device memory). G6's chains did not slow down (coloring 2.8 /
+4.5 ms, Jacobi 1.7 / 2.2 ms); G5's pyramid takes 3.9–4.8 / 1.4–1.8 ms on the RTX 5060 (G6: 3.6 / 1.3 — the pairs' reach and
+the touching flags), and 5.1–11.2 / 2.3–7.5 ms on the Intel GPU from one run to the next (its clocks: G6's 4.2 / 2.3 sit at
+the low end).
 
 ## C. The API as proposed (for validation, not final code)
 

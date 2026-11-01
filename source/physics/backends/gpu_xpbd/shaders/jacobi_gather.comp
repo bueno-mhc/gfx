@@ -1,22 +1,55 @@
 #version 460
-// The Jacobi gather of the overflow set (every active constraint in the Jacobi solver mode): each awake dynamic body adds
-// the corrections the overflow set's constraints computed for it, averaged over how many there are (mass splitting), in
-// its graph order — no floating-point atomics, the same sum every run. Mode 0: positions, the joints' and the contacts' (the
-// center moves, the orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the
-// contacts' only (joints have no velocity pass).
+// The Jacobi gather of the overflow set (every active constraint in the Jacobi solver mode), with mass splitting (Tonge et
+// al. 2012): each awake dynamic node is split into as many parts as it has overflow constraints acting on it — its joints
+// and its touching contacts (CONTACT_TOUCHING: a contact keeping a gap through the step gives no correction, and counting
+// the speculative margin's candidates made a pile of 400 balls sink 13 cm) —, each constraint computed with its part (the
+// node's inverse mass and inertia times that count: split_node() in solver.glsl), and the node takes the parts' sum over
+// that count: the sum of the impulses its constraints gave it, as its partners took theirs. Momentum is kept whatever the
+// count (a contact that touches unforeseen corrects with a larger part, as Jacobi steps do). In its graph order, without
+// floating-point atomics: the same sum every run. Mode 0: positions, the joints' and the contacts' (the center moves, the
+// orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the contacts' only (joints
+// have no velocity pass); mode 2 (after the coloring): the counts, positions' and velocities', for split_node(). Particles
+// gather theirs too (moved, not turned).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
 void main()
 {
     const uint body = gl_GlobalInvocationID.x;
-    if (body >= SOLVER.body_count || !body_is_dynamic_awake(gpu_words[PARAMETERS.body_flags].words[body]))
+    if (body >= SOLVER.node_count || !body_is_dynamic_awake(body_flags_of(body)))
     {
+        return;
+    }
+    if (push.mode == 2U)
+    {
+        // The overflow constraints acting on the node: joints and touching contacts (positions), touching contacts
+        // (velocities).
+        uvec2 counts = uvec2(0U);
+        const uint last = gpu_words[SOLVER.body_end].words[body];
+        for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < last; ++entry)
+        {
+            const uint constraint = gpu_words[SOLVER.graph_sorted_values].words[entry] >> 1U;
+            const uint key = gpu_words[SOLVER.color_keys].words[constraint];
+            if ((key >> 1U) != OVERFLOW_COLOR)
+            {
+                continue;
+            }
+            if ((key & 1U) == 0U)
+            {
+                counts.x += 1U;
+            }
+            else if ((gpu_word_vectors[SOLVER.contacts].values[contact_base(constraint - SOLVER.joint_count)].w & CONTACT_TOUCHING) != 0U)
+            {
+                counts += uvec2(1U);
+            }
+        }
+        gpu_words[SOLVER.overflow_counts].words[2U * body] = counts.x;
+        gpu_words[SOLVER.overflow_counts].words[2U * body + 1U] = counts.y;
         return;
     }
     vec3 first_sum = vec3(0.0);
     vec3 second_sum = vec3(0.0);
-    uint count = 0U;
+    bool corrected = false;
     const uint end = gpu_words[SOLVER.body_end].words[body];
     for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < end; ++entry)
     {
@@ -30,14 +63,27 @@ void main()
         const uint side = value & 1U;
         first_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side].xyz;
         second_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side + 1U].xyz;
-        ++count;
+        corrected = true;
     }
-    if (count == 0U)
+    if (!corrected)
     {
         return;
     }
-    const vec3 linear = first_sum / float(count);
-    const vec3 angular = second_sum / float(count);
+    const float parts = float(max(gpu_words[SOLVER.overflow_counts].words[2U * body + push.mode], 1U));
+    const vec3 linear = first_sum / parts;
+    const vec3 angular = second_sum / parts;
+    if (is_particle(body))
+    {
+        const uint particle = particle_of(body);
+        if (push.mode == 0U)
+        {
+            gpu_vectors[PARAMETERS.particle_positions].values[particle].xyz += linear;
+            gpu_vectors[PARAMETERS.particle_displacements].values[particle].xyz += linear;
+            return;
+        }
+        gpu_vectors[PARAMETERS.particle_velocities].values[particle].xyz += linear;
+        return;
+    }
     if (push.mode == 0U)
     {
         vec4 center = gpu_vectors[PARAMETERS.body_centers].values[body];

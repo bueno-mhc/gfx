@@ -1,7 +1,8 @@
 // What the solver's passes share (GpuConstraintSolver in gpu_solver.cppm): the solver's parameters and push constants,
 // the words of its counts, the layouts of colliders, instances, manifolds, contact constraints and joints, the
-// constraints (joints first, then contacts) as the graph, the coloring and the islands see them, and the bodies as the
-// constraint projections and the velocity pass see them.
+// constraints (joints first, then contacts) as the graph, the coloring and the islands see them, and the nodes they join
+// — the rigid bodies, then the soft bodies' particles (node body_count + p: a body without orientation or inertia) — as
+// the constraint projections and the velocity pass see them.
 #ifndef GPU_XPBD_SOLVER_GLSL
 #define GPU_XPBD_SOLVER_GLSL
 
@@ -24,6 +25,7 @@ layout(constant_id = 56) const uint NO_BODY = 0U;
 layout(constant_id = 57) const uint JOINT_ACTIVE = 0U;
 layout(constant_id = 58) const uint JOINT_SOLVED = 0U;
 layout(constant_id = 59) const uint JOINT_BROKEN = 0U;
+layout(constant_id = 60) const uint JOINT_PIN = 0U;
 
 // ===================================================================================================== layouts
 // GpuSolverParameters in gpu_solver.cppm.
@@ -84,6 +86,11 @@ struct SolverParameters
     uint joint_impulses;
     uint joint_results;
     uint joined_pairs;
+    uint node_count; // the rigid bodies and the particles
+    uint overflow_counts; // per node: its overflow constraints, all (positions) and contacts (velocities)
+    float world_speculative_distance; // the world's own
+    uint boxes;           // the instances' boxes (grown by speculative_distance)
+    uint pair_capacity;   // kept pairs at most
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -100,6 +107,8 @@ layout(push_constant) uniform Push
 } push;
 
 #define SOLVER gpu_solver_parameters[push.solver].parameters
+
+#include "particles.glsl"
 
 // The words of the counts (GpuSolverCounts in gpu_solver.cppm).
 const uint COUNT_WITHIN_PAIRS = 0U;
@@ -163,8 +172,11 @@ uint hash_words(uvec4 words)
 }
 
 // A collider (GpuCollider): its pose relative to its body's center of mass, in the body's frame (the shape in the first
-// vector's w); its body, flags, group; its filter (category and mask, two words each); its material.
+// vector's w); its body (a node: a particle's collider is its sphere), flags (bit 0: live; bit 1: a particle's), group;
+// its filter (category and mask, two words each); its material.
 const uint COLLIDER_VECTORS = 5U;
+const uint COLLIDER_LIVE = 1U;
+const uint COLLIDER_PARTICLE = 2U;
 
 struct Collider
 {
@@ -195,9 +207,11 @@ uint instance_collider(uint instance)
 // A contact constraint (GpuContact), one per manifold slot: its bodies, points, flags; its normal (first to second; w:
 // restitution); its material (static and dynamic friction, rolling resistance; w: its coloring priority); per point, the
 // anchors on the first and second bodies (relative to their centers of mass, body frames; w of the first: the separation
-// at the step's start) and the friction anchors (w of the first: 1 when static friction gave way).
+// at the step's start) and the friction anchors (w of the first: 1 when static friction gave way). Flags: active (the
+// manifold has points), touching (a point touches, or will within the step: counted by the Jacobi gather's mass splitting).
 const uint CONTACT_VECTORS = 19U;
 const uint CONTACT_ACTIVE = 1U;
+const uint CONTACT_TOUCHING = 2U;
 
 uint contact_base(uint slot)
 {
@@ -240,10 +254,36 @@ Constraint load_constraint(uint constraint)
     return Constraint(header.x, header.y, (header.w & CONTACT_ACTIVE) != 0U, gpu_word_vectors[SOLVER.contacts].values[base + 2U].w);
 }
 
-// A body's flags (none for the world).
+// Whether a node is a particle, and which.
+bool is_particle(uint node)
+{
+    return node != NO_BODY && node >= PARAMETERS.body_count;
+}
+
+uint particle_of(uint node)
+{
+    return node - PARAMETERS.body_count;
+}
+
+// A node's flags (none for the world; a particle's GpuBodyFlag bits).
 uint body_flags_of(uint body)
 {
-    return body == NO_BODY ? 0U : gpu_words[PARAMETERS.body_flags].words[body];
+    if (body == NO_BODY)
+    {
+        return 0U;
+    }
+    return is_particle(body) ? particle_header(particle_of(body)).y : gpu_words[PARAMETERS.body_flags].words[body];
+}
+
+// A node's center (of mass) and orientation (a particle's: unturned).
+vec3 node_center(uint node)
+{
+    return is_particle(node) ? gpu_vectors[PARAMETERS.particle_positions].values[particle_of(node)].xyz : gpu_vectors[PARAMETERS.body_centers].values[node].xyz;
+}
+
+vec4 node_orientation(uint node)
+{
+    return is_particle(node) ? vec4(0.0, 0.0, 0.0, 1.0) : gpu_vectors[PARAMETERS.body_orientations].values[node];
 }
 
 // The body that moves through constraints: awake and dynamic (asleep and other bodies keep still: infinite mass).
@@ -283,6 +323,16 @@ Body load_body(uint slot)
         // The world: at the origin, unturned, still.
         return Body(vec3(0.0), vec4(0.0, 0.0, 0.0, 1.0), vec3(0.0), mat3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), false);
     }
+    if (is_particle(slot))
+    {
+        // A particle: a point mass (no turn).
+        const uint particle = particle_of(slot);
+        const uvec4 header = particle_header(particle);
+        const bool moves = body_is_dynamic_awake(header.y);
+        return Body(gpu_vectors[PARAMETERS.particle_positions].values[particle].xyz, vec4(0.0, 0.0, 0.0, 1.0), vec3(moves ? uintBitsToFloat(header.x) : 0.0), mat3(0.0),
+                    gpu_vectors[PARAMETERS.particle_displacements].values[particle].xyz, vec3(0.0), gpu_vectors[PARAMETERS.particle_velocities].values[particle].xyz,
+                    vec3(0.0), moves);
+    }
     const uint flags = gpu_words[PARAMETERS.body_flags].words[slot];
     const vec4 center = gpu_vectors[PARAMETERS.body_centers].values[slot];
     const vec4 orientation = gpu_vectors[PARAMETERS.body_orientations].values[slot];
@@ -306,6 +356,12 @@ void store_body_pose(uint slot, Body body)
     {
         return;
     }
+    if (is_particle(slot))
+    {
+        gpu_vectors[PARAMETERS.particle_positions].values[particle_of(slot)].xyz = body.center;
+        gpu_vectors[PARAMETERS.particle_displacements].values[particle_of(slot)].xyz = body.displacement;
+        return;
+    }
     gpu_vectors[PARAMETERS.body_centers].values[slot].xyz = body.center;
     gpu_vectors[PARAMETERS.body_orientations].values[slot] = body.orientation;
     gpu_vectors[PARAMETERS.body_displacements].values[slot].xyz = body.displacement;
@@ -319,14 +375,27 @@ void store_body_velocities(uint slot, Body body)
     {
         return;
     }
+    if (is_particle(slot))
+    {
+        gpu_vectors[PARAMETERS.particle_velocities].values[particle_of(slot)].xyz = body.linear_velocity;
+        return;
+    }
     gpu_vectors[PARAMETERS.body_linear_velocities].values[slot].xyz = body.linear_velocity;
     gpu_vectors[PARAMETERS.body_angular_velocities].values[slot].xyz = body.angular_velocity;
 }
 
-vec3 rotate_by(vec4 q, vec3 v)
+// A node's part in the overflow set (mass splitting, jacobi_gather.comp): its inverse mass and inertia times its count of
+// overflow constraints of the pass (@p velocities: the velocity pass's, contacts only), at least 1. The gather divides the
+// node's corrections by the same count, so each constraint gives both sides the same impulse whatever the count.
+void split_node(inout Body body, uint node, bool velocities)
 {
-    const vec3 t = 2.0 * cross(q.xyz, v);
-    return v + q.w * t + cross(q.xyz, t);
+    if (!body.moves)
+    {
+        return;
+    }
+    const float parts = float(max(gpu_words[SOLVER.overflow_counts].words[2U * node + (velocities ? 1U : 0U)], 1U));
+    body.inverse_mass *= parts;
+    body.inverse_inertia *= parts;
 }
 
 // The generalized inverse mass of a body at the lever r along direction (Müller et al. 2020, eq. 2).

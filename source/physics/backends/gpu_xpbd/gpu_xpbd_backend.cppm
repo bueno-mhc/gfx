@@ -1,6 +1,7 @@
 // The GPU backend's internal partition: GpuXpbdBackend, a SteppedWorldBackend whose bodies live in GPU arrays (a CPU
 // mirror of what the last step read back, by slot), stepped by one command buffer per step on a compute-capable queue;
-// its colliders and joints are uploaded when they change.
+// its colliders and joints are uploaded when they change; its soft bodies' particles are constraint nodes after the
+// bodies, each with a sphere collider among the moving ones.
 module gfx.physics.gpu_xpbd:backend;
 
 import std;
@@ -17,6 +18,7 @@ import gfx.physics.shapes;
 import :settings;
 import :resources;
 import :solver;
+import :soft_bodies;
 
 namespace gfx::physics::gpu_xpbd
 {
@@ -34,6 +36,17 @@ struct JointEntry
 {
     JointHandle handle{}; ///< Null: a free slot.
     JointFrames frames{}; ///< In its bodies' frames.
+};
+
+/// What the backend keeps of a soft body (by slot): its model and its constraints for the GPU, color after color (the
+/// model's colors, then its tethers'), where its particles are on the GPU.
+struct SoftBodyEntry
+{
+    SoftBodyHandle handle{};                       ///< Null: a free slot.
+    std::shared_ptr<const SoftBodyModel> model{};  ///< Rest values, inverse masses, starting positions.
+    std::vector<GpuSoftConstraint> constraints{};  ///< Its particles' indices in it.
+    std::vector<std::uint32_t> color_starts{};     ///< Where each color begins in constraints, then where the last ends.
+    std::uint32_t first_particle = 0;              ///< Its first particle on the GPU.
 };
 
 /// What the backend keeps of a body: what the last step read back (exactly: patches of untouched values reuse them) and
@@ -136,12 +149,27 @@ public:
     /// The entry of @p joint's slot (grown when needed).
     [[nodiscard]] auto joint_entry(JointHandle joint) -> JointEntry&;
 
+    /// The entry of @p soft_body's slot (grown when needed).
+    [[nodiscard]] auto soft_body_entry(SoftBodyHandle soft_body) -> SoftBodyEntry&;
+
+    /// Marks the soft bodies made or destroyed (their particles laid out and uploaded again), or (@p layout false) a
+    /// particle moved by an edit (their state uploaded again).
+    void soft_bodies_changed(bool layout) noexcept;
+
 private:
     /// The colliders' GPU data and lists from the records, when they changed; the bodies' radii.
     void update_colliders(const WorldSnapshot& pending);
 
-    /// The joints' GPU data, their parts and the bodies they keep apart from the records, when they changed.
+    /// The joints' GPU data, their parts and the bodies they keep apart from the records, when they changed; then the
+    /// pins of particles that share their corrections with a body or are compliant (joints of PIN parts).
     void update_joints(const WorldSnapshot& pending);
+
+    /// The soft bodies' particles on the GPU: laid out when soft bodies were made or destroyed (with their constraints),
+    /// their state uploaded then or when an edit moved one, their pins and settings when they changed.
+    void update_soft_bodies(const WorldSnapshot& pending);
+
+    /// The table index of the sphere of a particle of @p radius (added the first time).
+    [[nodiscard]] auto particle_shape(float radius) -> std::uint32_t;
 
     /// How far a body may move in a step of @p seconds at most (the boxes' and contacts' speculative margin).
     [[nodiscard]] auto step_motion(const WorldSnapshot& pending,
@@ -176,6 +204,7 @@ private:
     std::uint64_t m_submitted = 0;
     GpuPipelines m_pipelines;
     GpuConstraintSolver m_solver;
+    GpuSoftBodies m_soft_bodies;
 
     // The body arrays (one storage buffer each).
     GpuArray m_centers{"body centers", sizeof(GpuVector)};
@@ -231,6 +260,15 @@ private:
     std::vector<GpuJoint> m_joint_data{};                          ///< As last uploaded, by joint slot.
     std::vector<GpuJointPart> m_part_data{};                       ///< As last uploaded.
     std::vector<std::array<std::uint32_t, 2>> m_joined_data{};     ///< As last uploaded.
+
+    // Soft bodies.
+    std::vector<SoftBodyEntry> m_soft_body_entries{};                  ///< By soft body slot.
+    std::vector<GpuParticle> m_particle_data{};                        ///< As last uploaded.
+    std::vector<GpuSoftBody> m_soft_body_data{};                       ///< As last uploaded.
+    std::unordered_map<std::uint32_t, std::uint32_t> m_sphere_shapes{}; ///< Particle radii (bits) to their spheres in the table.
+    std::uint32_t m_particle_count = 0;                                ///< Particles on the GPU.
+    bool m_soft_layout_changed = false;                                ///< Soft bodies made or destroyed since the last step.
+    bool m_particle_state_dirty = false;                               ///< A particle moved by an edit since the last step.
 };
 
 } // namespace gfx::physics::gpu_xpbd

@@ -10,7 +10,8 @@
 //     as the tangential multiplier stays within μs λ; beyond, the point slips (its friction anchors are renewed next step)
 //     and dynamic friction acts in the velocity pass.
 // The multipliers reset at the substep's first iteration (mode bit 0). Colored constraints write their bodies at once (no
-// two of a color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather.
+// two of a color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather, computed
+// with the sides' parts (split_node()).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -34,6 +35,11 @@ void main()
     }
     Body first = load_body(header.x);
     Body second = load_body(header.y);
+    if ((push.mode & 2U) != 0U)
+    {
+        split_node(first, header.x, false);
+        split_node(second, header.y, false);
+    }
     const vec3 first_center = first.center;
     const vec3 first_rotation = first.rotation;
     const vec3 second_center = second.center;

@@ -90,10 +90,16 @@ struct GpuSolverParameters
     std::uint32_t joint_impulses = 0;     ///< per joint, the step's impulses on the second body (two vectors: linear, angular),
     std::uint32_t joint_results = 0;      ///< per joint, the step's force and torque (two vectors; flags in the first's w),
     std::uint32_t joined_pairs = 0;       ///< the bodies joined without collisions (two words each, the smaller first, sorted).
+    std::uint32_t node_count = 0;         ///< Constraint nodes: the body slots, then the particles.
+    std::uint32_t overflow_counts = 0;    ///< Per node: its overflow constraints, all and contacts (two words: mass splitting).
+    float world_speculative_distance = 0.0F; ///< The world's own (CollisionSettings): a pair's reach adds it.
+    std::uint32_t boxes = 0;              ///< The instances' boxes (grown by speculative_distance).
+    std::uint32_t pair_capacity = 0;      ///< Kept pairs (the narrow phase's) at most.
 };
-static_assert(sizeof(GpuSolverParameters) == 220 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
+static_assert(sizeof(GpuSolverParameters) == 240 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
               offsetof(GpuSolverParameters, corrections) == 184 && offsetof(GpuSolverParameters, joint_count) == 188 &&
-              offsetof(GpuSolverParameters, joined_pairs) == 216);
+              offsetof(GpuSolverParameters, joined_pairs) == 216 && offsetof(GpuSolverParameters, overflow_counts) == 224 &&
+              offsetof(GpuSolverParameters, boxes) == 232);
 
 /// The words a step's solver passes count (COUNT_* in solver.glsl), read back after each step.
 struct GpuSolverCounts
@@ -118,14 +124,18 @@ struct GpuCollider
 {
     GpuVector position{};                    ///< Relative to its body's center of mass, in the body's frame.
     GpuVector orientation{0.0F, 0.0F, 0.0F, 1.0F}; ///< In the body's frame.
-    std::uint32_t body = 0;                  ///< Its body's slot.
+    std::uint32_t body = 0;                  ///< Its body's slot (a particle's node: the body slots, then the particles).
     std::uint32_t shape = 0;                 ///< Its shape in the narrow phase's table.
-    std::uint32_t flags = 0;                 ///< Bit 0: a live collider.
+    std::uint32_t flags = 0;                 ///< GPU_COLLIDER_LIVE, GPU_COLLIDER_PARTICLE.
     std::int32_t group = 0;                  ///< CollisionFilter::group.
     std::array<std::uint32_t, 4> filter{};   ///< Category low and high words, mask low and high words.
     GpuVector material{};                    ///< Static friction, dynamic friction, rolling resistance, restitution.
 };
 static_assert(sizeof(GpuCollider) == 80 && offsetof(GpuCollider, body) == 32 && offsetof(GpuCollider, filter) == 48 && offsetof(GpuCollider, material) == 64);
+
+/// The bits of GpuCollider::flags (COLLIDER_* in solver.glsl): a live collider, a particle's sphere.
+inline constexpr std::uint32_t GPU_COLLIDER_LIVE = 1;
+inline constexpr std::uint32_t GPU_COLLIDER_PARTICLE = 2;
 
 /// The size of a contact constraint (GpuContact in solver.glsl: CONTACT_VECTORS vectors).
 inline constexpr std::uint32_t GPU_CONTACT_BYTES = 19 * sizeof(GpuVector);
@@ -167,6 +177,7 @@ struct ContactStep
 {
     std::uint32_t step_parameters = 0;   ///< The step parameters' bindless index.
     std::uint32_t body_count = 0;        ///< Body slots.
+    std::uint32_t node_count = 0;        ///< Constraint nodes: the body slots, then the particles.
     float step_seconds = 0.0F;           ///< The step's duration.
     float speculative_distance = 0.0F;   ///< The world's plus the step's motion.
     SolverDescription solver{};          ///< The world's solver settings.
@@ -236,11 +247,12 @@ public:
     /// The joint slots on the GPU.
     [[nodiscard]] auto joint_count() const noexcept -> std::uint32_t;
 
-    /// Grows the arrays for @p body_count bodies and the capacities (copies recorded), uploads what changed (colliders,
-    /// lists, joints, the shape table) and clears this step's counts and joint impulses. Recorded before the step's first
-    /// barrier.
+    /// Grows the arrays for @p body_count bodies and @p node_count constraint nodes (the bodies, then the particles) and
+    /// the capacities (copies recorded), uploads what changed (colliders, lists, joints, the shape table) and clears this
+    /// step's counts and joint impulses. Recorded before the step's first barrier.
     void record_uploads(ComputeRecorder& recorder,
                         std::uint32_t body_count,
+                        std::uint32_t node_count,
                         std::vector<std::unique_ptr<Buffer>>& retired);
 
     /// Records the step's detection, contact constraints, islands (waking) and coloring.

@@ -11,13 +11,16 @@
 //     and w, as the reference backend measures it) within the bounds, with its exact gradient (joint_rows.cpp's);
 //   - SWING: the angle between the frames' z axes at most the limit, about their common normal;
 //   - motors: the anchors' (the frames') relative motion along (about) an axis of the first frame over the substep driven
-//     to the target speed × h, the multiplier within ± the largest force (torque) × h² (a force is λ / h²).
+//     to the target speed × h, the multiplier within ± the largest force (torque) × h² (a force is λ / h²);
+//   - PIN: a soft body's particle held at a point of a body or of the world (the anchors together along the world's axes),
+//     with an XPBD compliance c: its block's compliance is (c / h²) I.
 // A part constrains one to three axes together (a block: the parts of several axes solve their axes at once, through the
 // generalized inverse mass matrix A = Bᵀ K B of their axes B, K the bodies' at the anchors or about them — corrected along
 // one direction, a small body far from its anchor took the correction as a turn that moved the anchor sideways, and
 // pendulums stretched): Δλ = −(A⁻¹ (C + γ ∇C·Δx) + a λ) / (1 + γ + a), a spring's a = 1 / (ω h)² (its compliance α̃ =
 // a A: a frequency whatever the masses) and γ = 2ζ / (ω h) (ω = 2π × its frequency; rigid: 0), ∇C·Δx the error's
-// change by the bodies' motion over the substep; one axis gives XPBD's Δλ = (−C − α̃λ − γ ∇C·Δx) / ((1 + γ) w + α̃).
+// change by the bodies' motion over the substep; one axis gives XPBD's Δλ = (−C − α̃λ − γ ∇C·Δx) / ((1 + γ) w + α̃). A
+// compliance c given as is (PIN) adds c / h² to the block's diagonal and c / h² λ to its error.
 // In a joint whose anchors are locked rigidly (a pivot: ball, hinge, cone-twist, rigid weld, six-DOF with its translations
 // locked), the angular parts turn the bodies about the pivot: the anchors' block eliminated (its Schur complement), each
 // angular correction comes with the anchors' impulse that keeps them together. Turned about their centers instead, small
@@ -25,7 +28,8 @@
 // moving them): a cone's limit converged by under 1 % per iteration and swings passed it.
 // The multipliers reset at the substep's first iteration (mode bit 0); the joint's impulses on the second body (summed
 // over the step) give its force and torque (joint_forces.comp). Colored joints write their bodies at once (no two of a
-// color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather.
+// color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather (with the sides'
+// parts: split_node(); the multipliers are then the joint's own, its force exact).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -77,6 +81,7 @@ struct Row
     float highest;
     float frequency;
     float damping_ratio;
+    float compliance; // an XPBD compliance given as is (PIN)
 };
 
 Row joint_row(uint part, Geometry geometry, float h)
@@ -88,7 +93,7 @@ Row joint_row(uint part, Geometry geometry, float h)
     const uint kind = header.x;
     const vec3 unit = unit_axis(header.y);
     const mat3 frame = rotation_matrix(geometry.frame_first);
-    Row row = Row(false, mat3(0.0), vec3(1.0, 0.0, 0.0), vec3(0.0), false, -infinity(), infinity(), lower.w, upper.w);
+    Row row = Row(false, mat3(0.0), vec3(1.0, 0.0, 0.0), vec3(0.0), false, -infinity(), infinity(), lower.w, upper.w, 0.0);
     if (kind == JOINT_ANCHORS)
     {
         // The separation along the first frame's axes beyond their bounds; locked axes (equal bounds) are constrained even
@@ -98,6 +103,15 @@ Row joint_row(uint part, Geometry geometry, float h)
         row.basis = frame;
         row.mask = max(vec3(notEqual(outside, vec3(0.0))), vec3(equal(lower.xyz, upper.xyz)));
         row.error = outside;
+    }
+    else if (kind == JOINT_PIN)
+    {
+        // The anchors together along the world's axes, with the pin's compliance.
+        row.basis = mat3(1.0);
+        row.mask = vec3(1.0);
+        row.error = geometry.separation;
+        row.frequency = 0.0;
+        row.compliance = lower.w;
     }
     else if (kind == JOINT_DISTANCE)
     {
@@ -228,13 +242,10 @@ void project(Row row,
         return;
     }
     const mat3 kept = mat3(vec3(mask.x, 0.0, 0.0), vec3(0.0, mask.y, 0.0), vec3(0.0, 0.0, mask.z));
-    matrix = kept * matrix * kept + mat3(1.0) - kept;
-    const float diagonal = matrix[0][0] * matrix[1][1] * matrix[2][2];
-    const mat3 solved = abs(determinant(matrix)) > 1e-6 * abs(diagonal)
-                            ? inverse(matrix)
-                            : mat3(vec3(1.0 / matrix[0][0], 0.0, 0.0), vec3(0.0, 1.0 / matrix[1][1], 0.0), vec3(0.0, 0.0, 1.0 / matrix[2][2]));
+    matrix = kept * matrix * kept;
 
-    // XPBD with the spring's compliance and damping, the motor's bound.
+    // XPBD with the spring's compliance and damping, or the compliance given, the motor's bound:
+    // Δλ = −((1 + γ + a) A + c I)⁻¹ (C + γ ∇C·Δx + (a A + c I) λ).
     float compliance = 0.0;
     float damping = 0.0;
     if (row.frequency > 0.0)
@@ -243,7 +254,13 @@ void project(Row row,
         compliance = 1.0 / (omega_h * omega_h);
         damping = 2.0 * row.damping_ratio / omega_h;
     }
-    vec3 delta = mask * (-(solved * (error + damping * motion) + compliance * multipliers) / (1.0 + damping + compliance));
+    const float given = row.compliance / (h * h);
+    const mat3 total = matrix * (1.0 + damping + compliance) + kept * given + mat3(1.0) - kept;
+    const float diagonal = total[0][0] * total[1][1] * total[2][2];
+    const mat3 solved = abs(determinant(total)) > 1e-6 * abs(diagonal)
+                            ? inverse(total)
+                            : mat3(vec3(1.0 / total[0][0], 0.0, 0.0), vec3(0.0, 1.0 / total[1][1], 0.0), vec3(0.0, 0.0, 1.0 / total[2][2]));
+    vec3 delta = mask * -(solved * (error + damping * motion + compliance * (matrix * multipliers) + given * multipliers));
     if (row.motor)
     {
         delta.x = clamp(multipliers.x + delta.x, row.lowest, row.highest) - multipliers.x;
@@ -293,6 +310,11 @@ void main()
     const uint first_part = gpu_word_vectors[SOLVER.joints].values[base + 1U].x;
     Body first = load_body(header.x);
     Body second = load_body(header.y);
+    if ((push.mode & 2U) != 0U)
+    {
+        split_node(first, header.x, false);
+        split_node(second, header.y, false);
+    }
     const vec3 first_center = first.center;
     const vec3 first_rotation = first.rotation;
     const vec3 second_center = second.center;
