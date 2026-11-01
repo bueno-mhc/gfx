@@ -1,0 +1,412 @@
+#version 460
+// The mid phase of GpuNarrowPhase::collide(): each candidate pair of instances becomes its sub-pairs, in the order
+// physics::collide() visits them (collide.cpp's Gatherer): a compound descends into the children its partner's box
+// overlaps (the first shape's compounds before the second's), through the CPU's static hierarchy; a convex shape meets the
+// triangles of a mesh or a height field under its box (in their frame); two meshes or height fields meet triangle by
+// triangle (the first's under the second's box, then the second's near each). Run twice: the count pass writes each
+// pair's sub-pairs, the write pass (the counts scanned into offsets) writes them from its offset, up to the capacity.
+#extension GL_GOOGLE_include_directive : require
+#include "narrow_phase.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint tables;
+    uint instances_buffer;
+    uint instances_first;
+    uint pairs_buffer;
+    uint pairs_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    uint counts_buffer;    // per pair: its sub-pairs (count pass)
+    uint offsets_buffer;   // per pair: its first sub-pair (write pass)
+    uint sub_pairs_buffer; // SUB_PAIR_VECTORS vectors per sub-pair
+    uint capacity;
+    uint writing;
+    float speculative_distance;
+} push;
+
+// ===================================================================================================== emission
+
+uint pair_first_instance;
+uint pair_second_instance;
+uint emitted;
+uint write_base;
+
+void emit(uint kind, uint sub_first, uint sub_second, uint shape_a, uint triangle_a, Pose pose_a, uint shape_b, uint triangle_b, Pose pose_b)
+{
+    if (push.writing != 0U && write_base + emitted < push.capacity)
+    {
+        store_sub_pair(push.sub_pairs_buffer, write_base + emitted,
+                       SubPair(pair_first_instance, pair_second_instance, kind, sub_first, sub_second, shape_a, shape_b, triangle_a, triangle_b, pose_a, pose_b));
+    }
+    ++emitted;
+}
+
+// ===================================================================================================== triangles under a box
+
+// A resumable query of the triangles of a mesh (its static hierarchy, triangles of zero area skipped) or a height field
+// (the cells under the box's x and z range, row by row, two triangles each) whose boxes overlap a box.
+uint soup_stacks[2][STATIC_BVH_DEPTH];
+
+struct SoupCursor
+{
+    ShapeRecord soup;
+    Aabb box;
+    uint slot;     // its stack (meshes)
+    uint size;     // stack entries
+    uint next;     // the current leaf's next item (absolute)
+    uint end;      // and its end
+    uint first_column;
+    uint last_column;
+    uint last_row;
+    uint row;
+    uint column;
+    uint half_index;
+    bool done;
+};
+
+SoupCursor open_soup(ShapeRecord soup, Aabb box, uint slot)
+{
+    SoupCursor cursor = SoupCursor(soup, box, slot, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, false);
+    if (soup.kind == SHAPE_TRIANGLE_MESH)
+    {
+        soup_stacks[slot][0] = soup.first_node;
+        cursor.size = soup.second_count > 0U ? 1U : 0U;
+        return cursor;
+    }
+
+    // A height field: the cells under the box's x and z range, clamped to the grid.
+    if (!intersects(box, Aabb(soup.bounds_minimum, soup.bounds_maximum)))
+    {
+        cursor.done = true;
+        return cursor;
+    }
+    const uint rows = soup.count;
+    const uint columns = soup.second_count;
+    const float last_cell_column = float(columns - 2U);
+    const float last_cell_row = float(rows - 2U);
+    cursor.first_column = uint(clamp(floor(box.minimum.x / soup.size.x), 0.0, last_cell_column));
+    cursor.last_column = uint(clamp(floor(box.maximum.x / soup.size.x), 0.0, last_cell_column));
+    cursor.row = uint(clamp(floor(box.minimum.z / soup.size.z), 0.0, last_cell_row));
+    cursor.last_row = uint(clamp(floor(box.maximum.z / soup.size.z), 0.0, last_cell_row));
+    cursor.column = cursor.first_column;
+    return cursor;
+}
+
+// The next triangle of the query (its index, its corners, its active edges), or INVALID_INDEX.
+uint next_soup_triangle(inout SoupCursor cursor, out vec3 first, out vec3 second, out vec3 third, out uint active_edges)
+{
+    first = vec3(0.0);
+    second = vec3(0.0);
+    third = vec3(0.0);
+    active_edges = 0U;
+    if (cursor.soup.kind == SHAPE_TRIANGLE_MESH)
+    {
+        for (;;)
+        {
+            while (cursor.next < cursor.end)
+            {
+                const uint item = gpu_words[bvh_items].words[cursor.next];
+                ++cursor.next;
+                if (intersects(item_box(cursor.soup, item), cursor.box))
+                {
+                    soup_triangle(cursor.soup, item, first, second, third, active_edges);
+                    if (length_squared(cross(second - first, third - first)) > 0.0)
+                    {
+                        return item;
+                    }
+                }
+            }
+            if (cursor.size == 0U)
+            {
+                return INVALID_INDEX;
+            }
+            uint node_first;
+            uint node_count;
+            const Aabb bounds = node_box(soup_stacks[cursor.slot][--cursor.size], node_first, node_count);
+            if (!intersects(bounds, cursor.box))
+            {
+                continue;
+            }
+            if (node_count > 0U)
+            {
+                cursor.next = node_first;
+                cursor.end = node_first + node_count;
+            }
+            else
+            {
+                soup_stacks[cursor.slot][cursor.size++] = node_first + 1U;
+                soup_stacks[cursor.slot][cursor.size++] = node_first;
+            }
+        }
+    }
+
+    // A height field.
+    const uint columns = cursor.soup.second_count;
+    while (!cursor.done)
+    {
+        if (cursor.row > cursor.last_row)
+        {
+            cursor.done = true;
+            break;
+        }
+        const uint index = 2U * (cursor.row * (columns - 1U) + cursor.column) + cursor.half_index;
+        ++cursor.half_index;
+        if (cursor.half_index == 2U)
+        {
+            cursor.half_index = 0U;
+            ++cursor.column;
+            if (cursor.column > cursor.last_column)
+            {
+                cursor.column = cursor.first_column;
+                ++cursor.row;
+            }
+        }
+        soup_triangle(cursor.soup, index, first, second, third, active_edges);
+        if (intersects(triangle_bounds(first, second, third), cursor.box))
+        {
+            return index;
+        }
+    }
+    return INVALID_INDEX;
+}
+
+// ===================================================================================================== leaves
+
+// A convex shape against the triangles under its box in the triangles' frame (FLIPPED: the triangles are the pair's first).
+void convex_triangles(uint convex, ShapeRecord convex_record, Pose convex_pose, uint convex_sub, uint soup, ShapeRecord soup_record, Pose soup_pose,
+                      uint soup_sub, bool flip)
+{
+    const Pose relative = compose(inverse_pose(soup_pose), convex_pose);
+    SoupCursor cursor = open_soup(soup_record, expanded(convex_bounds(convex_shape(convex_record), relative), push.speculative_distance), 0U);
+    for (;;)
+    {
+        vec3 first;
+        vec3 second;
+        vec3 third;
+        uint active_edges;
+        const uint triangle = next_soup_triangle(cursor, first, second, third, active_edges);
+        if (triangle == INVALID_INDEX)
+        {
+            return;
+        }
+        const uint triangle_sub = soup_sub == NO_SUB_SHAPE ? triangle : soup_sub;
+        if (flip)
+        {
+            emit(SUB_PAIR_CONVEX_TRIANGLE | SUB_PAIR_FLIPPED, triangle_sub, convex_sub, convex, INVALID_INDEX, convex_pose, soup, triangle, soup_pose);
+        }
+        else
+        {
+            emit(SUB_PAIR_CONVEX_TRIANGLE, convex_sub, triangle_sub, convex, INVALID_INDEX, convex_pose, soup, triangle, soup_pose);
+        }
+    }
+}
+
+// Two meshes or height fields: each triangle of the first under the second's box against the second's triangles near it.
+void triangles_triangles(uint first, ShapeRecord first_record, Pose first_pose, uint first_sub, uint second, ShapeRecord second_record, Pose second_pose,
+                         uint second_sub)
+{
+    const Pose relative = compose(inverse_pose(first_pose), second_pose);
+    const Pose back = inverse_pose(relative);
+    SoupCursor outer = open_soup(first_record, expanded(shape_bounds_at(second_record, relative), push.speculative_distance), 0U);
+    for (;;)
+    {
+        vec3 a;
+        vec3 b;
+        vec3 c;
+        uint unused_edges;
+        const uint first_triangle = next_soup_triangle(outer, a, b, c, unused_edges);
+        if (first_triangle == INVALID_INDEX)
+        {
+            return;
+        }
+        SoupCursor inner = open_soup(second_record, expanded(transformed(triangle_bounds(a, b, c), back), push.speculative_distance), 1U);
+        for (;;)
+        {
+            vec3 d;
+            vec3 e;
+            vec3 f;
+            uint unused_second_edges;
+            const uint second_triangle = next_soup_triangle(inner, d, e, f, unused_second_edges);
+            if (second_triangle == INVALID_INDEX)
+            {
+                break;
+            }
+            emit(SUB_PAIR_TRIANGLES, first_sub == NO_SUB_SHAPE ? first_triangle : first_sub, second_sub == NO_SUB_SHAPE ? second_triangle : second_sub, first,
+                 first_triangle, first_pose, second, second_triangle, second_pose);
+        }
+    }
+}
+
+// Two shapes neither of which is a compound.
+void leaf_pairs(uint first, ShapeRecord first_record, Pose first_pose, uint first_sub, uint second, ShapeRecord second_record, Pose second_pose,
+                uint second_sub)
+{
+    if (is_convex(first_record) && is_convex(second_record))
+    {
+        emit(SUB_PAIR_CONVEX, first_sub, second_sub, first, INVALID_INDEX, first_pose, second, INVALID_INDEX, second_pose);
+    }
+    else if (is_convex(first_record))
+    {
+        convex_triangles(first, first_record, first_pose, first_sub, second, second_record, second_pose, second_sub, false);
+    }
+    else if (is_convex(second_record))
+    {
+        convex_triangles(second, second_record, second_pose, second_sub, first, first_record, first_pose, first_sub, true);
+    }
+    else
+    {
+        triangles_triangles(first, first_record, first_pose, first_sub, second, second_record, second_pose, second_sub);
+    }
+}
+
+// ===================================================================================================== compounds
+
+// The compounds being descended, innermost last: each with its query (its hierarchy's stack, its current leaf), its pose,
+// its own sub-shape, which side of the pair it is, its partner, and the partner's box in its frame.
+uint level_stacks[COMPOUND_LEVELS][STATIC_BVH_DEPTH];
+uint level_sizes[COMPOUND_LEVELS];
+uint level_next[COMPOUND_LEVELS];
+uint level_end[COMPOUND_LEVELS];
+uint level_compound[COMPOUND_LEVELS];
+Pose level_pose[COMPOUND_LEVELS];
+uint level_sub[COMPOUND_LEVELS];
+bool level_first_side[COMPOUND_LEVELS];
+uint level_partner[COMPOUND_LEVELS];
+Pose level_partner_pose[COMPOUND_LEVELS];
+uint level_partner_sub[COMPOUND_LEVELS];
+Aabb level_box[COMPOUND_LEVELS];
+uint level_count;
+
+void open_level(uint compound, ShapeRecord record, Pose pose, uint sub, bool first_side, uint partner, ShapeRecord partner_record, Pose partner_pose,
+                uint partner_sub)
+{
+    if (level_count == COMPOUND_LEVELS)
+    {
+        return;
+    }
+    const uint level = level_count++;
+    level_stacks[level][0] = record.first_node;
+    level_sizes[level] = record.count > 0U ? 1U : 0U;
+    level_next[level] = 0U;
+    level_end[level] = 0U;
+    level_compound[level] = compound;
+    level_pose[level] = pose;
+    level_sub[level] = sub;
+    level_first_side[level] = first_side;
+    level_partner[level] = partner;
+    level_partner_pose[level] = partner_pose;
+    level_partner_sub[level] = partner_sub;
+    level_box[level] = expanded(shape_bounds_at(partner_record, compose(inverse_pose(pose), partner_pose)), push.speculative_distance);
+}
+
+// The pair (first, second): a compound opens a level; two other shapes emit their sub-pairs.
+void visit_pair(uint first, Pose first_pose, uint first_sub, uint second, Pose second_pose, uint second_sub)
+{
+    const ShapeRecord first_record = load_record(first);
+    const ShapeRecord second_record = load_record(second);
+    if (first_record.kind == SHAPE_COMPOUND)
+    {
+        open_level(first, first_record, first_pose, first_sub, true, second, second_record, second_pose, second_sub);
+    }
+    else if (second_record.kind == SHAPE_COMPOUND)
+    {
+        open_level(second, second_record, second_pose, second_sub, false, first, first_record, first_pose, first_sub);
+    }
+    else
+    {
+        leaf_pairs(first, first_record, first_pose, first_sub, second, second_record, second_pose, second_sub);
+    }
+}
+
+// The next child of the innermost compound whose box overlaps its partner's, or INVALID_INDEX.
+uint next_child(uint level, ShapeRecord record)
+{
+    for (;;)
+    {
+        while (level_next[level] < level_end[level])
+        {
+            const uint item = gpu_words[bvh_items].words[level_next[level]];
+            ++level_next[level];
+            if (intersects(item_box(record, item), level_box[level]))
+            {
+                return item;
+            }
+        }
+        if (level_sizes[level] == 0U)
+        {
+            return INVALID_INDEX;
+        }
+        --level_sizes[level];
+        uint node_first;
+        uint node_count;
+        const Aabb bounds = node_box(level_stacks[level][level_sizes[level]], node_first, node_count);
+        if (!intersects(bounds, level_box[level]))
+        {
+            continue;
+        }
+        if (node_count > 0U)
+        {
+            level_next[level] = node_first;
+            level_end[level] = node_first + node_count;
+        }
+        else
+        {
+            level_stacks[level][level_sizes[level]++] = node_first + 1U;
+            level_stacks[level][level_sizes[level]++] = node_first;
+        }
+    }
+    return INVALID_INDEX;
+}
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    load_tables(push.tables);
+
+    // The pair's instances.
+    pair_first_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index)];
+    pair_second_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index) + 1U];
+    uint first_shape;
+    uint second_shape;
+    const Pose first_pose = load_instance(push.instances_buffer, push.instances_first + pair_first_instance, first_shape);
+    const Pose second_pose = load_instance(push.instances_buffer, push.instances_first + pair_second_instance, second_shape);
+    emitted = 0U;
+    write_base = push.writing != 0U ? gpu_words[push.offsets_buffer].words[index] : 0U;
+    level_count = 0U;
+
+    // Depth first: the pair, then each child of the innermost compound with its partner.
+    visit_pair(first_shape, first_pose, NO_SUB_SHAPE, second_shape, second_pose, NO_SUB_SHAPE);
+    while (level_count > 0U)
+    {
+        const uint level = level_count - 1U;
+        const ShapeRecord compound = load_record(level_compound[level]);
+        const uint child = next_child(level, compound);
+        if (child == INVALID_INDEX)
+        {
+            --level_count;
+            continue;
+        }
+        uint child_shape;
+        const Pose child_pose = compose(level_pose[level], compound_child(compound, child, child_shape));
+        const uint child_sub = level_sub[level] == NO_SUB_SHAPE ? child : level_sub[level];
+        if (level_first_side[level])
+        {
+            visit_pair(child_shape, child_pose, child_sub, level_partner[level], level_partner_pose[level], level_partner_sub[level]);
+        }
+        else
+        {
+            visit_pair(level_partner[level], level_partner_pose[level], level_partner_sub[level], child_shape, child_pose, child_sub);
+        }
+    }
+    if (push.writing == 0U)
+    {
+        gpu_words[push.counts_buffer].words[index] = emitted;
+    }
+}

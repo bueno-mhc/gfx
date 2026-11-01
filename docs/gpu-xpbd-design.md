@@ -2,7 +2,8 @@
 
 Status: **answers given 2026-10-31: every question of §D as recommended.** **G0 accepted** with its 5 deviations (§B "G0
 as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
-(§B "G2 as built"; committed 6858652). **G3 implemented** (§B "G3 as built", 5 deviations), awaiting validation.
+(§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9). **G4 implemented**
+(§B "G4 as built", 5 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -660,6 +661,100 @@ one the manifolds read back name, most points matched); **bounds → `GpuBvh` �
 cube against every pair on the CPU (the same 2039 contacts; every CPU contact's pair from the tree; none on the GPU between
 shapes the CPU finds apart); misuses (a mesh, a negative speculative distance, an infinite expansion, a cache above its
 reserve, a shape not uploaded). `GpuNarrowPhaseMeasurementTest` prints the throughput.
+
+### G4 as built (2026-10-31)
+
+**Every shape kind in `GpuNarrowPhase`.** `add_shape()` now takes triangle meshes, height fields and compounds: the shape
+table holds 96-byte records (kind, flags, compound depth; two ranges; a static hierarchy's first node, item and item box;
+sizes and margin; the shape's own box) and eleven shared arrays (vertices of hulls and meshes, hull faces and corners, mesh
+triangles with absolute vertices and their active-edge bits, hierarchy nodes with absolute children or items, hierarchy items
+and item boxes, height-field samples as given, each height-field triangle's active edges, compound children with their
+poses); a table buffer names the arrays' bindless indices for every pass (`load_tables()`). A compound's children are added
+with it, a child shared within one addition stored once.
+
+**`collide()` as `physics::collide()` does it**, in four passes recorded into the caller's command buffer:
+1. **Mid phase, counted** (`narrow_phase_pairs.comp`, one invocation per candidate pair): the pair becomes its sub-pairs in
+   the order collide.cpp's `Gatherer` visits them — a compound descends into the children its partner's box overlaps, the
+   first shape's compounds before the second's, through the CPU's own static hierarchy and stack order (explicit levels,
+   `2 × GPU_XPBD_COMPOUND_DEPTH`); a convex shape meets the triangles of a mesh or height field under its box in their frame
+   (resumable soup queries: a mesh's hierarchy without zero-area triangles; a height field's cells under the box, row by row,
+   two triangles each); two meshes or height fields meet triangle by triangle (the first's under the second's box, then the
+   second's near each). Each sub-pair records its kind, its sub-shapes, both pieces and their poses.
+2. The counts **scanned** (`GpuPrimitives::exclusive_scan`) into each pair's first slot; the sum is the `total` word.
+3. **Mid phase, written** at those slots, up to the capacity.
+4. **One manifold per sub-pair** (`narrow_phase_collide.comp`): two convex shapes through the convex dispatch; a convex shape
+   against a triangle in the triangles' frame — no contact from behind a one-sided triangle, the face normal on inactive
+   edges (`correct_inactive_edges`), each point naming its triangle, moved into the world, flipped when the triangles are the
+   pair's first; two triangles by separating axes in the first's frame (`collide_separating_axes` now serves boxes and
+   triangles), each point naming both.
+5. **Merge** (`narrow_phase_merge.comp`, one invocation per pair): the pair's manifolds in order, each merged into the first
+   earlier one whose normal is within the merge cosine (points reduced to four; the deeper names the sub-shapes), the
+   deepest `maximum_manifolds` kept by a stable insertion sort, the rest of the pair's slots emptied, the pair's range
+   written.
+
+Output: `GpuManifoldSpans {manifolds, ranges, total, capacity}` — `GpuManifold` slots (176 bytes: G3's plus the manifold's
+`sub_shape_first`/`second`), per pair its first slot and manifold count, the slots needed. `reserve(maximum_pairs,
+maximum_manifolds)`; `reserved_pairs()`, `reserved_manifolds()`. The cache (`match()`) reads the new layout and searches every
+manifold of a pair for a point of the same feature (sub-shapes and local features), the first in slot order.
+
+**How it agrees with the CPU.** The CPU's own collide cases hold on both GPUs (`TheCpusCollideCasesHold`): a box sliding over
+an 8 × 8 floor's seams keeps one manifold of four points with the floor's normal at all 61 positions, the floor first, a ball
+under one-sided and two-sided floors, a box across a height field's ridge (two normals; the deeper alone with one manifold), a
+table's four legs merged into one manifold naming a leg, two floors lowered onto each other triangle by triangle. **Random
+overlapping poses** (`ManifoldsAreTheCpusWithMeshesHeightFieldsAndCompounds`: 30 of each of the 161 ordered pairs with a rough
+one-sided mesh, a flat two-sided mesh, a closed box mesh, a height field, a dumbbell compound, a compound nesting it, or a
+compound holding a mesh; default settings, no speculative distance, one manifold): about 4 000 of 4 830 pairs in contact per
+run, 3 000 of them with several manifolds; **96–98 % give the CPU's manifolds at the pose** (order, algorithms, sub-shapes,
+points with their features), **1.6–3.5 % the CPU's at a nearby pose, and 1 to 3 pairs per run (0.06 %) differ at ties no
+nearby pose separates** — points that coincide because neighboring triangles share an edge or a vertex (rounding decides which
+triangle's point the reduction keeps, and its feature names that triangle), manifolds sharing their deepest point (their
+order when more than `maximum_manifolds` merge), EPA's support point on a flat face. Such ties move with the pose, so the
+nearby-pose test cannot separate them; the tests allow 0.25 % and print each. Convex pairs remain held to G3's standard (every
+pair at the pose or a nearby one). End to end (1200 shapes, a quarter of any kind: bounds → `GpuBvh` → pairs → manifolds),
+the GPU and the CPU find the same 2 377 contacts; 0 (Intel) and 2 (NVIDIA) of 9 632 examined pairs differ at ties.
+
+**Deviations (for validation).**
+1. **The CPU's static hierarchies, uploaded — not built on the GPU** (§A7 said the GPU builder would build them). A mesh's
+   or compound's `StaticBvh` (nodes, items, item boxes) is copied as built, so the GPU visits triangles and children in the
+   CPU's order: the merged manifolds (which points and sub-shapes survive) depend on that order. The shapes build their
+   hierarchy anyway; a Karras tree would visit them in another order.
+2. **Compounds descended in the narrow phase, not flattened into child colliders** (§A7). The candidate pair stays a pair of
+   instances and its compounds are descended as collide() does, so a compound's contacts merge across its children (the
+   CPU's single manifold for a table's four legs). The descent's fixed storage limits nesting to `GPU_XPBD_COMPOUND_DEPTH`
+   (4) per side: `add_shape()` refuses deeper compounds with a `BackendCapabilityError` suggesting to flatten them.
+3. **`collide()` changed shape**: ranges per pair instead of a slot per pair (G3's deviation 2), `GpuManifold` 176 bytes,
+   `reserve()` takes pairs and manifold slots. Pairs whose slots pass the capacity are cut short (none of their manifolds
+   written, nothing past the capacity); the `total` word tells the slots needed, which G5 sizes from.
+4. **A change to the CPU's narrow phase: `TRIANGLE_FACE_TOLERANCE`** (enums.cppm, 10⁻³). `TriangleShape::supporting_face()`
+   took the triangle's front when `dot(front, direction) >= 0`; a triangle met edge-on — beside a box resting on a mesh floor,
+   which every box on a floor has — got its face from the sign of rounding in GJK's normal (±10⁻⁵), so the CPU and the GPU named
+   the incident face, hence the points' features, differently (one seam step failed). Directions within 10⁻³ of the triangle's
+   plane now take the front, on both. Only feature ids change (front and back are the same polygon); the CPU tests all pass.
+5. **Ties allowed for shapes with triangles or children** (0.25 %, above), where G3 allowed none: their coincident points are
+   the CPU algorithm's own knife edges, and they move together.
+
+**Measured** (`GpuNarrowPhaseMeasurementTest`, best of five, recording, submission and waiting included). In Release without
+the validation layers: 192 000 convex pairs in **14.0 ms on the RTX 5060** (G3: 13.9) and 87.7 ms on the Intel GPU (G3: 75.8 —
+the mid phase, scan and merge cost about 12 ms there); 32 200 overlapping pairs with triangles or children (783 360 sub-pairs)
+in **38.5 ms** and 185 ms. Debug with the layers: 14.7 / 89 ms and 40 / 187 ms.
+
+**Found.**
+- **GLSL inlines every call**: the sub-pair kernel first called the convex dispatch in three branches (and the separating axes
+  twice), compiling GJK, EPA and clipping three times; on the RTX 5060 the kernel ran 5.5 times slower (84 ms for the convex
+  pairs). One call site restored G3's speed.
+- **Fused multiply-adds**: the drivers fuse `a * b - c` unless told not to. In `reduce_contact_points()` the area spanned by a
+  point coinciding with the farthest one is exactly 0 on the CPU (`cross(base, base)`), a signed residue on the GPU, which
+  then kept a duplicate as the fourth point: 36 of 4 830 pairs disagreed. The reduction's distances and areas and the merge's
+  cosine are now `precise` (no contraction, IEEE products and sums as on the CPU).
+- `buffer` is a GLSL reserved word too.
+
+**Tests** (`gpu_narrow_phase_test.cpp`, both GPUs with the validation layers; fifteen test shapes, eight convex): convex pairs
+as in G3; the overlapping pairs above; the CPU's collide cases; instance boxes of every kind equal to `Shape::bounds(pose)`
+grown; the same bits twice (convex and other pairs); **pairs past the capacity cut short** (the total counts every slot, pairs
+that fit are whole, pairs past it have none, the slot after the capacity untouched); the cache over pairs with several
+manifolds; the end-to-end run above; misuses (compounds five deep, reserves above the maximum, a table not uploaded, invalid
+settings, counts and capacities above the reserve, a cache above its reserve). `GpuNarrowPhaseMeasurementTest` prints both
+throughputs.
 
 ---
 

@@ -1,5 +1,7 @@
-// GpuNarrowPhase: the shape table (records, hull vertices, faces and polygons) built on the CPU and uploaded through a
-// staging buffer, the passes recorded with their push constants (the shaders' Push blocks), the cache's sorts.
+// GpuNarrowPhase: the shape table (records, vertices, hull faces and corners, mesh triangles, the CPU's static
+// hierarchies, height field samples and active edges, compound children) built on the CPU and uploaded through a staging
+// buffer, its arrays' bindless indices in a table buffer the shaders read; collide()'s passes (mid phase counted and
+// written, sub-pairs, merge) and the cache's sorts recorded with their push constants (the shaders' Push blocks).
 module gfx.physics.gpu_xpbd;
 
 import std;
@@ -26,62 +28,113 @@ namespace
 {
 
 static_assert(MAXIMUM_MANIFOLD_POINTS == 4, "GpuManifold holds four points: narrow_phase.glsl's MANIFOLD_POINTS");
-static_assert(sizeof(GpuInstance) == 32 && sizeof(GpuContactPoint) == 32 && sizeof(GpuManifold) == 160);
+static_assert(sizeof(GpuInstance) == 32 && sizeof(GpuContactPoint) == 32 && sizeof(GpuManifold) == 176, "narrow_phase.glsl: MANIFOLD_VECTORS 11");
 
-/// A shape of the table (three vectors in narrow_phase.glsl: load_shape()).
+/// A shape of the table (six vectors: narrow_phase.glsl's ShapeRecord).
 struct GpuShapeRecord
 {
-    std::uint32_t kind = 0;          ///< ShapeKind's value.
-    std::uint32_t first_vertex = 0;  ///< A hull's first vertex in the vertex array.
-    std::uint32_t vertex_count = 0;  ///< Its vertices.
-    std::uint32_t first_face = 0;    ///< Its first face in the face array.
-    std::uint32_t face_count = 0;    ///< Its faces.
-    std::array<std::uint32_t, 3> reserved{};
-    std::array<float, 3> size{};     ///< Sphere: radius; capsule, cylinder, cone: half height, radius; box: half extents.
-    float margin = 0.0F;             ///< The radius around the core.
+    std::uint32_t kind = 0;         ///< ShapeKind's value.
+    std::uint32_t flags = 0;        ///< Bit 0: a two-sided mesh.
+    std::uint32_t depth = 0;        ///< A compound's nesting (1: of other shapes).
+    std::uint32_t reserved = 0;
+    std::uint32_t first = 0;        ///< Hull, mesh: first vertex; height field: first sample; compound: first child.
+    std::uint32_t count = 0;        ///< Vertices; rows; children.
+    std::uint32_t second_first = 0; ///< Hull: first face; mesh: first triangle; height field: first active-edge word.
+    std::uint32_t second_count = 0; ///< Faces; triangles; columns.
+    std::uint32_t first_node = 0;   ///< A mesh's or compound's static hierarchy: its first node,
+    std::uint32_t first_item = 0;   ///< first item,
+    std::uint32_t first_box = 0;    ///< and first item box.
+    std::uint32_t reserved_hierarchy = 0;
+    std::array<float, 3> size{};    ///< Sphere: radius; capsule, cylinder, cone: half height, radius; box: half extents; height field: scale.
+    float margin = 0.0F;            ///< The radius around the core.
+    std::array<float, 4> bounds_minimum{}; ///< Its box in its own frame.
+    std::array<float, 4> bounds_maximum{};
 };
 
-/// A hull's face (two vectors): its plane, then its first corner in the index array and its corners.
+/// A hull's face: its plane, then its first corner in the corner array and its corners.
 struct GpuHullFace
 {
-    std::array<float, 4> plane{};    ///< Outward normal, distance.
+    std::array<float, 4> plane{};
     std::uint32_t first = 0;
     std::uint32_t count = 0;
     std::array<std::uint32_t, 2> reserved{};
 };
-static_assert(sizeof(GpuShapeRecord) == 48 && sizeof(GpuHullFace) == 32);
 
-// The push constants of the passes (the shaders' Push blocks, word by word).
-struct ShapeTablePush
+/// A node of a static hierarchy (the CPU's StaticBvhNode): its box, its first child or item (absolute), its items.
+struct GpuStaticNode
 {
-    std::uint32_t records = 0;
-    std::uint32_t vertices = 0;
-    std::uint32_t faces = 0;
-    std::uint32_t indices = 0;
+    std::array<float, 3> minimum{};
+    std::uint32_t first = 0;
+    std::array<float, 3> maximum{};
+    std::uint32_t count = 0;
 };
 
-struct CollidePush
+/// A compound's child: its pose in the compound's frame, its shape.
+struct GpuChild
 {
+    std::array<float, 3> position{};
+    std::uint32_t shape = 0;
+    std::array<float, 4> orientation{};
+};
+static_assert(sizeof(GpuShapeRecord) == 96 && sizeof(GpuHullFace) == 32 && sizeof(GpuStaticNode) == 32 && sizeof(GpuChild) == 32);
+
+/// A sub-pair (narrow_phase.glsl's SUB_PAIR_VECTORS).
+constexpr std::uint64_t SUB_PAIR_BYTES = 7 * sizeof(GpuVector);
+
+// The push constants of the passes (the shaders' Push blocks, word by word).
+struct PairsPush
+{
+    std::uint32_t tables = 0;
     std::uint32_t instances_buffer = 0;
     std::uint32_t instances_first = 0;
     std::uint32_t pairs_buffer = 0;
     std::uint32_t pairs_first = 0;
+    std::uint32_t maximum = 0;
+    std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
+    std::uint32_t count_word = 0;
+    std::uint32_t counts_buffer = 0;
+    std::uint32_t offsets_buffer = 0;
+    std::uint32_t sub_pairs_buffer = 0;
+    std::uint32_t capacity = 0;
+    std::uint32_t writing = 0;
+    float speculative_distance = 0.0F;
+};
+
+struct CollidePush
+{
+    std::uint32_t tables = 0;
+    std::uint32_t sub_pairs_buffer = 0;
     std::uint32_t manifolds_buffer = 0;
     std::uint32_t manifolds_first = 0;
-    ShapeTablePush shapes{};
     std::uint32_t maximum = 0;
     std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
     std::uint32_t count_word = 0;
     float speculative_distance = 0.0F;
 };
 
+struct MergePush
+{
+    std::uint32_t manifolds_buffer = 0;
+    std::uint32_t manifolds_first = 0;
+    std::uint32_t counts_buffer = 0;
+    std::uint32_t offsets_buffer = 0;
+    std::uint32_t ranges_buffer = 0;
+    std::uint32_t ranges_first = 0;
+    std::uint32_t maximum = 0;
+    std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
+    std::uint32_t count_word = 0;
+    std::uint32_t capacity = 0;
+    float merge_cosine = 0.0F;
+    std::uint32_t maximum_manifolds = 0;
+};
+
 struct BoundsPush
 {
+    std::uint32_t tables = 0;
     std::uint32_t instances_buffer = 0;
     std::uint32_t instances_first = 0;
     std::uint32_t boxes_buffer = 0;
     std::uint32_t boxes_first = 0;
-    ShapeTablePush shapes{};
     std::uint32_t maximum = 0;
     std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
     std::uint32_t count_word = 0;
@@ -118,13 +171,30 @@ struct MatchPush
     std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
     std::uint32_t count_word = 0;
 };
-static_assert(sizeof(CollidePush) == 14 * sizeof(std::uint32_t) && sizeof(MatchPush) == 14 * sizeof(std::uint32_t));
+static_assert(sizeof(PairsPush) == 14 * sizeof(std::uint32_t) && sizeof(MergePush) == 12 * sizeof(std::uint32_t));
 
 /// The uploads of the shape table, before the passes read it.
 constexpr GlobalMemoryBarrier TRANSFER_TO_COMPUTE{.source_stages = PipelineStage::TRANSFER,
                                                   .source_access = MemoryAccess::TRANSFER_WRITE,
                                                   .destination_stages = PipelineStage::COMPUTE_SHADER,
                                                   .destination_access = MemoryAccess::SHADER_STORAGE_READ};
+
+/// The table's arrays, in the order of the table buffer's words (narrow_phase.glsl's load_tables()).
+enum TableArray : std::size_t
+{
+    RECORDS,
+    VERTICES,
+    HULL_FACES,
+    HULL_INDICES,
+    TRIANGLES,
+    NODES,
+    ITEMS,
+    BOXES,
+    HEIGHTS,
+    EDGES,
+    CHILDREN,
+    TABLE_ARRAYS,
+};
 
 /// Throws the InvalidUsageError of @p operation.
 [[noreturn]] void
@@ -138,13 +208,27 @@ refuse(std::string_view operation,
                              .suggestion = std::string{suggestion}});
 }
 
-/// The record of a convex shape of a closed form.
 [[nodiscard]] auto
-record_of(ShapeKind kind,
-          std::array<float, 3> size,
-          float margin) -> GpuShapeRecord
+vector_of(Vector3 vector) noexcept -> std::array<float, 4>
 {
-    return {.kind = std::to_underlying(kind), .size = size, .margin = margin};
+    return {vector.x, vector.y, vector.z, 0.0F};
+}
+
+/// How deep @p shape's compounds go (0: not a compound).
+[[nodiscard]] auto
+compound_depth(const Shape& shape) -> std::uint32_t
+{
+    const auto* compound = shape.get_if<CompoundShape>();
+    if (compound == nullptr)
+    {
+        return 0;
+    }
+    std::uint32_t deepest = 0;
+    for (const CompoundChild& child : compound->children())
+    {
+        deepest = std::max(deepest, compound_depth(*child.shape));
+    }
+    return deepest + 1;
 }
 
 } // namespace
@@ -154,6 +238,8 @@ to_contact_manifold(const GpuManifold& manifold) noexcept -> ContactManifold
 {
     ContactManifold result{.normal = {.x = manifold.normal[0], .y = manifold.normal[1], .z = manifold.normal[2]},
                            .point_count = std::min(manifold.point_count, MAXIMUM_MANIFOLD_POINTS),
+                           .sub_shape_first = manifold.sub_shape_first,
+                           .sub_shape_second = manifold.sub_shape_second,
                            .algorithm = static_cast<ContactAlgorithm>(manifold.algorithm)};
     for (std::uint32_t point = 0; point < result.point_count; ++point)
     {
@@ -173,15 +259,18 @@ struct GpuNarrowPhase::State
           GpuPrimitives& shared_primitives)
         : device{target}
         , primitives{shared_primitives}
+        , pairs{make_pipeline(target, shaders::narrow_phase_pairs_comp, modules)}
         , collide{make_pipeline(target, shaders::narrow_phase_collide_comp, modules)}
+        , merge{make_pipeline(target, shaders::narrow_phase_merge_comp, modules)}
         , bounds{make_pipeline(target, shaders::shape_bounds_comp, modules)}
         , keys{make_pipeline(target, shaders::contact_keys_comp, modules)}
         , match{make_pipeline(target, shaders::contact_match_comp, modules)}
-        , records{buffer(16, "shape records")}
-        , vertices{buffer(16, "hull vertices")}
-        , faces{buffer(16, "hull faces")}
-        , indices{buffer(16, "hull indices")}
+        , tables{buffer(3 * sizeof(GpuVector), "tables")}
     {
+        for (std::size_t array = 0; array < TABLE_ARRAYS; ++array)
+        {
+            arrays[array] = buffer(16, "shape table");
+        }
     }
 
     /// A device-local storage buffer of @p bytes (at least a vector).
@@ -193,13 +282,9 @@ struct GpuNarrowPhase::State
                                      .debug_name = std::format("GPU narrow phase: {}", name)});
     }
 
-    /// The shape table, as the passes name it.
-    [[nodiscard]] auto table() const noexcept -> ShapeTablePush
+    [[nodiscard]] auto table() const noexcept -> std::uint32_t
     {
-        return {.records = records->bindless_index().value(),
-                .vertices = vertices->bindless_index().value(),
-                .faces = faces->bindless_index().value(),
-                .indices = indices->bindless_index().value()};
+        return tables->bindless_index().value();
     }
 
     /// Throws when shapes were added since the last upload.
@@ -211,28 +296,186 @@ struct GpuNarrowPhase::State
         }
     }
 
+    /// Appends @p hierarchy (nodes with absolute children and items, items, item boxes) for @p record.
+    void append_hierarchy(const StaticBvh& hierarchy,
+                          GpuShapeRecord& record)
+    {
+        record.first_node = static_cast<std::uint32_t>(nodes.size());
+        record.first_item = static_cast<std::uint32_t>(items.size());
+        record.first_box = static_cast<std::uint32_t>(boxes.size() / 2);
+        for (const StaticBvhNode& node : hierarchy.nodes())
+        {
+            nodes.push_back({.minimum = {node.bounds.minimum.x, node.bounds.minimum.y, node.bounds.minimum.z},
+                             .first = (node.is_leaf() ? record.first_item : record.first_node) + node.first,
+                             .maximum = {node.bounds.maximum.x, node.bounds.maximum.y, node.bounds.maximum.z},
+                             .count = node.count});
+        }
+        items.insert(items.end(), hierarchy.items().begin(), hierarchy.items().end());
+        for (const Aabb& box : hierarchy.boxes())
+        {
+            boxes.push_back(vector_of(box.minimum));
+            boxes.push_back(vector_of(box.maximum));
+        }
+    }
+
+    /// Adds @p shape (its children first; shapes met before in this addition stored once).
+    auto add(const Shape& shape,
+             std::unordered_map<const Shape*, std::uint32_t>& added) -> std::uint32_t
+    {
+        if (const auto known = added.find(&shape); known != added.end())
+        {
+            return known->second;
+        }
+        const Aabb local = shape.bounds();
+        GpuShapeRecord record{.kind = std::to_underlying(shape.kind()), .bounds_minimum = vector_of(local.minimum), .bounds_maximum = vector_of(local.maximum)};
+        std::visit(
+            [&](const auto& geometry) {
+                using Geometry = std::remove_cvref_t<decltype(geometry)>;
+                if constexpr (std::same_as<Geometry, SphereShape>)
+                {
+                    record.size = {geometry.radius, 0.0F, 0.0F};
+                    record.margin = geometry.radius;
+                }
+                else if constexpr (std::same_as<Geometry, CapsuleShape>)
+                {
+                    record.size = {geometry.half_height, geometry.radius, 0.0F};
+                    record.margin = geometry.radius;
+                }
+                else if constexpr (std::same_as<Geometry, CylinderShape> || std::same_as<Geometry, ConeShape>)
+                {
+                    record.size = {geometry.half_height, geometry.radius, 0.0F};
+                }
+                else if constexpr (std::same_as<Geometry, BoxShape>)
+                {
+                    record.size = {geometry.half_extents.x, geometry.half_extents.y, geometry.half_extents.z};
+                    record.margin = geometry.radius;
+                }
+                else if constexpr (std::same_as<Geometry, HullShape>)
+                {
+                    // Vertices, faces with their planes and first corner, corners (vertices of the hull).
+                    const HullView hull = geometry.view();
+                    record.margin = hull.radius;
+                    record.first = static_cast<std::uint32_t>(vertices.size());
+                    record.count = static_cast<std::uint32_t>(hull.vertices.size());
+                    record.second_first = static_cast<std::uint32_t>(hull_faces.size());
+                    record.second_count = static_cast<std::uint32_t>(hull.faces.size());
+                    const auto first_index = static_cast<std::uint32_t>(hull_indices.size());
+                    for (const Vector3 vertex : hull.vertices)
+                    {
+                        vertices.push_back(vector_of(vertex));
+                    }
+                    for (std::size_t face = 0; face < hull.faces.size(); ++face)
+                    {
+                        const Plane& plane = hull.planes[face];
+                        hull_faces.push_back({.plane = {plane.normal.x, plane.normal.y, plane.normal.z, plane.distance},
+                                              .first = first_index + hull.faces[face].first,
+                                              .count = hull.faces[face].count});
+                    }
+                    hull_indices.insert(hull_indices.end(), hull.face_vertices.begin(), hull.face_vertices.end());
+                }
+                else if constexpr (std::same_as<Geometry, TriangleMeshShape>)
+                {
+                    // Vertices, triangles (absolute vertices, active edges), the static hierarchy.
+                    record.flags = geometry.two_sided() ? 1U : 0U;
+                    record.first = static_cast<std::uint32_t>(vertices.size());
+                    record.count = static_cast<std::uint32_t>(geometry.vertices().size());
+                    record.second_first = static_cast<std::uint32_t>(triangles.size());
+                    record.second_count = geometry.triangle_count();
+                    for (const Vector3 vertex : geometry.vertices())
+                    {
+                        vertices.push_back(vector_of(vertex));
+                    }
+                    for (std::uint32_t index = 0; index < geometry.triangle_count(); ++index)
+                    {
+                        const std::array<std::uint32_t, 3>& corners = geometry.triangles()[index];
+                        triangles.push_back({record.first + corners[0], record.first + corners[1], record.first + corners[2], geometry.active_edges(index)});
+                    }
+                    append_hierarchy(geometry.bvh(), record);
+                }
+                else if constexpr (std::same_as<Geometry, HeightFieldShape>)
+                {
+                    // Samples as given (row by row), each triangle's active edges, the scale.
+                    record.first = static_cast<std::uint32_t>(heights.size());
+                    record.count = geometry.rows();
+                    record.second_first = static_cast<std::uint32_t>(edges.size());
+                    record.second_count = geometry.columns();
+                    record.size = {geometry.scale().x, geometry.scale().y, geometry.scale().z};
+                    const auto samples = geometry.heights();
+                    for (std::size_t row = 0; row < samples.extent(0); ++row)
+                    {
+                        for (std::size_t column = 0; column < samples.extent(1); ++column)
+                        {
+                            heights.push_back(samples[row, column]);
+                        }
+                    }
+                    for (std::uint32_t index = 0; index < geometry.triangle_count(); ++index)
+                    {
+                        edges.push_back(geometry.active_edges(index));
+                    }
+                }
+                else
+                {
+                    // A compound: its children's shapes, then its children (their shapes and poses), its hierarchy.
+                    std::vector<std::uint32_t> child_shapes;
+                    std::uint32_t deepest = 0;
+                    for (const CompoundChild& child : geometry.children())
+                    {
+                        child_shapes.push_back(add(*child.shape, added));
+                        deepest = std::max(deepest, shape_records[child_shapes.back()].depth);
+                    }
+                    record.depth = deepest + 1;
+                    record.first = static_cast<std::uint32_t>(children.size());
+                    record.count = static_cast<std::uint32_t>(geometry.children().size());
+                    for (std::size_t index = 0; index < geometry.children().size(); ++index)
+                    {
+                        const Transform& pose = geometry.children()[index].pose;
+                        children.push_back({.position = {pose.position.x, pose.position.y, pose.position.z},
+                                            .shape = child_shapes[index],
+                                            .orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}});
+                    }
+                    append_hierarchy(geometry.bvh(), record);
+                }
+            },
+            shape.geometry());
+        shape_records.push_back(record);
+        const auto index = static_cast<std::uint32_t>(shape_records.size() - 1);
+        added.emplace(&shape, index);
+        return index;
+    }
+
     Device& device;
     GpuPrimitives& primitives;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
+    std::unique_ptr<ComputePipeline> pairs{};
     std::unique_ptr<ComputePipeline> collide{};
+    std::unique_ptr<ComputePipeline> merge{};
     std::unique_ptr<ComputePipeline> bounds{};
     std::unique_ptr<ComputePipeline> keys{};
     std::unique_ptr<ComputePipeline> match{};
 
-    // The shape table on the CPU, and on the GPU once uploaded.
+    // The shape table on the CPU, and on the GPU once uploaded (its arrays, their indices in the table buffer).
     std::vector<GpuShapeRecord> shape_records{};
-    std::vector<GpuVector> hull_vertices{};
+    std::vector<GpuVector> vertices{};
     std::vector<GpuHullFace> hull_faces{};
     std::vector<std::uint32_t> hull_indices{};
+    std::vector<std::array<std::uint32_t, 4>> triangles{};
+    std::vector<GpuStaticNode> nodes{};
+    std::vector<std::uint32_t> items{};
+    std::vector<GpuVector> boxes{};
+    std::vector<float> heights{};
+    std::vector<std::uint32_t> edges{};
+    std::vector<GpuChild> children{};
     bool pending_upload = false;
-    std::unique_ptr<Buffer> records{};
-    std::unique_ptr<Buffer> vertices{};
-    std::unique_ptr<Buffer> faces{};
-    std::unique_ptr<Buffer> indices{};
+    std::array<std::unique_ptr<Buffer>, TABLE_ARRAYS> arrays{};
+    std::unique_ptr<Buffer> tables{};
     std::unique_ptr<Buffer> staging{}; ///< The last upload's (its copies read it until they ran: the device's deleter).
 
-    // The cache's scratch, for up to `maximum` manifolds.
-    std::uint32_t maximum = 0;
+    // Scratch: per pair (counts, offsets), per manifold slot (sub-pairs, the cache's sort).
+    std::uint32_t maximum_pairs = 0;
+    std::uint32_t maximum_manifolds = 0;
+    std::unique_ptr<Buffer> pair_counts{};
+    std::unique_ptr<Buffer> pair_offsets{};
+    std::unique_ptr<Buffer> sub_pairs{};
     std::unique_ptr<Buffer> cache_keys{};
     std::unique_ptr<Buffer> cache_values{};
     std::unique_ptr<Buffer> cache_sorted_keys{};
@@ -245,7 +488,7 @@ GpuNarrowPhase::GpuNarrowPhase(Device& device,
                                GpuPrimitives& primitives)
     : m_state{std::make_unique<State>(device, primitives)}
 {
-    reserve(GPU_XPBD_WORKGROUP_SIZE);
+    reserve(GPU_XPBD_WORKGROUP_SIZE, GPU_XPBD_WORKGROUP_SIZE);
 }
 
 GpuNarrowPhase::~GpuNarrowPhase() = default;
@@ -253,67 +496,17 @@ GpuNarrowPhase::~GpuNarrowPhase() = default;
 auto
 GpuNarrowPhase::add_shape(const Shape& shape) -> std::uint32_t
 {
-    // The convex kinds as records; a hull's arrays appended to the table's.
-    State& state = *m_state;
-    GpuShapeRecord record{};
-    std::visit(
-        [&](const auto& geometry) {
-            using Geometry = std::remove_cvref_t<decltype(geometry)>;
-            if constexpr (std::same_as<Geometry, SphereShape>)
-            {
-                record = record_of(ShapeKind::SPHERE, {geometry.radius, 0.0F, 0.0F}, geometry.radius);
-            }
-            else if constexpr (std::same_as<Geometry, CapsuleShape>)
-            {
-                record = record_of(ShapeKind::CAPSULE, {geometry.half_height, geometry.radius, 0.0F}, geometry.radius);
-            }
-            else if constexpr (std::same_as<Geometry, CylinderShape>)
-            {
-                record = record_of(ShapeKind::CYLINDER, {geometry.half_height, geometry.radius, 0.0F}, 0.0F);
-            }
-            else if constexpr (std::same_as<Geometry, ConeShape>)
-            {
-                record = record_of(ShapeKind::CONE, {geometry.half_height, geometry.radius, 0.0F}, 0.0F);
-            }
-            else if constexpr (std::same_as<Geometry, BoxShape>)
-            {
-                record = record_of(ShapeKind::BOX, {geometry.half_extents.x, geometry.half_extents.y, geometry.half_extents.z}, geometry.radius);
-            }
-            else if constexpr (std::same_as<Geometry, HullShape>)
-            {
-                const HullView hull = geometry.view();
-                record = record_of(ShapeKind::CONVEX_HULL, {}, hull.radius);
-                record.first_vertex = static_cast<std::uint32_t>(state.hull_vertices.size());
-                record.vertex_count = static_cast<std::uint32_t>(hull.vertices.size());
-                record.first_face = static_cast<std::uint32_t>(state.hull_faces.size());
-                record.face_count = static_cast<std::uint32_t>(hull.faces.size());
-                const auto first_index = static_cast<std::uint32_t>(state.hull_indices.size());
-                for (const Vector3 vertex : hull.vertices)
-                {
-                    state.hull_vertices.push_back({vertex.x, vertex.y, vertex.z, 0.0F});
-                }
-                for (std::size_t face = 0; face < hull.faces.size(); ++face)
-                {
-                    const Plane& plane = hull.planes[face];
-                    state.hull_faces.push_back({.plane = {plane.normal.x, plane.normal.y, plane.normal.z, plane.distance},
-                                                .first = first_index + hull.faces[face].first,
-                                                .count = hull.faces[face].count});
-                }
-                state.hull_indices.insert(state.hull_indices.end(), hull.face_vertices.begin(), hull.face_vertices.end());
-            }
-            else
-            {
-                throw_unsupported(PhysicsBackendKind::GPU_XPBD, "GpuNarrowPhase::add_shape", PhysicsCapability::WORLD_OBJECTS,
-                                  std::format("the GPU narrow phase collides convex shapes only so far (a {}: triangle meshes, height fields and "
-                                              "compounds arrive with phase G4 of docs/gpu-xpbd-design.md)",
-                                              shape.kind()),
-                                  "use convex shapes (sphere, capsule, cylinder, cone, box, hull), or another backend");
-            }
-        },
-        shape.geometry());
-    state.shape_records.push_back(record);
-    state.pending_upload = true;
-    return static_cast<std::uint32_t>(state.shape_records.size() - 1);
+    if (const std::uint32_t depth = compound_depth(shape); depth > GPU_XPBD_COMPOUND_DEPTH)
+    {
+        throw_unsupported(PhysicsBackendKind::GPU_XPBD, "GpuNarrowPhase::add_shape", PhysicsCapability::WORLD_OBJECTS,
+                          std::format("the GPU narrow phase descends compounds {} deep at most (GPU_XPBD_COMPOUND_DEPTH); this one is {} deep",
+                                      GPU_XPBD_COMPOUND_DEPTH, depth),
+                          "flatten the compound (children holding the shapes of its inner compounds at their composed poses), or use another backend");
+    }
+    std::unordered_map<const Shape*, std::uint32_t> added;
+    const std::uint32_t index = m_state->add(shape, added);
+    m_state->pending_upload = true;
+    return index;
 }
 
 auto
@@ -325,73 +518,97 @@ GpuNarrowPhase::shape_count() const noexcept -> std::uint32_t
 void
 GpuNarrowPhase::upload_shapes(ComputeRecorder& recorder)
 {
-    // The whole table again (shapes are few and small): new buffers, one staging buffer, four copies, a barrier.
+    // The whole table again (shapes are few): new arrays, the table buffer naming them, one staging buffer, the copies.
     State& state = *m_state;
     if (!state.pending_upload)
     {
         return;
     }
-    const std::array<std::span<const std::byte>, 4> parts{std::as_bytes(std::span{state.shape_records}), std::as_bytes(std::span{state.hull_vertices}),
-                                                           std::as_bytes(std::span{state.hull_faces}), std::as_bytes(std::span{state.hull_indices})};
-    std::array<std::uint64_t, 4> offsets{};
-    std::uint64_t total = 0;
-    for (std::size_t part = 0; part < parts.size(); ++part)
+    const std::array<std::span<const std::byte>, TABLE_ARRAYS> parts{
+        std::as_bytes(std::span{state.shape_records}), std::as_bytes(std::span{state.vertices}), std::as_bytes(std::span{state.hull_faces}),
+        std::as_bytes(std::span{state.hull_indices}),  std::as_bytes(std::span{state.triangles}), std::as_bytes(std::span{state.nodes}),
+        std::as_bytes(std::span{state.items}),         std::as_bytes(std::span{state.boxes}),     std::as_bytes(std::span{state.heights}),
+        std::as_bytes(std::span{state.edges}),         std::as_bytes(std::span{state.children})};
+    std::array<std::uint32_t, 12> indices{};
+    for (std::size_t array = 0; array < TABLE_ARRAYS; ++array)
     {
-        offsets[part] = total;
-        total += (parts[part].size() + 15) / 16 * 16;
+        state.arrays[array] = state.buffer(parts[array].size(), "shape table");
+        indices[array] = state.arrays[array]->bindless_index().value();
     }
-    state.staging = state.device.create_buffer({.size = std::max<std::uint64_t>(total, 16),
+    std::array<std::uint64_t, TABLE_ARRAYS + 1> offsets{};
+    std::uint64_t total = 0;
+    for (std::size_t array = 0; array <= TABLE_ARRAYS; ++array)
+    {
+        offsets[array] = total;
+        total += ((array < TABLE_ARRAYS ? parts[array].size() : sizeof(indices)) + 15) / 16 * 16;
+    }
+    state.staging = state.device.create_buffer({.size = total,
                                                 .usage = BufferUsage::TRANSFER_SOURCE,
                                                 .location = MemoryLocation::HOST_UPLOAD,
                                                 .debug_name = "GPU narrow phase: shape staging"});
     const std::span<std::byte> mapped = state.staging->mapped_memory();
-    for (std::size_t part = 0; part < parts.size(); ++part)
+    for (std::size_t array = 0; array < TABLE_ARRAYS; ++array)
     {
-        std::ranges::copy(parts[part], mapped.begin() + static_cast<std::ptrdiff_t>(offsets[part]));
+        std::ranges::copy(parts[array], mapped.begin() + static_cast<std::ptrdiff_t>(offsets[array]));
     }
+    std::ranges::copy(std::as_bytes(std::span{indices}), mapped.begin() + static_cast<std::ptrdiff_t>(offsets[TABLE_ARRAYS]));
     state.staging->flush_mapped_range();
-
-    std::array<std::unique_ptr<Buffer>*, 4> targets{&state.records, &state.vertices, &state.faces, &state.indices};
-    constexpr std::array<std::string_view, 4> NAMES{"shape records", "hull vertices", "hull faces", "hull indices"};
-    for (std::size_t part = 0; part < parts.size(); ++part)
+    for (std::size_t array = 0; array < TABLE_ARRAYS; ++array)
     {
-        *targets[part] = state.buffer(parts[part].size(), NAMES[part]);
-        if (!parts[part].empty())
+        if (!parts[array].empty())
         {
-            const std::array regions{BufferCopyRegion{.source_offset = offsets[part], .size = parts[part].size()}};
-            recorder.copy_buffer(state.staging->handle(), (*targets[part])->handle(), regions);
+            const std::array regions{BufferCopyRegion{.source_offset = offsets[array], .size = parts[array].size()}};
+            recorder.copy_buffer(state.staging->handle(), state.arrays[array]->handle(), regions);
         }
     }
+    const std::array regions{BufferCopyRegion{.source_offset = offsets[TABLE_ARRAYS], .size = sizeof(indices)}};
+    recorder.copy_buffer(state.staging->handle(), state.tables->handle(), regions);
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_COMPUTE, 1}});
     state.pending_upload = false;
 }
 
 void
-GpuNarrowPhase::reserve(std::uint32_t maximum)
+GpuNarrowPhase::reserve(std::uint32_t maximum_pairs,
+                        std::uint32_t maximum_manifolds)
 {
     State& state = *m_state;
-    if (maximum <= state.maximum)
+    for (const std::uint32_t maximum : {maximum_pairs, maximum_manifolds})
     {
-        return;
+        if (maximum > GPU_XPBD_MAXIMUM_ELEMENTS)
+        {
+            refuse("reserve", std::format("{} is above GPU_XPBD_MAXIMUM_ELEMENTS ({})", maximum, GPU_XPBD_MAXIMUM_ELEMENTS),
+                   "split the pairs between several narrow phases");
+        }
     }
-    if (maximum > GPU_XPBD_MAXIMUM_ELEMENTS)
+    state.primitives.reserve(std::max(maximum_pairs, maximum_manifolds));
+    constexpr std::uint64_t WORD = sizeof(std::uint32_t);
+    if (maximum_pairs > state.maximum_pairs)
     {
-        refuse("reserve", std::format("{} manifolds is above GPU_XPBD_MAXIMUM_ELEMENTS ({})", maximum, GPU_XPBD_MAXIMUM_ELEMENTS),
-               "split the pairs between several caches");
+        state.pair_counts = state.buffer(maximum_pairs * WORD, "pair counts");
+        state.pair_offsets = state.buffer(maximum_pairs * WORD, "pair offsets");
+        state.maximum_pairs = maximum_pairs;
     }
-    state.primitives.reserve(maximum);
-    const std::uint64_t bytes = std::uint64_t{maximum} * sizeof(std::uint32_t);
-    state.cache_keys = state.buffer(bytes, "cache keys");
-    state.cache_values = state.buffer(bytes, "cache values");
-    state.cache_sorted_keys = state.buffer(bytes, "cache sorted keys");
-    state.cache_order = state.buffer(bytes, "cache order");
-    state.maximum = maximum;
+    if (maximum_manifolds > state.maximum_manifolds)
+    {
+        state.sub_pairs = state.buffer(maximum_manifolds * SUB_PAIR_BYTES, "sub-pairs");
+        state.cache_keys = state.buffer(maximum_manifolds * WORD, "cache keys");
+        state.cache_values = state.buffer(maximum_manifolds * WORD, "cache values");
+        state.cache_sorted_keys = state.buffer(maximum_manifolds * WORD, "cache sorted keys");
+        state.cache_order = state.buffer(maximum_manifolds * WORD, "cache order");
+        state.maximum_manifolds = maximum_manifolds;
+    }
 }
 
 auto
-GpuNarrowPhase::reserved() const noexcept -> std::uint32_t
+GpuNarrowPhase::reserved_pairs() const noexcept -> std::uint32_t
 {
-    return m_state->maximum;
+    return m_state->maximum_pairs;
+}
+
+auto
+GpuNarrowPhase::reserved_manifolds() const noexcept -> std::uint32_t
+{
+    return m_state->maximum_manifolds;
 }
 
 void
@@ -408,11 +625,11 @@ GpuNarrowPhase::bounds(ComputeRecorder& recorder,
         refuse("bounds", std::format("the expansion is {}", expansion), "grow the boxes by a finite distance of at least 0");
     }
     record_pass(recorder, *state.bounds,
-                BoundsPush{.instances_buffer = instances.buffer,
+                BoundsPush{.tables = state.table(),
+                           .instances_buffer = instances.buffer,
                            .instances_first = instances.first,
                            .boxes_buffer = boxes.buffer,
                            .boxes_first = boxes.first,
-                           .shapes = state.table(),
                            .maximum = count.maximum,
                            .count_buffer = count.word.buffer,
                            .count_word = count.word.first,
@@ -424,29 +641,75 @@ void
 GpuNarrowPhase::collide(ComputeRecorder& recorder,
                         GpuSpan instances,
                         GpuSpan pairs,
-                        GpuSpan manifolds,
                         const GpuCount& count,
+                        const GpuManifoldSpans& output,
                         const CollisionSettings& settings)
 {
+    // Valid input, as collide() checks it; room for it.
     const State& state = *m_state;
     state.require_uploaded("collide");
-    if (!std::isfinite(settings.speculative_distance) || settings.speculative_distance < 0.0F)
+    if (!std::isfinite(settings.speculative_distance) || !(settings.speculative_distance >= 0.0F) || settings.maximum_manifolds == 0 ||
+        !(settings.merge_cosine >= -1.0F && settings.merge_cosine <= 1.0F))
     {
-        refuse("collide", std::format("the speculative distance is {}", settings.speculative_distance), "give a finite speculative distance of at least 0");
+        refuse("collide",
+               std::format("invalid settings: speculative distance {}, merge cosine {}, maximum manifolds {}", settings.speculative_distance,
+                           settings.merge_cosine, settings.maximum_manifolds),
+               "give a finite speculative distance of at least 0, a cosine in [-1, 1] and at least one manifold");
     }
+    if (count.maximum > state.maximum_pairs || output.capacity > state.maximum_manifolds)
+    {
+        refuse("collide",
+               std::format("{} pairs into {} slots, above the {} pairs and {} slots reserved", count.maximum, output.capacity, state.maximum_pairs,
+                           state.maximum_manifolds),
+               "call GpuNarrowPhase::reserve() with the largest counts before recording");
+    }
+
+    // The mid phase counted, the counts scanned into offsets (their sum: the slots needed), the mid phase written.
+    const std::uint32_t pair_workgroups = workgroups(std::max(count.maximum, 1U));
+    PairsPush mid_phase{.tables = state.table(),
+                        .instances_buffer = instances.buffer,
+                        .instances_first = instances.first,
+                        .pairs_buffer = pairs.buffer,
+                        .pairs_first = pairs.first,
+                        .maximum = count.maximum,
+                        .count_buffer = count.word.buffer,
+                        .count_word = count.word.first,
+                        .counts_buffer = state.pair_counts->bindless_index().value(),
+                        .offsets_buffer = state.pair_offsets->bindless_index().value(),
+                        .sub_pairs_buffer = state.sub_pairs->bindless_index().value(),
+                        .capacity = output.capacity,
+                        .writing = 0,
+                        .speculative_distance = settings.speculative_distance};
+    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    state.primitives.exclusive_scan(recorder, span_of(*state.pair_counts), span_of(*state.pair_offsets), count, output.total);
+    mid_phase.writing = 1;
+    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+
+    // Each sub-pair's manifold at its slot, then each pair's merged.
     record_pass(recorder, *state.collide,
-                CollidePush{.instances_buffer = instances.buffer,
-                            .instances_first = instances.first,
-                            .pairs_buffer = pairs.buffer,
-                            .pairs_first = pairs.first,
-                            .manifolds_buffer = manifolds.buffer,
-                            .manifolds_first = manifolds.first,
-                            .shapes = state.table(),
-                            .maximum = count.maximum,
-                            .count_buffer = count.word.buffer,
-                            .count_word = count.word.first,
+                CollidePush{.tables = state.table(),
+                            .sub_pairs_buffer = state.sub_pairs->bindless_index().value(),
+                            .manifolds_buffer = output.manifolds.buffer,
+                            .manifolds_first = output.manifolds.first,
+                            .maximum = output.capacity,
+                            .count_buffer = output.total.buffer,
+                            .count_word = output.total.first,
                             .speculative_distance = settings.speculative_distance},
-                workgroups(std::max(count.maximum, 1U)));
+                workgroups(std::max(output.capacity, 1U)));
+    record_pass(recorder, *state.merge,
+                MergePush{.manifolds_buffer = output.manifolds.buffer,
+                          .manifolds_first = output.manifolds.first,
+                          .counts_buffer = state.pair_counts->bindless_index().value(),
+                          .offsets_buffer = state.pair_offsets->bindless_index().value(),
+                          .ranges_buffer = output.ranges.buffer,
+                          .ranges_first = output.ranges.first,
+                          .maximum = count.maximum,
+                          .count_buffer = count.word.buffer,
+                          .count_word = count.word.first,
+                          .capacity = output.capacity,
+                          .merge_cosine = settings.merge_cosine,
+                          .maximum_manifolds = settings.maximum_manifolds},
+                pair_workgroups);
 }
 
 void
@@ -459,39 +722,29 @@ GpuNarrowPhase::match(ComputeRecorder& recorder,
 {
     // The previous manifolds sorted by pair: by second instance, then (stable) by first instance gathered in that order.
     const State& state = *m_state;
-    if (previous_count.maximum > state.maximum)
+    if (previous_count.maximum > state.maximum_manifolds)
     {
-        refuse("match", std::format("the previous count's maximum is {}, above the {} reserved", previous_count.maximum, state.maximum),
-               "call GpuNarrowPhase::reserve() with the largest count before recording");
+        refuse("match", std::format("the previous count's maximum is {}, above the {} reserved", previous_count.maximum, state.maximum_manifolds),
+               "call GpuNarrowPhase::reserve() with the largest counts before recording");
     }
     const std::uint32_t keys = state.cache_keys->bindless_index().value();
     const std::uint32_t values = state.cache_values->bindless_index().value();
     const std::uint32_t sorted_keys = state.cache_sorted_keys->bindless_index().value();
     const std::uint32_t order = state.cache_order->bindless_index().value();
     const std::uint32_t previous_workgroups = workgroups(std::max(previous_count.maximum, 1U));
-    record_pass(recorder, *state.keys,
-                KeysPush{.manifolds_buffer = previous.buffer,
-                         .manifolds_first = previous.first,
-                         .keys_buffer = keys,
-                         .values_buffer = values,
-                         .order_buffer = order,
-                         .maximum = previous_count.maximum,
-                         .count_buffer = previous_count.word.buffer,
-                         .count_word = previous_count.word.first,
-                         .gather = 0},
-                previous_workgroups);
+    KeysPush key_push{.manifolds_buffer = previous.buffer,
+                      .manifolds_first = previous.first,
+                      .keys_buffer = keys,
+                      .values_buffer = values,
+                      .order_buffer = order,
+                      .maximum = previous_count.maximum,
+                      .count_buffer = previous_count.word.buffer,
+                      .count_word = previous_count.word.first,
+                      .gather = 0};
+    record_pass(recorder, *state.keys, key_push, previous_workgroups);
     state.primitives.sort(recorder, {.buffer = keys}, {.buffer = values}, {.buffer = sorted_keys}, {.buffer = order}, previous_count);
-    record_pass(recorder, *state.keys,
-                KeysPush{.manifolds_buffer = previous.buffer,
-                         .manifolds_first = previous.first,
-                         .keys_buffer = keys,
-                         .values_buffer = values,
-                         .order_buffer = order,
-                         .maximum = previous_count.maximum,
-                         .count_buffer = previous_count.word.buffer,
-                         .count_word = previous_count.word.first,
-                         .gather = 1},
-                previous_workgroups);
+    key_push.gather = 1;
+    record_pass(recorder, *state.keys, key_push, previous_workgroups);
     state.primitives.sort(recorder, {.buffer = keys}, {.buffer = order}, {.buffer = sorted_keys}, {.buffer = values}, previous_count);
 
     // Each current point's predecessor.

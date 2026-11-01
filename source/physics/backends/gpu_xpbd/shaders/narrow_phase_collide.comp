@@ -1,108 +1,170 @@
 #version 460
-// The manifold of each candidate pair of instances (GpuNarrowPhase::collide), as the CPU's collide_convex() dispatches it:
-// the analytic pairs in either order (the result flipped for the reversed order), the separating axis test for two boxes,
-// GJK, EPA and face clipping for every other pair. One manifold per pair, at the pair's index (no points: no contact).
+// The manifold of each sub-pair (GpuNarrowPhase::collide), as collide.cpp makes it: two convex shapes through the convex
+// dispatch; a convex shape and a triangle in the triangles' frame — no contact from behind a one-sided triangle, the
+// triangle's normal for contacts on its inactive edges, each point naming the triangle, moved into the world, flipped when
+// the triangles are the pair's first; two triangles by separating axes in the first's frame, each point naming both. One
+// manifold per sub-pair, at its index (no points: no contact); the merge pass then joins each pair's.
 #extension GL_GOOGLE_include_directive : require
 #include "analytic.glsl"
 
 layout(push_constant) uniform Push
 {
-    uint instances_buffer;
-    uint instances_first;
-    uint pairs_buffer;
-    uint pairs_first;
+    uint tables;
+    uint sub_pairs_buffer;
     uint manifolds_buffer;
     uint manifolds_first;
-    uint shape_records;
-    uint hull_vertices;
-    uint hull_faces;
-    uint hull_indices;
     uint maximum;
     uint count_buffer;
     uint count_word;
     float speculative_distance;
 } push;
 
+// Gives the manifold (a convex shape against the triangle, in its frame) the triangle's face normal when every point lies
+// on the face or on inactive edges and vertices (collide.cpp's correct_inactive_edges()).
+void correct_inactive_edges(vec3 first, vec3 second, vec3 third, uint active_edges)
+{
+    const vec3 front = triangle_normal(first, second, third);
+    const vec3 face_normal = dot(result.normal, front) <= 0.0 ? -front : front;
+    if (dot(result.normal, face_normal) > 0.9999)
+    {
+        return;
+    }
+    for (uint point = 0U; point < result.count; ++point)
+    {
+        // The point's barycentric coordinates in the triangle's plane; near 0 means on the opposite edge.
+        const vec3 v0 = second - first;
+        const vec3 v1 = third - first;
+        const vec3 v2 = result.positions[point] - first;
+        const float d00 = dot(v0, v0);
+        const float d01 = dot(v0, v1);
+        const float d11 = dot(v1, v1);
+        const float d20 = dot(v2, v0);
+        const float d21 = dot(v2, v1);
+        const float denominator = d00 * d11 - d01 * d01;
+        if (!(abs(denominator) > 0.0))
+        {
+            return;
+        }
+        const float v = (d11 * d20 - d01 * d21) / denominator;
+        const float w = (d00 * d21 - d01 * d20) / denominator;
+        const float weights[3] = float[3](1.0 - v - w, v, w);
+        bool on_active = false;
+        for (uint vertex = 0U; vertex < 3U; ++vertex)
+        {
+            // Weight of vertex k near 0: the point is on edge k + 1 (from vertex k + 1 to k + 2).
+            if (weights[vertex] <= 1e-4)
+            {
+                on_active = on_active || (active_edges & (1U << ((vertex + 1U) % 3U))) != 0U;
+            }
+        }
+        if (on_active)
+        {
+            return;
+        }
+    }
+    result.normal = face_normal;
+}
+
+// The manifold (in the frame of pose) moved into the world.
+void to_world(Pose pose)
+{
+    result.normal = rotate_vector(pose.orientation, result.normal);
+    for (uint point = 0U; point < result.count; ++point)
+    {
+        result.positions[point] = transform_point(pose, result.positions[point]);
+    }
+}
+
 void main()
 {
-    shape_records = push.shape_records;
-    hull_vertices = push.hull_vertices;
-    hull_faces = push.hull_faces;
-    hull_indices = push.hull_indices;
     const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
     const uint index = gl_GlobalInvocationID.x;
     if (index >= count)
     {
         return;
     }
+    load_tables(push.tables);
+    const SubPair pair = load_sub_pair(push.sub_pairs_buffer, index);
+    const uint kind = pair.kind & 0xFFU;
 
-    // The pair's instances and shapes.
-    const uint first_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index)];
-    const uint second_instance = gpu_words[push.pairs_buffer].words[2U * (push.pairs_first + index) + 1U];
-    uint first_shape;
-    uint second_shape;
-    pose_first = load_instance(push.instances_buffer, push.instances_first + first_instance, first_shape);
-    pose_second = load_instance(push.instances_buffer, push.instances_first + second_instance, second_shape);
-    shape_first = load_shape(first_shape);
-    shape_second = load_shape(second_shape);
-
-    // The analytic pairs (either order), two boxes, or the general path.
-    result = empty_manifold();
-    const float speculative = push.speculative_distance;
-    const uint a = shape_first.kind;
-    const uint b = shape_second.kind;
-    bool found = false;
-    if (a == SHAPE_SPHERE && b == SHAPE_SPHERE)
+    // The two pieces: two convex shapes as posed; a convex shape and a triangle in the triangles' frame; two triangles in
+    // the first's frame. One call collides them (GLSL inlines every call: a call per kind, with two calls of the separating
+    // axes, made the kernel about three times as large and 5.5 times as slow on the RTX 5060).
+    vec3 corner_a = vec3(0.0);
+    vec3 corner_b = vec3(0.0);
+    vec3 corner_c = vec3(0.0);
+    uint active_edges = 0U;
+    bool one_sided = false;
+    if (kind == SUB_PAIR_CONVEX)
     {
-        found = collide_spheres(shape_first, pose_first, shape_second, pose_second, speculative);
+        shape_first = load_shape(pair.shape_a);
+        pose_first = pair.pose_a;
+        shape_second = load_shape(pair.shape_b);
+        pose_second = pair.pose_b;
     }
-    else if (a == SHAPE_SPHERE && b == SHAPE_CAPSULE)
+    else if (kind == SUB_PAIR_CONVEX_TRIANGLE)
     {
-        found = collide_sphere_capsule(shape_first, pose_first, shape_second, pose_second, speculative);
-    }
-    else if (a == SHAPE_CAPSULE && b == SHAPE_SPHERE)
-    {
-        found = collide_sphere_capsule(shape_second, pose_second, shape_first, pose_first, speculative);
-        if (found)
-        {
-            flip_manifold(result);
-        }
-    }
-    else if (a == SHAPE_CAPSULE && b == SHAPE_CAPSULE)
-    {
-        found = collide_capsules(shape_first, pose_first, shape_second, pose_second, speculative);
-    }
-    else if (a == SHAPE_SPHERE && b == SHAPE_BOX)
-    {
-        found = collide_sphere_box(shape_first, pose_first, shape_second, pose_second, speculative);
-    }
-    else if (a == SHAPE_BOX && b == SHAPE_SPHERE)
-    {
-        found = collide_sphere_box(shape_second, pose_second, shape_first, pose_first, speculative);
-        if (found)
-        {
-            flip_manifold(result);
-        }
-    }
-    else if (a == SHAPE_BOX && b == SHAPE_BOX)
-    {
-        found = collide_boxes(shape_first, pose_first, shape_second, pose_second, speculative);
+        const ShapeRecord soup = load_record(pair.shape_b);
+        soup_triangle(soup, pair.triangle_b, corner_a, corner_b, corner_c, active_edges);
+        one_sided = (soup.flags & 1U) == 0U;
+        shape_first = load_shape(pair.shape_a);
+        pose_first = compose(inverse_pose(pair.pose_b), pair.pose_a);
+        shape_second = triangle_shape(corner_a, corner_b, corner_c);
+        pose_second = identity_pose();
     }
     else
     {
-        found = collide_convex_general(speculative);
+        vec3 d;
+        vec3 e;
+        vec3 f;
+        uint unused_first;
+        uint unused_second;
+        soup_triangle(load_record(pair.shape_a), pair.triangle_a, corner_a, corner_b, corner_c, unused_first);
+        soup_triangle(load_record(pair.shape_b), pair.triangle_b, d, e, f, unused_second);
+        const Pose relative = compose(inverse_pose(pair.pose_a), pair.pose_b);
+        shape_first = triangle_shape(corner_a, corner_b, corner_c);
+        pose_first = identity_pose();
+        shape_second = triangle_shape(transform_point(relative, d), transform_point(relative, e), transform_point(relative, f));
+        pose_second = identity_pose();
     }
+    bool found = collide_pieces(push.speculative_distance);
 
-    // The manifold (GpuManifold): header, normal, four points (the unused ones zero).
-    const uint points = found ? result.count : 0U;
-    const uint base = 10U * (push.manifolds_first + index);
-    gpu_word_vectors[push.manifolds_buffer].values[base] = uvec4(first_instance, second_instance, points, points > 0U ? result.algorithm : 0U);
-    gpu_vectors[push.manifolds_buffer].values[base + 1U] = vec4(points > 0U ? result.normal : vec3(0.0), 0.0);
-    for (uint point = 0U; point < MANIFOLD_POINTS; ++point)
+    // A triangle's contact: none from behind a one-sided triangle, the face normal on inactive edges, each point naming the
+    // triangle, moved into the world (flipped when the triangles are the pair's first); two triangles' points naming both.
+    if (found && kind == SUB_PAIR_CONVEX_TRIANGLE)
     {
-        const bool used = point < points;
-        gpu_vectors[push.manifolds_buffer].values[base + 2U + 2U * point] = used ? vec4(result.positions[point], result.separations[point]) : vec4(0.0);
-        gpu_word_vectors[push.manifolds_buffer].values[base + 3U + 2U * point] =
-            used ? uvec4(NO_SUB_SHAPE, NO_SUB_SHAPE, result.features[point], 0U) : uvec4(0U);
+        if (one_sided && dot(result.normal, triangle_normal(corner_a, corner_b, corner_c)) > 0.0)
+        {
+            found = false;
+        }
+        else
+        {
+            correct_inactive_edges(corner_a, corner_b, corner_c, active_edges);
+            for (uint point = 0U; point < result.count; ++point)
+            {
+                result.point_sub_second[point] = pair.triangle_b;
+            }
+            to_world(pair.pose_b);
+            if ((pair.kind & SUB_PAIR_FLIPPED) != 0U)
+            {
+                flip_manifold(result);
+            }
+        }
     }
+    else if (found && kind == SUB_PAIR_TRIANGLES)
+    {
+        for (uint point = 0U; point < result.count; ++point)
+        {
+            result.point_sub_first[point] = pair.triangle_a;
+            result.point_sub_second[point] = pair.triangle_b;
+        }
+        to_world(pair.pose_a);
+    }
+    if (!found)
+    {
+        result = empty_manifold();
+    }
+    result.sub_shape_first = pair.sub_first;
+    result.sub_shape_second = pair.sub_second;
+    store_manifold(push.manifolds_buffer, push.manifolds_first + index, pair.first_instance, pair.second_instance, result);
 }

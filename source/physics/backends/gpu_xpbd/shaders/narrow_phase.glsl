@@ -1,7 +1,8 @@
-// What the narrow-phase passes share (GpuNarrowPhase in gpu_narrow_phase.cppm): the shape table, posed instances, the
-// convex shapes' support functions and supporting faces, the Minkowski difference, contact features and manifolds. A
-// port of the CPU's narrow phase (gfx.physics.shapes :convex and :hull, gfx.physics.narrow_phase): the same operations in
-// the same order, the same tolerances and the same ties, so that its manifolds carry the CPU's feature ids.
+// What the narrow-phase passes share (GpuNarrowPhase in gpu_narrow_phase.cppm): the shape table (convex shapes, triangle
+// meshes and height fields with their triangles, compounds with their children, the CPU's static hierarchies), poses and
+// boxes, the convex shapes' and triangles' support functions and supporting faces, the Minkowski difference, contact
+// features and manifolds. A port of the CPU's narrow phase (gfx.physics.shapes, gfx.physics.narrow_phase): the same
+// operations in the same order, the same tolerances and the same ties, so that its manifolds carry the CPU's feature ids.
 #ifndef GPU_XPBD_NARROW_PHASE_GLSL
 #define GPU_XPBD_NARROW_PHASE_GLSL
 
@@ -32,6 +33,13 @@ layout(constant_id = 34) const float FACE_ALIGNMENT = 2.0;
 layout(constant_id = 35) const float SIDE_ALIGNMENT = 0.0;
 layout(constant_id = 36) const uint ROUND_FACE_VERTICES = 3U;
 layout(constant_id = 37) const float GEOMETRIC_TOLERANCE = 0.0;
+layout(constant_id = 39) const uint SHAPE_TRIANGLE_MESH = 0xFFFFFFF6U;
+layout(constant_id = 40) const uint SHAPE_HEIGHT_FIELD = 0xFFFFFFF7U;
+layout(constant_id = 41) const uint SHAPE_COMPOUND = 0xFFFFFFF8U;
+layout(constant_id = 42) const uint ALGORITHM_TRIANGLE_TRIANGLE = 0U;
+layout(constant_id = 43) const uint STATIC_BVH_DEPTH = 2U;   // StaticBvh::MAXIMUM_DEPTH: a static hierarchy's traversal stack
+layout(constant_id = 44) const uint COMPOUND_LEVELS = 2U;    // compounds being descended at once: GPU_XPBD_COMPOUND_DEPTH per side
+layout(constant_id = 45) const float TRIANGLE_FACE_TOLERANCE = 0.0;
 
 // Points a manifold holds (the GpuManifold layout's: the C++ side checks MAXIMUM_MANIFOLD_POINTS against it).
 const uint MANIFOLD_POINTS = 4U;
@@ -49,14 +57,89 @@ float float_maximum()
 
 // ===================================================================================================== tables
 
-// The shape table (bindless indices the including pass sets from its push constants): three vectors per shape (kind,
-// first hull vertex, hull vertices, first hull face; hull faces; sizes and margin), a vector per hull vertex, two per hull
-// face (its plane; its first index and count), a word per face corner (a vertex of its hull).
+// The shape table's arrays (bindless indices, read from the table's own buffer by load_tables()):
+//   shape_records    six vectors per shape (ShapeRecord);
+//   table_vertices   a vector per hull or mesh vertex;
+//   hull_faces       two vectors per hull face (its plane; its first corner in hull_indices and its corners);
+//   hull_indices     a word per hull face corner (a vertex of its hull);
+//   mesh_triangles   a word vector per mesh triangle (its three vertices, absolute; its active edges' bits);
+//   bvh_nodes        two word vectors per static hierarchy node (minimum and its first child or item, absolute; maximum
+//                    and its items, 0 for an inner node) — the CPU's StaticBvh as built, so traversals visit its order;
+//   bvh_items        a word per hierarchy item (a triangle or child of its shape);
+//   bvh_boxes        two vectors per hierarchy item (its box), at the shape's first box + the item;
+//   field_heights    a word per height field sample (a float, as given), row by row;
+//   field_edges      a word per height field triangle: its active edges' bits;
+//   compound_children two vectors per compound child (position and shape index; orientation).
 uint shape_records;
-uint hull_vertices;
+uint table_vertices;
 uint hull_faces;
 uint hull_indices;
+uint mesh_triangles;
+uint bvh_nodes;
+uint bvh_items;
+uint bvh_boxes;
+uint field_heights;
+uint field_edges;
+uint compound_children;
 
+void load_tables(uint tables)
+{
+    const uvec4 first = gpu_word_vectors[tables].values[0];
+    const uvec4 second = gpu_word_vectors[tables].values[1];
+    const uvec4 third = gpu_word_vectors[tables].values[2];
+    shape_records = first.x;
+    table_vertices = first.y;
+    hull_faces = first.z;
+    hull_indices = first.w;
+    mesh_triangles = second.x;
+    bvh_nodes = second.y;
+    bvh_items = second.z;
+    bvh_boxes = second.w;
+    field_heights = third.x;
+    field_edges = third.y;
+    compound_children = third.z;
+}
+
+// A shape of the table (GpuShapeRecord): kind, flags (bit 0: two-sided mesh); two ranges (hull: vertices, faces; mesh:
+// vertices, triangles; height field: first sample and rows, first edge word and columns; compound: children); its static
+// hierarchy (first node, first item, first box); sizes (sphere: radius; capsule, cylinder, cone: half height, radius; box:
+// half extents; height field: scale) and margin; its box in its own frame.
+struct ShapeRecord
+{
+    uint kind;
+    uint flags;
+    uint first;
+    uint count;
+    uint second_first;
+    uint second_count;
+    uint first_node;
+    uint first_item;
+    uint first_box;
+    vec3 size;
+    float margin;
+    vec3 bounds_minimum;
+    vec3 bounds_maximum;
+};
+
+ShapeRecord load_record(uint index)
+{
+    const uint base = 6U * index;
+    const uvec4 head = gpu_word_vectors[shape_records].values[base];
+    const uvec4 ranges = gpu_word_vectors[shape_records].values[base + 1U];
+    const uvec4 hierarchy = gpu_word_vectors[shape_records].values[base + 2U];
+    const vec4 size = gpu_vectors[shape_records].values[base + 3U];
+    return ShapeRecord(head.x, head.y, ranges.x, ranges.y, ranges.z, ranges.w, hierarchy.x, hierarchy.y, hierarchy.z, size.xyz, size.w,
+                       gpu_vectors[shape_records].values[base + 4U].xyz, gpu_vectors[shape_records].values[base + 5U].xyz);
+}
+
+bool is_convex(ShapeRecord record)
+{
+    return record.kind != SHAPE_TRIANGLE_MESH && record.kind != SHAPE_HEIGHT_FIELD && record.kind != SHAPE_COMPOUND;
+}
+
+// A convex piece being collided: a convex shape, or a triangle (kind SHAPE_TRIANGLE_MESH, its corners in its frame). The
+// corners are three members, not an array: no array member indexed at run time in a struct the support function takes by
+// value in every GJK and EPA iteration.
 struct ConvexShape
 {
     uint kind;
@@ -66,14 +149,31 @@ struct ConvexShape
     uint face_count;
     vec3 size;    // sphere: radius; capsule, cylinder, cone: half height, radius; box: half extents
     float margin; // the radius around the core
+    vec3 corner_a;
+    vec3 corner_b;
+    vec3 corner_c;
 };
+
+ConvexShape convex_shape(ShapeRecord record)
+{
+    return ConvexShape(record.kind, record.first, record.count, record.second_first, record.second_count, record.size, record.margin, vec3(0.0),
+                       vec3(0.0), vec3(0.0));
+}
+
+// A triangle's corner index (0, 1 or 2), by selection.
+vec3 triangle_corner(ConvexShape shape, uint index)
+{
+    return index == 0U ? shape.corner_a : index == 1U ? shape.corner_b : shape.corner_c;
+}
 
 ConvexShape load_shape(uint index)
 {
-    const uvec4 first = gpu_word_vectors[shape_records].values[3U * index];
-    const uvec4 second = gpu_word_vectors[shape_records].values[3U * index + 1U];
-    const vec4 third = gpu_vectors[shape_records].values[3U * index + 2U];
-    return ConvexShape(first.x, first.y, first.z, first.w, second.x, third.xyz, third.w);
+    return convex_shape(load_record(index));
+}
+
+ConvexShape triangle_shape(vec3 first, vec3 second, vec3 third)
+{
+    return ConvexShape(SHAPE_TRIANGLE_MESH, 0U, 0U, 0U, 0U, vec3(0.0), 0.0, first, second, third);
 }
 
 // A frame in the world: a position and a unit quaternion (x, y, z, w).
@@ -89,6 +189,11 @@ Pose load_instance(uint instances_buffer, uint index, out uint shape)
     const uvec4 first = gpu_word_vectors[instances_buffer].values[2U * index];
     shape = first.w;
     return Pose(uintBitsToFloat(first.xyz), gpu_vectors[instances_buffer].values[2U * index + 1U]);
+}
+
+Pose identity_pose()
+{
+    return Pose(vec3(0.0), vec4(0.0, 0.0, 0.0, 1.0));
 }
 
 // ===================================================================================================== math (gfx.core.math)
@@ -109,6 +214,27 @@ vec4 conjugate_rotation(vec4 rotation)
 vec3 transform_point(Pose pose, vec3 point)
 {
     return rotate_vector(pose.orientation, point) + pose.position;
+}
+
+// The Hamilton product: second applied first (as gfx::operator*(Quaternion, Quaternion) at compile time).
+vec4 multiply_rotations(vec4 first, vec4 second)
+{
+    return vec4(first.w * second.x + first.x * second.w + first.y * second.z - first.z * second.y,
+                first.w * second.y - first.x * second.z + first.y * second.w + first.z * second.x,
+                first.w * second.z + first.x * second.y - first.y * second.x + first.z * second.w,
+                first.w * second.w - first.x * second.x - first.y * second.y - first.z * second.z);
+}
+
+// The composition: second applied first, then first (as gfx::operator*(Transform, Transform)).
+Pose compose(Pose first, Pose second)
+{
+    return Pose(transform_point(first, second.position), multiply_rotations(first.orientation, second.orientation));
+}
+
+Pose inverse_pose(Pose pose)
+{
+    const vec4 rotation = conjugate_rotation(pose.orientation);
+    return Pose(-rotate_vector(rotation, pose.position), rotation);
 }
 
 float length_squared(vec3 vector)
@@ -134,6 +260,53 @@ vec3 any_perpendicular(vec3 vector)
     const vec3 size = abs(vector);
     const vec3 axis = size.x <= size.y && size.x <= size.z ? vec3(1.0, 0.0, 0.0) : size.y <= size.z ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
     return normalized(cross(vector, axis));
+}
+
+// ===================================================================================================== boxes
+
+struct Aabb
+{
+    vec3 minimum;
+    vec3 maximum;
+};
+
+// Whether two boxes overlap (touching counts).
+bool intersects(Aabb first, Aabb second)
+{
+    return all(lessThanEqual(first.minimum, second.maximum)) && all(greaterThanEqual(first.maximum, second.minimum));
+}
+
+Aabb expanded(Aabb box, float distance)
+{
+    return Aabb(box.minimum - vec3(distance), box.maximum + vec3(distance));
+}
+
+// The box holding box moved by pose (Arvo's method on the rotation's matrix, as Aabb::transformed()).
+Aabb transformed(Aabb box, Pose pose)
+{
+    const float x = pose.orientation.x;
+    const float y = pose.orientation.y;
+    const float z = pose.orientation.z;
+    const float w = pose.orientation.w;
+    const vec3 columns[3] = vec3[3](vec3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),
+                                    vec3(2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)),
+                                    vec3(2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)));
+    const float lows[3] = float[3](box.minimum.x, box.minimum.y, box.minimum.z);
+    const float highs[3] = float[3](box.maximum.x, box.maximum.y, box.maximum.z);
+    Aabb result = Aabb(pose.position, pose.position);
+    for (uint column = 0U; column < 3U; ++column)
+    {
+        const vec3 first = columns[column] * lows[column];
+        const vec3 second = columns[column] * highs[column];
+        result.minimum += min(first, second);
+        result.maximum += max(first, second);
+    }
+    return result;
+}
+
+Aabb triangle_bounds(vec3 first, vec3 second, vec3 third)
+{
+    return Aabb(min(first, min(second, third)), max(first, max(second, third)));
 }
 
 // ===================================================================================================== segments
@@ -211,7 +384,13 @@ void segment_closest_points(Segment first, Segment second, out vec3 first_point,
 
 vec3 hull_vertex(ConvexShape shape, uint vertex)
 {
-    return gpu_vectors[hull_vertices].values[shape.first_vertex + vertex].xyz;
+    return gpu_vectors[table_vertices].values[shape.first_vertex + vertex].xyz;
+}
+
+// A triangle's front normal (unit length; zero for a degenerate triangle).
+vec3 triangle_normal(vec3 first, vec3 second, vec3 third)
+{
+    return normalized(cross(second - first, third - first));
 }
 
 // The core's farthest point along direction (the shape's frame), as each shape's support().
@@ -250,6 +429,14 @@ vec3 shape_support(ConvexShape shape, vec3 direction)
     {
         return vec3(direction.x >= 0.0 ? shape.size.x : -shape.size.x, direction.y >= 0.0 ? shape.size.y : -shape.size.y,
                     direction.z >= 0.0 ? shape.size.z : -shape.size.z);
+    }
+    if (shape.kind == SHAPE_TRIANGLE_MESH)
+    {
+        // The vertex farthest along it (the first of equals).
+        const float a = dot(shape.corner_a, direction);
+        const float b = dot(shape.corner_b, direction);
+        const float c = dot(shape.corner_c, direction);
+        return a >= b && a >= c ? shape.corner_a : b >= c ? shape.corner_b : shape.corner_c;
     }
 
     // A hull: the first vertex farthest along it.
@@ -437,6 +624,20 @@ void supporting_face(ConvexShape shape, vec3 direction, uint slot)
         return;
     }
 
+    if (shape.kind == SHAPE_TRIANGLE_MESH)
+    {
+        // The triangle, its front (face 0) toward the direction (or within TRIANGLE_FACE_TOLERANCE of its plane) or its back (1).
+        const vec3 front = triangle_normal(shape.corner_a, shape.corner_b, shape.corner_c);
+        const bool facing = dot(front, direction) >= -TRIANGLE_FACE_TOLERANCE * length(direction);
+        face_vertices[slot][0] = shape.corner_a;
+        face_vertices[slot][1] = facing ? shape.corner_b : shape.corner_c;
+        face_vertices[slot][2] = facing ? shape.corner_c : shape.corner_b;
+        face_counts[slot] = 3U;
+        face_normals[slot] = facing ? front : -front;
+        face_features[slot] = facing ? 0U : 1U;
+        return;
+    }
+
     // A hull: the face whose normal is closest to the direction (the first on ties); more than MAXIMUM_FACE_VERTICES
     // corners give that many, evenly spaced.
     if (shape.face_count == 0U)
@@ -514,6 +715,88 @@ vec3 posed_support(ConvexShape shape, Pose pose, vec3 direction)
     return transform_point(pose, shape_support(shape, rotate_vector(conjugate_rotation(pose.orientation), direction)));
 }
 
+// The box around a convex shape at pose, from its support function along the six axes (as convex_bounds()).
+Aabb convex_bounds(ConvexShape shape, Pose pose)
+{
+    const vec3 low = vec3(-dot(posed_support(shape, pose, vec3(-1.0, 0.0, 0.0)), vec3(-1.0, 0.0, 0.0)),
+                          -dot(posed_support(shape, pose, vec3(0.0, -1.0, 0.0)), vec3(0.0, -1.0, 0.0)),
+                          -dot(posed_support(shape, pose, vec3(0.0, 0.0, -1.0)), vec3(0.0, 0.0, -1.0)));
+    const vec3 high = vec3(dot(posed_support(shape, pose, vec3(1.0, 0.0, 0.0)), vec3(1.0, 0.0, 0.0)),
+                           dot(posed_support(shape, pose, vec3(0.0, 1.0, 0.0)), vec3(0.0, 1.0, 0.0)),
+                           dot(posed_support(shape, pose, vec3(0.0, 0.0, 1.0)), vec3(0.0, 0.0, 1.0)));
+    return Aabb(low - shape.margin, high + shape.margin);
+}
+
+// The box around any shape at pose (as Shape::bounds(pose)): convex shapes' from their support functions, the others'
+// their own box moved.
+Aabb shape_bounds_at(ShapeRecord record, Pose pose)
+{
+    if (is_convex(record))
+    {
+        return convex_bounds(convex_shape(record), pose);
+    }
+    return transformed(Aabb(record.bounds_minimum, record.bounds_maximum), pose);
+}
+
+// ===================================================================================================== meshes, fields, compounds
+
+// Triangle index of a mesh or a height field: its corners in the shape's frame, its active edges' bits.
+void soup_triangle(ShapeRecord soup, uint index, out vec3 first, out vec3 second, out vec3 third, out uint active_edges)
+{
+    if (soup.kind == SHAPE_TRIANGLE_MESH)
+    {
+        const uvec4 triangle = gpu_word_vectors[mesh_triangles].values[soup.second_first + index];
+        first = gpu_vectors[table_vertices].values[triangle.x].xyz;
+        second = gpu_vectors[table_vertices].values[triangle.y].xyz;
+        third = gpu_vectors[table_vertices].values[triangle.z].xyz;
+        active_edges = triangle.w;
+        return;
+    }
+
+    // A height field: half 0 = (r, c), (r + 1, c), (r + 1, c + 1); half 1 = (r, c), (r + 1, c + 1), (r, c + 1).
+    const uint columns = soup.second_count;
+    const uint cell = index / 2U;
+    const uint row = cell / (columns - 1U);
+    const uint column = cell % (columns - 1U);
+    const vec3 scale = soup.size;
+    const vec3 corner = vec3(float(column) * scale.x, uintBitsToFloat(gpu_words[field_heights].words[soup.first + row * columns + column]) * scale.y,
+                             float(row) * scale.z);
+    const vec3 below = vec3(float(column) * scale.x, uintBitsToFloat(gpu_words[field_heights].words[soup.first + (row + 1U) * columns + column]) * scale.y,
+                            float(row + 1U) * scale.z);
+    const vec3 diagonal = vec3(float(column + 1U) * scale.x,
+                               uintBitsToFloat(gpu_words[field_heights].words[soup.first + (row + 1U) * columns + column + 1U]) * scale.y,
+                               float(row + 1U) * scale.z);
+    const vec3 beside = vec3(float(column + 1U) * scale.x, uintBitsToFloat(gpu_words[field_heights].words[soup.first + row * columns + column + 1U]) * scale.y,
+                             float(row) * scale.z);
+    first = corner;
+    second = index % 2U == 0U ? below : diagonal;
+    third = index % 2U == 0U ? diagonal : beside;
+    active_edges = gpu_words[field_edges].words[soup.second_first + index];
+}
+
+// A static hierarchy's node: its box, its first child or item (absolute), its items (0: an inner node).
+Aabb node_box(uint node, out uint first, out uint count)
+{
+    const uvec4 low = gpu_word_vectors[bvh_nodes].values[2U * node];
+    const uvec4 high = gpu_word_vectors[bvh_nodes].values[2U * node + 1U];
+    first = low.w;
+    count = high.w;
+    return Aabb(uintBitsToFloat(low.xyz), uintBitsToFloat(high.xyz));
+}
+
+Aabb item_box(ShapeRecord record, uint item)
+{
+    return Aabb(gpu_vectors[bvh_boxes].values[2U * (record.first_box + item)].xyz, gpu_vectors[bvh_boxes].values[2U * (record.first_box + item) + 1U].xyz);
+}
+
+// Child index of a compound: its shape and its pose in the compound's frame.
+Pose compound_child(ShapeRecord compound, uint index, out uint shape)
+{
+    const uvec4 first = gpu_word_vectors[compound_children].values[2U * (compound.first + index)];
+    shape = first.w;
+    return Pose(uintBitsToFloat(first.xyz), gpu_vectors[compound_children].values[2U * (compound.first + index) + 1U]);
+}
+
 // ===================================================================================================== features (contact_features)
 
 uint incident_vertex(uint vertex)
@@ -552,15 +835,21 @@ uint flipped_feature(uint local)
 
 // ===================================================================================================== manifolds
 
-// Up to four points sharing a normal (first to second); a point's separation is along it.
+// Up to four points sharing a normal (first to second); a point's separation is along it; a point's feature names its
+// sub-shapes (triangles; NO_SUB_SHAPE for convex shapes) and its local features; the manifold names the sub-shapes it
+// comes from (compound children or triangles).
 struct Manifold
 {
     vec3 normal;
     uint count;
     uint algorithm;
+    uint sub_shape_first;
+    uint sub_shape_second;
     vec3 positions[MANIFOLD_POINTS];
     float separations[MANIFOLD_POINTS];
     uint features[MANIFOLD_POINTS];
+    uint point_sub_first[MANIFOLD_POINTS];
+    uint point_sub_second[MANIFOLD_POINTS];
 };
 
 Manifold empty_manifold()
@@ -569,26 +858,142 @@ Manifold empty_manifold()
     manifold.normal = vec3(0.0);
     manifold.count = 0U;
     manifold.algorithm = 0U;
+    manifold.sub_shape_first = NO_SUB_SHAPE;
+    manifold.sub_shape_second = NO_SUB_SHAPE;
     for (uint point = 0U; point < MANIFOLD_POINTS; ++point)
     {
         manifold.positions[point] = vec3(0.0);
         manifold.separations[point] = 0.0;
         manifold.features[point] = 0U;
+        manifold.point_sub_first[point] = NO_SUB_SHAPE;
+        manifold.point_sub_second[point] = NO_SUB_SHAPE;
     }
     return manifold;
 }
 
-// The manifold with its shapes exchanged: the normal reversed, the features' roles exchanged.
+// The manifold with its shapes exchanged: the normal reversed, sub-shapes and features exchanged.
 void flip_manifold(inout Manifold manifold)
 {
     manifold.normal = -manifold.normal;
+    const uint first = manifold.sub_shape_first;
+    manifold.sub_shape_first = manifold.sub_shape_second;
+    manifold.sub_shape_second = first;
     for (uint point = 0U; point < manifold.count; ++point)
     {
         manifold.features[point] = flipped_feature(manifold.features[point]);
+        const uint point_first = manifold.point_sub_first[point];
+        manifold.point_sub_first[point] = manifold.point_sub_second[point];
+        manifold.point_sub_second[point] = point_first;
     }
+}
+
+// The smallest separation of its points (the deepest), as ContactManifold::deepest().
+float deepest_separation(Manifold manifold)
+{
+    float smallest = float_maximum();
+    for (uint point = 0U; point < manifold.count; ++point)
+    {
+        smallest = min(smallest, manifold.separations[point]);
+    }
+    return smallest;
+}
+
+// Manifolds in a buffer (GpuManifold, eleven vectors): header (instances, points, algorithm), sub-shapes, normal, four
+// points (position and separation; sub-shapes and local feature). Unused points are zero.
+const uint MANIFOLD_VECTORS = 11U;
+
+void store_manifold(uint storage, uint slot, uint first_instance, uint second_instance, Manifold manifold)
+{
+    const uint base = MANIFOLD_VECTORS * slot;
+    gpu_word_vectors[storage].values[base] = uvec4(first_instance, second_instance, manifold.count, manifold.count > 0U ? manifold.algorithm : 0U);
+    gpu_word_vectors[storage].values[base + 1U] = manifold.count > 0U ? uvec4(manifold.sub_shape_first, manifold.sub_shape_second, 0U, 0U) : uvec4(0U);
+    gpu_vectors[storage].values[base + 2U] = vec4(manifold.count > 0U ? manifold.normal : vec3(0.0), 0.0);
+    for (uint point = 0U; point < MANIFOLD_POINTS; ++point)
+    {
+        const bool used = point < manifold.count;
+        gpu_vectors[storage].values[base + 3U + 2U * point] = used ? vec4(manifold.positions[point], manifold.separations[point]) : vec4(0.0);
+        gpu_word_vectors[storage].values[base + 4U + 2U * point] =
+            used ? uvec4(manifold.point_sub_first[point], manifold.point_sub_second[point], manifold.features[point], 0U) : uvec4(0U);
+    }
+}
+
+Manifold load_manifold(uint storage, uint slot, out uint first_instance, out uint second_instance)
+{
+    const uint base = MANIFOLD_VECTORS * slot;
+    const uvec4 header = gpu_word_vectors[storage].values[base];
+    const uvec4 subs = gpu_word_vectors[storage].values[base + 1U];
+    first_instance = header.x;
+    second_instance = header.y;
+    Manifold manifold = empty_manifold();
+    manifold.count = min(header.z, MANIFOLD_POINTS);
+    manifold.algorithm = header.w;
+    manifold.sub_shape_first = subs.x;
+    manifold.sub_shape_second = subs.y;
+    manifold.normal = gpu_vectors[storage].values[base + 2U].xyz;
+    for (uint point = 0U; point < manifold.count; ++point)
+    {
+        const vec4 position = gpu_vectors[storage].values[base + 3U + 2U * point];
+        const uvec4 feature = gpu_word_vectors[storage].values[base + 4U + 2U * point];
+        manifold.positions[point] = position.xyz;
+        manifold.separations[point] = position.w;
+        manifold.point_sub_first[point] = feature.x;
+        manifold.point_sub_second[point] = feature.y;
+        manifold.features[point] = feature.z;
+    }
+    return manifold;
 }
 
 // The manifold of the pair: what the passes write.
 Manifold result;
+
+// ===================================================================================================== sub-pairs
+
+// What a candidate pair is made of, as physics::collide() visits it: two convex shapes (their world poses), a convex shape
+// and a triangle of a mesh or a height field (shape a convex, shape b the triangles' shape; collided in its frame; FLIPPED:
+// the triangles' shape is the pair's first), or two triangles (shape a's and shape b's). The manifold's sub-shapes are
+// recorded as collide() records them.
+const uint SUB_PAIR_CONVEX = 0U;
+const uint SUB_PAIR_CONVEX_TRIANGLE = 1U;
+const uint SUB_PAIR_TRIANGLES = 2U;
+const uint SUB_PAIR_FLIPPED = 0x100U;
+const uint SUB_PAIR_VECTORS = 7U;
+
+struct SubPair
+{
+    uint first_instance;
+    uint second_instance;
+    uint kind;
+    uint sub_first;
+    uint sub_second;
+    uint shape_a;
+    uint shape_b;
+    uint triangle_a;
+    uint triangle_b;
+    Pose pose_a;
+    Pose pose_b;
+};
+
+void store_sub_pair(uint storage, uint slot, SubPair pair)
+{
+    const uint base = SUB_PAIR_VECTORS * slot;
+    gpu_word_vectors[storage].values[base] = uvec4(pair.first_instance, pair.second_instance, pair.kind, 0U);
+    gpu_word_vectors[storage].values[base + 1U] = uvec4(pair.sub_first, pair.sub_second, pair.shape_a, pair.shape_b);
+    gpu_word_vectors[storage].values[base + 2U] = uvec4(pair.triangle_a, pair.triangle_b, 0U, 0U);
+    gpu_vectors[storage].values[base + 3U] = vec4(pair.pose_a.position, 0.0);
+    gpu_vectors[storage].values[base + 4U] = pair.pose_a.orientation;
+    gpu_vectors[storage].values[base + 5U] = vec4(pair.pose_b.position, 0.0);
+    gpu_vectors[storage].values[base + 6U] = pair.pose_b.orientation;
+}
+
+SubPair load_sub_pair(uint storage, uint slot)
+{
+    const uint base = SUB_PAIR_VECTORS * slot;
+    const uvec4 head = gpu_word_vectors[storage].values[base];
+    const uvec4 shapes = gpu_word_vectors[storage].values[base + 1U];
+    const uvec4 triangles = gpu_word_vectors[storage].values[base + 2U];
+    return SubPair(head.x, head.y, head.z, shapes.x, shapes.y, shapes.z, shapes.w, triangles.x, triangles.y,
+                   Pose(gpu_vectors[storage].values[base + 3U].xyz, gpu_vectors[storage].values[base + 4U]),
+                   Pose(gpu_vectors[storage].values[base + 5U].xyz, gpu_vectors[storage].values[base + 6U]));
+}
 
 #endif

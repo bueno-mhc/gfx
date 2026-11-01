@@ -28,7 +28,7 @@ void main()
         return;
     }
     const uint manifold = push.gather != 0U ? gpu_words[push.order_buffer].words[index] : index;
-    const uvec4 header = gpu_word_vectors[push.manifolds_buffer].values[10U * (push.manifolds_first + manifold)];
+    const uvec4 header = gpu_word_vectors[push.manifolds_buffer].values[11U * (push.manifolds_first + manifold)];
     const uint key = header.z == 0U ? INVALID_INDEX : push.gather != 0U ? header.x : header.y;
     gpu_words[push.keys_buffer].words[index] = key;
     if (push.gather == 0U)

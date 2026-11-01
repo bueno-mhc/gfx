@@ -79,8 +79,10 @@ struct GpuBodyReadback
 /// floats by their bits): the workgroup size, the body flags, the invalid bindless index, the elements per invocation, the
 /// radix bits; the BVHs' leaf bit, stack size, treelet leaves, node costs, Morton bits and overflow flag; the narrow
 /// phase's shape kinds, contact algorithms, limits (face vertices, GJK iterations, EPA storage), the absent sub-shape,
-/// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 39> SPECIALIZATION_CONSTANTS{{
+/// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity; the
+/// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
+/// compounds descended at once, the triangles' edge-on tolerance.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 46> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -120,6 +122,13 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 39> SPECIAL
     {36, shape_detail::ROUND_FACE_VERTICES},
     {37, std::bit_cast<std::uint32_t>(GEOMETRIC_TOLERANCE)},
     {38, 2 * MAXIMUM_FACE_VERTICES},
+    {39, std::to_underlying(ShapeKind::TRIANGLE_MESH)},
+    {40, std::to_underlying(ShapeKind::HEIGHT_FIELD)},
+    {41, std::to_underlying(ShapeKind::COMPOUND)},
+    {42, std::to_underlying(ContactAlgorithm::TRIANGLE_TRIANGLE)},
+    {43, static_cast<std::uint32_t>(StaticBvh::MAXIMUM_DEPTH)},
+    {44, 2 * GPU_XPBD_COMPOUND_DEPTH},
+    {45, std::bit_cast<std::uint32_t>(TRIANGLE_FACE_TOLERANCE)},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");

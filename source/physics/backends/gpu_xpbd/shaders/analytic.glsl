@@ -1,6 +1,6 @@
 // The pairs with exact answers cheaper than GJK (a port of analytic.cppm): sphere–sphere, sphere–capsule, capsule–capsule
-// (two points when the segments lie side by side), sphere–box, and the separating axis test for box–box (face axes preferred
-// to edge axes). Each takes its shapes in its own order; the collide pass flips the result for the other.
+// (two points when the segments lie side by side), sphere–box, and the separating axis test for box–box and
+// triangle–triangle (face axes preferred to edge axes); and the dispatch of two convex pieces (collide_convex()).
 #ifndef GPU_XPBD_ANALYTIC_GLSL
 #define GPU_XPBD_ANALYTIC_GLSL
 
@@ -138,72 +138,119 @@ bool collide_sphere_box(ConvexShape sphere, Pose sphere_pose, ConvexShape box, P
 
 // ===================================================================================================== separating axes
 
-// The two boxes' corners, face normals (their edges' directions too), world space.
-vec3 box_corners[2][8];
-vec3 box_axes[2][3];
+// The two polytopes' vertices, face normals and edge directions, world space (a box: 8 corners, 3 normals, its edges along
+// them; a triangle: 3 vertices, its normal, its 3 edges), as sat_detail::features_of().
+vec3 sat_corners[2][8];
+uint sat_corner_counts[2];
+vec3 sat_face_axes[2][3];
+uint sat_face_axis_counts[2];
+vec3 sat_edge_axes[2][3];
 
-void box_features(uint slot, ConvexShape box, Pose pose)
+void sat_features(uint slot, ConvexShape shape, Pose pose)
 {
-    for (uint corner = 0U; corner < 8U; ++corner)
+    if (shape.kind == SHAPE_BOX)
     {
-        const vec3 local = vec3((corner & 1U) != 0U ? box.size.x : -box.size.x, (corner & 2U) != 0U ? box.size.y : -box.size.y,
-                                (corner & 4U) != 0U ? box.size.z : -box.size.z);
-        box_corners[slot][corner] = transform_point(pose, local);
+        for (uint corner = 0U; corner < 8U; ++corner)
+        {
+            const vec3 local = vec3((corner & 1U) != 0U ? shape.size.x : -shape.size.x, (corner & 2U) != 0U ? shape.size.y : -shape.size.y,
+                                    (corner & 4U) != 0U ? shape.size.z : -shape.size.z);
+            sat_corners[slot][corner] = transform_point(pose, local);
+        }
+        sat_corner_counts[slot] = 8U;
+        sat_face_axes[slot][0] = rotate_vector(pose.orientation, vec3(1.0, 0.0, 0.0));
+        sat_face_axes[slot][1] = rotate_vector(pose.orientation, vec3(0.0, 1.0, 0.0));
+        sat_face_axes[slot][2] = rotate_vector(pose.orientation, vec3(0.0, 0.0, 1.0));
+        sat_face_axis_counts[slot] = 3U;
+        for (uint edge = 0U; edge < 3U; ++edge)
+        {
+            sat_edge_axes[slot][edge] = sat_face_axes[slot][edge];
+        }
+        return;
     }
-    box_axes[slot][0] = rotate_vector(pose.orientation, vec3(1.0, 0.0, 0.0));
-    box_axes[slot][1] = rotate_vector(pose.orientation, vec3(0.0, 1.0, 0.0));
-    box_axes[slot][2] = rotate_vector(pose.orientation, vec3(0.0, 0.0, 1.0));
+    sat_corners[slot][0] = transform_point(pose, shape.corner_a);
+    sat_corners[slot][1] = transform_point(pose, shape.corner_b);
+    sat_corners[slot][2] = transform_point(pose, shape.corner_c);
+    sat_corner_counts[slot] = 3U;
+    sat_face_axes[slot][0] = rotate_vector(pose.orientation, triangle_normal(shape.corner_a, shape.corner_b, shape.corner_c));
+    sat_face_axis_counts[slot] = 1U;
+    for (uint edge = 0U; edge < 3U; ++edge)
+    {
+        sat_edge_axes[slot][edge] = normalized(sat_corners[slot][(edge + 1U) % 3U] - sat_corners[slot][edge]);
+    }
 }
 
-// The second box's separation from the first along axis, oriented the way it is larger (w: the separation).
+// The second polytope's separation from the first along axis, oriented the way it is larger (w: the separation).
 vec4 separation_along(vec3 axis)
 {
     float first_low = float_maximum();
     float first_high = -float_maximum();
     float second_low = float_maximum();
     float second_high = -float_maximum();
+    // Constant bounds (the loops unroll, the corners stay in registers), the counts as guards.
     for (uint corner = 0U; corner < 8U; ++corner)
     {
-        first_low = min(first_low, dot(box_corners[0][corner], axis));
-        first_high = max(first_high, dot(box_corners[0][corner], axis));
-        second_low = min(second_low, dot(box_corners[1][corner], axis));
-        second_high = max(second_high, dot(box_corners[1][corner], axis));
+        if (corner < sat_corner_counts[0])
+        {
+            first_low = min(first_low, dot(sat_corners[0][corner], axis));
+            first_high = max(first_high, dot(sat_corners[0][corner], axis));
+        }
+        if (corner < sat_corner_counts[1])
+        {
+            second_low = min(second_low, dot(sat_corners[1][corner], axis));
+            second_high = max(second_high, dot(sat_corners[1][corner], axis));
+        }
     }
     const float forward = second_low - first_high;
     const float backward = first_low - second_high;
     return forward >= backward ? vec4(axis, forward) : vec4(-axis, backward);
 }
 
-// The edge of a box parallel to its edge (axis) that is farthest along direction (world space).
-Segment supporting_edge(ConvexShape box, Pose pose, uint edge, vec3 direction)
+// The edge of a box parallel to its edge (axis) farthest along direction, or a triangle's edge (world space).
+Segment supporting_edge(ConvexShape shape, Pose pose, uint edge, vec3 direction)
 {
-    const vec3 corner = shape_support(box, rotate_vector(conjugate_rotation(pose.orientation), direction));
+    if (shape.kind != SHAPE_BOX)
+    {
+        return Segment(transform_point(pose, triangle_corner(shape, edge)), transform_point(pose, triangle_corner(shape, (edge + 1U) % 3U)));
+    }
+    const vec3 corner = shape_support(shape, rotate_vector(conjugate_rotation(pose.orientation), direction));
     vec3 start = corner;
     vec3 end = corner;
     if (edge == 0U)
     {
-        start.x = -box.size.x;
-        end.x = box.size.x;
+        start.x = -shape.size.x;
+        end.x = shape.size.x;
     }
     else if (edge == 1U)
     {
-        start.y = -box.size.y;
-        end.y = box.size.y;
+        start.y = -shape.size.y;
+        end.y = shape.size.y;
     }
     else
     {
-        start.z = -box.size.z;
-        end.z = box.size.z;
+        start.z = -shape.size.z;
+        end.z = shape.size.z;
     }
     return Segment(transform_point(pose, start), transform_point(pose, end));
 }
 
-// The axis of least penetration among the face normals and the edges' cross products; a face axis is kept unless an
-// edge axis separates clearly more (then the edges' closest points make one contact).
-bool collide_boxes(ConvexShape first, Pose first_pose, ConvexShape second, Pose second_pose, float speculative_distance)
+// The diagonal of a polytope's box in its own frame (its bounds' extents).
+float sat_scale(ConvexShape shape)
 {
-    box_features(0U, first, first_pose);
-    box_features(1U, second, second_pose);
+    if (shape.kind == SHAPE_BOX)
+    {
+        return vector_length(2.0 * (shape.size + vec3(shape.margin)));
+    }
+    const Aabb bounds = triangle_bounds(shape.corner_a, shape.corner_b, shape.corner_c);
+    return vector_length(bounds.maximum - bounds.minimum);
+}
+
+// The separating axis test between two boxes or two triangles (collide_separating_axes): the axis of least penetration
+// among the face normals and the edges' cross products; a face axis is kept unless an edge axis separates clearly more
+// (then the edges' closest points make one contact).
+bool collide_separating_axes(ConvexShape first, Pose first_pose, ConvexShape second, Pose second_pose, float speculative_distance, uint algorithm)
+{
+    sat_features(0U, first, first_pose);
+    sat_features(1U, second, second_pose);
     const float margins = first.margin + second.margin;
     const float limit = speculative_distance + margins;
 
@@ -213,7 +260,11 @@ bool collide_boxes(ConvexShape first, Pose first_pose, ConvexShape second, Pose 
     {
         for (uint index = 0U; index < 3U; ++index)
         {
-            const vec4 candidate = separation_along(box_axes[slot][index]);
+            if (index >= sat_face_axis_counts[slot])
+            {
+                break;
+            }
+            const vec4 candidate = separation_along(sat_face_axes[slot][index]);
             if (candidate.w > limit)
             {
                 return false;
@@ -230,7 +281,7 @@ bool collide_boxes(ConvexShape first, Pose first_pose, ConvexShape second, Pose 
     {
         for (uint j = 0U; j < 3U; ++j)
         {
-            const vec3 across = cross(box_axes[0][i], box_axes[1][j]);
+            const vec3 across = cross(sat_edge_axes[0][i], sat_edge_axes[1][j]);
             if (length_squared(across) < 1e-6)
             {
                 continue;
@@ -250,7 +301,7 @@ bool collide_boxes(ConvexShape first, Pose first_pose, ConvexShape second, Pose 
     }
 
     // A face contact unless an edge axis separates clearly more (faces give stable manifolds).
-    const float scale = max(vector_length(2.0 * (first.size + vec3(first.margin))), vector_length(2.0 * (second.size + vec3(second.margin))));
+    const float scale = max(sat_scale(first), sat_scale(second));
     if (best_edge.w > best_face.w + 0.05 * abs(best_face.w) + 1e-3 * scale)
     {
         const Segment on_first = supporting_edge(first, first_pose, first_edge, best_edge.xyz);
@@ -259,17 +310,68 @@ bool collide_boxes(ConvexShape first, Pose first_pose, ConvexShape second, Pose 
         vec3 second_point;
         segment_closest_points(on_first, on_second, first_point, second_point);
         return point_manifold(first_point, second_point, best_edge.xyz, best_edge.w, first.margin, second.margin,
-                              point_contact(64U + first_edge, 64U + second_edge), speculative_distance, ALGORITHM_BOX_BOX);
+                              point_contact(64U + first_edge, 64U + second_edge), speculative_distance, algorithm);
     }
     const vec3 normal = best_face.xyz;
     posed_supporting_face(first, first_pose, normal, 0U);
     posed_supporting_face(second, second_pose, -normal, 1U);
-    if (face_manifold(first.margin, second.margin, normal, speculative_distance, ALGORITHM_BOX_BOX))
+    if (face_manifold(first.margin, second.margin, normal, speculative_distance, algorithm))
     {
         return true;
     }
     return point_manifold(posed_support(first, first_pose, normal), posed_support(second, second_pose, -normal), normal, best_face.w, first.margin,
-                          second.margin, point_contact(face_features[0], face_features[1]), speculative_distance, ALGORITHM_BOX_BOX);
+                          second.margin, point_contact(face_features[0], face_features[1]), speculative_distance, algorithm);
+}
+
+// The manifold of two convex pieces at their poses, as collide_convex() dispatches it: the analytic pairs in either order
+// (flipped for the reversed order), separating axes for two boxes and for two triangles, GJK, EPA and clipping otherwise.
+// The result in `result`; the pieces in shape_first/second and pose_first/second.
+bool collide_pieces(float speculative_distance)
+{
+    result = empty_manifold();
+    const uint a = shape_first.kind;
+    const uint b = shape_second.kind;
+    if (a == SHAPE_SPHERE && b == SHAPE_SPHERE)
+    {
+        return collide_spheres(shape_first, pose_first, shape_second, pose_second, speculative_distance);
+    }
+    if (a == SHAPE_SPHERE && b == SHAPE_CAPSULE)
+    {
+        return collide_sphere_capsule(shape_first, pose_first, shape_second, pose_second, speculative_distance);
+    }
+    if (a == SHAPE_CAPSULE && b == SHAPE_SPHERE)
+    {
+        const bool found = collide_sphere_capsule(shape_second, pose_second, shape_first, pose_first, speculative_distance);
+        if (found)
+        {
+            flip_manifold(result);
+        }
+        return found;
+    }
+    if (a == SHAPE_CAPSULE && b == SHAPE_CAPSULE)
+    {
+        return collide_capsules(shape_first, pose_first, shape_second, pose_second, speculative_distance);
+    }
+    if (a == SHAPE_SPHERE && b == SHAPE_BOX)
+    {
+        return collide_sphere_box(shape_first, pose_first, shape_second, pose_second, speculative_distance);
+    }
+    if (a == SHAPE_BOX && b == SHAPE_SPHERE)
+    {
+        const bool found = collide_sphere_box(shape_second, pose_second, shape_first, pose_first, speculative_distance);
+        if (found)
+        {
+            flip_manifold(result);
+        }
+        return found;
+    }
+    if ((a == SHAPE_BOX && b == SHAPE_BOX) || (a == SHAPE_TRIANGLE_MESH && b == SHAPE_TRIANGLE_MESH))
+    {
+        // One call for both (GLSL inlines every call).
+        return collide_separating_axes(shape_first, pose_first, shape_second, pose_second, speculative_distance,
+                                       a == SHAPE_BOX ? ALGORITHM_BOX_BOX : ALGORITHM_TRIANGLE_TRIANGLE);
+    }
+    return collide_convex_general(speculative_distance);
 }
 
 #endif

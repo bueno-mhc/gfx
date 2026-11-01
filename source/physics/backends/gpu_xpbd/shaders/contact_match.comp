@@ -1,8 +1,9 @@
 #version 460
-// The contact cache (GpuNarrowPhase::match): each point of each current manifold finds its predecessor — the point of the
-// previous manifold of the same pair with the same feature — by a binary search of the pair among the previous
-// manifolds sorted by pair, then a comparison of the features. A predecessor is the previous manifold's index × 4 + its
-// point, or INVALID_INDEX.
+// The contact cache (GpuNarrowPhase::match): each point of each current manifold finds its predecessor — a point with the
+// same feature (its sub-shapes and local features) among the previous manifolds of the same pair, the first of them in
+// their order — by a binary search of the pair among the previous manifolds sorted by pair (stably: a pair's manifolds keep
+// their order), then a comparison of the features. A predecessor is the previous manifold's index × 4 + its point, or
+// INVALID_INDEX. Manifolds are GpuManifold: eleven vectors (header, sub-shapes, normal, four points of two vectors).
 #extension GL_GOOGLE_include_directive : require
 #include "primitives.glsl"
 
@@ -24,9 +25,16 @@ layout(push_constant) uniform Push
     uint count_word;
 } push;
 
+const uint MANIFOLD_VECTORS = 11U;
+
 uvec4 previous_header(uint manifold)
 {
-    return gpu_word_vectors[push.previous_buffer].values[10U * (push.previous_first + manifold)];
+    return gpu_word_vectors[push.previous_buffer].values[MANIFOLD_VECTORS * (push.previous_first + manifold)];
+}
+
+uvec3 previous_feature(uint manifold, uint point)
+{
+    return gpu_word_vectors[push.previous_buffer].values[MANIFOLD_VECTORS * (push.previous_first + manifold) + 4U + 2U * point].xyz;
 }
 
 void main()
@@ -37,7 +45,7 @@ void main()
     {
         return;
     }
-    const uint current = 10U * (push.current_first + index);
+    const uint current = MANIFOLD_VECTORS * (push.current_first + index);
     const uvec4 header = gpu_word_vectors[push.current_buffer].values[current];
     uint predecessors[4] = uint[4](INVALID_INDEX, INVALID_INDEX, INVALID_INDEX, INVALID_INDEX);
     if (header.z > 0U)
@@ -62,23 +70,24 @@ void main()
             }
         }
 
-        // Its points with the same features.
-        if (low < previous_count)
+        // The points of the pair's manifolds with the same features.
+        for (uint point = 0U; point < header.z && point < 4U; ++point)
         {
-            const uint manifold = gpu_words[push.order_buffer].words[low];
-            const uvec4 found = previous_header(manifold);
-            if (found.z > 0U && found.x == header.x && found.y == header.y)
+            const uvec3 feature = gpu_word_vectors[push.current_buffer].values[current + 4U + 2U * point].xyz;
+            for (uint position = low; position < previous_count && predecessors[point] == INVALID_INDEX; ++position)
             {
-                for (uint point = 0U; point < header.z && point < 4U; ++point)
+                const uint manifold = gpu_words[push.order_buffer].words[position];
+                const uvec4 found = previous_header(manifold);
+                if (found.z == 0U || found.x != header.x || found.y != header.y)
                 {
-                    const uvec3 feature = gpu_word_vectors[push.current_buffer].values[current + 3U + 2U * point].xyz;
-                    for (uint other = 0U; other < found.z && other < 4U; ++other)
+                    break;
+                }
+                for (uint other = 0U; other < found.z && other < 4U; ++other)
+                {
+                    if (all(equal(previous_feature(manifold, other), feature)))
                     {
-                        if (all(equal(gpu_word_vectors[push.previous_buffer].values[10U * (push.previous_first + manifold) + 3U + 2U * other].xyz, feature)))
-                        {
-                            predecessors[point] = manifold * 4U + other;
-                            break;
-                        }
+                        predecessors[point] = manifold * 4U + other;
+                        break;
                     }
                 }
             }

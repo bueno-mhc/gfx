@@ -22,11 +22,37 @@ uint clip_tags[2][MAXIMUM_CLIPPED];
 uint clip_edges[2][MAXIMUM_CLIPPED];
 uint clip_counts[2];
 
-// The candidate contact points of a face manifold.
+// The candidate contact points of a face manifold (or of two manifolds merging).
 vec3 candidate_positions[MAXIMUM_CLIPPED];
 float candidate_separations[MAXIMUM_CLIPPED];
 uint candidate_features[MAXIMUM_CLIPPED];
+uint candidate_sub_first[MAXIMUM_CLIPPED];
+uint candidate_sub_second[MAXIMUM_CLIPPED];
 uint candidate_count;
+
+// Appends the points of manifold to the candidates.
+void add_candidates(Manifold manifold)
+{
+    for (uint point = 0U; point < manifold.count; ++point)
+    {
+        candidate_positions[candidate_count] = manifold.positions[point];
+        candidate_separations[candidate_count] = manifold.separations[point];
+        candidate_features[candidate_count] = manifold.features[point];
+        candidate_sub_first[candidate_count] = manifold.point_sub_first[point];
+        candidate_sub_second[candidate_count] = manifold.point_sub_second[point];
+        ++candidate_count;
+    }
+}
+
+// Candidate index as the point index of result.
+void take_candidate(uint index, uint point)
+{
+    result.positions[point] = candidate_positions[index];
+    result.separations[point] = candidate_separations[index];
+    result.features[point] = candidate_features[index];
+    result.point_sub_first[point] = candidate_sub_first[index];
+    result.point_sub_second[point] = candidate_sub_second[index];
+}
 
 // The part of polygon source on the inner side of the plane through origin with outward normal (side side), into target.
 void clip_polygon(uint source, vec3 origin, vec3 normal, uint side, uint target)
@@ -62,6 +88,25 @@ void clip_polygon(uint source, vec3 origin, vec3 normal, uint side, uint target)
     }
 }
 
+// The squared length of offset in the plane perpendicular to normal, and the signed area (twice) of the triangle spanned by
+// base and offset seen along normal, rounded as the CPU rounds them (precise: no fused multiply-adds — a point on the base's
+// line spans exactly 0, as on the CPU, where a fused residue's sign would decide whether a duplicate point is kept).
+float flat_length_squared(vec3 offset, vec3 normal)
+{
+    precise const float along = offset.x * normal.x + offset.y * normal.y + offset.z * normal.z;
+    precise const vec3 flat_part = vec3(offset.x - normal.x * along, offset.y - normal.y * along, offset.z - normal.z * along);
+    precise const float squared = flat_part.x * flat_part.x + flat_part.y * flat_part.y + flat_part.z * flat_part.z;
+    return squared;
+}
+
+float spanned_area(vec3 base, vec3 offset, vec3 normal)
+{
+    precise const vec3 crossed =
+        vec3(base.y * offset.z - base.z * offset.y, base.z * offset.x - base.x * offset.z, base.x * offset.y - base.y * offset.x);
+    precise const float area = crossed.x * normal.x + crossed.y * normal.y + crossed.z * normal.z;
+    return area;
+}
+
 // The candidates reduced into result: the deepest, the farthest from it, the one spanning the largest triangle with
 // them, the one farthest on the other side of their line (in the plane perpendicular to normal).
 void reduce_contact_points(vec3 normal)
@@ -71,9 +116,7 @@ void reduce_contact_points(vec3 normal)
     {
         for (uint index = 0U; index < candidate_count; ++index)
         {
-            result.positions[result.count] = candidate_positions[index];
-            result.separations[result.count] = candidate_separations[index];
-            result.features[result.count] = candidate_features[index];
+            take_candidate(index, result.count);
             ++result.count;
         }
         return;
@@ -87,9 +130,8 @@ void reduce_contact_points(vec3 normal)
     uint farthest = deepest == 0U ? 1U : 0U;
     for (uint index = 0U; index < candidate_count; ++index)
     {
-        const vec3 offset = candidate_positions[index] - deepest_position;
-        const vec3 best_offset = candidate_positions[farthest] - deepest_position;
-        if (length_squared(offset - normal * dot(offset, normal)) > length_squared(best_offset - normal * dot(best_offset, normal)))
+        if (flat_length_squared(candidate_positions[index] - deepest_position, normal) >
+            flat_length_squared(candidate_positions[farthest] - deepest_position, normal))
         {
             farthest = index;
         }
@@ -100,7 +142,7 @@ void reduce_contact_points(vec3 normal)
     float widest_area = 0.0;
     for (uint index = 0U; index < candidate_count; ++index)
     {
-        const float area = dot(cross(base, candidate_positions[index] - deepest_position), normal);
+        const float area = spanned_area(base, candidate_positions[index] - deepest_position, normal);
         if (index != deepest && index != farthest && (widest == NONE || abs(area) > abs(widest_area)))
         {
             widest = index;
@@ -110,9 +152,7 @@ void reduce_contact_points(vec3 normal)
     const uint chosen[3] = uint[3](deepest, farthest, widest);
     for (uint index = 0U; index < 3U; ++index)
     {
-        result.positions[index] = candidate_positions[chosen[index]];
-        result.separations[index] = candidate_separations[chosen[index]];
-        result.features[index] = candidate_features[chosen[index]];
+        take_candidate(chosen[index], index);
     }
     result.count = 3U;
     const float side = widest_area >= 0.0 ? 1.0 : -1.0;
@@ -120,7 +160,7 @@ void reduce_contact_points(vec3 normal)
     float opposite_area = 0.0;
     for (uint index = 0U; index < candidate_count; ++index)
     {
-        const float area = dot(cross(base, candidate_positions[index] - deepest_position), normal);
+        const float area = spanned_area(base, candidate_positions[index] - deepest_position, normal);
         if (index != deepest && index != farthest && index != widest && -side * area > 0.0 && (opposite == NONE || -side * area > -side * opposite_area))
         {
             opposite = index;
@@ -129,9 +169,7 @@ void reduce_contact_points(vec3 normal)
     }
     if (opposite != NONE)
     {
-        result.positions[3] = candidate_positions[opposite];
-        result.separations[3] = candidate_separations[opposite];
-        result.features[3] = candidate_features[opposite];
+        take_candidate(opposite, 3U);
         result.count = 4U;
     }
 }
@@ -243,12 +281,15 @@ bool face_manifold(float first_margin, float second_margin, vec3 normal, float s
         candidate_positions[candidate_count] = (on_reference + on_incident) * 0.5;
         candidate_separations[candidate_count] = separation;
         candidate_features[candidate_count] = face_contact(face_features[reference], face_features[incident], clip_tags[polygon][index], first_is_reference);
+        candidate_sub_first[candidate_count] = NO_SUB_SHAPE;
+        candidate_sub_second[candidate_count] = NO_SUB_SHAPE;
         ++candidate_count;
     }
     if (candidate_count == 0U)
     {
         return false;
     }
+    result = empty_manifold();
     result.normal = first_is_reference ? reference_normal : -reference_normal;
     result.algorithm = algorithm;
     reduce_contact_points(result.normal);

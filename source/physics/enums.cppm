@@ -489,6 +489,10 @@ inline constexpr float DEFAULT_RESTITUTION_THRESHOLD = 1.0F;
 /// @brief Tolerance of geometric tests (parallel directions, degenerate segments, plane distances), in units.
 inline constexpr float GEOMETRIC_TOLERANCE = 1.0e-6F;
 
+/// @brief A triangle's supporting face along a direction within this cosine of its plane is its front: an edge-on contact
+///        (a box beside a floor's triangle), whose normal's tilt is rounding, always names the same face in its features.
+inline constexpr float TRIANGLE_FACE_TOLERANCE = 1.0e-3F;
+
 /// @brief Vertices a supporting face (a polygon used to build contact manifolds) holds at most.
 inline constexpr std::uint32_t MAXIMUM_FACE_VERTICES = 32;
 
@@ -590,6 +594,10 @@ inline constexpr float GPU_XPBD_BVH_INTERNAL_COST = 1.2F;
 
 /// @brief The surface area heuristic's cost of a leaf of a GPU backend's BVH, per unit of area (a box test of a primitive).
 inline constexpr float GPU_XPBD_BVH_LEAF_COST = 1.0F;
+
+/// @brief Compounds the GPU backend's narrow phase descends at most on each side of a pair: a compound holds compounds at most
+///        this deep (a compound of convex shapes is 1 deep).
+inline constexpr std::uint32_t GPU_XPBD_COMPOUND_DEPTH = 4;
 
 } // namespace gfx::physics
 

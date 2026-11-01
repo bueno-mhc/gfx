@@ -238,7 +238,9 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/shaders/bvh_wide.comp
             backends/gpu_xpbd/shaders/bvh_pairs.comp
             backends/gpu_xpbd/shaders/bvh_rays.comp
+            backends/gpu_xpbd/shaders/narrow_phase_pairs.comp
             backends/gpu_xpbd/shaders/narrow_phase_collide.comp
+            backends/gpu_xpbd/shaders/narrow_phase_merge.comp
             backends/gpu_xpbd/shaders/shape_bounds.comp
             backends/gpu_xpbd/shaders/contact_keys.comp
             backends/gpu_xpbd/shaders/contact_match.comp

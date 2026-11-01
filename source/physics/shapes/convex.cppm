@@ -377,11 +377,13 @@ struct TriangleShape
         return Aabb{.minimum = component_minimum(first, component_minimum(second, third)), .maximum = component_maximum(first, component_maximum(second, third))};
     }
 
-    /// @brief The triangle, its front (face 0) toward @p direction or its back (1).
+    /// @brief The triangle, its front (face 0) toward @p direction (or within TRIANGLE_FACE_TOLERANCE of its plane) or its
+    ///        back (1).
     [[nodiscard]] constexpr auto supporting_face(Vector3 direction) const noexcept -> SupportingFace
     {
         const Vector3 front = normal();
-        return dot(front, direction) >= 0.0F ? shape_detail::face_of({first, second, third}, front, 0) : shape_detail::face_of({first, third, second}, -front, 1);
+        return dot(front, direction) >= -TRIANGLE_FACE_TOLERANCE * length(direction) ? shape_detail::face_of({first, second, third}, front, 0)
+                                                                                      : shape_detail::face_of({first, third, second}, -front, 1);
     }
 };
 

@@ -1,0 +1,124 @@
+#version 460
+// The last pass of GpuNarrowPhase::collide(): each pair's sub-pair manifolds, in order, joined as physics::collide()
+// joins them — a manifold whose normal agrees with an earlier one's (merge cosine) merges into it (their points reduced to
+// four; the deeper names the sub-shapes), the others stay — then the deepest at most `maximum_manifolds` (a stable sort by
+// their deepest points). They are written from the pair's first slot on, the slots after them emptied, and the pair's
+// range (first slot, manifolds) recorded.
+#extension GL_GOOGLE_include_directive : require
+#include "manifold.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint manifolds_buffer;
+    uint manifolds_first;
+    uint counts_buffer;  // per pair: its sub-pairs
+    uint offsets_buffer; // per pair: its first sub-pair
+    uint ranges_buffer;  // per pair: its first manifold and how many (two words)
+    uint ranges_first;
+    uint maximum;
+    uint count_buffer;
+    uint count_word;
+    uint capacity;
+    float merge_cosine;
+    uint maximum_manifolds;
+} push;
+
+float slot_deepest(uint slot)
+{
+    uint unused_first;
+    uint unused_second;
+    return deepest_separation(load_manifold(push.manifolds_buffer, slot, unused_first, unused_second));
+}
+
+void main()
+{
+    const uint count = resolve_count(push.maximum, push.count_buffer, push.count_word);
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= count)
+    {
+        return;
+    }
+    const uint offset = gpu_words[push.offsets_buffer].words[index];
+    const uint available = offset < push.capacity ? min(gpu_words[push.counts_buffer].words[index], push.capacity - offset) : 0U;
+    const uint base = push.manifolds_first + offset;
+
+    // Merge in order: into the first earlier manifold whose normal agrees, else kept after the others.
+    uint merged = 0U;
+    for (uint sub_pair = 0U; sub_pair < available; ++sub_pair)
+    {
+        uint first_instance;
+        uint second_instance;
+        const Manifold manifold = load_manifold(push.manifolds_buffer, base + sub_pair, first_instance, second_instance);
+        if (manifold.count == 0U)
+        {
+            continue;
+        }
+        uint target = INVALID_INDEX;
+        for (uint other = 0U; other < merged && target == INVALID_INDEX; ++other)
+        {
+            // The cosine rounded as the CPU rounds it (precise: no fused multiply-adds).
+            const vec3 earlier = gpu_vectors[push.manifolds_buffer].values[MANIFOLD_VECTORS * (base + other) + 2U].xyz;
+            precise const float cosine = earlier.x * manifold.normal.x + earlier.y * manifold.normal.y + earlier.z * manifold.normal.z;
+            if (cosine >= push.merge_cosine)
+            {
+                target = other;
+            }
+        }
+        if (target == INVALID_INDEX)
+        {
+            if (merged != sub_pair)
+            {
+                store_manifold(push.manifolds_buffer, base + merged, first_instance, second_instance, manifold);
+            }
+            ++merged;
+            continue;
+        }
+        Manifold joined = load_manifold(push.manifolds_buffer, base + target, first_instance, second_instance);
+        candidate_count = 0U;
+        add_candidates(joined);
+        add_candidates(manifold);
+        if (deepest_separation(manifold) < deepest_separation(joined))
+        {
+            joined.sub_shape_first = manifold.sub_shape_first;
+            joined.sub_shape_second = manifold.sub_shape_second;
+        }
+        result = joined;
+        reduce_contact_points(joined.normal);
+        store_manifold(push.manifolds_buffer, base + target, first_instance, second_instance, result);
+    }
+
+    // The deepest at most maximum_manifolds: a stable insertion sort by deepest point, then the rest emptied.
+    if (merged > push.maximum_manifolds)
+    {
+        for (uint position = 1U; position < merged; ++position)
+        {
+            uint first_instance;
+            uint second_instance;
+            const Manifold moving = load_manifold(push.manifolds_buffer, base + position, first_instance, second_instance);
+            const float depth = deepest_separation(moving);
+            uint place = position;
+            while (place > 0U && slot_deepest(base + place - 1U) > depth)
+            {
+                uint unused_first;
+                uint unused_second;
+                store_manifold(push.manifolds_buffer, base + place, first_instance, second_instance,
+                               load_manifold(push.manifolds_buffer, base + place - 1U, unused_first, unused_second));
+                --place;
+            }
+            if (place != position)
+            {
+                store_manifold(push.manifolds_buffer, base + place, first_instance, second_instance, moving);
+            }
+        }
+    }
+    const uint kept = min(merged, push.maximum_manifolds);
+    for (uint slot = kept; slot < available; ++slot)
+    {
+        uint first_instance;
+        uint second_instance;
+        load_manifold(push.manifolds_buffer, base + slot, first_instance, second_instance);
+        store_manifold(push.manifolds_buffer, base + slot, first_instance, second_instance, empty_manifold());
+    }
+    gpu_words[push.ranges_buffer].words[2U * (push.ranges_first + index)] = offset;
+    gpu_words[push.ranges_buffer].words[2U * (push.ranges_first + index) + 1U] = kept;
+}
