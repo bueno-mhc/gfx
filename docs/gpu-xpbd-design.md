@@ -4,8 +4,8 @@ Status: **answers given 2026-10-31: every question of §D as recommended.** **G0
 as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; committed 3e666ee), **G2 accepted** with its 5
 (§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
 with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323), **G6
-accepted** with its 7 (§B "G6 as built"; committed cad9b8e). **G7 implemented** (§B "G7 as built", 6 deviations), awaiting
-validation.
+accepted** with its 7 (§B "G6 as built"; committed cad9b8e), **G7 accepted** with its 6 (§B "G7 as built"; committed
+31de7c4). **G8 implemented** (§B "G8 as built", 7 deviations), awaiting validation.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -1091,6 +1091,138 @@ Jacobi 7.5 and 74 ms** (about 28 000 contact points, 726 MiB of device memory). 
 4.5 ms, Jacobi 1.7 / 2.2 ms); G5's pyramid takes 3.9–4.8 / 1.4–1.8 ms on the RTX 5060 (G6: 3.6 / 1.3 — the pairs' reach and
 the touching flags), and 5.1–11.2 / 2.3–7.5 ms on the Intel GPU from one run to the next (its clocks: G6's 4.2 / 2.3 sit at
 the low end).
+
+### G8 as built (2026-11-02)
+
+**Contacts.** After the substeps, `contacts_report` flags each manifold slot that **touches** — the solver pushed its bodies
+apart in a substep (`CONTACT_PUSHED`, set by `contact_solve` when a point's normal multiplier is positive) or its deepest
+point started within `LINEAR_SLOP` (the reference backend's rule: a hit that bounces off within one step is reported) —
+between two colliders (a particle's sphere is no collider of the interface: its contacts are not reported, though their
+points count in the statistics), compacts them and writes a `GpuContactReport` per touching slot (192 B: the colliders'
+slots, the fastest approach of its points at the step's start — `contact_prepare` keeps it —, then the manifold as the
+narrow phase wrote it). The readback copies them; more than the reports hold → their capacity grows and the report pass runs
+again in a second submission (the step's contacts are still on the GPU: no replay). The CPU (`gpu_events.cpp`) turns them
+into the touching pairs, each from the smaller collider handle to the larger (the manifold flipped when the narrow phase had
+them the other way), sorted, and their `ContactInfo`; the framework's `contacts_of()` reads them. **BEGIN** for a pair that
+did not touch after the last step, **HIT** with it when its approach reached `hit_event_speed`, **END** for a pair of the last
+step not reported now — unless its colliders still exist and its bodies all rest (static, or dynamic and asleep): the GPU no
+longer looks at such pairs (G5), so they and their contacts are **carried over**, and a sleeping stack keeps its contacts and
+makes no END. Colliders whose contact events are off still touch (their contacts are there) but make no event. A destroyed
+collider's touches end at the next step and the dynamic bodies it touched wake (what rested on it may fall).
+
+**Triggers.** `create_trigger()` is accepted (shapes of every kind; a compound too deep for the narrow phase is refused when
+recorded, as a collider's is). Triggers are `GpuCollider` entries with `GPU_COLLIDER_TRIGGER` after the particles' spheres;
+their instances follow the static colliders'. At the end of a step, when the world has triggers: the colliders' final poses,
+their boxes (no speculative growth), the **moving tree rebuilt** from them, a **trigger tree**, the pairs of the trigger tree
+with the moving and with the static tree, `triggers_filter` (mode 0: the collider live, not a particle's, not on the
+trigger's body, both filters agree — `should_collide()`, moved into `solver.glsl`; mode 1: the kept pairs' instances), the
+narrow phase with **no speculative distance**, then mode 2: a pair overlaps when one of its manifolds has a point, appended to
+the results. The CPU sorts the overlaps by trigger and collider and makes **EXIT**, **ENTER** and **STAY** in each trigger's
+colliders' order, trigger after trigger in slot order (the reference backend's rule, so touching counts: a zone 5 cm above
+the floor does not hold it, one touching it does). A destroyed collider leaves its triggers at once (EXIT). Overflowing
+trigger capacities replay the step like the solver's.
+
+**Sleep events** come from G5 (`FELL_ASLEEP` and `WOKE_UP` from the bodies' flags read back; the rigid tests count them).
+
+**Timestamps.** `StepTimer` (in `:resources`) writes a timestamp between phases when the queue supports them: each mark ends
+the phase begun at the mark before (BROAD_PHASE: poses, boxes, trees, pairs, filter; NARROW_PHASE: manifolds, the contact
+cache; SOLVER: preparation, islands, coloring, the rigid parts of each iteration, joint forces, sleep; SOFT_BODIES: the soft
+colors of each iteration and the particles' passes, marked in turn with SOLVER inside the substeps; EVENTS: reports,
+triggers, the readback copies), up to `GPU_XPBD_TIMESTAMPS` (256) per step (later marks time with the phase before), ticks
+masked by the queue family's valid bits. After the step each phase's GPU time goes to `StepStatistics::phase_seconds`; the
+CPU's reading of the events is added to EVENTS; EDITS stays the framework's (the CPU writing the edits). Without timestamps,
+SOLVER is the GPU step's wall time.
+
+**Queries.** Every `QueryEngine::BACKEND` query runs on the GPU (`gpu_queries.cpp`, `query.comp`): one at a time (a mutex), in
+a command pool and buffer of its own, submitted and waited for on the calling thread. The moving tree must hold the
+published poses: the step leaves it so when it built the trigger tree, otherwise the first query after a step rebuilds it
+(`record_query_tree`). Mode 0 (one invocation) walks the moving and static trees — for a closest point first a **bound**
+walk (the smallest distance from the point to any box's farthest corner, which some collider lies within) — and collects
+the colliders whose boxes meet the query's region (the ray's box clipped to its maximum, the swept shape, the overlapping
+shape's or the box) and pass its filter, and writes the region as a box record and instance. Then the narrow phase's **mid
+phase alone** (`GpuNarrowPhase::pieces()`, new: the pairs' sub-pairs — convex shapes, compound children, triangles under the
+region — without manifolds); mode 1 tests each piece; mode 2 keeps each collider's best piece. The CPU reads them back and
+picks the nearest or sorts, as the abstraction does (ties to the smaller handle, `keep_smallest`). A piece's answer is the
+CPU query's: rays on spheres, plain boxes (new, below) and triangles exact; every other answer — rays on the other convex
+kinds, casts, overlaps, closest points — by the same conservative advancement from **one call site of `convex_distance()`**
+in one loop (see Found). A cast or overlapping shape is written into a reserved record of the shape table
+(`GpuNarrowPhase::write_primitive()`: sphere, capsule, cylinder, cone, box), or named when it is a shape of the table
+(`m_shape_indices`); a hull not in the table, more than `GPU_XPBD_QUERY_PAIRS` (4096) colliders or `GPU_XPBD_QUERY_PIECES`
+(16384) pieces, a walk past its stack, or a query before the first step → the backend returns nothing and the abstraction
+answers (exact, as Box3D's backend does for its proxies). A GPU failure (a lost device) fails the query, `UNSUPPORTED`, and the
+next step reports the error (§A13).
+
+**Deviations (for validation).**
+1. **Events are made on the CPU** from the reported contacts and overlaps (sorted, compared with last step's lists), not by an
+   `events` pass (§A15 named one): the GPU compacts what touches; the comparison is a merge of two sorted lists.
+2. **Resting pairs are carried over by the CPU**: the GPU skips pairs whose bodies all rest (G5), so their contacts are those
+   of the step before they rested — what `contacts_of()` shows for a sleeping stack.
+3. **Triggers go through the narrow phase** (a manifold with a point = overlapping, no speculative distance), with a trigger
+   tree and the moving tree rebuilt from the final poses at the end of each step that has triggers (§A6/§A10 planned trigger
+   pairs among the step's pairs: those use the start's poses grown by the motion).
+4. **Queries one at a time**, with one set of buffers (§A12 planned slots taken atomically): concurrent queries wait for each
+   other (they are short: see Measured).
+5. **What the GPU cannot hold, the abstraction answers** (more than 4096 colliders or 16384 pieces, a hull not in the table,
+   before the first step), as the Box3D backend does; a GPU failure fails the query (§A13).
+6. **`broad_phase().structure_nodes()` is refused** (as Box3D's): the trees are not read back between steps (§A9); planned with
+   the sandbox's GPU backend in G9.
+7. **CPU queries changed** (they are the reference the GPU answers are compared with; Found): flat meshes and compounds'
+   rays, exact rays on plain boxes.
+
+**Found.**
+- **CPU rays missed flat meshes** (`mesh_ray_cast`, `compound_ray_cast`): the ray was clipped to the shape's box, which for a
+  flat mesh has no thickness, so the segment ended exactly on its plane and a triangle's own distance an ulp further was
+  rejected — rays onto a level roof or a flat ground mesh missed it now and then (the GPU hit it; the CPU hit the floor 7 m
+  further). The height field already widened its box by `GEOMETRIC_TOLERANCE`; now the mesh's and the compound's are widened
+  too, and `StaticBvh::query_segment()` widens each node's and item's box (a flat triangle's box met where the segment ends).
+  Test `ShapeQueryTest.FlatMeshesAreHitWhereverRaysCrossThem` (a square of two triangles, one-sided, two-sided, a compound's
+  child, level and tilted: 2000 rays; it fails from its second ray with the old code — checked).
+- **Rays on plain boxes are exact** (`box_ray_cast()`: the slabs in the box's frame, the entered face's normal; from inside a
+  hit at 0 against the ray), on the CPU and the GPU (`box_ray()`): conservative advancement's normal is GJK's at the touching
+  distance, whose error grows with the shape — 4–5° on the scene's 100 m floor box, one way on the CPU, another on the GPU, so
+  the two never agreed within 0.99. Rounded boxes keep conservative advancement. Test
+  `ShapeQueryTest.BoxRayCastsHitFacesExactly` (a 100 m floor and a small turned box: the face normal within 1e-5).
+- **A query kernel with several `convex_distance()` call sites hung the RTX 5060's driver** (the device lost at the 44th
+  closest-point query of a run, depending on the build): GLSL inlines every call, and GJK + EPA inlined for the ray, the cast,
+  the probe, the overlap and the closest point made a kernel the driver once never finished. `test_piece()` now has one call
+  in one loop (each query kind's state — travel, limit, tolerance, the probe — around it); sphere and triangle rays stay exact.
+  (G4 found the same for the collide kernel's speed.)
+- A query that caught the lost device and handed every later query to the abstraction let the agreement tests pass
+  unchanged: the ray and shape query tests now also require some answers to differ from the CPU's in their last bits (the GPU
+  answered), and a GPU failure fails the query.
+- GLSL reserved words met: `filter`, `cast`.
+
+**Tests** (`gpu_xpbd_event_test.cpp` in `gfx_physics_gpu_xpbd_tests`, each on both GPUs in both solver modes with the
+validation layers): a ball landing begins (one BEGIN, a HIT at 7 m/s), its contact from the ball's side points down, its
+collider destroyed ends the touch; a sleeping stack keeps its contacts (4 points per pair) without END and touches again once
+pushed awake; a bouncy ball stopped and returned by a wall within one step reports BEGIN, HIT and END; a collider without
+contact events touches silently; the same scene on the reference backend and on the GPU begins the same pairs within two
+steps and touches the same pairs at the end; a ball through a zone enters once, stays, exits once, and leaves a zone at once
+when its collider goes; a trigger on a kinematic body sweeps a row of boxes in order, skipping its own body's collider and a
+filtered one; zones of several shapes crossed by kinematic bodies give the reference backend's trigger events at the same
+steps, in the same order; with timestamps every phase takes some GPU time and they sum to less than the step; 400 random rays
+(`ray_cast` and `ray_cast_all`) and 200 random casts, overlaps (shapes and boxes) and closest points on a scene of every shape
+kind (turned convex shapes, a nested compound, a two-sided ramp, a one-sided roof, a height field, resting bodies) give the
+abstraction's answers; a box only one layer sees hides from a query that masks that layer. `GpuXpbdTest` refuses a trigger
+whose compound is too deep (renamed `WhatTheGpuCannotRunIsRefused`). `GpuXpbdEventMeasurementTest` (both GPUs, both modes).
+
+**Enumerations and constants.** `GPU_XPBD_TIMESTAMPS` 256, `GPU_XPBD_QUERY_PAIRS` 4096, `GPU_XPBD_QUERY_PIECES` 16384;
+specialization constant 67 (`LINEAR_SLOP`). `GpuSolverParameters` 304 bytes (reports: capacity, flags, indices, array;
+triggers: count, four capacities, seven arrays), `GpuSolverCounts` 76 bytes (+ reported, touching points, five trigger
+counts), `GpuContactReport` 192 bytes, `GpuTriggerOverlap` 8 bytes, `GpuQuery` 208 bytes, `GpuQueryResult` 48 bytes; collider
+flag `GPU_COLLIDER_TRIGGER`; contact flag `CONTACT_PUSHED`. Shaders `contacts_report`, `triggers_filter`, `query` (new);
+`contact_prepare` (the approach speed), `contact_solve` (pushed), `pairs_filter`, `collider_poses` (triggers),
+`solver.glsl` (`should_collide()`, the counts' words 12–18).
+
+**Measured** (`GpuXpbdEventMeasurementTest`: 400 balls and boxes dropped through 100 zones onto a floor; Release without the
+validation layers): **a step 1.93 ms (graph coloring) / 1.37 ms (Jacobi) on the RTX 5060, 2.12 / 3.36 ms on the Intel GPU,
+its events phase 0.30 / 0.49–0.54 ms** (the reports, the trigger trees and narrow phase, the CPU's events; about 1000
+contact points, most of the pile resting). **A query (a ray onto the pile, a closest point beside it) takes 0.14 ms on the
+RTX 5060 and 0.33–0.50 ms on the Intel GPU, against 0.001 ms for the abstraction's CPU query** on the same scene: one
+submission and its wait per query dominate. A synchronous `BACKEND` query pays off only when the CPU's would test many
+pieces; many queries at once need the batch API §D7 left for later (one submission for many rays). The other phases'
+measurements held: G5's pyramid 4.1 ms (coloring) on the RTX 5060, G6's chains 2.5 / 1.4 ms, G7's cloth 15.1 / 7.7 ms (Intel
+GPU 99 / 62 ms, which varies from run to run with its clocks).
 
 ## C. The API as proposed (for validation, not final code)
 

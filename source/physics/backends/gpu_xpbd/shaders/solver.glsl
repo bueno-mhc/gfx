@@ -91,6 +91,22 @@ struct SolverParameters
     float world_speculative_distance; // the world's own
     uint boxes;           // the instances' boxes (grown by speculative_distance)
     uint pair_capacity;   // kept pairs at most
+    uint report_capacity; // contact reports at most
+    uint report_flags;    // a word per manifold slot: reported or not
+    uint report_indices;  // the reported slots, compacted
+    uint reports;         // their reports (GpuContactReport)
+    uint trigger_count;   // triggers (their instances after the moving and static colliders')
+    uint trigger_within_capacity;   // the trigger tree's pairs with the moving tree at most
+    uint trigger_between_capacity;  // with the static tree at most
+    uint trigger_pair_capacity;     // kept (and overlapping) at most
+    uint trigger_manifold_capacity; // their manifold slots at most
+    uint trigger_raw_pairs;
+    uint trigger_pair_flags;
+    uint trigger_pair_indices;
+    uint trigger_pairs;
+    uint trigger_ranges;
+    uint trigger_manifolds;
+    uint trigger_results;
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -123,6 +139,13 @@ const uint COUNT_CONTACT_POINTS = 8U;
 const uint COUNT_SLOTS = 9U;
 const uint COUNT_GRAPH_ENTRIES = 10U;
 const uint COUNT_CONSTRAINTS = 11U;
+const uint COUNT_REPORTED = 12U;
+const uint COUNT_TOUCHING_POINTS = 13U;
+const uint COUNT_TRIGGER_MOVING_PAIRS = 14U;
+const uint COUNT_TRIGGER_STATIC_PAIRS = 15U;
+const uint COUNT_TRIGGER_CANDIDATES = 16U;
+const uint COUNT_TRIGGER_SLOTS = 17U;
+const uint COUNT_TRIGGER_OVERLAPS = 18U;
 
 uint count_word(uint word)
 {
@@ -177,6 +200,7 @@ uint hash_words(uvec4 words)
 const uint COLLIDER_VECTORS = 5U;
 const uint COLLIDER_LIVE = 1U;
 const uint COLLIDER_PARTICLE = 2U;
+const uint COLLIDER_TRIGGER = 4U;
 
 struct Collider
 {
@@ -189,6 +213,19 @@ struct Collider
     uvec4 filter_words; // category low, high; mask low, high
     vec4 material;      // static friction, dynamic friction, rolling resistance, restitution
 };
+
+// Whether two colliders' filters let them meet (CollisionFilter's should_collide(): a common non-zero group decides
+// alone, else each one's category in the other's mask).
+bool should_collide(Collider first, Collider second)
+{
+    if (first.group == second.group && first.group != 0)
+    {
+        return first.group > 0;
+    }
+    const bool first_in_second = ((first.filter_words.x & second.filter_words.z) | (first.filter_words.y & second.filter_words.w)) != 0U;
+    const bool second_in_first = ((second.filter_words.x & first.filter_words.z) | (second.filter_words.y & first.filter_words.w)) != 0U;
+    return first_in_second && second_in_first;
+}
 
 Collider load_collider(uint slot)
 {
@@ -208,10 +245,13 @@ uint instance_collider(uint instance)
 // restitution); its material (static and dynamic friction, rolling resistance; w: its coloring priority); per point, the
 // anchors on the first and second bodies (relative to their centers of mass, body frames; w of the first: the separation
 // at the step's start) and the friction anchors (w of the first: 1 when static friction gave way). Flags: active (the
-// manifold has points), touching (a point touches, or will within the step: counted by the Jacobi gather's mass splitting).
+// manifold has points), touching (a point touches, or will within the step: counted by the Jacobi gather's mass splitting),
+// pushed (the solver pushed its bodies apart in a substep: reported). The second anchor's w: the point's approach speed at
+// the step's start.
 const uint CONTACT_VECTORS = 19U;
 const uint CONTACT_ACTIVE = 1U;
 const uint CONTACT_TOUCHING = 2U;
+const uint CONTACT_PUSHED = 4U;
 
 uint contact_base(uint slot)
 {

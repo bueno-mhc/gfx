@@ -719,6 +719,121 @@ GpuNarrowPhase::collide(ComputeRecorder& recorder,
 }
 
 void
+GpuNarrowPhase::pieces(ComputeRecorder& recorder,
+                       GpuSpan instances,
+                       GpuSpan pairs,
+                       const GpuCount& count,
+                       GpuSpan total,
+                       std::uint32_t capacity,
+                       float expansion)
+{
+    // Valid input, as collide() checks it; the mid phase counted, scanned, written.
+    const State& state = *m_state;
+    state.require_uploaded("pieces");
+    if (!std::isfinite(expansion) || !(expansion >= 0.0F))
+    {
+        refuse("pieces", std::format("invalid expansion {}", expansion), "give a finite expansion of at least 0");
+    }
+    if (count.maximum > state.maximum_pairs || capacity > state.maximum_manifolds)
+    {
+        refuse("pieces",
+               std::format("{} pairs into {} pieces, above the {} pairs and {} slots reserved", count.maximum, capacity, state.maximum_pairs,
+                           state.maximum_manifolds),
+               "call GpuNarrowPhase::reserve() with the largest counts before recording");
+    }
+    const std::uint32_t pair_workgroups = workgroups(std::max(count.maximum, 1U));
+    PairsPush mid_phase{.tables = state.table(),
+                        .instances_buffer = instances.buffer,
+                        .instances_first = instances.first,
+                        .pairs_buffer = pairs.buffer,
+                        .pairs_first = pairs.first,
+                        .maximum = count.maximum,
+                        .count_buffer = count.word.buffer,
+                        .count_word = count.word.first,
+                        .counts_buffer = state.pair_counts->bindless_index().value(),
+                        .offsets_buffer = state.pair_offsets->bindless_index().value(),
+                        .sub_pairs_buffer = state.sub_pairs->bindless_index().value(),
+                        .capacity = capacity,
+                        .writing = 0,
+                        .speculative_distance = expansion};
+    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    state.primitives.exclusive_scan(recorder, span_of(*state.pair_counts), span_of(*state.pair_offsets), count, total);
+    mid_phase.writing = 1;
+    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+}
+
+auto
+GpuNarrowPhase::piece_spans() const noexcept -> GpuPieceSpans
+{
+    const State& state = *m_state;
+    return {.sub_pairs = span_of(*state.sub_pairs), .counts = span_of(*state.pair_counts), .offsets = span_of(*state.pair_offsets)};
+}
+
+auto
+GpuNarrowPhase::write_primitive(ComputeRecorder& recorder,
+                                std::uint32_t index,
+                                const Shape& shape,
+                                const Buffer& staging,
+                                std::span<std::byte> mapped,
+                                std::uint64_t offset) -> bool
+{
+    // The record as add() makes it for these shapes (sizes, margin, box), copied over the one at index.
+    const State& state = *m_state;
+    state.require_uploaded("write_primitive");
+    const Aabb local = shape.bounds();
+    GpuShapeRecord record{.kind = std::to_underlying(shape.kind()), .bounds_minimum = vector_of(local.minimum), .bounds_maximum = vector_of(local.maximum)};
+    if (const SphereShape* sphere = shape.get_if<SphereShape>())
+    {
+        record.size = {sphere->radius, 0.0F, 0.0F};
+        record.margin = sphere->radius;
+    }
+    else if (const CapsuleShape* capsule = shape.get_if<CapsuleShape>())
+    {
+        record.size = {capsule->half_height, capsule->radius, 0.0F};
+        record.margin = capsule->radius;
+    }
+    else if (const CylinderShape* cylinder = shape.get_if<CylinderShape>())
+    {
+        record.size = {cylinder->half_height, cylinder->radius, 0.0F};
+    }
+    else if (const ConeShape* cone = shape.get_if<ConeShape>())
+    {
+        record.size = {cone->half_height, cone->radius, 0.0F};
+    }
+    else if (const BoxShape* box = shape.get_if<BoxShape>())
+    {
+        record.size = {box->half_extents.x, box->half_extents.y, box->half_extents.z};
+        record.margin = box->radius;
+    }
+    else
+    {
+        return false;
+    }
+    std::memcpy(mapped.data() + offset, &record, sizeof(record));
+    const std::array regions{BufferCopyRegion{.source_offset = offset, .destination_offset = std::uint64_t{index} * sizeof(GpuShapeRecord), .size = sizeof(GpuShapeRecord)}};
+    recorder.copy_buffer(staging.handle(), state.arrays[0]->handle(), regions);
+    return true;
+}
+
+auto
+GpuNarrowPhase::record_bytes() noexcept -> std::uint32_t
+{
+    return sizeof(GpuShapeRecord);
+}
+
+auto
+GpuNarrowPhase::table_index() const noexcept -> std::uint32_t
+{
+    return m_state->table();
+}
+
+auto
+GpuNarrowPhase::uploaded() const noexcept -> bool
+{
+    return !m_state->pending_upload;
+}
+
+void
 GpuNarrowPhase::match(ComputeRecorder& recorder,
                       GpuSpan previous,
                       const GpuCount& previous_count,

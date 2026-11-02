@@ -1,20 +1,22 @@
 #version 460
 // The instances of a step (GpuInstance: what the narrow phase and the boxes read): each collider of the lists (the moving
-// colliders, the particles' spheres among them, then the static ones) at its node's pose — the body's center of mass and
-// orientation (a particle's position, unturned), the collider's pose relative to the center — with its shape.
+// colliders, the particles' spheres among them, then the static ones, then the triggers' shapes) at its node's pose — the
+// body's center of mass and orientation (a particle's position, unturned), the collider's pose relative to the center —
+// with its shape; a trigger of no body where it is in the world.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
 void main()
 {
     const uint instance = gl_GlobalInvocationID.x;
-    if (instance >= SOLVER.moving_count + SOLVER.static_count)
+    if (instance >= SOLVER.moving_count + SOLVER.static_count + SOLVER.trigger_count)
     {
         return;
     }
     const Collider collider = load_collider(instance_collider(instance));
-    const vec3 center = node_center(collider.body);
-    const vec4 orientation = node_orientation(collider.body);
+    const bool anchored = collider.body != NO_BODY;
+    const vec3 center = anchored ? node_center(collider.body) : vec3(0.0);
+    const vec4 orientation = anchored ? node_orientation(collider.body) : vec4(0.0, 0.0, 0.0, 1.0);
     const vec3 position = center + rotate_by(orientation, collider.position);
     gpu_word_vectors[SOLVER.instances].values[2U * instance] = uvec4(floatBitsToUint(position), collider.shape);
     gpu_vectors[SOLVER.instances].values[2U * instance + 1U] = quaternion_multiply(orientation, collider.orientation);

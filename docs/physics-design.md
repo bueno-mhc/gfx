@@ -1218,6 +1218,26 @@ proxies; nodes have boxes; emptied, none lists a proxy), the run-time structures
 backend's octree lists its four colliders after the component test's stack, Box3D's broad phase refuses, and the
 interface test calls the throwing default.
 
+### Follow-up after PH8: rays on flat meshes and boxes (2026-11-02, found by the GPU backend's G8)
+
+The GPU backend's queries are checked against the abstraction's (`ray_cast_shape()` and the others), which showed two
+faults of the CPU's rays (gpu-xpbd-design.md §B "G8 as built", Found):
+
+- **Rays missed flat meshes now and then.** `mesh_ray_cast()` and `compound_ray_cast()` clip the ray to the shape's box
+  first; a flat mesh's box has no thickness, so the clipped segment ended exactly on the mesh's plane, and a triangle whose
+  own distance came out an ulp further was rejected (a level roof, a flat ground mesh: the ray went on to whatever lay
+  behind). The height field's box was already widened by `GEOMETRIC_TOLERANCE`; the mesh's and the compound's are now, and
+  `StaticBvh::query_segment()` widens each box it tests by the same tolerance.
+- **Rays on boxes had GJK's normal.** Conservative advancement takes the normal of GJK's closest points at the touching
+  distance, whose error grows with the shape (4–5° on a 100 m floor box). Plain boxes (`radius` 0) now take an exact path,
+  as spheres do: the slabs in the box's frame, the normal of the face the ray enters by, a hit at 0 against the ray from
+  inside. Rounded boxes keep conservative advancement.
+
+Tests (+ 2): `ShapeQueryTest.FlatMeshesAreHitWhereverRaysCrossThem` (a square of two triangles as a one-sided mesh, a
+two-sided mesh and a compound's child, level and tilted, 2000 rays from above and below; it fails from its second ray with
+the old code — checked) and `ShapeQueryTest.BoxRayCastsHitFacesExactly` (a 100 m floor and a small turned box: 600 rays
+onto every face, the face's normal within 1e-5, a ray from inside, a ray beside).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

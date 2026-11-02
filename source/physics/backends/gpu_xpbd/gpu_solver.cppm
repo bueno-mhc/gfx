@@ -95,8 +95,24 @@ struct GpuSolverParameters
     float world_speculative_distance = 0.0F; ///< The world's own (CollisionSettings): a pair's reach adds it.
     std::uint32_t boxes = 0;              ///< The instances' boxes (grown by speculative_distance).
     std::uint32_t pair_capacity = 0;      ///< Kept pairs (the narrow phase's) at most.
+    std::uint32_t report_capacity = 0;    ///< Contact reports at most.
+    std::uint32_t report_flags = 0;       ///< Bindless indices: a word per manifold slot (reported or not),
+    std::uint32_t report_indices = 0;     ///< the reported slots, compacted,
+    std::uint32_t reports = 0;            ///< their reports (GpuContactReport).
+    std::uint32_t trigger_count = 0;      ///< Triggers (their instances after the moving and static colliders').
+    std::uint32_t trigger_within_capacity = 0;  ///< The trigger tree's pairs with the moving tree at most,
+    std::uint32_t trigger_between_capacity = 0; ///< with the static tree at most,
+    std::uint32_t trigger_pair_capacity = 0;    ///< kept (and overlapping) at most,
+    std::uint32_t trigger_manifold_capacity = 0; ///< their manifold slots at most.
+    std::uint32_t trigger_raw_pairs = 0;  ///< Bindless indices: the trigger tree's pairs (with the moving tree, then the static),
+    std::uint32_t trigger_pair_flags = 0; ///< a word per pair: kept or not,
+    std::uint32_t trigger_pair_indices = 0; ///< the kept pairs, compacted,
+    std::uint32_t trigger_pairs = 0;      ///< their instances (GpuPair),
+    std::uint32_t trigger_ranges = 0;     ///< their manifolds' ranges,
+    std::uint32_t trigger_manifolds = 0;  ///< their manifolds,
+    std::uint32_t trigger_results = 0;    ///< the overlaps (GpuTriggerOverlap).
 };
-static_assert(sizeof(GpuSolverParameters) == 240 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
+static_assert(sizeof(GpuSolverParameters) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
               offsetof(GpuSolverParameters, corrections) == 184 && offsetof(GpuSolverParameters, joint_count) == 188 &&
               offsetof(GpuSolverParameters, joined_pairs) == 216 && offsetof(GpuSolverParameters, overflow_counts) == 224 &&
               offsetof(GpuSolverParameters, boxes) == 232);
@@ -116,8 +132,34 @@ struct GpuSolverCounts
     std::uint32_t slots = 0;                ///< Manifold slots of the step (at most the capacity).
     std::uint32_t graph_entries = 0;        ///< The graph's entries (two per constraint).
     std::uint32_t constraints = 0;          ///< Constraints of the step: the joint slots and the manifold slots.
+    std::uint32_t reported = 0;             ///< Touching contacts between colliders (reported; may exceed the capacity).
+    std::uint32_t touching_points = 0;      ///< Points of the touching contacts (particles' too).
+    std::uint32_t trigger_moving_pairs = 0; ///< Pairs of the trigger tree and the moving tree.
+    std::uint32_t trigger_static_pairs = 0; ///< Pairs of the trigger tree and the static tree.
+    std::uint32_t trigger_candidates = 0;   ///< Of them, kept.
+    std::uint32_t trigger_slots = 0;        ///< Manifold slots the kept pairs needed.
+    std::uint32_t trigger_overlaps = 0;     ///< Pairs overlapping.
 };
-static_assert(sizeof(GpuSolverCounts) == 48);
+static_assert(sizeof(GpuSolverCounts) == 76);
+
+/// A trigger overlapping a collider after a step (triggers_filter.comp).
+struct GpuTriggerOverlap
+{
+    std::uint32_t trigger = 0;  ///< The trigger's instance among the triggers (the order of set_colliders()' list).
+    std::uint32_t collider = 0; ///< The collider's slot.
+};
+static_assert(sizeof(GpuTriggerOverlap) == 8);
+
+/// A contact a step reports (contacts_report.comp): touching, between two colliders.
+struct GpuContactReport
+{
+    std::uint32_t first_collider = 0;  ///< The manifold's first collider (slot).
+    std::uint32_t second_collider = 0; ///< Its second collider (slot).
+    std::uint32_t reserved = 0;        ///< (Alignment.)
+    float approach_speed = 0.0F;       ///< The fastest approach of its points at the step's start.
+    GpuManifold manifold{};            ///< As the narrow phase wrote it (from the first collider to the second).
+};
+static_assert(sizeof(GpuContactReport) == 192);
 
 /// A collider on the GPU (Collider in solver.glsl).
 struct GpuCollider
@@ -136,6 +178,8 @@ static_assert(sizeof(GpuCollider) == 80 && offsetof(GpuCollider, body) == 32 && 
 /// The bits of GpuCollider::flags (COLLIDER_* in solver.glsl): a live collider, a particle's sphere.
 inline constexpr std::uint32_t GPU_COLLIDER_LIVE = 1;
 inline constexpr std::uint32_t GPU_COLLIDER_PARTICLE = 2;
+/// A trigger's shape (in the colliders' array after the colliders and particles, never in a pair of contacts).
+inline constexpr std::uint32_t GPU_COLLIDER_TRIGGER = 4;
 
 /// The size of a contact constraint (GpuContact in solver.glsl: CONTACT_VECTORS vectors).
 inline constexpr std::uint32_t GPU_CONTACT_BYTES = 19 * sizeof(GpuVector);
@@ -185,6 +229,25 @@ struct ContactStep
     CollisionSettings collision{};       ///< The world's collision settings (the speculative distance replaced).
     bool lists_changed = false;          ///< The collider lists changed since the last completed step (instances name
                                          ///< other colliders: no contact keeps its previous anchors).
+    StepTimer* timer = nullptr;          ///< Marks the broad phase, the narrow phase, the solver's set-up (when timed).
+};
+
+/// What a query of the GPU reads of the solver's buffers (between steps).
+struct GpuQueryLayout
+{
+    std::uint32_t tables = 0;        ///< The narrow phase's shape table.
+    std::uint32_t colliders = 0;     ///< Bindless indices: the colliders (GpuCollider),
+    std::uint32_t collider_list = 0; ///< the instances' colliders,
+    std::uint32_t instances = 0;     ///< the instances,
+    std::uint32_t boxes = 0;         ///< their boxes,
+    std::uint32_t moving_header = 0; ///< the moving tree's header and nodes,
+    std::uint32_t moving_nodes = 0;
+    std::uint32_t static_header = 0; ///< the static tree's.
+    std::uint32_t static_nodes = 0;
+    std::uint32_t moving_count = 0;  ///< Moving colliders' instances (the first).
+    std::uint32_t static_count = 0;  ///< Static colliders' instances (after them).
+    std::uint32_t region_instance = 0; ///< The instance a query's region takes (after the triggers').
+    std::uint32_t trees = 0;         ///< Bit 0: the moving tree is built; bit 1: the static tree.
 };
 
 // ===================================================================================================== joints
@@ -231,11 +294,12 @@ public:
     /// The narrow phase (its shape table).
     [[nodiscard]] auto narrow_phase() noexcept -> GpuNarrowPhase&;
 
-    /// Sets the colliders (by slot) and the lists of moving and static colliders' slots, uploaded by the next
-    /// record_uploads(); @p static_changed: the static tree is rebuilt.
+    /// Sets the colliders (by slot) and the lists of moving and static colliders' and of triggers' entries, uploaded by
+    /// the next record_uploads(); @p static_changed: the static tree is rebuilt.
     void set_colliders(std::span<const GpuCollider> colliders,
                        std::span<const std::uint32_t> moving,
                        std::span<const std::uint32_t> statics,
+                       std::span<const std::uint32_t> triggers,
                        bool static_changed);
 
     /// Sets the joints (by slot), their parts and the pairs of body slots joined without collisions (the smaller first,
@@ -273,6 +337,40 @@ public:
 
     /// Records the sleep timers and the islands falling asleep.
     void record_sleep(ComputeRecorder& recorder);
+
+    /// Records the step's contact reports: the touching contacts between colliders, compacted, the first
+    /// report_capacity() of them written (the counts say how many there were).
+    void record_reports(ComputeRecorder& recorder);
+
+    /// Reports the step's contacts again with room for @p reported of them (after a step that reported more than
+    /// report_capacity(); its contacts are still on the GPU): the reports grown, the parameters rewritten.
+    void record_reports_again(ComputeRecorder& recorder,
+                              std::uint32_t reported,
+                              std::vector<std::unique_ptr<Buffer>>& retired);
+
+    /// Contact reports the step writes at most.
+    [[nodiscard]] auto report_capacity() const noexcept -> std::uint32_t;
+
+    /// Records the triggers' overlaps at the end of the step (when there are triggers): every instance at its final pose,
+    /// the moving tree rebuilt and a trigger tree built from their boxes, their pairs filtered and collided without
+    /// speculative distance; those overlapping into the results (at most trigger_capacity()).
+    void record_triggers(ComputeRecorder& recorder);
+
+    /// Trigger overlaps the step writes at most (0 without triggers).
+    [[nodiscard]] auto trigger_capacity() const noexcept -> std::uint32_t;
+
+    /// The trigger overlaps (GpuTriggerOverlap; copied into the readback).
+    [[nodiscard]] auto trigger_results_buffer() const noexcept -> const Buffer&;
+
+    /// Records what queries of the published world need when record_triggers() did not make it this step: every instance
+    /// at its final pose, their boxes (no growth), the moving tree rebuilt from them.
+    void record_query_tree(ComputeRecorder& recorder);
+
+    /// What queries read (between steps).
+    [[nodiscard]] auto query_layout() const -> GpuQueryLayout;
+
+    /// The contact reports (GpuContactReport; copied into the readback).
+    [[nodiscard]] auto reports_buffer() const noexcept -> const Buffer&;
 
     /// This step's counts (copied into the readback).
     [[nodiscard]] auto counts_buffer() const noexcept -> const Buffer&;

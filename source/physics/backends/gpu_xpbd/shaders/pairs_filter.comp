@@ -31,17 +31,6 @@ bool slot_valid(uint index)
     return index - SOLVER.within_capacity < count_word(COUNT_BETWEEN_PAIRS);
 }
 
-bool should_collide(Collider first, Collider second)
-{
-    if (first.group == second.group && first.group != 0)
-    {
-        return first.group > 0;
-    }
-    const bool first_in_second = ((first.filter_words.x & second.filter_words.z) | (first.filter_words.y & second.filter_words.w)) != 0U;
-    const bool second_in_first = ((second.filter_words.x & first.filter_words.z) | (second.filter_words.y & first.filter_words.w)) != 0U;
-    return first_in_second && second_in_first;
-}
-
 // Whether a joint keeps the bodies @p first and @p second apart (the joined pairs: the smaller body first, sorted).
 bool joined(uint first, uint second)
 {

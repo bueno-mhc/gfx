@@ -146,6 +146,58 @@ sphere_ray_cast(Vector3 center,
     return ShapeRayHit{.distance = *distance, .normal = inside || length_squared(outward) == 0.0F ? -ray.direction : normalized(outward)};
 }
 
+/// The first hit of @p ray on the box of @p half_extents at @p pose within @p maximum (exact: the slabs in the box's
+/// frame, the normal of the face the ray enters by; starting inside, a hit at 0 against the ray). Conservative
+/// advancement's normal is GJK's, whose error grows with the shape: about 4° on a 100 m floor.
+[[nodiscard]] auto
+box_ray_cast(Vector3 half_extents,
+             const Transform& pose,
+             const Ray& ray,
+             float maximum) noexcept -> std::optional<ShapeRayHit>
+{
+    const Ray local = local_ray(inverse(pose), ray);
+    const std::array<float, 3> start{local.origin.x, local.origin.y, local.origin.z};
+    const std::array<float, 3> along{local.direction.x, local.direction.y, local.direction.z};
+    const std::array<float, 3> half{half_extents.x, half_extents.y, half_extents.z};
+    float entry = 0.0F;
+    float exit = maximum;
+    std::optional<std::size_t> entry_axis;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        // Parallel to the slab (as slab_interval()): inside it or never.
+        if (std::abs(along[axis]) < GEOMETRIC_TOLERANCE)
+        {
+            if (std::abs(start[axis]) > half[axis])
+            {
+                return std::nullopt;
+            }
+            continue;
+        }
+
+        // The near face's plane, then the far one's.
+        const float near_side = along[axis] > 0.0F ? -half[axis] : half[axis];
+        const float first = (near_side - start[axis]) / along[axis];
+        const float second = (-near_side - start[axis]) / along[axis];
+        if (first > entry)
+        {
+            entry = first;
+            entry_axis = axis;
+        }
+        exit = std::min(exit, second);
+        if (entry > exit)
+        {
+            return std::nullopt;
+        }
+    }
+    if (!entry_axis)
+    {
+        return ShapeRayHit{.distance = 0.0F, .normal = -ray.direction};
+    }
+    std::array<float, 3> normal{};
+    normal[*entry_axis] = along[*entry_axis] > 0.0F ? -1.0F : 1.0F;
+    return ShapeRayHit{.distance = entry, .normal = rotate(pose.orientation, Vector3{.x = normal[0], .y = normal[1], .z = normal[2]})};
+}
+
 /// Where @p ray crosses @p triangle within @p maximum (Möller–Trumbore), and the face's normal against the ray; a
 /// one-sided triangle is hit from the front only.
 [[nodiscard]] auto
@@ -193,8 +245,9 @@ mesh_ray_cast(const TriangleMeshShape& mesh,
               const Ray& ray,
               float maximum) noexcept -> std::optional<ShapeRayHit>
 {
-    // Clipped to the mesh's box first, so the segment the hierarchy walks is finite.
-    const auto interval = primitives_detail::slab_interval(ray.origin, ray.direction, mesh.bounds(), maximum);
+    // Clipped to the mesh's box first, so the segment the hierarchy walks is finite — the box widened, as the height
+    // field's: a flat mesh's box ends the segment on its plane, where the triangle's own distance may be an ulp further.
+    const auto interval = primitives_detail::slab_interval(ray.origin, ray.direction, mesh.bounds().expanded(GEOMETRIC_TOLERANCE), maximum);
     if (!interval)
     {
         return std::nullopt;
@@ -256,7 +309,7 @@ compound_ray_cast(const CompoundShape& compound,
                   const Ray& ray,
                   float maximum) noexcept -> std::optional<ShapeRayHit>
 {
-    const auto interval = primitives_detail::slab_interval(ray.origin, ray.direction, compound.bounds(), maximum);
+    const auto interval = primitives_detail::slab_interval(ray.origin, ray.direction, compound.bounds().expanded(GEOMETRIC_TOLERANCE), maximum);
     if (!interval)
     {
         return std::nullopt;
@@ -433,10 +486,15 @@ ray_cast_shape(const Shape& shape,
                const Ray& ray,
                float maximum) noexcept -> std::optional<ShapeRayHit>
 {
-    // Convex shapes in world space (spheres exactly); the others in their own frame, the normal turned back.
+    // Convex shapes in world space (spheres and boxes without rounding exactly); the others in their own frame, the normal
+    // turned back.
     if (const SphereShape* sphere = shape.get_if<SphereShape>())
     {
         return sphere_ray_cast(pose.position, sphere->radius, ray, maximum);
+    }
+    if (const BoxShape* box = shape.get_if<BoxShape>(); box != nullptr && box->radius == 0.0F)
+    {
+        return box_ray_cast(box->half_extents, pose, ray, maximum);
     }
     if (shape.is_convex())
     {

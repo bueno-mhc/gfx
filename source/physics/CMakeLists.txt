@@ -212,6 +212,8 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/gpu_solver.cpp
             backends/gpu_xpbd/gpu_joints.cpp
             backends/gpu_xpbd/gpu_soft_bodies.cpp
+            backends/gpu_xpbd/gpu_events.cpp
+            backends/gpu_xpbd/gpu_queries.cpp
             backends/gpu_xpbd/gpu_xpbd_world.cpp)
     target_compile_features(gfx_physics_gpu_xpbd PUBLIC cxx_std_23)
     target_link_libraries(gfx_physics_gpu_xpbd
@@ -265,6 +267,9 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/shaders/soft_solve.comp
             backends/gpu_xpbd/shaders/jacobi_gather.comp
             backends/gpu_xpbd/shaders/sleep.comp
+            backends/gpu_xpbd/shaders/contacts_report.comp
+            backends/gpu_xpbd/shaders/triggers_filter.comp
+            backends/gpu_xpbd/shaders/query.comp
         INCLUDE_DIRECTORIES backends/gpu_xpbd/shaders)
     gfx_require_decoupled(gfx_physics_gpu_xpbd FORBIDDEN gfx_platform gfx_platform_graphics gfx_ui gfx_ui_platform gfx_ui_atlas_tools gfx_camera)
 endif()

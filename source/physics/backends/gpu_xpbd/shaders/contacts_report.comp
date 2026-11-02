@@ -1,0 +1,73 @@
+#version 460
+// The contacts a step reports (PhysicsWorld::contacts_of(), the contact events): each manifold slot whose contact
+// touches — the solver pushed its bodies apart in a substep (CONTACT_PUSHED), or its deepest point started within
+// LINEAR_SLOP (the reference backend's rule) — between two colliders (a particle's contacts are not reported: particles
+// are no colliders of the interface). Mode 0, one invocation per manifold slot: a flag per slot (compacted after) and the
+// touching points counted (particles' too: the statistics). Mode 1, one per compacted slot within the reports'
+// capacity: a GpuContactReport — the colliders' slots, the fastest approach of its points at the step's start, then the
+// manifold as the narrow phase wrote it.
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+layout(constant_id = 67) const float LINEAR_SLOP = 0.0;
+
+const uint MANIFOLD_VECTORS = 11U;
+const uint REPORT_VECTORS = 12U;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 0U)
+    {
+        if (index >= SOLVER.manifold_capacity)
+        {
+            return;
+        }
+        uint flag = 0U;
+        if (index < min(count_word(COUNT_SLOTS), SOLVER.manifold_capacity))
+        {
+            const uint base = contact_base(index);
+            const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
+            if ((header.w & CONTACT_ACTIVE) != 0U)
+            {
+                bool touching = (header.w & CONTACT_PUSHED) != 0U;
+                for (uint point = 0U; point < header.z; ++point)
+                {
+                    touching = touching || gpu_vectors[SOLVER.contacts].values[base + 3U + 4U * point].w < LINEAR_SLOP;
+                }
+                if (touching)
+                {
+                    atomicAdd(gpu_words[SOLVER.counts].words[COUNT_TOUCHING_POINTS], header.z);
+                    const uvec4 manifold = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * index];
+                    const uint first = load_collider(instance_collider(manifold.x)).flags;
+                    const uint second = load_collider(instance_collider(manifold.y)).flags;
+                    flag = ((first | second) & COLLIDER_PARTICLE) == 0U ? 1U : 0U;
+                }
+            }
+        }
+        gpu_words[SOLVER.report_flags].words[index] = flag;
+        return;
+    }
+
+    // The report of a compacted slot.
+    if (index >= min(count_word(COUNT_REPORTED), SOLVER.report_capacity))
+    {
+        return;
+    }
+    const uint slot = gpu_words[SOLVER.report_indices].words[index];
+    const uint base = contact_base(slot);
+    const uint points = gpu_word_vectors[SOLVER.contacts].values[base].z;
+    float approach = 0.0;
+    for (uint point = 0U; point < points; ++point)
+    {
+        approach = max(approach, gpu_vectors[SOLVER.contacts].values[base + 3U + 4U * point + 1U].w);
+    }
+    const uvec4 manifold = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot];
+    const uint report = REPORT_VECTORS * index;
+    gpu_word_vectors[SOLVER.reports].values[report] =
+        uvec4(instance_collider(manifold.x), instance_collider(manifold.y), 0U, floatBitsToUint(approach));
+    for (uint vector = 0U; vector < MANIFOLD_VECTORS; ++vector)
+    {
+        gpu_word_vectors[SOLVER.reports].values[report + 1U + vector] = gpu_word_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + vector];
+    }
+}

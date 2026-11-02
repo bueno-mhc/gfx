@@ -71,6 +71,14 @@ struct GpuManifoldSpans
     std::uint32_t capacity = 0; ///< Slots of `manifolds`, at most reserved_manifolds().
 };
 
+/// @brief Where GpuNarrowPhase::pieces() leaves the mid phase's output.
+struct GpuPieceSpans
+{
+    GpuSpan sub_pairs{}; ///< The sub-pairs (narrow_phase.glsl's SubPair: SUB_PAIR_VECTORS vectors each).
+    GpuSpan counts{};    ///< Per pair: its sub-pairs.
+    GpuSpan offsets{};   ///< Per pair: its first sub-pair.
+};
+
 /// @brief @p manifold as the CPU's narrow phase holds one (its points' impulses zero).
 [[nodiscard]] auto to_contact_manifold(const GpuManifold& manifold) noexcept -> ContactManifold;
 
@@ -138,6 +146,43 @@ public:
                  const GpuCount& count,
                  const GpuManifoldSpans& output,
                  const CollisionSettings& settings = {});
+
+    /// @brief Records collide()'s mid phase alone: each of @p count pairs' sub-pairs (compound children, the triangles of
+    ///        meshes and height fields under the partner's box grown by @p expansion), their total into the word
+    ///        @p total, the first @p capacity of them written — what piece_spans() names until the next collide() or
+    ///        pieces() (the queries' pieces).
+    /// @throws InvalidUsageError as collide() does (the capacity: at most reserved_manifolds()).
+    void pieces(ComputeRecorder& recorder,
+                GpuSpan instances,
+                GpuSpan pairs,
+                const GpuCount& count,
+                GpuSpan total,
+                std::uint32_t capacity,
+                float expansion);
+
+    /// @brief Where the last pieces() wrote.
+    [[nodiscard]] auto piece_spans() const noexcept -> GpuPieceSpans;
+
+    /// @brief Records the copy, over the table's record @p index (a shape added before), of the record of @p shape — a
+    ///        sphere, capsule, cylinder, cone or box, whose records need nothing else of the table — through @p staging
+    ///        (its mapped bytes @p mapped, record_bytes() at @p offset written here).
+    /// @return Whether @p shape is such a shape (nothing recorded otherwise).
+    /// @throws InvalidUsageError if the table was not uploaded.
+    auto write_primitive(ComputeRecorder& recorder,
+                         std::uint32_t index,
+                         const Shape& shape,
+                         const Buffer& staging,
+                         std::span<std::byte> mapped,
+                         std::uint64_t offset) -> bool;
+
+    /// @brief Bytes of a shape's record.
+    [[nodiscard]] static auto record_bytes() noexcept -> std::uint32_t;
+
+    /// @brief The table's bindless index (what the passes' `tables` push constant names; valid once uploaded).
+    [[nodiscard]] auto table_index() const noexcept -> std::uint32_t;
+
+    /// @brief Whether the table holds every shape added (uploaded since).
+    [[nodiscard]] auto uploaded() const noexcept -> bool;
 
     /// @brief Records the contact cache: for each point of the @p count manifold slots of @p current, its predecessor
     ///        among the @p previous_count slots of @p previous — the point with the same feature among the previous

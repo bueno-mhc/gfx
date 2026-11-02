@@ -78,14 +78,16 @@ public:
     }
 
     /// @brief Calls `visitor(item)` for each item whose box the segment from @p origin along @p direction for
-    ///        @p length may cross.
+    ///        @p length may cross (boxes widened by GEOMETRIC_TOLERANCE: a flat triangle's box, met exactly where the
+    ///        segment ends, is not lost to rounding).
     template<class Visitor>
     void query_segment(Vector3 origin,
                        Vector3 direction,
                        float length,
                        Visitor&& visitor) const
     {
-        traverse([&](const Aabb& bounds) { return primitives_detail::slab_interval(origin, direction * length, bounds, 1.0F).has_value(); }, visitor);
+        traverse([&](const Aabb& bounds) { return primitives_detail::slab_interval(origin, direction * length, bounds.expanded(GEOMETRIC_TOLERANCE), 1.0F).has_value(); },
+                 visitor);
     }
 
     /// @brief Calls `visitor(this_item, other_item)` for each pair of items whose boxes overlap, @p other's boxes

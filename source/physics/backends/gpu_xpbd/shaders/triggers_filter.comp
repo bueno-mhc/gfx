@@ -1,0 +1,84 @@
+#version 460
+// The triggers' overlaps at the end of a step (the reference backend's rule): the trigger tree's pairs with the moving
+// tree (rebuilt from the colliders' final poses), then with the static tree. Mode 0, one invocation per pair slot of the
+// two searches: kept when the collider is live, not a particle's sphere, not on the trigger's body, and the trigger's filter
+// and the collider's let them meet (should_collide()). Mode 1, one per kept pair (compacted) within the capacity: its
+// instances (the trigger's first) for the narrow phase, which collides them with no speculative distance. Mode 2, one per
+// kept pair: overlapping when one of its manifolds has a point — appended to the results as (trigger instance, collider
+// slot) (their order does not matter: the CPU sorts each trigger's colliders).
+#extension GL_GOOGLE_include_directive : require
+#include "solver.glsl"
+
+const uint MANIFOLD_VECTORS = 11U;
+
+// The instances of raw pair slot @p index: the trigger's (after the moving and static colliders' instances), the collider's.
+uvec2 raw_instances(uint index)
+{
+    const uvec2 pair = uvec2(gpu_words[SOLVER.trigger_raw_pairs].words[2U * index], gpu_words[SOLVER.trigger_raw_pairs].words[2U * index + 1U]);
+    const uint first_trigger = SOLVER.moving_count + SOLVER.static_count;
+    return index < SOLVER.trigger_within_capacity ? uvec2(first_trigger + pair.x, pair.y) : uvec2(first_trigger + pair.x, SOLVER.moving_count + pair.y);
+}
+
+bool raw_valid(uint index)
+{
+    if (index < SOLVER.trigger_within_capacity)
+    {
+        return index < count_word(COUNT_TRIGGER_MOVING_PAIRS);
+    }
+    return index - SOLVER.trigger_within_capacity < count_word(COUNT_TRIGGER_STATIC_PAIRS);
+}
+
+bool keeps(uvec2 instances)
+{
+    const Collider trigger = load_collider(instance_collider(instances.x));
+    const Collider collider = load_collider(instance_collider(instances.y));
+    return (collider.flags & COLLIDER_LIVE) != 0U && (collider.flags & COLLIDER_PARTICLE) == 0U && (trigger.body == NO_BODY || collider.body != trigger.body) &&
+           should_collide(trigger, collider);
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 0U)
+    {
+        if (index >= SOLVER.trigger_within_capacity + SOLVER.trigger_between_capacity)
+        {
+            return;
+        }
+        gpu_words[SOLVER.trigger_pair_flags].words[index] = raw_valid(index) && keeps(raw_instances(index)) ? 1U : 0U;
+        return;
+    }
+    const uint kept = min(count_word(COUNT_TRIGGER_CANDIDATES), SOLVER.trigger_pair_capacity);
+    if (index >= kept)
+    {
+        return;
+    }
+    if (push.mode == 1U)
+    {
+        const uvec2 instances = raw_instances(gpu_words[SOLVER.trigger_pair_indices].words[index]);
+        gpu_words[SOLVER.trigger_pairs].words[2U * index] = instances.x;
+        gpu_words[SOLVER.trigger_pairs].words[2U * index + 1U] = instances.y;
+        return;
+    }
+
+    // Mode 2: an overlap when a manifold of the pair's range has a point.
+    const uint first = gpu_words[SOLVER.trigger_ranges].words[2U * index];
+    const uint count = gpu_words[SOLVER.trigger_ranges].words[2U * index + 1U];
+    bool overlap = false;
+    for (uint slot = first; slot < first + count && slot < SOLVER.trigger_manifold_capacity; ++slot)
+    {
+        overlap = overlap || gpu_word_vectors[SOLVER.trigger_manifolds].values[MANIFOLD_VECTORS * slot].z > 0U;
+    }
+    if (!overlap)
+    {
+        return;
+    }
+    const uint result = atomicAdd(gpu_words[SOLVER.counts].words[COUNT_TRIGGER_OVERLAPS], 1U);
+    if (result < SOLVER.trigger_pair_capacity)
+    {
+        const uint trigger_instance = gpu_words[SOLVER.trigger_pairs].words[2U * index];
+        const uint collider_instance = gpu_words[SOLVER.trigger_pairs].words[2U * index + 1U];
+        gpu_words[SOLVER.trigger_results].words[2U * result] = trigger_instance - SOLVER.moving_count - SOLVER.static_count;
+        gpu_words[SOLVER.trigger_results].words[2U * result + 1U] = instance_collider(collider_instance);
+    }
+}

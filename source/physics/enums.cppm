@@ -652,6 +652,17 @@ inline constexpr std::uint32_t GPU_XPBD_MAXIMUM_REPLAYS = 4;
 /// @brief The steps the GPU backend gives contact and pair buffers room for beyond what they hold (a fraction more).
 inline constexpr float GPU_XPBD_CAPACITY_HEADROOM = 0.5F;
 
+/// @brief Timestamps the GPU backend writes in a step at most (between its phases; the phases of later marks are timed
+///        with the phase before them).
+inline constexpr std::uint32_t GPU_XPBD_TIMESTAMPS = 256;
+
+/// @brief Colliders a query of the GPU backend (QueryEngine::BACKEND) tests at most (more: the abstraction answers).
+inline constexpr std::uint32_t GPU_XPBD_QUERY_PAIRS = 4096;
+
+/// @brief Pieces (convex shapes, compound children, triangles) a query of the GPU backend tests at most (more: the
+///        abstraction answers).
+inline constexpr std::uint32_t GPU_XPBD_QUERY_PIECES = 16384;
+
 } // namespace gfx::physics
 
 export namespace gfx::camera

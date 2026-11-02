@@ -65,6 +65,13 @@ enum CountWord : std::uint32_t
     SLOTS,
     GRAPH_ENTRIES,
     CONSTRAINTS,
+    REPORTED,
+    TOUCHING_POINTS,
+    TRIGGER_MOVING_PAIRS,
+    TRIGGER_STATIC_PAIRS,
+    TRIGGER_CANDIDATES,
+    TRIGGER_SLOTS,
+    TRIGGER_OVERLAPS,
 };
 
 /// Bytes of the indirect dispatch arguments of a color key.
@@ -119,6 +126,7 @@ struct GpuConstraintSolver::State
         , narrow_phase{target, primitives}
         , moving_tree{target, primitives, {.layout = description.bvh_layout, .debug_name = "GPU physics: moving colliders"}}
         , static_tree{target, primitives, {.layout = description.bvh_layout, .debug_name = "GPU physics: static colliders"}}
+        , trigger_tree{target, primitives, {.layout = description.bvh_layout, .debug_name = "GPU physics: triggers"}}
         , collider_poses{make_pipeline(target, shaders::collider_poses_comp, modules)}
         , pairs_filter{make_pipeline(target, shaders::pairs_filter_comp, modules)}
         , contact_prepare{make_pipeline(target, shaders::contact_prepare_comp, modules)}
@@ -132,6 +140,8 @@ struct GpuConstraintSolver::State
         , joint_forces{make_pipeline(target, shaders::joint_forces_comp, modules)}
         , jacobi_gather{make_pipeline(target, shaders::jacobi_gather_comp, modules)}
         , sleep{make_pipeline(target, shaders::sleep_comp, modules)}
+        , contacts_report{make_pipeline(target, shaders::contacts_report_comp, modules)}
+        , triggers_filter{make_pipeline(target, shaders::triggers_filter_comp, modules)}
     {
     }
 
@@ -215,6 +225,7 @@ struct GpuConstraintSolver::State
     GpuNarrowPhase narrow_phase;
     GpuBvh moving_tree;
     GpuBvh static_tree;
+    GpuBvh trigger_tree;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
     std::unique_ptr<ComputePipeline> collider_poses{};
     std::unique_ptr<ComputePipeline> pairs_filter{};
@@ -229,12 +240,15 @@ struct GpuConstraintSolver::State
     std::unique_ptr<ComputePipeline> joint_forces{};
     std::unique_ptr<ComputePipeline> jacobi_gather{};
     std::unique_ptr<ComputePipeline> sleep{};
+    std::unique_ptr<ComputePipeline> contacts_report{};
+    std::unique_ptr<ComputePipeline> triggers_filter{};
 
     // Colliders and lists (CPU copies uploaded when they change).
     std::vector<GpuCollider> collider_data{};
     std::vector<std::uint32_t> lists{};
     std::uint32_t moving = 0;
     std::uint32_t statics = 0;
+    std::uint32_t triggers = 0;
     bool colliders_pending = false;
     bool static_dirty = false;
     bool static_built = false;
@@ -259,6 +273,13 @@ struct GpuConstraintSolver::State
     std::uint32_t island_rounds = 8;
     std::uint32_t parity = 0;
     std::uint32_t step_parameters = 0;
+    std::uint32_t report_capacity = 64;
+    std::uint32_t trigger_within_capacity = 0;
+    std::uint32_t trigger_between_capacity = 0;
+    std::uint32_t trigger_pair_capacity = 0;
+    std::uint32_t trigger_manifold_capacity = 0;
+    GpuSolverParameters parameters{}; ///< As last written (rewritten when the reports grow after a step).
+    CollisionSettings collision{};    ///< The step's (the triggers collide with them, without speculative distance).
 
     // Buffers.
     HostBuffer solver_parameters{"GPU physics: solver parameters", MemoryLocation::HOST_UPLOAD, BufferUsage::STORAGE};
@@ -303,6 +324,16 @@ struct GpuConstraintSolver::State
     GpuArray joint_results{"GPU physics: joint results", 2 * sizeof(GpuVector)};
     GpuArray joined_pairs{"GPU physics: joined bodies", 2 * sizeof(std::uint32_t)};
     GpuArray overflow_counts{"GPU physics: overflow counts", 2 * sizeof(std::uint32_t)};
+    GpuArray report_flags{"GPU physics: reported contacts' flags", sizeof(std::uint32_t)};
+    GpuArray report_indices{"GPU physics: reported contacts", sizeof(std::uint32_t)};
+    GpuArray reports{"GPU physics: contact reports", sizeof(GpuContactReport)};
+    GpuArray trigger_raw_pairs{"GPU physics: trigger tree pairs", sizeof(GpuPair)};
+    GpuArray trigger_pair_flags{"GPU physics: trigger pair flags", sizeof(std::uint32_t)};
+    GpuArray trigger_pair_indices{"GPU physics: kept trigger pairs", sizeof(std::uint32_t)};
+    GpuArray trigger_pairs{"GPU physics: trigger pairs", sizeof(GpuPair)};
+    GpuArray trigger_ranges{"GPU physics: trigger pair ranges", 2 * sizeof(std::uint32_t)};
+    GpuArray trigger_manifolds{"GPU physics: trigger manifolds", sizeof(GpuManifold)};
+    GpuArray trigger_results{"GPU physics: trigger overlaps", sizeof(GpuTriggerOverlap)};
 };
 
 // ===================================================================================================== GpuConstraintSolver
@@ -326,14 +357,17 @@ void
 GpuConstraintSolver::set_colliders(std::span<const GpuCollider> colliders,
                                    std::span<const std::uint32_t> moving,
                                    std::span<const std::uint32_t> statics,
+                                   std::span<const std::uint32_t> triggers,
                                    bool static_changed)
 {
     State& state = *m_state;
     state.collider_data.assign(colliders.begin(), colliders.end());
     state.lists.assign(moving.begin(), moving.end());
     state.lists.insert(state.lists.end(), statics.begin(), statics.end());
+    state.lists.insert(state.lists.end(), triggers.begin(), triggers.end());
     state.moving = static_cast<std::uint32_t>(moving.size());
     state.statics = static_cast<std::uint32_t>(statics.size());
+    state.triggers = static_cast<std::uint32_t>(triggers.size());
     state.colliders_pending = true;
     state.static_dirty = state.static_dirty || static_changed;
 }
@@ -373,18 +407,28 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     state.between_capacity = std::max(state.between_capacity, with_headroom(2 * state.moving));
     state.pair_capacity = std::max(state.pair_capacity, with_headroom(2 * state.moving));
     state.manifold_capacity = std::max(state.manifold_capacity, state.pair_capacity);
+    if (state.triggers > 0)
+    {
+        state.trigger_within_capacity = std::max(state.trigger_within_capacity, with_headroom(2 * state.triggers));
+        state.trigger_between_capacity = std::max(state.trigger_between_capacity, with_headroom(2 * state.triggers));
+        state.trigger_pair_capacity = std::max(state.trigger_pair_capacity, with_headroom(2 * state.triggers));
+        state.trigger_manifold_capacity = std::max(state.trigger_manifold_capacity, state.trigger_pair_capacity);
+    }
     const std::uint32_t candidates = state.candidates();
     const std::uint32_t slots = state.manifold_capacity;
     const std::uint32_t constraints = state.constraint_capacity();
-    const std::uint32_t instances = state.moving + state.statics;
+    const std::uint32_t instances = state.moving + state.statics + state.triggers;
+    const std::uint32_t trigger_candidates = state.trigger_within_capacity + state.trigger_between_capacity;
     const auto part_count = static_cast<std::uint32_t>(state.part_data.size());
     const auto joined_count = static_cast<std::uint32_t>(state.joined_data.size());
 
     // The components' room (before any of their commands is recorded).
-    state.primitives.reserve(std::max({candidates, 2 * constraints, node_count, instances, 64U}));
-    state.narrow_phase.reserve(state.pair_capacity, slots);
+    state.primitives.reserve(std::max({candidates, 2 * constraints, node_count, instances, trigger_candidates, GPU_XPBD_QUERY_PAIRS, 64U}));
+    state.narrow_phase.reserve(std::max({state.pair_capacity, state.trigger_pair_capacity, GPU_XPBD_QUERY_PAIRS}),
+                               std::max({slots, state.trigger_manifold_capacity, GPU_XPBD_QUERY_PIECES}));
     state.moving_tree.reserve(std::max(state.moving, 1U));
     state.static_tree.reserve(std::max(state.statics, 1U));
+    state.trigger_tree.reserve(std::max(state.triggers, 1U));
 
     // The arrays (scratch ones need no copy; the previous step's halves and the joints' results keep their contents).
     Device& device = state.device;
@@ -393,7 +437,7 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     const std::uint32_t previous = 1 - state.parity;
     grow(state.colliders, static_cast<std::uint32_t>(state.collider_data.size()));
     grow(state.collider_list, instances);
-    grow(state.instances, instances);
+    grow(state.instances, instances + 1);
     grow(state.boxes, instances);
     for (GpuArray* array : {&state.raw_pairs, &state.pair_flags, &state.pair_indices})
     {
@@ -409,6 +453,18 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     grow(state.counts[previous], 1, 1);
     grow(state.predecessors, slots);
     grow(state.multipliers, slots);
+    grow(state.report_flags, slots);
+    grow(state.report_indices, slots);
+    grow(state.reports, state.report_capacity);
+    for (GpuArray* array : {&state.trigger_raw_pairs, &state.trigger_pair_flags, &state.trigger_pair_indices})
+    {
+        grow(*array, trigger_candidates);
+    }
+    for (GpuArray* array : {&state.trigger_pairs, &state.trigger_ranges, &state.trigger_results})
+    {
+        grow(*array, state.trigger_pair_capacity);
+    }
+    grow(state.trigger_manifolds, state.trigger_manifold_capacity);
     for (GpuArray* array : {&state.corrections, &state.colors_first, &state.colors_second, &state.color_keys, &state.color_values, &state.color_sorted_keys,
                             &state.color_lists})
     {
@@ -504,6 +560,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     const std::uint32_t constraints = state.constraint_capacity();
     const std::uint32_t candidates = state.candidates();
     const std::uint32_t instances = state.moving + state.statics;
+    const std::uint32_t posed = instances + state.triggers;
     state.step_parameters = step.step_parameters;
     const GpuSolverParameters parameters{
         .speculative_distance = step.speculative_distance,
@@ -566,14 +623,36 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         .world_speculative_distance = step.collision.speculative_distance,
         .boxes = state.boxes.index(),
         .pair_capacity = state.pair_capacity,
+        .report_capacity = state.report_capacity,
+        .report_flags = state.report_flags.index(),
+        .report_indices = state.report_indices.index(),
+        .reports = state.reports.index(),
+        .trigger_count = state.triggers,
+        .trigger_within_capacity = state.trigger_within_capacity,
+        .trigger_between_capacity = state.trigger_between_capacity,
+        .trigger_pair_capacity = state.trigger_pair_capacity,
+        .trigger_manifold_capacity = state.trigger_manifold_capacity,
+        .trigger_raw_pairs = state.trigger_raw_pairs.index(),
+        .trigger_pair_flags = state.trigger_pair_flags.index(),
+        .trigger_pair_indices = state.trigger_pair_indices.index(),
+        .trigger_pairs = state.trigger_pairs.index(),
+        .trigger_ranges = state.trigger_ranges.index(),
+        .trigger_manifolds = state.trigger_manifolds.index(),
+        .trigger_results = state.trigger_results.index(),
     };
+    state.parameters = parameters;
+    state.collision = step.collision;
     std::memcpy(state.solver_parameters.bytes().data(), &parameters, sizeof(parameters));
     state.solver_parameters.buffer().flush_mapped_range();
 
     // Instances and boxes; the moving tree, the static tree when its colliders changed; their pairs.
+    if (step.timer != nullptr)
+    {
+        step.timer->mark(recorder, StepPhase::BROAD_PHASE);
+    }
     if (instances > 0)
     {
-        state.pass(recorder, *state.collider_poses, 0, 0, instances);
+        state.pass(recorder, *state.collider_poses, 0, 0, posed);
         state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = instances}, step.speculative_distance);
     }
     if (state.static_dirty)
@@ -603,6 +682,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     state.pass(recorder, *state.pairs_filter, 0, 0, candidates);
     state.primitives.compact(recorder, span_of(state.pair_flags.buffer()), {}, span_of(state.pair_indices.buffer()), state.count(CANDIDATES), {.maximum = candidates});
     state.pass(recorder, *state.pairs_filter, 0, 1, candidates);
+    if (step.timer != nullptr)
+    {
+        step.timer->mark(recorder, StepPhase::NARROW_PHASE);
+    }
     CollisionSettings collision = step.collision;
     collision.speculative_distance = step.speculative_distance;
     state.narrow_phase.collide(recorder, span_of(state.instances.buffer()), span_of(state.pairs.buffer()), {.maximum = state.pair_capacity, .word = state.count(CANDIDATES)},
@@ -625,6 +708,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
 
     // Islands over contacts and joints: labels hooked and compressed (the last round counts its changes), awake islands,
     // kinematic touches, bodies woken.
+    if (step.timer != nullptr)
+    {
+        step.timer->mark(recorder, StepPhase::SOLVER);
+    }
     state.pass(recorder, *state.islands, 0, 0, step.body_count);
     for (std::uint32_t round = 0; round < state.island_rounds; ++round)
     {
@@ -717,6 +804,145 @@ GpuConstraintSolver::record_sleep(ComputeRecorder& recorder)
     state.pass(recorder, *state.sleep, 0, 1, state.body_count);
 }
 
+void
+GpuConstraintSolver::record_reports(ComputeRecorder& recorder)
+{
+    // The touching contacts' slots flagged, compacted in slot order, their reports written.
+    State& state = *m_state;
+    state.pass(recorder, *state.contacts_report, 0, 0, state.manifold_capacity);
+    state.primitives.compact(recorder, span_of(state.report_flags.buffer()), {}, span_of(state.report_indices.buffer()), state.count(REPORTED),
+                             {.maximum = state.manifold_capacity});
+    state.pass(recorder, *state.contacts_report, 0, 1, state.report_capacity);
+}
+
+void
+GpuConstraintSolver::record_reports_again(ComputeRecorder& recorder,
+                                          std::uint32_t reported,
+                                          std::vector<std::unique_ptr<Buffer>>& retired)
+{
+    // Room for them (with headroom, kept for the next steps), the parameters naming the grown reports.
+    State& state = *m_state;
+    state.report_capacity = std::max(state.report_capacity, with_headroom(reported));
+    (void)state.reports.reserve(state.device, recorder, state.report_capacity, 0, retired);
+    state.parameters.report_capacity = state.report_capacity;
+    state.parameters.reports = state.reports.index();
+    std::memcpy(state.solver_parameters.bytes().data(), &state.parameters, sizeof(state.parameters));
+    state.solver_parameters.buffer().flush_mapped_range();
+    recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
+    state.pass(recorder, *state.contacts_report, 0, 1, state.report_capacity);
+}
+
+auto
+GpuConstraintSolver::report_capacity() const noexcept -> std::uint32_t
+{
+    return m_state->report_capacity;
+}
+
+void
+GpuConstraintSolver::record_triggers(ComputeRecorder& recorder)
+{
+    State& state = *m_state;
+    if (state.triggers == 0)
+    {
+        return;
+    }
+
+    // Every instance at its final pose, their boxes (no growth); the moving tree rebuilt from them, the triggers' tree.
+    const std::uint32_t colliders = state.moving + state.statics;
+    state.pass(recorder, *state.collider_poses, 0, 0, colliders + state.triggers);
+    state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = colliders + state.triggers});
+    if (state.moving > 0)
+    {
+        state.moving_tree.build(recorder, span_of(state.boxes.buffer()), {.maximum = state.moving});
+    }
+    state.trigger_tree.build(recorder, span_of(state.boxes.buffer(), colliders), {.maximum = state.triggers});
+
+    // Their pairs with the moving tree and the static tree; kept, compacted, gathered; collided without speculative
+    // distance; the overlapping ones appended to the results.
+    if (state.moving > 0)
+    {
+        state.trigger_tree.find_pairs(recorder, state.moving_tree, span_of(state.trigger_raw_pairs.buffer()), state.count(TRIGGER_MOVING_PAIRS),
+                                      state.trigger_within_capacity);
+    }
+    if (state.static_built)
+    {
+        state.trigger_tree.find_pairs(recorder, state.static_tree, span_of(state.trigger_raw_pairs.buffer(), state.trigger_within_capacity),
+                                      state.count(TRIGGER_STATIC_PAIRS), state.trigger_between_capacity);
+    }
+    const std::uint32_t raw = state.trigger_within_capacity + state.trigger_between_capacity;
+    state.pass(recorder, *state.triggers_filter, 0, 0, raw);
+    state.primitives.compact(recorder, span_of(state.trigger_pair_flags.buffer()), {}, span_of(state.trigger_pair_indices.buffer()), state.count(TRIGGER_CANDIDATES),
+                             {.maximum = raw});
+    state.pass(recorder, *state.triggers_filter, 0, 1, state.trigger_pair_capacity);
+    CollisionSettings touching = state.collision;
+    touching.speculative_distance = 0.0F;
+    state.narrow_phase.collide(recorder, span_of(state.instances.buffer()), span_of(state.trigger_pairs.buffer()),
+                               {.maximum = state.trigger_pair_capacity, .word = state.count(TRIGGER_CANDIDATES)},
+                               {.manifolds = span_of(state.trigger_manifolds.buffer()),
+                                .ranges = span_of(state.trigger_ranges.buffer()),
+                                .total = state.count(TRIGGER_SLOTS),
+                                .capacity = state.trigger_manifold_capacity},
+                               touching);
+    state.pass(recorder, *state.triggers_filter, 0, 2, state.trigger_pair_capacity);
+}
+
+void
+GpuConstraintSolver::record_query_tree(ComputeRecorder& recorder)
+{
+    State& state = *m_state;
+    const std::uint32_t colliders = state.moving + state.statics;
+    if (colliders == 0)
+    {
+        return;
+    }
+    state.pass(recorder, *state.collider_poses, 0, 0, colliders + state.triggers);
+    state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = colliders});
+    if (state.moving > 0)
+    {
+        state.moving_tree.build(recorder, span_of(state.boxes.buffer()), {.maximum = state.moving});
+    }
+}
+
+auto
+GpuConstraintSolver::query_layout() const -> GpuQueryLayout
+{
+    const State& state = *m_state;
+    const bool moving = state.moving > 0;
+    const bool statics = state.statics > 0 && state.static_built;
+    const auto index = [](const Buffer& buffer) { return buffer.bindless_index().value(); };
+    return {.tables = state.narrow_phase.table_index(),
+            .colliders = state.colliders.index(),
+            .collider_list = state.collider_list.index(),
+            .instances = state.instances.index(),
+            .boxes = state.boxes.index(),
+            .moving_header = moving ? index(state.moving_tree.header_buffer()) : 0,
+            .moving_nodes = moving ? index(state.moving_tree.node_buffer()) : 0,
+            .static_header = statics ? index(state.static_tree.header_buffer()) : 0,
+            .static_nodes = statics ? index(state.static_tree.node_buffer()) : 0,
+            .moving_count = state.moving,
+            .static_count = state.statics,
+            .region_instance = state.moving + state.statics + state.triggers,
+            .trees = (moving ? 1U : 0U) | (statics ? 2U : 0U)};
+}
+
+auto
+GpuConstraintSolver::trigger_capacity() const noexcept -> std::uint32_t
+{
+    return m_state->triggers > 0 ? m_state->trigger_pair_capacity : 0;
+}
+
+auto
+GpuConstraintSolver::trigger_results_buffer() const noexcept -> const Buffer&
+{
+    return m_state->trigger_results.buffer();
+}
+
+auto
+GpuConstraintSolver::reports_buffer() const noexcept -> const Buffer&
+{
+    return m_state->reports.buffer();
+}
+
 auto
 GpuConstraintSolver::counts_buffer() const noexcept -> const Buffer&
 {
@@ -746,6 +972,13 @@ GpuConstraintSolver::overflowed(const GpuSolverCounts& counts) -> bool
     room(counts.between_pairs, state.between_capacity);
     room(counts.candidates, state.pair_capacity);
     room(counts.manifold_slots, state.manifold_capacity);
+    if (state.triggers > 0)
+    {
+        room(counts.trigger_moving_pairs, state.trigger_within_capacity);
+        room(counts.trigger_static_pairs, state.trigger_between_capacity);
+        room(counts.trigger_candidates, state.trigger_pair_capacity);
+        room(counts.trigger_slots, state.trigger_manifold_capacity);
+    }
     if (state.coloring() && counts.colors > state.recorded_colors)
     {
         state.recorded_colors = counts.colors;

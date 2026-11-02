@@ -20,8 +20,10 @@ import gfx.physics.handles;
 import gfx.physics.interface;
 import gfx.physics.shapes;
 import gfx.physics.world;
+import gfx.physics.gpu_xpbd.shaders;
 import :settings;
 import :resources;
+import :primitives;
 import :narrow_phase;
 import :solver;
 import :backend;
@@ -31,6 +33,9 @@ namespace gfx::physics::gpu_xpbd
 
 namespace
 {
+
+/// Bytes of a query's input: the query, then the shape's record at 256 (gpu_queries.cpp).
+constexpr std::uint64_t SHAPE_RECORD_BYTES_END = 512;
 
 /// The mass properties a body moves with: a dynamic body's (a unit mass and inertia when its colliders give none), none
 /// for the others (as the reference backend).
@@ -258,7 +263,7 @@ make_soft_body_entry(SoftBodyHandle handle,
 struct ChangeMarker
 {
     GpuXpbdBackend& backend;
-    const WorldSnapshot& pending;
+    WorldSnapshot& pending;
 
     void operator()(const edits::CreateRigidBody& change) const
     {
@@ -368,6 +373,7 @@ struct ChangeMarker
 
     void operator()(const edits::DestroyCollider& change) const
     {
+        backend.forget_collider(change.collider, pending);
         ColliderEntry& entry = backend.collider_entry(change.collider);
         if (entry.body)
         {
@@ -395,6 +401,19 @@ struct ChangeMarker
     void operator()(const edits::SetColliderFilter& change) const
     {
         collider_changed(change.collider, false);
+    }
+
+    // Triggers: their shapes in the table; their data comes from the records each step.
+    void operator()(const edits::CreateTrigger& change) const
+    {
+        backend.trigger_entry(change.trigger) = {.handle = change.trigger, .shape = backend.shape_index(change.description.shape), .overlaps = {}};
+        backend.colliders_changed(false, false);
+    }
+
+    void operator()(const edits::DestroyTrigger& change) const
+    {
+        backend.trigger_entry(change.trigger) = {};
+        backend.colliders_changed(false, false);
     }
 
     // Joints: their frames, fixed at their creation from their bodies' poses (their parts and states come from the records
@@ -580,7 +599,23 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
     , m_pipelines{device}
     , m_solver{device, m_capabilities, settings}
     , m_soft_bodies{device}
+    , m_timer{device, m_capabilities.timestamps, m_capabilities.queue_family}
 {
+    // The queries' command buffer, pipeline and buffers (made now: a query never allocates), the records their regions and
+    // shapes take in the shape table.
+    m_query_pool = device.create_command_pool({.queue_type = m_capabilities.queue_type, .debug_name = "GPU physics queries"});
+    m_query_commands = m_query_pool->allocate(CommandBufferLevel::PRIMARY, "GPU physics query");
+    m_query_pipeline = make_pipeline(device, shaders::query_comp, m_query_modules);
+    m_query_pairs = device.create_buffer({.size = std::uint64_t{GPU_XPBD_QUERY_PAIRS} * sizeof(GpuPair), .usage = BufferUsage::STORAGE, .debug_name = "GPU physics: query pairs"});
+    m_query_pieces = device.create_buffer(
+        {.size = std::uint64_t{GPU_XPBD_QUERY_PIECES} * sizeof(GpuQueryResult), .usage = BufferUsage::STORAGE, .debug_name = "GPU physics: query pieces"});
+    m_query_input.reserve(device, SHAPE_RECORD_BYTES_END, m_retired);
+    const std::uint64_t answer_bytes = 2 * sizeof(GpuVector) + std::uint64_t{GPU_XPBD_QUERY_PAIRS} * sizeof(GpuQueryResult);
+    m_query_answers = device.create_buffer(
+        {.size = answer_bytes, .usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION, .debug_name = "GPU physics: query answers"});
+    m_query_results.reserve(device, answer_bytes, m_retired);
+    const std::shared_ptr<const Shape> placeholder = make_shape(BoxShape{});
+    m_query_records = {m_solver.narrow_phase().add_shape(*placeholder), m_solver.narrow_phase().add_shape(*placeholder)};
 }
 
 GpuXpbdBackend::~GpuXpbdBackend()
@@ -615,11 +650,9 @@ GpuXpbdBackend::check(const WorldEdit& edit,
     {
         GpuNarrowPhase::check_shape(*collider->description.shape);
     }
-    if (std::holds_alternative<edits::CreateTrigger>(edit))
+    if (const auto* trigger = std::get_if<edits::CreateTrigger>(&edit))
     {
-        throw_unsupported(identity(), "PhysicsWorld::create_trigger", PhysicsCapability::WORLD_OBJECTS,
-                          "the GPU backend does not simulate triggers yet (they arrive with phase G8 of docs/gpu-xpbd-design.md)",
-                          "use another backend");
+        GpuNarrowPhase::check_shape(*trigger->description.shape);
     }
     if (std::holds_alternative<edits::CreateConstraint>(edit))
     {
@@ -660,6 +693,17 @@ GpuXpbdBackend::joint_entry(JointHandle joint) -> JointEntry&
         m_joints.resize(index + 1);
     }
     return m_joints[index];
+}
+
+auto
+GpuXpbdBackend::trigger_entry(TriggerHandle trigger) -> TriggerEntry&
+{
+    const std::uint32_t index = slot(trigger);
+    if (m_triggers.size() <= index)
+    {
+        m_triggers.resize(index + 1);
+    }
+    return m_triggers[index];
 }
 
 auto
@@ -920,18 +964,52 @@ GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
         }
     }
 
+    // The triggers' shapes after them: about their bodies' centers of mass, or in the world (no body).
+    std::vector<std::uint32_t> triggers;
+    m_trigger_slots.clear();
+    for (std::uint32_t trigger_slot = 0; trigger_slot < m_triggers.size() && trigger_slot < pending.triggers.size(); ++trigger_slot)
+    {
+        const TriggerRecord& record = pending.triggers[trigger_slot];
+        if (!record.handle || !m_triggers[trigger_slot].handle)
+        {
+            continue;
+        }
+        const TriggerDescription& configuration = record.configuration;
+        const RigidBodyRecord* body = configuration.body ? find(pending, configuration.body) : nullptr;
+        if (configuration.body && body == nullptr)
+        {
+            continue;
+        }
+        const Vector3 position = body != nullptr ? configuration.pose.position - effective_mass(*body).center_of_mass : configuration.pose.position;
+        const auto category = std::to_underlying(configuration.filter.category);
+        const auto mask = std::to_underlying(configuration.filter.mask);
+        triggers.push_back(static_cast<std::uint32_t>(data.size()));
+        m_trigger_slots.push_back(trigger_slot);
+        data.push_back({.position = vector(position),
+                        .orientation = vector(configuration.pose.orientation),
+                        .body = body != nullptr ? slot(configuration.body) : NO_SOLVER_BODY,
+                        .shape = m_triggers[trigger_slot].shape,
+                        .flags = GPU_COLLIDER_TRIGGER,
+                        .group = configuration.filter.group,
+                        .filter = {static_cast<std::uint32_t>(category), static_cast<std::uint32_t>(category >> 32U), static_cast<std::uint32_t>(mask),
+                                   static_cast<std::uint32_t>(mask >> 32U)},
+                        .material = {}});
+    }
+
     // Uploaded when anything changed; the static tree rebuilt when a static collider or a static body's pose changed.
     const std::span<const std::byte> signature_bytes = std::as_bytes(std::span{signature});
     const bool lists_changed = !same_bytes(std::span<const std::uint32_t>{moving}, std::span<const std::uint32_t>{m_moving_list}) ||
                                !same_bytes(std::span<const std::uint32_t>{statics}, std::span<const std::uint32_t>{m_static_list});
-    const bool data_changed = !same_bytes(std::span<const GpuCollider>{data}, std::span<const GpuCollider>{m_collider_data});
+    const bool data_changed = !same_bytes(std::span<const GpuCollider>{data}, std::span<const GpuCollider>{m_collider_data}) ||
+                              !same_bytes(std::span<const std::uint32_t>{triggers}, std::span<const std::uint32_t>{m_trigger_list});
     const bool statics_changed = lists_changed || m_statics_dirty || !same_bytes(signature_bytes, std::span<const std::byte>{m_static_signature});
     if (lists_changed || data_changed || statics_changed)
     {
-        m_solver.set_colliders(data, moving, statics, statics_changed);
+        m_solver.set_colliders(data, moving, statics, triggers, statics_changed);
         m_collider_data = std::move(data);
         m_moving_list = std::move(moving);
         m_static_list = std::move(statics);
+        m_trigger_list = std::move(triggers);
         m_static_signature.assign(signature_bytes.begin(), signature_bytes.end());
     }
     m_lists_changed = m_lists_changed || lists_changed;
@@ -1249,15 +1327,7 @@ GpuXpbdBackend::simulate(float seconds,
             stage = "recording the step";
             record_step(body_count, pending, seconds, attempt > 0);
             stage = "running the step on the GPU";
-            const std::array command_buffers{m_command_buffer->handle()};
-            const std::array signals{TimelineSemaphoreSignal{.semaphore = m_timeline->handle(), .value = m_submitted + 1}};
-            const std::array batches{SubmitDescription{.command_buffers = command_buffers, .timeline_signals = signals}};
-            m_queue->submit(batches);
-            ++m_submitted;
-            if (m_timeline->wait(m_submitted) != WaitStatus::SIGNALED)
-            {
-                throw PhysicsError({.backend = identity(), .operation = "PhysicsWorld::step", .problem = "the GPU step did not complete", .suggestion = {}});
-            }
+            run_commands();
             counts = read_counts();
             if (!m_solver.overflowed(counts))
             {
@@ -1274,16 +1344,44 @@ GpuXpbdBackend::simulate(float seconds,
             }
         }
         const Clock::time_point solved = Clock::now();
-        pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, solved);
+        if (m_timer.enabled())
+        {
+            m_timer.read(pending.statistics.phase_seconds);
+        }
+        else
+        {
+            pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, solved);
+        }
+        const double gpu_events = m_timer.enabled() ? pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] : 0.0;
+
+        // More touching contacts than the reports had room for: reported again (the step's contacts are still on the GPU).
+        if (counts.reported > m_solver.report_capacity())
+        {
+            stage = "reading the contacts back";
+            m_command_pool->reset();
+            {
+                ComputeRecorder recorder{*m_command_buffer};
+                m_solver.record_reports_again(recorder, counts.reported, m_retired);
+                m_report_readback.reserve(m_device, std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport), m_retired);
+                recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
+                const std::array regions{BufferCopyRegion{.size = std::uint64_t{counts.reported} * sizeof(GpuContactReport)}};
+                recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), regions);
+                recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+            }
+            run_commands();
+        }
         stage = "reading the step back";
         read_back(pending);
+        const std::uint32_t kept_points = read_contacts(pending, counts.reported);
+        read_triggers(pending, counts.trigger_overlaps);
+        m_query_tree_current = m_solver.trigger_capacity() > 0;
         m_solver.complete_step(counts);
         m_lists_changed = false;
         pending.statistics.pairs = counts.candidates;
-        pending.statistics.contacts = counts.contact_points;
+        pending.statistics.contacts = counts.touching_points + kept_points;
         m_retired.clear();
         (void)m_device.deleter().collect();
-        pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] = seconds_between(solved, Clock::now());
+        pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] = gpu_events + seconds_between(solved, Clock::now());
     }
     catch (const gfx::Error& error)
     {
@@ -1310,9 +1408,11 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                        std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts) +
                            (std::uint64_t{joint_count} + particle_count) * 2 * sizeof(GpuVector),
                        m_retired);
+    m_report_readback.reserve(m_device, std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport), m_retired);
 
     m_command_pool->reset();
     ComputeRecorder recorder{*m_command_buffer};
+    m_timer.begin(recorder);
 
     // The arrays hold every slot (grown ones keep the slots the GPU had); the contacts' arrays and uploads.
     const std::uint32_t kept = m_body_count;
@@ -1397,6 +1497,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         }
     };
     recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
+    m_timer.mark(recorder, StepPhase::SOLVER);
     if (!replay)
     {
         if (patch_count > 0)
@@ -1423,26 +1524,40 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                            .solver = solver,
                            .sleep = pending.configuration.sleep,
                            .collision = pending.configuration.collision,
-                           .lists_changed = m_lists_changed};
+                           .lists_changed = m_lists_changed,
+                           .timer = &m_timer};
     m_solver.record_detection(recorder, step);
     const std::uint32_t position_iterations = std::max(solver.position_iterations, 1U);
     const std::uint32_t iterations = std::max(position_iterations, m_soft_bodies.iterations());
     for (std::uint32_t substep = 0; substep < parameters.substeps; ++substep)
     {
         // The bodies' prediction, then the particles' (they may follow a body); each iteration the soft constraints, then
-        // the joints and contacts (soft bodies may ask for more iterations than the world's, rigid ones fewer).
+        // the joints and contacts (soft bodies may ask for more iterations than the world's, rigid ones fewer). The soft
+        // bodies' passes timed apart.
+        const bool particles = particle_count > 0;
+        const auto soft = [&](bool begins) {
+            if (particles)
+            {
+                m_timer.mark(recorder, begins ? StepPhase::SOFT_BODIES : StepPhase::SOLVER);
+            }
+        };
         pass(m_pipelines.integrate(), body_count);
+        soft(true);
         m_soft_bodies.record_integrate(recorder, parameters_index);
         for (std::uint32_t iteration = 0; iteration < iterations; ++iteration)
         {
+            soft(true);
             m_soft_bodies.record_iteration(recorder, parameters_index, iteration);
+            soft(false);
             if (iteration < position_iterations)
             {
                 m_solver.record_positions(recorder, iteration == 0);
             }
         }
         pass(m_pipelines.update_velocities(), body_count);
+        soft(true);
         m_soft_bodies.record_velocity_update(recorder, parameters_index);
+        soft(false);
         for (std::uint32_t iteration = 0; iteration < std::max(solver.velocity_iterations, 1U); ++iteration)
         {
             m_solver.record_velocities(recorder, iteration == 0);
@@ -1450,6 +1565,9 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     }
     m_solver.record_joint_forces(recorder);
     m_solver.record_sleep(recorder);
+    m_timer.mark(recorder, StepPhase::EVENTS);
+    m_solver.record_reports(recorder);
+    m_solver.record_triggers(recorder);
 
     // The results into the readback buffer: the bodies' arrays, their flags, the solver's counts, the joints' results.
     recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
@@ -1489,6 +1607,16 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         }
         offset += std::uint64_t{particle_count} * sizeof(GpuVector);
     }
+    const std::array report_regions{BufferCopyRegion{.size = std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport)}};
+    recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), report_regions);
+    if (m_solver.trigger_capacity() > 0)
+    {
+        const std::uint64_t trigger_bytes = std::uint64_t{m_solver.trigger_capacity()} * sizeof(GpuTriggerOverlap);
+        m_trigger_readback.reserve(m_device, trigger_bytes, m_retired);
+        const std::array trigger_regions{BufferCopyRegion{.size = trigger_bytes}};
+        recorder.copy_buffer(m_solver.trigger_results_buffer().handle(), m_trigger_readback.buffer().handle(), trigger_regions);
+    }
+    m_timer.end(recorder);
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
 }
 

@@ -1,0 +1,722 @@
+#version 460
+// A query of the published world on the GPU (QueryEngine::BACKEND), in three modes over one GpuQuery (gpu_queries.cpp):
+//   0. one invocation walks the moving and static trees (rebuilt from the colliders' poses after the step): each collider
+//      (not a particle's sphere) whose filter the query's accepts and whose box meets the query — a ray's (entered within
+//      its maximum), a box (a box query's colliders are its results directly), the box around a cast or an overlapping
+//      shape, the box around a point within the distance of the nearest collider's farthest corner (a first walk) — becomes
+//      a pair of the region's instance and its own; the region (a box around what the pairs may reach: for a ray, up to
+//      where it leaves the farthest box it enters) is written as the region's record and instance, which the mid phase
+//      descends compounds and triangle soups with;
+//   1. one invocation per piece of those pairs (GpuNarrowPhase::pieces(): convex shapes and compound children as posed, the
+//      triangles of meshes and height fields under the region): the ray's hit, the cast's first touch, the shape's
+//      overlap or the point's distance on that piece, as the CPU's ray_cast_shape(), cast_shape(), shapes_overlap() and
+//      closest_point_on_shape() find them (conservative advancement on GJK distances; triangles by Möller–Trumbore; one-sided
+//      triangles hit from the front only);
+//   2. one invocation per pair: its best piece (the nearest; any for an overlap) into the results the CPU reads.
+#extension GL_GOOGLE_include_directive : require
+#include "epa.glsl"
+#include "bvh.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint query; // the GpuQuery's buffer
+    uint mode;
+} push;
+
+// Query kinds (QueryKind in gpu_queries.cpp).
+const uint QUERY_RAY = 0U;
+const uint QUERY_RAY_ALL = 1U;
+const uint QUERY_CAST = 2U;
+const uint QUERY_OVERLAP = 3U;
+const uint QUERY_BOX = 4U;
+const uint QUERY_CLOSEST = 5U;
+
+// The results (a device buffer the CPU reads a copy of): the header's words (the first vector), the reach of a closest
+// point (the second vector's x), then three vectors per result.
+const uint RESULT_PAIRS = 0U;
+const uint RESULT_PIECES = 1U;
+const uint RESULT_BOXES = 2U;
+const uint RESULT_OVERFLOW = 3U;
+const uint RESULT_REACH = 4U;
+const uint RESULT_FIRST = 2U;
+const uint RESULT_VECTORS = 3U;
+
+// The conservative advancement of the CPU's queries (queries.cpp).
+const uint MAXIMUM_ADVANCEMENT_STEPS = 64U;
+const float TOUCHING_DISTANCE = 1.0e-4;
+const float NEAR_DISTANCE = 16.0 * TOUCHING_DISTANCE;
+const float PROBE_REACH = 4.0 * NEAR_DISTANCE;
+
+const uint COLLIDER_VECTORS = 5U;
+const uint COLLIDER_LIVE = 1U;
+const uint COLLIDER_PARTICLE = 2U;
+
+// ===================================================================================================== the query
+
+struct Query
+{
+    uint kind;
+    uint pair_capacity;
+    uint region_instance;
+    uint trees; // bit 0: the moving tree is built; bit 1: the static tree
+    uvec4 filter_words;
+    uint tables;
+    uint colliders;
+    uint collider_list;
+    uint instances;
+    uint boxes;
+    uint moving_header;
+    uint moving_nodes;
+    uint static_header;
+    uint static_nodes;
+    uint pairs;
+    uint results;
+    uint sub_pairs;
+    uint piece_counts;
+    uint piece_offsets;
+    uint piece_results;
+    uint piece_capacity;
+    uint moving_count;
+    uint static_count;
+    uint shape;
+    int group;
+    vec3 origin; // the ray's origin, the point, the cast or overlap shape's position, or the box's minimum
+    float maximum;
+    vec3 direction; // the ray's direction, or the cast's translation
+    vec4 orientation;
+    vec3 region_minimum;
+    vec3 region_maximum;
+    uint region_record;
+};
+
+Query query;
+
+void load_query()
+{
+    const uint base = 0U;
+    const uvec4 head = gpu_word_vectors[push.query].values[base];
+    const uvec4 buffers0 = gpu_word_vectors[push.query].values[base + 2U];
+    const uvec4 buffers1 = gpu_word_vectors[push.query].values[base + 3U];
+    const uvec4 buffers2 = gpu_word_vectors[push.query].values[base + 4U];
+    const uvec4 buffers3 = gpu_word_vectors[push.query].values[base + 5U];
+    const uvec4 sizes = gpu_word_vectors[push.query].values[base + 6U];
+    const vec4 origin = gpu_vectors[push.query].values[base + 7U];
+    query = Query(head.x, head.y, head.z, head.w, gpu_word_vectors[push.query].values[base + 1U], buffers0.x, buffers0.y, buffers0.z, buffers0.w,
+                  buffers1.x, buffers1.y, buffers1.z, buffers1.w, buffers2.x, buffers2.y, buffers2.z, buffers2.w, buffers3.x, buffers3.y,
+                  buffers3.z, buffers3.w, sizes.x, sizes.y, sizes.z, int(sizes.w), origin.xyz, origin.w, gpu_vectors[push.query].values[base + 8U].xyz,
+                  gpu_vectors[push.query].values[base + 9U], gpu_vectors[push.query].values[base + 10U].xyz, gpu_vectors[push.query].values[base + 11U].xyz,
+                  gpu_word_vectors[push.query].values[base + 12U].x);
+}
+
+// ===================================================================================================== mode 0: candidates
+
+// Whether the query's filter and a collider's let them meet (should_collide(), the query as a collider).
+bool accepts(uint collider)
+{
+    const uvec4 words = gpu_word_vectors[query.colliders].values[COLLIDER_VECTORS * collider + 2U];
+    const uvec4 words_of_filter = gpu_word_vectors[query.colliders].values[COLLIDER_VECTORS * collider + 3U];
+    if ((words.z & COLLIDER_LIVE) == 0U || (words.z & COLLIDER_PARTICLE) != 0U)
+    {
+        return false;
+    }
+    const int group = int(words.w);
+    if (group == query.group && group != 0)
+    {
+        return group > 0;
+    }
+    const bool query_in_collider = ((query.filter_words.x & words_of_filter.z) | (query.filter_words.y & words_of_filter.w)) != 0U;
+    const bool collider_in_query = ((words_of_filter.x & query.filter_words.z) | (words_of_filter.y & query.filter_words.w)) != 0U;
+    return query_in_collider && collider_in_query;
+}
+
+// Whether the ray (origin, direction, maximum) enters box.
+bool ray_meets(Box box)
+{
+    const vec3 inverse = vec3(1.0) / query.direction;
+    return ray_entry(box, query.origin, query.direction, inverse, query.maximum) <= query.maximum;
+}
+
+// Where the ray leaves box (within its maximum).
+float ray_exit(Box box)
+{
+    float far = query.maximum;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (query.direction[axis] != 0.0)
+        {
+            const float first = (box.minimum[axis] - query.origin[axis]) / query.direction[axis];
+            const float second = (box.maximum[axis] - query.origin[axis]) / query.direction[axis];
+            far = min(far, max(first, second));
+        }
+    }
+    return far;
+}
+
+// The distance from the query's point to the nearest point of box (0 inside) and to its farthest corner.
+float box_distance(Box box)
+{
+    const vec3 outside = max(max(box.minimum - query.origin, query.origin - box.maximum), vec3(0.0));
+    return length(outside);
+}
+
+float farthest_corner(Box box)
+{
+    return length(max(abs(box.minimum - query.origin), abs(box.maximum - query.origin)));
+}
+
+// The instance's box as the bounds pass wrote it (no growth).
+Box instance_box(uint instance)
+{
+    return Box(gpu_vectors[query.boxes].values[2U * instance].xyz, gpu_vectors[query.boxes].values[2U * instance + 1U].xyz);
+}
+
+// The walks of the trees: the nearest collider's farthest corner from the point (BOUND), or the pairs (COLLECT).
+const uint WALK_BOUND = 0U;
+const uint WALK_COLLECT = 1U;
+
+uint stack[BVH_STACK_SIZE];
+float bound;       // WALK_BOUND: the smallest farthest corner so far
+float ray_reach;   // WALK_COLLECT of a ray: where it leaves the farthest box it enters
+
+// Whether a node's box is worth entering.
+bool enters(Box box, uint walk)
+{
+    if (walk == WALK_BOUND)
+    {
+        return box_distance(box) <= bound;
+    }
+    if (query.kind == QUERY_RAY || query.kind == QUERY_RAY_ALL)
+    {
+        return ray_meets(box);
+    }
+    return overlaps(box, Box(query.region_minimum, query.region_maximum));
+}
+
+void leaf(uint instance,
+          uint walk)
+{
+    const uint collider = gpu_words[query.collider_list].words[instance];
+    if (!accepts(collider))
+    {
+        return;
+    }
+    const Box box = instance_box(instance);
+    if (walk == WALK_BOUND)
+    {
+        bound = min(bound, farthest_corner(box));
+        return;
+    }
+    if (!enters(box, walk))
+    {
+        return;
+    }
+    if (query.kind == QUERY_RAY || query.kind == QUERY_RAY_ALL)
+    {
+        ray_reach = max(ray_reach, ray_exit(box));
+    }
+    if (query.kind == QUERY_BOX)
+    {
+        const uint result = atomicAdd(gpu_words[query.results].words[RESULT_BOXES], 1U);
+        if (result < query.pair_capacity)
+        {
+            gpu_word_vectors[query.results].values[RESULT_FIRST + RESULT_VECTORS * result] = uvec4(collider, NO_SUB_SHAPE, 0U, 1U);
+        }
+        return;
+    }
+    const uint pair = atomicAdd(gpu_words[query.results].words[RESULT_PAIRS], 1U);
+    if (pair < query.pair_capacity)
+    {
+        gpu_words[query.pairs].words[2U * pair] = query.region_instance;
+        gpu_words[query.pairs].words[2U * pair + 1U] = instance;
+    }
+}
+
+// The tree's leaves worth visiting (its primitives are instances from first_instance).
+void traverse(uint header,
+              uint nodes,
+              uint first_instance,
+              uint walk)
+{
+    const uint leaves = gpu_words[header].words[HEADER_LEAVES];
+    if (leaves == 0U)
+    {
+        return;
+    }
+    const Tree tree = Tree(header, nodes, 0U, 0U, 0U, 0U);
+    uint first;
+    uint second;
+    const Box root = read_node(tree, 0U, first, second);
+    if (!enters(root, walk))
+    {
+        return;
+    }
+    if (leaves == 1U)
+    {
+        leaf(first_instance + first, walk);
+        return;
+    }
+    uint size = 1U;
+    stack[0] = 0U;
+    while (size > 0U)
+    {
+        --size;
+        uint children[2];
+        read_node(tree, stack[size], children[0], children[1]);
+        for (int side = 0; side < 2; ++side)
+        {
+            uint primitive;
+            uint unused;
+            const Box box = read_node(tree, node_of(children[side], leaves), primitive, unused);
+            if (!enters(box, walk))
+            {
+                continue;
+            }
+            if (is_leaf(children[side]))
+            {
+                leaf(first_instance + primitive, walk);
+            }
+            else if (size < BVH_STACK_SIZE)
+            {
+                stack[size++] = children[side];
+            }
+            else
+            {
+                atomicOr(gpu_words[query.results].words[RESULT_OVERFLOW], 1U);
+            }
+        }
+    }
+}
+
+void walk_trees(uint walk)
+{
+    if ((query.trees & 1U) != 0U)
+    {
+        traverse(query.moving_header, query.moving_nodes, 0U, walk);
+    }
+    if ((query.trees & 2U) != 0U)
+    {
+        traverse(query.static_header, query.static_nodes, query.moving_count, walk);
+    }
+}
+
+// The region as a box shape at its center: its record, its instance.
+void write_region(vec3 minimum,
+                  vec3 maximum)
+{
+    const vec3 center = 0.5 * (minimum + maximum);
+    const vec3 half_size = max(0.5 * (maximum - minimum), vec3(0.0));
+    const uint record = 6U * query.region_record;
+    gpu_word_vectors[shape_records].values[record] = uvec4(SHAPE_BOX, 0U, 0U, 0U);
+    gpu_word_vectors[shape_records].values[record + 1U] = uvec4(0U);
+    gpu_word_vectors[shape_records].values[record + 2U] = uvec4(0U);
+    gpu_vectors[shape_records].values[record + 3U] = vec4(half_size, 0.0);
+    gpu_vectors[shape_records].values[record + 4U] = vec4(-half_size, 0.0);
+    gpu_vectors[shape_records].values[record + 5U] = vec4(half_size, 0.0);
+    gpu_word_vectors[query.instances].values[2U * query.region_instance] = uvec4(floatBitsToUint(center), query.region_record);
+    gpu_vectors[query.instances].values[2U * query.region_instance + 1U] = vec4(0.0, 0.0, 0.0, 1.0);
+}
+
+// ===================================================================================================== mode 1: pieces
+
+// The distance between two convex shapes at their poses (convex_distance(): GJK between the cores minus the margins, EPA's
+// depth when they overlap), the normal from the first to the second, the points on their surfaces.
+struct ShapeDistance
+{
+    float distance;
+    vec3 normal;
+    vec3 point_first;
+    vec3 point_second;
+};
+
+ShapeDistance convex_distance(ConvexShape first, Pose first_pose, ConvexShape second, Pose second_pose)
+{
+    shape_first = first;
+    pose_first = first_pose;
+    shape_second = second;
+    pose_second = second_pose;
+    const GjkResult closest = gjk();
+    if (!closest.overlapping && closest.distance > 1e-6)
+    {
+        const vec3 normal = (closest.point_second - closest.point_first) / closest.distance;
+        return ShapeDistance(closest.distance - first.margin - second.margin, normal, closest.point_first + normal * first.margin,
+                             closest.point_second - normal * second.margin);
+    }
+    const EpaResult deepest = epa(closest);
+    return ShapeDistance(-deepest.depth - first.margin - second.margin, deepest.normal, deepest.point_first + deepest.normal * first.margin,
+                         deepest.point_second - deepest.normal * second.margin);
+}
+
+ConvexShape point_shape()
+{
+    return ConvexShape(SHAPE_SPHERE, 0U, 0U, 0U, 0U, vec3(0.0), 0.0, vec3(0.0), vec3(0.0), vec3(0.0));
+}
+
+// A piece's answer: hit (or overlapping), the distance or fraction, the point (on the piece), the normal.
+bool piece_hit;
+float piece_value;
+vec3 piece_point;
+vec3 piece_normal;
+
+// The ray's first hit on a sphere (center, radius) within maximum (sphere_ray_cast()).
+void sphere_ray(vec3 center, float radius, vec3 origin, vec3 direction, float maximum)
+{
+    const vec3 offset = origin - center;
+    const float b = dot(offset, direction);
+    const float c = dot(offset, offset) - radius * radius;
+    if (c > 0.0 && b > 0.0)
+    {
+        return;
+    }
+    const float discriminant = b * b - c;
+    if (discriminant < 0.0)
+    {
+        return;
+    }
+    const float distance = max(-b - sqrt(discriminant), 0.0);
+    if (distance > maximum)
+    {
+        return;
+    }
+    const vec3 outward = origin + direction * distance - center;
+    const bool inside = distance == 0.0 && dot(offset, offset) < radius * radius;
+    piece_hit = true;
+    piece_value = distance;
+    piece_point = origin + direction * distance;
+    piece_normal = inside || dot(outward, outward) == 0.0 ? -direction : normalize(outward);
+}
+
+// The ray's first hit on a box (half extents, pose) within maximum (box_ray_cast()): the slabs in the box's frame, the
+// normal of the face it enters by; starting inside, a hit at 0 against the ray.
+void box_ray(vec3 half_extents, Pose pose, vec3 origin, vec3 direction, float maximum)
+{
+    const Pose to_box = inverse_pose(pose);
+    const vec3 start = transform_point(to_box, origin);
+    const vec3 along = rotate_vector(to_box.orientation, direction);
+    float entry = 0.0;
+    float exit = maximum;
+    uint entry_axis = 3U;
+    for (uint axis = 0U; axis < 3U; ++axis)
+    {
+        // Parallel to the slab: inside it or never; else the near face's plane, then the far one's.
+        if (abs(along[axis]) < GEOMETRIC_TOLERANCE)
+        {
+            if (abs(start[axis]) > half_extents[axis])
+            {
+                return;
+            }
+            continue;
+        }
+        const float near_side = along[axis] > 0.0 ? -half_extents[axis] : half_extents[axis];
+        const float first = (near_side - start[axis]) / along[axis];
+        const float second = (-near_side - start[axis]) / along[axis];
+        if (first > entry)
+        {
+            entry = first;
+            entry_axis = axis;
+        }
+        exit = min(exit, second);
+        if (entry > exit)
+        {
+            return;
+        }
+    }
+    piece_hit = true;
+    piece_value = entry;
+    piece_point = origin + direction * entry;
+    if (entry_axis == 3U)
+    {
+        piece_normal = -direction;
+        return;
+    }
+    vec3 normal = vec3(0.0);
+    normal[entry_axis] = along[entry_axis] > 0.0 ? -1.0 : 1.0;
+    piece_normal = rotate_vector(pose.orientation, normal);
+}
+
+// The ray's hit on a triangle within maximum (Möller–Trumbore, triangle_ray_cast()): the face's normal against the ray; a
+// one-sided triangle hit from the front only. In the triangle's frame.
+void triangle_ray(vec3 a, vec3 b, vec3 c, bool two_sided, vec3 origin, vec3 direction, float maximum)
+{
+    const vec3 first_edge = b - a;
+    const vec3 second_edge = c - a;
+    const vec3 across = cross(direction, second_edge);
+    const float determinant = dot(first_edge, across);
+    if (abs(determinant) <= 1e-12 * length(first_edge) * length(second_edge) || (!two_sided && determinant < 0.0))
+    {
+        return;
+    }
+    const float inverse_determinant = 1.0 / determinant;
+    const vec3 offset = origin - a;
+    const float u = dot(offset, across) * inverse_determinant;
+    if (u < 0.0 || u > 1.0)
+    {
+        return;
+    }
+    const vec3 lifted = cross(offset, first_edge);
+    const float v = dot(direction, lifted) * inverse_determinant;
+    if (v < 0.0 || u + v > 1.0)
+    {
+        return;
+    }
+    const float distance = dot(second_edge, lifted) * inverse_determinant;
+    if (distance < 0.0 || distance > maximum)
+    {
+        return;
+    }
+    const vec3 normal = triangle_normal(a, b, c);
+    piece_hit = true;
+    piece_value = distance;
+    piece_point = origin + direction * distance;
+    piece_normal = determinant > 0.0 ? normal : -normal;
+}
+
+// A piece's answer, as the CPU's queries find it. Rays on spheres, plain boxes and triangles are exact; every other answer comes from
+// the distance between the moving side (the point, or the cast or overlapping shape) and the piece, by conservative
+// advancement along the ray's direction (in meters) or the cast's translation (as a fraction): convex_ray_cast() and
+// convex_cast(), their probe a little further along when the motion turned away within GJK's accuracy. One distance per
+// iteration of one loop: GLSL inlines every call, and convex_distance() (GJK, EPA) called from each query kind made a kernel
+// the RTX 5060 driver once hung on (the device lost).
+void test_piece(uint slot)
+{
+    const SubPair pair = load_sub_pair(query.sub_pairs, slot);
+    const uint kind = pair.kind & 0xFFU;
+    piece_hit = false;
+    piece_value = 0.0;
+    piece_point = vec3(0.0);
+    piece_normal = vec3(0.0);
+
+    // The piece: a convex shape as posed, or a triangle in its shape's frame (the query moved into that frame).
+    ConvexShape piece;
+    Pose piece_pose;
+    bool triangle = false;
+    bool two_sided = true;
+    vec3 corner_a = vec3(0.0);
+    vec3 corner_b = vec3(0.0);
+    vec3 corner_c = vec3(0.0);
+    if (kind == SUB_PAIR_CONVEX)
+    {
+        piece = load_shape(pair.shape_b);
+        piece_pose = pair.pose_b;
+    }
+    else
+    {
+        const ShapeRecord soup = load_record(pair.shape_b);
+        uint active_edges;
+        soup_triangle(soup, pair.triangle_b, corner_a, corner_b, corner_c, active_edges);
+        two_sided = soup.kind == SHAPE_TRIANGLE_MESH && (soup.flags & 1U) != 0U;
+        piece = triangle_shape(corner_a, corner_b, corner_c);
+        piece_pose = identity_pose();
+        triangle = true;
+    }
+    const Pose frame = triangle ? pair.pose_b : identity_pose();
+    const Pose to_local = inverse_pose(frame);
+    const vec3 origin = transform_point(to_local, query.origin);
+    const vec3 motion = rotate_vector(to_local.orientation, query.direction);
+    const bool ray = query.kind == QUERY_RAY || query.kind == QUERY_RAY_ALL;
+    const bool casting = query.kind == QUERY_CAST;
+
+    if (ray && triangle)
+    {
+        triangle_ray(corner_a, corner_b, corner_c, two_sided, origin, motion, query.maximum);
+    }
+    else if (ray && piece.kind == SHAPE_SPHERE)
+    {
+        sphere_ray(piece_pose.position, piece.margin, origin, motion, query.maximum);
+    }
+    else if (ray && piece.kind == SHAPE_BOX && piece.margin == 0.0)
+    {
+        box_ray(piece.size, piece_pose, origin, motion, query.maximum);
+    }
+    else if (!casting || !triangle || two_sided || dot(triangle_normal(corner_a, corner_b, corner_c), motion) < 0.0)
+    {
+        // (A one-sided triangle stops only what comes at its front.)
+        const bool shaped = casting || query.kind == QUERY_OVERLAP;
+        const ConvexShape moving = shaped ? load_shape(query.shape) : point_shape();
+        const vec4 orientation = shaped ? multiply_rotations(to_local.orientation, query.orientation) : vec4(0.0, 0.0, 0.0, 1.0);
+        const bool moves = ray || casting;
+        const float limit = ray ? query.maximum : 1.0;
+        const float tolerance = ray ? GEOMETRIC_TOLERANCE : GEOMETRIC_TOLERANCE * max(1.0, length(motion));
+        float travel = 0.0;
+        vec3 last_normal = ray ? -motion : normalized(motion);
+        float last_approach = 1.0;
+        bool probing = false;
+        float probe_travel = 0.0;
+        float probe_hit = 0.0;
+        vec3 probe_point = vec3(0.0);
+        for (uint step = 0U; step <= MAXIMUM_ADVANCEMENT_STEPS; ++step)
+        {
+            const ShapeDistance gap = convex_distance(moving, Pose(origin + motion * (probing ? probe_travel : travel), orientation), piece, piece_pose);
+
+            // An overlap or a closest point: this distance (a triangle's never below 0).
+            if (!moves)
+            {
+                const float distance = triangle && query.kind == QUERY_CLOSEST ? max(gap.distance, 0.0) : gap.distance;
+                piece_hit = query.kind == QUERY_OVERLAP ? distance <= 0.0 : distance <= query.maximum;
+                piece_value = distance;
+                piece_point = gap.point_second;
+                piece_normal = gap.normal;
+                break;
+            }
+
+            // The probe a little further along: inside there, the hit stands.
+            if (probing)
+            {
+                if (gap.distance <= 0.0)
+                {
+                    piece_hit = true;
+                    piece_value = probe_hit;
+                    piece_point = ray ? origin + motion * probe_hit : probe_point;
+                    piece_normal = last_normal;
+                }
+                break;
+            }
+            if (step == MAXIMUM_ADVANCEMENT_STEPS)
+            {
+                break;
+            }
+
+            // Overlapping at the start: a hit at 0.
+            const float approach = dot(gap.normal, motion);
+            if (gap.distance < 0.0 && step == 0U)
+            {
+                piece_hit = true;
+                piece_value = 0.0;
+                piece_point = ray ? origin : gap.point_second;
+                piece_normal = ray ? -motion : gap.normal;
+                break;
+            }
+
+            // Touching (after advancing; at the start only when approaching): where the motion meets the plane through
+            // the closest points; so close, GJK's normal may point anywhere: the last reliable one stands.
+            if (gap.distance <= TOUCHING_DISTANCE && (step > 0U || approach > tolerance))
+            {
+                const bool reliable = approach > tolerance;
+                const float hit = travel + (reliable ? max(gap.distance, 0.0) / approach : 0.0);
+                if (hit <= limit)
+                {
+                    piece_hit = true;
+                    piece_value = hit;
+                    piece_point = ray ? origin + motion * hit : gap.point_second;
+                    piece_normal = reliable ? (ray ? -gap.normal : gap.normal) : last_normal;
+                }
+                break;
+            }
+
+            // Moving away from (or along) that plane: no hit, unless it came within GJK's accuracy (the probe decides).
+            if (approach <= tolerance)
+            {
+                const float hit = travel + max(gap.distance, 0.0) / last_approach;
+                if (step > 0U && gap.distance <= NEAR_DISTANCE && hit <= limit)
+                {
+                    probing = true;
+                    probe_travel = travel + PROBE_REACH / last_approach;
+                    probe_hit = hit;
+                    probe_point = gap.point_second;
+                    continue;
+                }
+                break;
+            }
+            last_normal = ray ? -gap.normal : gap.normal;
+            last_approach = approach;
+            travel += (gap.distance - 0.5 * TOUCHING_DISTANCE) / approach;
+            if (travel > limit)
+            {
+                break;
+            }
+        }
+    }
+
+    // Back into the world.
+    piece_point = transform_point(frame, piece_point);
+    piece_normal = rotate_vector(frame.orientation, piece_normal);
+    gpu_word_vectors[query.piece_results].values[RESULT_VECTORS * slot] = uvec4(piece_hit ? 1U : 0U, pair.sub_second, floatBitsToUint(piece_value), 0U);
+    gpu_vectors[query.piece_results].values[RESULT_VECTORS * slot + 1U] = vec4(piece_point, 0.0);
+    gpu_vectors[query.piece_results].values[RESULT_VECTORS * slot + 2U] = vec4(piece_normal, 0.0);
+}
+
+
+// ===================================================================================================== mode 2: pairs
+
+void reduce_pair(uint pair)
+{
+    // The pair's best piece: the smallest value (the first of equal ones); any for an overlap.
+    const uint first = gpu_words[query.piece_offsets].words[pair];
+    const uint count = gpu_words[query.piece_counts].words[pair];
+    uint best = 0xFFFFFFFFU;
+    float best_value = 0.0;
+    for (uint slot = first; slot < first + count && slot < query.piece_capacity; ++slot)
+    {
+        const uvec4 head = gpu_word_vectors[query.piece_results].values[RESULT_VECTORS * slot];
+        const float value = uintBitsToFloat(head.z);
+        if (head.x != 0U && (best == 0xFFFFFFFFU || value < best_value))
+        {
+            best = slot;
+            best_value = value;
+        }
+    }
+    const uint collider = gpu_words[query.collider_list].words[gpu_words[query.pairs].words[2U * pair + 1U]];
+    const uint result = RESULT_FIRST + RESULT_VECTORS * pair;
+    if (best == 0xFFFFFFFFU)
+    {
+        gpu_word_vectors[query.results].values[result] = uvec4(collider, NO_SUB_SHAPE, 0U, 0U);
+        return;
+    }
+    const uvec4 head = gpu_word_vectors[query.piece_results].values[RESULT_VECTORS * best];
+    gpu_word_vectors[query.results].values[result] = uvec4(collider, head.y, head.z, 1U);
+    gpu_vectors[query.results].values[result + 1U] = gpu_vectors[query.piece_results].values[RESULT_VECTORS * best + 1U];
+    gpu_vectors[query.results].values[result + 2U] = gpu_vectors[query.piece_results].values[RESULT_VECTORS * best + 2U];
+}
+
+void main()
+{
+    load_query();
+    const uint index = gl_GlobalInvocationID.x;
+    load_tables(query.tables);
+    if (push.mode == 0U)
+    {
+        if (index != 0U)
+        {
+            return;
+        }
+
+        // A closest point's reach: the nearest collider's farthest corner (or the maximum).
+        if (query.kind == QUERY_CLOSEST)
+        {
+            bound = query.maximum;
+            walk_trees(WALK_BOUND);
+            query.maximum = bound;
+            query.region_minimum = query.origin - vec3(bound);
+            query.region_maximum = query.origin + vec3(bound);
+            gpu_words[query.results].words[RESULT_REACH] = floatBitsToUint(bound);
+        }
+        ray_reach = 0.0;
+        walk_trees(WALK_COLLECT);
+        if (query.kind == QUERY_RAY || query.kind == QUERY_RAY_ALL)
+        {
+            const vec3 end = query.origin + query.direction * ray_reach;
+            query.region_minimum = min(query.origin, end);
+            query.region_maximum = max(query.origin, end);
+        }
+        if (query.kind != QUERY_BOX)
+        {
+            write_region(query.region_minimum, query.region_maximum);
+        }
+        return;
+    }
+    if (query.kind == QUERY_CLOSEST)
+    {
+        query.maximum = uintBitsToFloat(gpu_words[query.results].words[RESULT_REACH]);
+    }
+    if (push.mode == 1U)
+    {
+        if (index < min(gpu_words[query.results].words[RESULT_PIECES], query.piece_capacity))
+        {
+            test_piece(index);
+        }
+        return;
+    }
+    if (index < min(gpu_words[query.results].words[RESULT_PAIRS], query.pair_capacity))
+    {
+        reduce_pair(index);
+    }
+}

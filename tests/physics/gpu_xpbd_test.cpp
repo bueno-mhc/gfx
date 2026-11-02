@@ -304,8 +304,9 @@ TEST_P(GpuXpbdTest, IdenticalEditsGiveIdenticalBits)
     }
 }
 
-TEST_P(GpuXpbdTest, WhatLaterPhasesBringIsRefusedNow)
+TEST_P(GpuXpbdTest, WhatTheGpuCannotRunIsRefused)
 {
+    // Compounds nested deeper than the GPU descends (colliders and triggers alike) and user constraints (C++ code).
     const std::unique_ptr<PhysicsWorld> simulated = world();
     const std::unique_ptr<RigidBody> body = simulated->create_rigid_body({.mass_properties = mass_of(1)});
     const auto refused = [](const auto& create, std::string_view part) {
@@ -327,7 +328,7 @@ TEST_P(GpuXpbdTest, WhatLaterPhasesBringIsRefusedNow)
     }
     refused([&] { return body->add_collider({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
     refused([&] { return simulated->create_constraint({.first = body->handle(), .constraint = std::make_shared<OneRowConstraint>()}); }, "USER_CONSTRAINTS");
-    refused([&] { return simulated->create_trigger({.shape = make_shape(SphereShape{.radius = 1})}); }, "phase G8");
+    refused([&] { return simulated->create_trigger({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
 }
 
 TEST_P(GpuXpbdTest, DevicesWithAGraphicsQueueOnlyStepOnIt)

@@ -239,6 +239,98 @@ TEST(ShapeQueryTest, MeshAndHeightFieldRayCastsMatchBruteForce)
     EXPECT_GT(hits, 150U);
 }
 
+TEST(ShapeQueryTest, FlatMeshesAreHitWhereverRaysCrossThem)
+{
+    // A flat square of two triangles (front up), as a one-sided mesh, a two-sided mesh and a compound's child, level and
+    // tilted: rays aimed at points inside it from above hit it where they cross its plane, from below only when two-sided.
+    // (Its box has no thickness: the clip to the box once ended the segment on the plane, an ulp short of some hits.)
+    const std::vector<Vector3> corners{{.x = -1.5F, .z = -1.5F}, {.x = 1.5F, .z = -1.5F}, {.x = 1.5F, .z = 1.5F}, {.x = -1.5F, .z = 1.5F}};
+    const std::vector<std::array<std::uint32_t, 3>> triangles{{0, 2, 1}, {0, 3, 2}};
+    const std::shared_ptr<const Shape> one_sided = make_shape(TriangleMeshShape{{.vertices = corners, .triangles = triangles}});
+    const Shape two_sided{TriangleMeshShape{{.vertices = corners, .triangles = triangles, .two_sided = true}}};
+    const Transform child_pose{.position = {.x = 0.5F, .y = 0.25F}};
+    const Shape compound{CompoundShape{{CompoundChild{.shape = one_sided, .pose = child_pose}}}};
+
+    Generator generator{5};
+    std::size_t hits = 0;
+    for (const Transform& pose : {Transform{.position = {.y = 2.5F, .z = 4}}, Transform{.position = {.x = -4, .y = 1, .z = 4}, .orientation = Quaternion::from_axis_angle({.x = 1}, 0.3F)}})
+    {
+        for (int sample = 0; sample < 400; ++sample)
+        {
+            // In the square's frame: a point inside it, a start above it (below for every fourth ray).
+            const bool from_below = sample % 4 == 0;
+            const Vector3 target{.x = generator.between(-1.45F, 1.45F), .z = generator.between(-1.45F, 1.45F)};
+            const Vector3 start{.x = generator.between(-8, 8), .y = (from_below ? -1.0F : 1.0F) * generator.between(0.2F, 6), .z = generator.between(-8, 8)};
+            const Vector3 direction = normalized(target - start);
+            const float expected = -start.y / direction.y;
+            const float maximum = sample % 2 == 0 ? std::numeric_limits<float>::infinity() : 25.0F;
+            // (The compound is posed so that its child lies where the meshes do.)
+            const Ray ray{.origin = transform_point(pose, start), .direction = rotate(pose.orientation, direction)};
+            for (const auto& [shape, shape_pose, hit_from_below, name] :
+                 {std::tuple{one_sided.get(), pose, false, "one-sided mesh"}, std::tuple{&two_sided, pose, true, "two-sided mesh"},
+                  std::tuple{&compound, pose * inverse(child_pose), false, "compound"}})
+            {
+                const std::optional<ShapeRayHit> hit = ray_cast_shape(*shape, shape_pose, ray, maximum);
+                ASSERT_EQ(hit.has_value(), !from_below || hit_from_below) << name << " sample " << sample;
+                if (hit)
+                {
+                    EXPECT_NEAR(hit->distance, expected, 1e-3F) << name << " sample " << sample;
+                    EXPECT_LT(dot(hit->normal, ray.direction), 0.0F) << name << " sample " << sample;
+                    ++hits;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(hits, 2U * (300U * 3U + 100U));
+}
+
+TEST(ShapeQueryTest, BoxRayCastsHitFacesExactly)
+{
+    // A 100 m floor and a small turned box: rays aimed at points of their faces from outside hit where they cross the face's
+    // plane, with the face's normal exactly (conservative advancement's GJK normal was 4° off on the floor); a ray from
+    // inside hits at 0 against itself, one passing beside misses.
+    Generator generator{9};
+    for (const auto& [half_extents, pose] : {std::pair{Vector3{.x = 50, .y = 1, .z = 50}, Transform{.position = {.y = -1}}},
+                                             std::pair{Vector3{.x = 0.4F, .y = 0.3F, .z = 0.5F},
+                                                       Transform{.position = {.x = 2, .y = 1, .z = -3}, .orientation = Quaternion::from_axis_angle(normalized(Vector3{.x = 1, .y = 2, .z = 3}), 0.7F)}}})
+    {
+        const Shape box{BoxShape{.half_extents = half_extents}};
+        const auto along_face = [&generator](float extent) { return extent > 10.0F ? generator.between(-8, 8) : generator.between(-0.95F, 0.95F) * extent; };
+        for (int sample = 0; sample < 300; ++sample)
+        {
+            // A point on one of the six faces (in the box's frame), a start beyond the face's plane (the segment to the
+            // point meets the box there only).
+            const int face = sample % 6;
+            const auto axis = static_cast<std::size_t>(face / 2);
+            const float side = face % 2 == 0 ? 1.0F : -1.0F;
+            const std::array<float, 3> extents{half_extents.x, half_extents.y, half_extents.z};
+            std::array<float, 3> point{along_face(extents[0]), along_face(extents[1]), along_face(extents[2])};
+            point[axis] = side * extents[axis];
+            std::array<float, 3> outward{};
+            outward[axis] = side;
+            const Vector3 local_point{.x = point[0], .y = point[1], .z = point[2]};
+            const Vector3 local_normal{.x = outward[0], .y = outward[1], .z = outward[2]};
+            const Vector3 start = local_point + local_normal * generator.between(0.5F, 5) + generator.vector(-0.4F, 0.4F);
+            const Ray ray{.origin = transform_point(pose, start), .direction = rotate(pose.orientation, normalized(local_point - start))};
+            const std::optional<ShapeRayHit> hit = ray_cast_shape(box, pose, ray, 100.0F);
+            ASSERT_TRUE(hit.has_value()) << "sample " << sample;
+            EXPECT_NEAR(hit->distance, length(local_point - start), 1e-4F * std::max(1.0F, length(local_point - start))) << "sample " << sample;
+            const Vector3 expected_normal = rotate(pose.orientation, local_normal);
+            EXPECT_NEAR(hit->normal.x, expected_normal.x, 1e-5F) << "sample " << sample;
+            EXPECT_NEAR(hit->normal.y, expected_normal.y, 1e-5F) << "sample " << sample;
+            EXPECT_NEAR(hit->normal.z, expected_normal.z, 1e-5F) << "sample " << sample;
+            EXPECT_EQ(hit->sub_shape, NO_SUB_SHAPE);
+        }
+        const Ray inside{.origin = pose.position, .direction = normalized(Vector3{.x = 1, .y = 1})};
+        const std::optional<ShapeRayHit> from_inside = ray_cast_shape(box, pose, inside, 100.0F);
+        ASSERT_TRUE(from_inside.has_value());
+        EXPECT_EQ(from_inside->distance, 0.0F);
+        EXPECT_EQ(from_inside->normal, -inside.direction);
+        const Vector3 beside = transform_point(pose, Vector3{.x = 2.0F * half_extents.x, .y = 3.0F * half_extents.y});
+        EXPECT_FALSE(ray_cast_shape(box, pose, Ray{.origin = beside, .direction = rotate(pose.orientation, Vector3{.y = -1})}, 100.0F).has_value());
+    }
+}
+
 TEST(ShapeQueryTest, CompoundRayCastsHitTheNearestChild)
 {
     const Shape compound{CompoundShape{{CompoundChild{.shape = make_shape(SphereShape{.radius = 1}), .pose = {.position = {.x = -3}}},

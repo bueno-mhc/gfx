@@ -93,8 +93,8 @@ struct GpuBodyReadback
 /// the convex shapes' alignment thresholds and round faces, the geometric tolerance, the clipped polygons' capacity; the
 /// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
 /// compounds descended at once, the triangles' edge-on tolerance; the solver's sleeping flag and colors; the joint part
-/// kinds, the absent body (the world), the joint flags; the pin part, the soft-body constraint kinds.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 67> SPECIALIZATION_CONSTANTS{{
+/// kinds, the absent body (the world), the joint flags; the pin part, the soft-body constraint kinds; the touching slop.
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 68> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -162,6 +162,7 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 67> SPECIAL
     {64, std::to_underlying(SoftBodyConstraintKind::VOLUME)},
     {65, std::to_underlying(SoftBodyConstraintKind::DIHEDRAL)},
     {66, std::to_underlying(SoftBodyConstraintKind::TETHER)},
+    {67, std::bit_cast<std::uint32_t>(LINEAR_SLOP)},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");
@@ -230,6 +231,45 @@ private:
     MemoryLocation m_location = MemoryLocation::HOST_UPLOAD;
     BufferUsage m_usage = BufferUsage::NONE;
     std::unique_ptr<Buffer> m_buffer{};
+};
+
+// ===================================================================================================== step timer
+
+/// Timestamps between a step's phases, when the queue writes them: each mark ends the phase begun at the mark before and
+/// begins another; after the step, the time between marks summed per phase (on the GPU, so the phases' GPU times).
+class StepTimer
+{
+public:
+    /// @param device  The device (it outlives the timer).
+    /// @param enabled Whether the queue writes timestamps (else every operation does nothing).
+    /// @param family  The queue's family (its timestamps' valid bits).
+    StepTimer(Device& device,
+              bool enabled,
+              std::uint32_t family);
+
+    [[nodiscard]] auto enabled() const noexcept -> bool;
+
+    /// Begins a step's recording: the queries reset, no phase begun.
+    void begin(ComputeRecorder& recorder);
+
+    /// Begins @p phase (ending the one begun before): a timestamp, unless @p phase is the one begun or the queries are
+    /// used up (its time then goes to the phase before).
+    void mark(ComputeRecorder& recorder,
+              StepPhase phase);
+
+    /// Ends the phase begun last.
+    void end(ComputeRecorder& recorder);
+
+    /// After the step completed: the seconds of each phase marked into @p seconds (the others untouched).
+    void read(std::span<double, ENUMERATOR_COUNT<StepPhase>> seconds);
+
+private:
+    std::unique_ptr<QueryPool> m_pool{};
+    double m_nanoseconds_per_tick = 1.0;
+    std::uint64_t m_mask = 0;
+    std::vector<StepPhase> m_phases{};      ///< The phase each mark begins (the last one: none, the end).
+    std::vector<std::uint64_t> m_ticks{};   ///< Read back (scratch).
+    bool m_ended = false;
 };
 
 // ===================================================================================================== pipelines
