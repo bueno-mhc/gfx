@@ -542,7 +542,7 @@ stateDiagram-v2
     [*] --> Presenting: create_swapchain(window)
     Presenting --> Presenting: acquire / render / present (OPTIMAL)
     Presenting --> RecreationRequested: resized, SUBOPTIMAL or OUT_OF_DATE
-    RecreationRequested --> Presenting: next acquire() resizes, resets semaphores
+    RecreationRequested --> Presenting: next acquire() resizes
     Presenting --> Minimized: window minimized
     Minimized --> Minimized: acquire() returns nothing
     Minimized --> RecreationRequested: window restored
@@ -550,11 +550,16 @@ stateDiagram-v2
     SurfaceLost --> Presenting: next acquire() creates a new Swapchain
 ```
 
-Semaphores: one **acquisition semaphore** per image plus one. Each acquisition takes a free one; when an
-image comes back, the semaphore of its previous acquisition is free again (the image's presentation, and
-therefore the rendering that waited on that semaphore, is over). One **rendering semaphore** per image:
-the presentation engine may still hold the previous frame's semaphore, so reusing one per frame in flight
-would be invalid.
+Semaphores: **acquisition semaphores**, one per image plus one to start with. Each acquisition takes a
+free one; `present()` hands it to the device's `Deleter`, which returns it once every submission made so far,
+among them the rendering that waits on it, has completed. An image coming back says nothing about that
+rendering: with FIFO on the laptop's NVIDIA GPU, while other work kept the GPU busy, images came back the
+frame after they were presented, before the GPU had run that frame, and giving the frame's semaphore to the
+next acquisition then broke VUID-vkAcquireNextImageKHR-semaphore-01779 (and once hung the physics sandbox).
+When none is free, `acquire()` collects the deleter, then makes another semaphore (the GPU is further behind
+than ever before), and beyond 64 waits for the device. One **rendering semaphore** per image: the
+presentation engine may still hold the previous frame's semaphore, so reusing one per frame in flight would
+be invalid; the validation layers accept one reused once its image is acquired again.
 
 One frame of the windowed example:
 
@@ -563,6 +568,7 @@ sequenceDiagram
     participant G as game loop
     participant WS as WindowSwapchain
     participant FT as FrameTimeline / FrameCommandPools
+    participant D as device Deleter
     participant Q as graphics Queue
     participant PE as presentation engine
     G->>G: events = poll_events(), frame = input.update(events)
@@ -572,9 +578,11 @@ sequenceDiagram
     PE-->>WS: image index
     WS-->>G: SwapchainFrame (image, view, acquired, rendered)
     G->>FT: begin_frame(): wait for frame N - frames in flight, reset its pool
+    FT->>D: collect(): acquisition semaphores of finished frames are free again
     G->>G: record: UNDEFINED to COLOR_ATTACHMENT_WRITE, clear, draw, to PRESENT
     G->>Q: submit(wait acquired, signal rendered, signal timeline = N)
     G->>WS: present(queue, frame)
+    WS->>D: enqueue(free the acquisition semaphore once the GPU finished what was submitted)
     WS->>Q: present(wait rendered)
     Q->>PE: queue the image
     PE-->>WS: OPTIMAL / SUBOPTIMAL / OUT_OF_DATE (recreation noted)

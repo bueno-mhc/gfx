@@ -196,12 +196,17 @@ re-exports `gfx` and `gfx.platform`, built with the platform library):
 - `swapchain_description_for(window, base)`: native handle + framebuffer size, the rest from `base`.
 - `requires_swapchain_recreation(event, window)` / `(status)`: the resize rule as two `constexpr` functions.
 - **`WindowSwapchain`**: owns the swapchain and the presentation semaphores. Acquisition semaphores: one per
-  image plus one; the semaphore of an image's previous acquisition is free again when the image comes back
-  (its presentation, hence the rendering that waited on the semaphore, is over); rendering semaphores: one
-  per image (reusing one per frame in flight is a validation error: the presentation engine may still hold
-  it). `acquire()` returns `std::nullopt` while the window is minimized or has no area and on timeouts;
-  recreates on framebuffer-resize events, `SUBOPTIMAL`/`OUT_OF_DATE` (retrying once) and replaces the
-  swapchain on `SURFACE_LOST`; recreation waits for the device to be idle and resets the semaphores.
+  image plus one to start with; `present()` hands the frame's semaphore to the device's `Deleter`, which
+  returns it once every submission made so far (the rendering that waits on it included) has completed;
+  more are made while the GPU falls behind, up to 64, then the device is waited for. (Corrected 2026-11-01:
+  as built in P5, the semaphore of an image's previous acquisition was free again when the image came back,
+  but an image can come back the frame after it was presented, before the GPU ran that frame: the
+  validation layers reported VUID-vkAcquireNextImageKHR-semaphore-01779 under load and the physics sandbox
+  hung.) Rendering semaphores: one per image (reusing one per frame in flight is a validation error: the
+  presentation engine may still hold it). `acquire()` returns `std::nullopt` while the window is minimized
+  or has no area and on timeouts; recreates on framebuffer-resize events, `SUBOPTIMAL`/`OUT_OF_DATE`
+  (retrying once) and replaces the swapchain on `SURFACE_LOST`; recreation waits for the device to be idle
+  and prepares the semaphores of the new images.
 - **Tests** (`tests/platform_graphics/presentation_test.cpp`, 6 tests × SDL3/GLFW × both GPUs = 24, validation
   layers on and required): surface support, cleared frames read back from the swapchain image (more frames
   than images), resize, minimize/restore, frame latency (or its documented error), unsupported settings.

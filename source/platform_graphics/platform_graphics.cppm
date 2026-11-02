@@ -52,12 +52,20 @@ struct SwapchainFrame
 /// @brief A swapchain that follows its window: recreated when the framebuffer is resized or the
 ///        swapchain reports itself out of date (or suboptimal), skipped while the window is minimized,
 ///        and replaced when the window's surface is lost. It owns the binary semaphores of presentation:
-///        one acquisition semaphore per image plus one, recycled when an image comes back, and one
-///        rendering semaphore per image.
+///        acquisition semaphores (one per image plus one to start with), each free again once the GPU has
+///        finished the frame that waited on it, and one rendering semaphore per image.
 ///
 /// Every frame acquire() returns must be rendered by a submission that waits on SwapchainFrame::acquired
 /// and signals SwapchainFrame::rendered, then presented with present(). Recreation waits for the device
 /// to be idle. Use it on one thread (the swapchain is externally synchronized).
+///
+/// An acquisition semaphore may be given to the presentation engine again only once the submission that
+/// waited on it has completed, and an image coming back from the presentation engine does not tell that:
+/// an image can come back the frame after it was presented, before the GPU ran the rendering of that frame
+/// (seen with FIFO on a laptop's discrete GPU while other work kept it busy). So present() hands the frame's
+/// acquisition semaphore to the device's Deleter, which returns it once every submission made so far has
+/// completed; acquire() collects the deleter when no semaphore is free, creates another one when the GPU
+/// is further behind than ever before, and waits for the device beyond 64.
 ///
 /// @code
 /// gfx::platform::WindowSwapchain presentation{*device, *window};
@@ -102,7 +110,8 @@ public:
     [[nodiscard]] auto acquire(std::chrono::nanoseconds timeout = WAIT_INDEFINITELY) -> std::optional<SwapchainFrame>;
 
     /// @brief Presents @p frame on @p queue once its rendering semaphore is signaled, and notes when the
-    ///        swapchain must be recreated.
+    ///        swapchain must be recreated. The frame's acquisition semaphore is free again once the GPU has
+    ///        finished everything submitted before this call (its rendering included).
     /// @return The status Queue::present() reported.
     auto present(Queue& queue,
                  const SwapchainFrame& frame) -> SwapchainStatus;
@@ -133,22 +142,41 @@ public:
 
 private:
     /// @brief Recreates the swapchain for the window's framebuffer size (a new one when the surface was
-    ///        lost) and resets the semaphores.
+    ///        lost) and prepares the semaphores of its images.
     void recreate();
 
-    /// @brief Makes enough semaphores for the swapchain's images, all free.
+    /// @brief Makes enough semaphores for the swapchain's images: one acquisition semaphore per image plus
+    ///        one at least (those that exist keep their state), one rendering semaphore per image.
     void prepare_semaphores();
+
+    /// @brief Makes sure an acquisition semaphore is free: one the deleter returned, else one more while
+    ///        fewer than MAXIMUM_ACQUISITION_SEMAPHORES exist, else one the device returns once idle.
+    /// @return The free semaphore (the last of m_free_acquire_semaphores).
+    /// @throws InvalidUsageError when every semaphore belongs to a frame acquired and never presented.
+    [[nodiscard]] auto free_acquisition_semaphore() -> std::size_t;
+
+    /// @brief Moves the acquisition semaphores the deleter returned to the free ones.
+    void reclaim_released_semaphores() noexcept;
+
+    /// @brief Creates a free acquisition semaphore.
+    void add_acquisition_semaphore();
 
 private:
     static constexpr std::size_t NO_SEMAPHORE = std::numeric_limits<std::size_t>::max();
+    /// @brief Acquisition semaphores at most: one bit each in the released mask.
+    static constexpr std::size_t MAXIMUM_ACQUISITION_SEMAPHORES = 64;
 
     Device& m_device;
     const Window& m_window;
     SwapchainDescription m_description;
     std::vector<std::unique_ptr<Semaphore>> m_acquire_semaphores;
     std::vector<std::unique_ptr<Semaphore>> m_rendered_semaphores;
-    std::vector<std::size_t> m_free_acquire_semaphores; ///< Acquisition semaphores no image holds.
-    std::vector<std::size_t> m_image_acquire_semaphore; ///< Per image: the acquisition semaphore of its last acquisition.
+    std::vector<std::size_t> m_free_acquire_semaphores; ///< Acquisition semaphores no frame holds (capacity for all of them).
+    std::vector<std::size_t> m_image_acquire_semaphore; ///< Per image: the acquisition semaphore of its frame not presented yet.
+    /// @brief One bit per acquisition semaphore the deleter returned: set by deletions on whichever thread
+    ///        collects the deleter, shared with them so that they outlive this object.
+    std::shared_ptr<std::atomic<std::uint64_t>> m_released_semaphores;
+    std::size_t m_pending_semaphores = 0; ///< Acquisition semaphores presented, not returned yet.
     bool m_recreation_requested = false;
     bool m_surface_lost = false;
     std::uint32_t m_recreation_count = 0;

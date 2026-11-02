@@ -1,8 +1,8 @@
 // Presentation to platform windows (gfx.platform.graphics), on every platform backend built here and
 // every GPU of the machine, with the Vulkan validation layers (any validation message fails the test):
 // cleared frames reach a visible window (read back from the swapchain image), resizing recreates the
-// swapchain, a minimized window presents nothing and is presented to again once restored, and settings
-// the surface lacks are named.
+// swapchain, a minimized window presents nothing and is presented to again once restored, frames paced like
+// the examples' stay valid while another device keeps the GPU busy, and settings the surface lacks are named.
 #include "vulkan_test.hpp"
 
 import std;
@@ -386,6 +386,103 @@ TEST_P(PresentationTest, FrameLatencyWaitsForPresentation)
         ASSERT_TRUE(present_when_possible(presentation, color).has_value());
     }
     EXPECT_EQ(presentation.swapchain().wait_for_frame_latency(5s), gfx::WaitStatus::SIGNALED);
+}
+
+TEST_P(PresentationTest, FramesPacedLikeTheExamplesStayValidWhileAnotherDeviceKeepsTheGpuBusy)
+{
+    // Another device on the same GPU keeps it busy, as the other tests of a parallel CTest run do: images then come
+    // back irregularly, at times the frame after they were presented (seen on NVIDIA with FIFO), before the GPU ran
+    // that frame. WindowSwapchain must still give no acquisition a semaphore a frame not finished waits on (the
+    // validation layers report VUID-vkAcquireNextImageKHR-semaphore-01779 then; any message fails the test).
+    std::atomic<std::uint32_t> contention_submissions{0};
+    std::jthread contention{[this, &contention_submissions](std::stop_token stop)
+                            {
+                                static constexpr std::array QUEUES{gfx::QueueRequest{.type = gfx::QueueType::GRAPHICS, .count = 1, .priority = 1.0F}};
+                                const std::unique_ptr<gfx::Device> device =
+                                    m_physical_device->create_device({.queues = QUEUES, .debug_name = "contention device"});
+                                const std::unique_ptr<gfx::CommandPool> pool = device->create_command_pool({.queue_type = gfx::QueueType::GRAPHICS});
+                                const std::unique_ptr<gfx::Buffer> buffer = device->create_buffer({.size = std::uint64_t{256} << 20U,
+                                                                                                   .usage = gfx::BufferUsage::TRANSFER_DESTINATION,
+                                                                                                   .location = gfx::MemoryLocation::DEVICE_LOCAL,
+                                                                                                   .debug_name = "contention buffer"});
+                                const std::unique_ptr<gfx::Fence> fence = device->create_fence({.debug_name = "contention fence"});
+                                while (!stop.stop_requested())
+                                {
+                                    std::unique_ptr<gfx::CommandBuffer> commands = pool->allocate(gfx::CommandBufferLevel::PRIMARY, "contention");
+                                    {
+                                        gfx::GraphicsRecorder recorder{*commands};
+                                        for (std::uint32_t fill = 0; fill < 16; ++fill)
+                                        {
+                                            recorder.fill_buffer(buffer->handle(), 0, buffer->size(), fill);
+                                        }
+                                    }
+                                    const std::array command_buffers{commands->handle()};
+                                    device->queue(gfx::QueueType::GRAPHICS).submit(std::array{gfx::SubmitDescription{.command_buffers = command_buffers}},
+                                                                                   fence->handle());
+                                    EXPECT_EQ(fence->wait(30s), gfx::WaitStatus::SIGNALED);
+                                    fence->reset();
+                                    commands.reset();
+                                    pool->reset();
+                                    ++contention_submissions;
+                                }
+                            }};
+
+    // The examples' frame loop for 3 seconds: acquire, then FrameTimeline::begin_frame() (two frames in flight), a
+    // cleared image, one submission, the presentation.
+    WindowSwapchain presentation{*m_device, *m_window, swapchain_description()};
+    gfx::FrameTimeline timeline{*m_device, 2};
+    gfx::FrameCommandPools pools{*m_device, {.queue_type = gfx::QueueType::GRAPHICS, .debug_name = "contention test commands"}, timeline.timeline(), 2};
+    gfx::Queue& queue = m_device->queue(gfx::QueueType::GRAPHICS);
+    std::uint32_t frames = 0;
+    std::uint32_t at_once = 0;
+    std::optional<std::uint32_t> previous_index;
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        for (const gfx::platform::Event& event : m_platform->poll_events())
+        {
+            presentation.handle_event(event);
+        }
+        const std::optional<SwapchainFrame> frame = presentation.acquire(5s);
+        if (!frame)
+        {
+            continue;
+        }
+        at_once += previous_index == frame->image.index ? 1U : 0U;
+        previous_index = frame->image.index;
+        const std::uint64_t number = timeline.begin_frame();
+        pools.begin_frame(number);
+        gfx::CommandBuffer& commands = pools.command_buffer();
+        {
+            gfx::GraphicsRecorder recorder{commands};
+            const std::array to_attachment{
+                gfx::image_barrier(frame->image.image, gfx::ResourceState::UNDEFINED, gfx::ResourceState::COLOR_ATTACHMENT_WRITE)};
+            recorder.barrier({.image_barriers = to_attachment});
+            {
+                const std::array attachments{gfx::ColorAttachment{.view = frame->image.view, .clear_color = RED.value}};
+                const gfx::Rectangle area{.width = presentation.extent().width, .height = presentation.extent().height};
+                gfx::RenderingScope scope = recorder.begin_rendering({.area = area, .color_attachments = attachments});
+            }
+            const std::array to_present{
+                gfx::image_barrier(frame->image.image, gfx::ResourceState::COLOR_ATTACHMENT_WRITE, gfx::ResourceState::PRESENT)};
+            recorder.barrier({.image_barriers = to_present});
+        }
+        const std::array command_buffers{commands.handle()};
+        const std::array waits{gfx::SemaphoreWait{.semaphore = frame->acquired}};
+        const std::array signals{gfx::SemaphoreSignal{.semaphore = frame->rendered}};
+        const std::array timeline_signals{timeline.frame_signal()};
+        queue.submit(std::array{gfx::SubmitDescription{
+            .command_buffers = command_buffers, .waits = waits, .signals = signals, .timeline_signals = timeline_signals}});
+        EXPECT_NE(presentation.present(queue, *frame), gfx::SwapchainStatus::SURFACE_LOST);
+        ++frames;
+    }
+    timeline.wait_idle();
+    contention.request_stop();
+    contention.join();
+    std::cout << std::format("note: {} frames ({} images acquired again at once) beside {} submissions of another device\n", frames,
+                             at_once, contention_submissions.load());
+    EXPECT_GE(frames, 5U);
+    EXPECT_GE(contention_submissions.load(), 1U);
 }
 
 #if GFX_TEST_WITH_UI

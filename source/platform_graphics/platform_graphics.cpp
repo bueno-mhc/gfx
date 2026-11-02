@@ -24,8 +24,12 @@ WindowSwapchain::WindowSwapchain(Device& device,
     : m_device{device}
     , m_window{window}
     , m_description{base}
+    , m_released_semaphores{std::make_shared<std::atomic<std::uint64_t>>(0)}
     , m_swapchain{device.create_swapchain(swapchain_description_for(window, base))}
 {
+    // Room for every acquisition semaphore there may be: returning them never allocates.
+    m_acquire_semaphores.reserve(MAXIMUM_ACQUISITION_SEMAPHORES);
+    m_free_acquire_semaphores.reserve(MAXIMUM_ACQUISITION_SEMAPHORES);
     prepare_semaphores();
 }
 
@@ -76,20 +80,14 @@ WindowSwapchain::acquire(std::chrono::nanoseconds timeout) -> std::optional<Swap
         }
 
         // The image, signaling a free acquisition semaphore.
-        const std::size_t semaphore = m_free_acquire_semaphores.back();
+        const std::size_t semaphore = free_acquisition_semaphore();
         const std::expected<AcquiredImage, SwapchainStatus> acquired =
             m_swapchain->acquire_next_image(m_acquire_semaphores[semaphore]->handle(), {}, timeout);
         if (acquired)
         {
-            // The semaphore of the image's previous acquisition is free again: the image came back, so
-            // its presentation, and the rendering that waited on that semaphore, are over.
+            // The frame holds the semaphore until present() hands it to the deleter.
             m_free_acquire_semaphores.pop_back();
-            std::size_t& held = m_image_acquire_semaphore[acquired->index];
-            if (held != NO_SEMAPHORE)
-            {
-                m_free_acquire_semaphores.push_back(held);
-            }
-            held = semaphore;
+            m_image_acquire_semaphore[acquired->index] = semaphore;
             m_recreation_requested = m_recreation_requested || acquired->suboptimal;
             return SwapchainFrame{
                 .image = *acquired,
@@ -120,6 +118,22 @@ auto
 WindowSwapchain::present(Queue& queue,
                          const SwapchainFrame& frame) -> SwapchainStatus
 {
+    // The acquisition semaphore is free again once every submission made so far, among them the rendering
+    // that waits on it, has completed (the image coming back later says nothing about that rendering).
+    // Handed over before presenting: a presentation that fails changes nothing about the rendering.
+    if (frame.image.index < m_image_acquire_semaphore.size())
+    {
+        std::size_t& held = m_image_acquire_semaphore[frame.image.index];
+        if (held != NO_SEMAPHORE && m_acquire_semaphores[held]->handle() == frame.acquired)
+        {
+            m_device.deleter().enqueue([released = m_released_semaphores, bit = std::uint64_t{1} << held]() noexcept
+                                       { released->fetch_or(bit, std::memory_order_release); });
+            ++m_pending_semaphores;
+            held = NO_SEMAPHORE;
+        }
+    }
+
+    // The image, once its rendering semaphore is signaled.
     const std::array waits{frame.rendered};
     const SwapchainStatus status = queue.present({
         .swapchain = m_swapchain->handle(),
@@ -148,28 +162,88 @@ WindowSwapchain::recreate()
     m_recreation_requested = false;
     ++m_recreation_count;
 
-    // The device is idle (recreation waited for it): every semaphore is unsignaled and free.
+    // The device is idle (recreation waited for it): the rendering semaphores are unsignaled; acquisition
+    // semaphores still pending come back through the deleter as before.
     prepare_semaphores();
 }
 
 void
 WindowSwapchain::prepare_semaphores()
 {
-    // One acquisition semaphore per image plus one (the next acquisition's), one rendering semaphore per image.
+    // One acquisition semaphore per image plus one (the next acquisition's) to start with, one rendering
+    // semaphore per image.
     const std::size_t image_count = m_swapchain->image_count();
-    while (m_acquire_semaphores.size() < image_count + 1)
+    while (m_acquire_semaphores.size() < std::min(image_count + 1, MAXIMUM_ACQUISITION_SEMAPHORES))
     {
-        m_acquire_semaphores.push_back(
-            m_device.create_semaphore({.debug_name = std::format("swapchain acquisition {}", m_acquire_semaphores.size())}));
+        add_acquisition_semaphore();
     }
     while (m_rendered_semaphores.size() < image_count)
     {
         m_rendered_semaphores.push_back(
             m_device.create_semaphore({.debug_name = std::format("swapchain rendering {}", m_rendered_semaphores.size())}));
     }
-    m_free_acquire_semaphores.resize(m_acquire_semaphores.size());
-    std::ranges::iota(m_free_acquire_semaphores, std::size_t{0});
     m_image_acquire_semaphore.assign(image_count, NO_SEMAPHORE);
+}
+
+auto
+WindowSwapchain::free_acquisition_semaphore() -> std::size_t
+{
+    // Those the deleter returned; when none is free, those whose frames the GPU finished since the deleter
+    // was last collected.
+    reclaim_released_semaphores();
+    if (m_free_acquire_semaphores.empty() && m_pending_semaphores > 0)
+    {
+        (void)m_device.deleter().collect();
+        reclaim_released_semaphores();
+    }
+
+    // The GPU is further behind than ever before: one more semaphore (the pool never shrinks, so this
+    // allocates only then).
+    if (m_free_acquire_semaphores.empty() && m_acquire_semaphores.size() < MAXIMUM_ACQUISITION_SEMAPHORES)
+    {
+        add_acquisition_semaphore();
+    }
+
+    // Every semaphore is pending: the device finishes its work. A deletion another thread took from the
+    // deleter before the flush may still be running: until it has set its bit, flush again.
+    while (m_free_acquire_semaphores.empty() && m_pending_semaphores > 0)
+    {
+        m_device.deleter().flush();
+        reclaim_released_semaphores();
+    }
+    if (m_free_acquire_semaphores.empty())
+    {
+        throw InvalidUsageError({
+            .backend = m_device.backend(),
+            .operation = "WindowSwapchain::acquire",
+            .problem = std::format("each of the {} acquisition semaphores belongs to a frame acquired and never presented",
+                                   m_acquire_semaphores.size()),
+            .suggestion = "present every frame acquire() returns with WindowSwapchain::present()",
+        });
+    }
+    return m_free_acquire_semaphores.back();
+}
+
+void
+WindowSwapchain::reclaim_released_semaphores() noexcept
+{
+    // One bit per semaphore a deletion returned (on whichever thread collected the deleter).
+    std::uint64_t released = m_released_semaphores->exchange(0, std::memory_order_acquire);
+    while (released != 0)
+    {
+        m_free_acquire_semaphores.push_back(static_cast<std::size_t>(std::countr_zero(released)));
+        released &= released - 1;
+        --m_pending_semaphores;
+    }
+}
+
+void
+WindowSwapchain::add_acquisition_semaphore()
+{
+    std::unique_ptr<Semaphore> semaphore =
+        m_device.create_semaphore({.debug_name = std::format("swapchain acquisition {}", m_acquire_semaphores.size())});
+    m_acquire_semaphores.push_back(std::move(semaphore));
+    m_free_acquire_semaphores.push_back(m_acquire_semaphores.size() - 1);
 }
 
 } // namespace gfx::platform

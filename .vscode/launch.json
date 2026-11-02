@@ -201,6 +201,7 @@
                 { "label": "sdl3       - Sdl3PlatformTest.*, Sdl3EventsTest.*, Sdl3GamepadTest.* (SDL3 backend)", "value": "platform/backends/sdl3/gfx_platform_sdl3_tests.exe" },
                 { "label": "glfw       - GlfwPlatformTest.*, GlfwEventsTest.* (GLFW backend)", "value": "platform/backends/glfw/gfx_platform_glfw_tests.exe" },
                 { "label": "present    - Presentation/PresentationTest.* (visible windows x GPUs, Vulkan presentation)", "value": "platform_graphics/gfx_presentation_tests.exe" },
+                { "label": "window swapchain - WindowSwapchainTest.* (acquisition semaphores on a fake GPU and window)", "value": "platform_graphics/gfx_window_swapchain_tests.exe" },
                 { "label": "ui         - UiEnumerationsTest.*, UiHandlesTest.*, UiErrorsTest.*", "value": "ui/gfx_ui_tests.exe" },
                 { "label": "font libraries - FreeTypeTest.*, HarfBuzzTest.*, MsdfAtlasGenTest.*, ... (third-party font pipeline)", "value": "ui/gfx_ui_font_library_tests.exe" },
                 { "label": "atlas tools - AtlasFormatTest.*, AtlasViewTest.*, FontDecoderTest.*, SdfGeneratorTest.*, AtlasPackerTest.*, AtlasBuilderTest.*, ...", "value": "ui/gfx_ui_atlas_tools_tests.exe" },

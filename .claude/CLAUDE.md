@@ -943,9 +943,28 @@ Original hard requirements (from the user's initial specification):
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
-  + semaphores: acquisition semaphores image_count + 1 recycled when an image comes back, rendering
+  + semaphores: acquisition semaphores image_count + 1 to start with, **returned through the device Deleter**
+  (present() enqueues a deletion setting the semaphore's bit in a shared `atomic<uint64_t>` mask (shared_ptr:
+  deletions run on any thread that collects, after the object may be gone); acquire() reclaims the bits,
+  collects the deleter when none is free, adds one while the GPU is further behind than ever (≤ 64), else
+  `Deleter::flush()`; InvalidUsageError when every one belongs to a frame never presented), rendering
   semaphores one per image; acquire() → nullopt when minimized/zero area/timeout; recreates on framebuffer
   resize, SUBOPTIMAL/OUT_OF_DATE (retry once), new swapchain on SURFACE_LOST; `recreation_count()`).
+  **Fix 2026-11-01** (no public API change): until then a semaphore was recycled when its image came back,
+  but with FIFO on the NVIDIA laptop GPU, while other work keeps the GPU busy, an image comes back the frame
+  after it was presented (index sequences like `0 0 0`), so the next acquisition got the semaphore the frame
+  before last still waited on: VUID-vkAcquireNextImageKHR-semaphore-01779, and PhysicsSandbox.Tour hung in a
+  full parallel run. Reproduced with a light FIFO loop while another process presented heavy frames (5
+  messages in 1500 frames; 0 after the fix in 3 rounds), or another device in the same process (1 run in 4).
+  Tests: **gfx_window_swapchain_tests** (6, fake GPU + fake window: scripted image order, GPU lag, pool growth,
+  flush past 64, failed acquisition, recreation, never-presented frames; the first fails with the old code:
+  30 early reuses), `PresentationTest.FramesPacedLikeTheExamplesStayValidWhileAnotherDeviceKeepsTheGpuBusy`
+  (× 4; 3 s each). Fakes added to fake_backend.cppm: FakeGpuProgress, deferring FakeDeleter (collect/flush/
+  flushes), FakeSemaphore, FakeQueue (records waits + presents), FakeSwapchain (NextImage script, acquisitions
+  with the GPU's submitted/completed counts), FakeDevice::fake_queue/complete_submissions/set_swapchain_images/
+  last_swapchain/semaphores_created, wait_idle completes everything (device_test's unimplemented-operation
+  example is now create_fence). Rendering semaphores stay per image (validation layers accept their reuse once
+  the image is acquired again; VK_KHR_swapchain_maintenance1 present fences would make that exact).
 - **Backend factory** (`gfx.backend_factory`, re-exported by `gfx`): `backend_availability()`,
   `available_backends()`, `create_instance(BackendKind, InstanceDescription)`; each backend module
   exports `unavailable_reason()` + `create_instance()`; CMake options `GFX_BACKEND_{VULKAN,NULL,
@@ -1379,7 +1398,8 @@ gfx/
             physics_test_support.cppm,
             decoupling_fixture/ (+ camera/)), compilation/physics/, platform/ (fake_platform
             .cppm/.cpp, input_test_support.cppm + 10 test files; backends/ = shared backend suite +
-            sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp),
+            sdl3/ + glfw/), platform_graphics/ (presentation_test.cpp; includes graphics/vulkan/vulkan_test.hpp;
+            window_swapchain_test.cpp = gfx_window_swapchain_tests on the fake device + fake window),
             ui/ (ui_foundations_test.cpp; font_libraries_test.cpp = plain TU, fetched OFL fonts; U1: atlas_*_test.cpp,
             font_*_test.cpp, sdf_generator_test.cpp, module gfx.tests.ui_atlas_support, xxhash_reference plain TU,
             atlas_embed_test.cpp + gfx_add_ui_atlas, scripts/GfxCompareAtlasBuilds.cmake; U2: font_atlas_test.cpp,
@@ -1449,7 +1469,19 @@ gfx/
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1253**, all passing in Debug (721 s) and Release (687 s), 2026-11-01 (GPU XPBD G7: + 48
+Test count at last report: **1263**, 2026-11-01 (WindowSwapchain acquisition-semaphore fix, rebased on G7: + 6
+gfx_window_swapchain_tests, + 4 PresentationTest contention runs; rebased tree, Debug: 1262/1263 in 1573 s beside another session's full run on the same
+GPUs — Gpu/GpuXpbdRigidTest.TheSameStepsGiveTheSameBits/Device1_GRAPH_COLORING timed out, then passed alone in 65 s; Release
+not rerun after the rebase, which changed no code of the fix). On its base (G1, 1056 tests): Debug: 1055 passed (skips 4); the 1056th,
+Backends/UiAccessibilityPlatformTest.AUiAutomationClientFindsTheNodesAndInvokesAButton/SDL3, **hung again** despite the G1 fix
+(about 4 min at 1 s of CPU; the client thread inside query_window, blocked in UIAutomationCore's GetMessageW waiting for the
+window's thread; killed by a second gdb attach, exit 0xc0000354, before the main thread's stack was read), then 3/3 alone on
+SDL3 + GLFW: still open. Release (skips 19, about 106 s), three full runs: 1056/1056 once; once
+Presentation/PresentationTest.FrameLatencyWaitsForPresentation/SDL3_Device1 failed (wait_for_frame_latency(5s) → TIMEOUT; it
+ran beside the four new contention tests, but passed 5× alone, 3× beside them and in 3 parallel runs of all 32 presentation
+tests: visible-window tests stay sensitive to load — make the contention test RUN_SERIAL if this recurs); once
+SteppedWorldTest.QueriesFromManyThreadsSeeOnlyCompletedSteps failed (world_test.cpp:425, answered 0: timing under load).
+Before: **1253**, all passing in Debug (721 s) and Release (687 s), 2026-11-01 (GPU XPBD G7: + 48
 GpuXpbdSoftBodyTest = 12 × 2 GPUs × 2 solver modes, + 4 GpuXpbdSoftBodyMeasurementTest; skips Debug 4, Release 19; run from
 PowerShell with `--timeout 900`; an earlier full Debug run of G7 timed out PhysicsSandbox.Tour (300 s, swapchain semaphore
 validation error then a hang) — passed alone and in the next run). Before: **1201**, all passing in Debug (309 s) and Release (310 s), 2026-11-01 (GPU XPBD G6: + 44

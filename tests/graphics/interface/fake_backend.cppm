@@ -766,18 +766,40 @@ private:
     std::uint32_t m_index;
 };
 
+/// How far the fake GPU got: FakeQueue counts the submissions, the test says how many completed
+/// (FakeDevice::complete_submissions()), waiting for the device completes them all.
+struct FakeGpuProgress
+{
+    std::uint64_t submitted = 0;
+    std::uint64_t completed = 0;
+};
+
+/// Runs each deletion once the fake GPU completed every submission made before it was enqueued.
 class FakeDeleter final : public Fake<Deleter>
 {
 public:
+    explicit FakeDeleter(FakeGpuProgress& progress)
+        : m_progress{progress}
+    {}
+
     void enqueue(std::move_only_function<void()> deletion) override
     {
-        Deleter::enqueue(std::move(deletion));
+        m_pending.push_back({.deletion = std::move(deletion), .submitted = m_progress.submitted});
     }
 
     auto collect() -> std::size_t override
     {
+        // Oldest first, up to the first whose submissions are not complete.
         ++m_collections;
-        return 0;
+        std::size_t count = 0;
+        while (!m_pending.empty() && m_pending.front().submitted <= m_progress.completed)
+        {
+            std::move_only_function<void()> deletion = std::move(m_pending.front().deletion);
+            m_pending.pop_front();
+            deletion();
+            ++count;
+        }
+        return count;
     }
 
     [[nodiscard]] auto collections() const noexcept -> std::uint32_t
@@ -787,16 +809,245 @@ public:
 
     void flush() override
     {
-        Deleter::flush();
+        // The device becomes idle, then every deletion runs.
+        ++m_flushes;
+        m_progress.completed = m_progress.submitted;
+        (void)collect();
+    }
+
+    [[nodiscard]] auto flushes() const noexcept -> std::uint32_t
+    {
+        return m_flushes;
     }
 
     [[nodiscard]] auto pending_count() const noexcept -> std::size_t override
     {
-        return 0;
+        return m_pending.size();
     }
 
 private:
+    struct Pending
+    {
+        std::move_only_function<void()> deletion;
+        std::uint64_t submitted = 0; ///< Submissions made when it was enqueued.
+    };
+
+    FakeGpuProgress& m_progress;
+    std::deque<Pending> m_pending;
     std::uint32_t m_collections = 0;
+    std::uint32_t m_flushes = 0;
+};
+
+/// A binary semaphore: a handle.
+class FakeSemaphore final : public Fake<Semaphore>
+{
+public:
+    FakeSemaphore(std::uint32_t index,
+                  std::string_view name)
+        : m_index{index}
+    {
+        m_debug_name = name;
+    }
+
+    [[nodiscard]] auto handle() const noexcept -> SemaphoreHandle override
+    {
+        return make_handle<SemaphoreTag>(m_index);
+    }
+
+private:
+    std::uint32_t m_index;
+};
+
+/// The graphics queue: counts submissions (the fake GPU completes them when the test says so) and records
+/// the binary semaphores they wait on and the images presented.
+class FakeQueue final : public Fake<Queue>
+{
+public:
+    /// A binary semaphore a batch waits on, and the number of its submission (from 1).
+    struct SubmittedWait
+    {
+        SemaphoreHandle semaphore{};
+        std::uint64_t submission = 0;
+    };
+
+    explicit FakeQueue(FakeGpuProgress& progress)
+        : m_progress{progress}
+    {}
+
+    [[nodiscard]] auto handle() const noexcept -> QueueHandle override
+    {
+        return make_handle<QueueTag>(1);
+    }
+
+    [[nodiscard]] auto type() const noexcept -> QueueType override
+    {
+        return QueueType::GRAPHICS;
+    }
+
+    [[nodiscard]] auto family_index() const noexcept -> std::uint32_t override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] auto capabilities() const noexcept -> QueueCapability override
+    {
+        return queue_type_capabilities(QueueType::GRAPHICS);
+    }
+
+    void submit(std::span<const SubmitDescription> batches,
+                FenceHandle /*fence*/) override
+    {
+        ++m_progress.submitted;
+        for (const SubmitDescription& batch : batches)
+        {
+            for (const SemaphoreWait& wait : batch.waits)
+            {
+                m_waits.push_back({.semaphore = wait.semaphore, .submission = m_progress.submitted});
+            }
+        }
+    }
+
+    [[nodiscard]] auto present(const PresentDescription& presentation) -> SwapchainStatus override
+    {
+        m_presented.push_back(presentation.image_index);
+        return m_present_status;
+    }
+
+    void wait_idle() override
+    {
+        m_progress.completed = m_progress.submitted;
+    }
+
+    void bind_sparse(const SparseBindDescription& description) override
+    {
+        Queue::bind_sparse(description);
+    }
+
+    [[nodiscard]] auto waits() const noexcept -> const std::vector<SubmittedWait>&
+    {
+        return m_waits;
+    }
+
+    [[nodiscard]] auto presented() const noexcept -> const std::vector<std::uint32_t>&
+    {
+        return m_presented;
+    }
+
+    /// What present() reports from now on.
+    void set_present_status(SwapchainStatus status) noexcept
+    {
+        m_present_status = status;
+    }
+
+private:
+    FakeGpuProgress& m_progress;
+    std::vector<SubmittedWait> m_waits;
+    std::vector<std::uint32_t> m_presented;
+    SwapchainStatus m_present_status = SwapchainStatus::OPTIMAL;
+};
+
+/// A swapchain whose images come back in the order the test scripts (round robin by default). It records
+/// every acquisition with how far the fake GPU got then; resize() waits for the device, as Vulkan's does.
+class FakeSwapchain final : public Fake<Swapchain>
+{
+public:
+    /// The index the next acquisition returns, or why it returns none.
+    using NextImage = std::function<std::expected<std::uint32_t, SwapchainStatus>()>;
+
+    /// An acquisition: the semaphore it signals and the fake GPU's submitted and completed counts then.
+    struct Acquisition
+    {
+        SemaphoreHandle signal{};
+        std::uint64_t submitted = 0;
+        std::uint64_t completed = 0;
+    };
+
+    FakeSwapchain(std::uint32_t index,
+                  const SwapchainDescription& description,
+                  FakeGpuProgress& progress,
+                  NextImage next_image)
+        : m_index{index}
+        , m_extent{description.extent}
+        , m_format{description.format}
+        , m_image_count{description.minimum_image_count}
+        , m_progress{progress}
+        , m_next_image{std::move(next_image)}
+    {
+        m_debug_name = description.debug_name;
+    }
+
+    [[nodiscard]] auto handle() const noexcept -> SwapchainHandle override
+    {
+        return make_handle<SwapchainTag>(m_index);
+    }
+
+    [[nodiscard]] auto extent() const noexcept -> Extent override
+    {
+        return m_extent;
+    }
+
+    [[nodiscard]] auto format() const noexcept -> Format override
+    {
+        return m_format;
+    }
+
+    [[nodiscard]] auto image_count() const noexcept -> std::uint32_t override
+    {
+        return m_image_count;
+    }
+
+    [[nodiscard]] auto acquire_next_image(SemaphoreHandle signal,
+                                          FenceHandle /*fence*/,
+                                          std::chrono::nanoseconds /*timeout*/) -> std::expected<AcquiredImage, SwapchainStatus> override
+    {
+        // Round robin unless the test scripts the order.
+        m_acquisitions.push_back({.signal = signal, .submitted = m_progress.submitted, .completed = m_progress.completed});
+        const std::expected<std::uint32_t, SwapchainStatus> index =
+            m_next_image ? m_next_image() : std::expected<std::uint32_t, SwapchainStatus>{m_round_robin++ % m_image_count};
+        if (!index)
+        {
+            return std::unexpected(index.error());
+        }
+        return AcquiredImage{.index = *index, .image = make_handle<ImageTag>(100 + *index), .view = make_handle<ImageViewTag>(100 + *index)};
+    }
+
+    void resize(Extent extent) override
+    {
+        m_progress.completed = m_progress.submitted;
+        m_extent = extent;
+        ++m_resizes;
+    }
+
+    [[nodiscard]] auto wait_for_frame_latency(std::chrono::nanoseconds timeout) -> WaitStatus override
+    {
+        return Swapchain::wait_for_frame_latency(timeout);
+    }
+
+    void set_hdr_metadata(const HdrMetadata& metadata) override
+    {
+        Swapchain::set_hdr_metadata(metadata);
+    }
+
+    [[nodiscard]] auto acquisitions() const noexcept -> const std::vector<Acquisition>&
+    {
+        return m_acquisitions;
+    }
+
+    [[nodiscard]] auto resizes() const noexcept -> std::uint32_t
+    {
+        return m_resizes;
+    }
+
+private:
+    std::uint32_t m_index;
+    Extent m_extent;
+    Format m_format;
+    std::uint32_t m_image_count;
+    FakeGpuProgress& m_progress;
+    NextImage m_next_image;
+    std::uint32_t m_round_robin = 0;
+    std::uint32_t m_resizes = 0;
+    std::vector<Acquisition> m_acquisitions;
 };
 
 /// Timestamp results the test provides.
@@ -939,13 +1190,16 @@ struct CapturedDescriptions
     std::vector<Format> color_formats{};
 };
 
-/// Implements what the shader, pipeline and command pool tests need; every other operation forwards to
+/// Implements what the shader, pipeline, command pool and presentation tests need (a fake GPU whose
+/// submissions complete when the test says so); every other operation forwards to
 /// Device's default. Objects it created must outlive the creations that name them.
 class FakeDevice final : public Fake<Device>
 {
 public:
     explicit FakeDevice(const PhysicalDevice& physical_device)
         : m_physical_device{physical_device}
+        , m_deleter{m_progress}
+        , m_queue{m_progress}
     {}
 
     [[nodiscard]] auto captured() const noexcept -> const CapturedDescriptions&
@@ -986,7 +1240,43 @@ public:
 
     void wait_idle() override
     {
-        Device::wait_idle();
+        m_progress.completed = m_progress.submitted;
+    }
+
+    /// The graphics queue (Device::queue() is not implemented: it is only reached directly).
+    [[nodiscard]] auto fake_queue() noexcept -> FakeQueue&
+    {
+        return m_queue;
+    }
+
+    /// The fake GPU completes the submissions numbered up to @p submission (from 1).
+    void complete_submissions(std::uint64_t submission) noexcept
+    {
+        m_progress.completed = std::max(m_progress.completed, std::min(submission, m_progress.submitted));
+    }
+
+    /// Submissions made so far.
+    [[nodiscard]] auto submitted_count() const noexcept -> std::uint64_t
+    {
+        return m_progress.submitted;
+    }
+
+    /// The order in which the swapchains created from now on return their images.
+    void set_swapchain_images(FakeSwapchain::NextImage next_image)
+    {
+        m_next_swapchain_image = std::move(next_image);
+    }
+
+    /// The swapchain created last.
+    [[nodiscard]] auto last_swapchain() const noexcept -> FakeSwapchain&
+    {
+        return *m_last_swapchain;
+    }
+
+    /// Binary semaphores created so far.
+    [[nodiscard]] auto semaphores_created() const noexcept -> std::uint32_t
+    {
+        return m_semaphores_created;
     }
 
     [[nodiscard]] auto memory_requirements(const BufferDescription& description) const -> MemoryRequirements override
@@ -1203,7 +1493,8 @@ public:
 
     [[nodiscard]] auto create_semaphore(const SemaphoreDescription& description) -> std::unique_ptr<Semaphore> override
     {
-        return Device::create_semaphore(description);
+        ++m_semaphores_created;
+        return std::make_unique<FakeSemaphore>(++m_next_index, description.debug_name);
     }
 
     [[nodiscard]] auto create_timeline_semaphore(const TimelineSemaphoreDescription& description)
@@ -1246,7 +1537,9 @@ public:
 
     [[nodiscard]] auto create_swapchain(const SwapchainDescription& description) -> std::unique_ptr<Swapchain> override
     {
-        return Device::create_swapchain(description);
+        auto swapchain = std::make_unique<FakeSwapchain>(++m_next_index, description, m_progress, m_next_swapchain_image);
+        m_last_swapchain = swapchain.get();
+        return swapchain;
     }
 
 protected:
@@ -1285,7 +1578,12 @@ private:
 
 private:
     const PhysicalDevice& m_physical_device;
+    FakeGpuProgress m_progress{};
     FakeDeleter m_deleter;
+    FakeQueue m_queue;
+    FakeSwapchain::NextImage m_next_swapchain_image{};
+    FakeSwapchain* m_last_swapchain = nullptr;
+    std::uint32_t m_semaphores_created = 0;
     std::uint32_t m_next_index = 0;
     CapturedDescriptions m_captured;
     std::map<std::string, ShaderLayout> m_reflected_layouts;

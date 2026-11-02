@@ -1,3 +1,15 @@
+# WindowSwapchain's semaphores on the graphics tests' fake device (a fake GPU) and the platform tests' fake
+# window: no GPU and no window system needed.
+gfx_add_test(gfx_window_swapchain_tests
+    SOURCES
+        window_swapchain_test.cpp
+        ${PROJECT_SOURCE_DIR}/tests/platform/fake_platform.cpp
+    MODULES
+        ${PROJECT_SOURCE_DIR}/tests/graphics/interface/fake_backend.cppm
+        ${PROJECT_SOURCE_DIR}/tests/platform/fake_platform.cppm
+    MODULE_BASE_DIRECTORY ${PROJECT_SOURCE_DIR}/tests
+    LIBRARIES gfx::platform_graphics)
+
 # Presentation to platform windows through gfx.platform.graphics: visible windows of every platform
 # backend built, on every GPU of the machine, with the Vulkan validation layers when installed (their
 # directory, GFX_VULKAN_VALIDATION_LAYER_DIRECTORY, comes from tests/graphics/vulkan).

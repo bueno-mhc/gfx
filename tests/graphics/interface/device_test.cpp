@@ -112,7 +112,7 @@ TEST_F(DeviceTest, UnimplementedOperationsThrowADescriptiveError)
     // Through the interface, as user code does (default arguments belong to the interface).
     EXPECT_THROW((void)device().create_image({.format = Format::R8G8B8A8_UNORM}), BackendCapabilityError);
     EXPECT_THROW((void)device().queue(QueueType::COMPUTE), BackendCapabilityError);
-    EXPECT_THROW(device().deleter().enqueue([] {}), BackendCapabilityError);
+    EXPECT_THROW((void)device().create_fence({}), BackendCapabilityError);
 }
 
 TEST_F(DeviceTest, ShaderModulesExposeTheLayoutReflectedFromTheirCode)
