@@ -352,6 +352,20 @@ Original hard requirements (from the user's initial specification):
   make_input_schema unused-lambda warning with no contexts. Gotchas: a new window takes the focus (tests focus the first on
   frame 2); AccessKit Invoke = FOCUS then CLICK in one frame; `native_handle().get_if<>()` dangles (copy the handle first);
   bash heredocs break on apostrophes in this shell (write scripts with the Write tool).
+- **Fix: the UI Automation platform test's hang in full parallel runs (2026-11-02)** — cause (UIAutomationCore disassembled
+  with gdb; no PDBs): `IUIAutomationInvokePattern::Invoke` first brings the element's window to the foreground **on the client's
+  thread**; when the window is not in front and `SetForegroundWindow` is refused (foreground lock: another process's window in front,
+  the user active — a parallel CTest run), UIA's fallback takes `GlobalAddAtomW` as a hotkey id, `RegisterHotKey(NULL, id, 0, vk)` for
+  vk 0xB9.., injects that key with SendInput, then loops `MsgWaitForMultipleObjects(0, …, 2000 ms, QS_ALLINPUT)` → **`GetMessageW` with no
+  timeout** until `WM_HOTKEY`: when the wait reports input the `GetMessageW` does not return, the client blocks for good (both saved
+  hangs: client at that GetMessageW, 0x7ff89be59862, which gdb names `WindowPattern_WaitForInputIdle+1152402`; the main thread kept
+  pumping). Not reproducible unattended (window in front, foreground lock off while the user is idle: the fallback returns at
+  once); reproduced deterministically under gdb (second window steals the foreground, the hotkey's key replaced, the first wait forced
+  to report input): hangs before, passes after. Fix (test only): `ClientState` on the heap (thread id, step, done, result); after
+  `CLIENT_NUDGE_AFTER` 5 s the main loop posts `WM_NULL` to the client's thread every `CLIENT_NUDGE_INTERVAL` 3 s (ends GetMessageW;
+  UIA's next 2 s wait times out; Invoke goes on: FOCUS + CLICK, 7.6 s); after `CLIENT_LIMIT` 90 s it fails naming the client's step
+  and detaches it. The earlier diagnosis (§9: client "blocked in Invoke() on a call only the window's procedure answers") was this
+  same wait. A real screen reader runs with UIAccess (foreground rights) and does not take that path.
 - **UI sample and documentation (U10 as built, 2026-10-19)** — docs/ui-design.md §B "U10 as built" (5 deviations).
   `examples/ui_editor/ui_editor_example.cpp` (+ CMakeLists: 3 atlases editor_latin/hebrew/arabic, MTSDF 32/4, explicit
   code point ranges + REQUIRE_ALL_CHARACTERS, EMBED modules ui_editor.*_font): main thread = platform + InputSystem
@@ -1504,7 +1518,8 @@ flakiness in tests G4 does not touch). Before: **1102** (GPU XPBD G3: + 12 GpuNa
 the 1046th, Backends/UiAccessibilityPlatformTest.AUiAutomationClientFindsTheNodesAndInvokesAButton/SDL3, **hung for an hour** (no CTest
 timeout): its main loop stopped pumping 30 s after `start` and joined the UI Automation client thread, blocked in Invoke() on a call only
 the window's procedure on the main thread answers (gdb: main in jthread::join, client in UIAutomationCore GetMessageW). Fixed: frames run
-until the client returns (its 20 s deadline ends it); 5/5 alone on SDL3 + GLFW. Release (fix included): 1046/1046, skips 19, 73 s; run from PowerShell. Before: 1018, all passing in
+until the client returns (its 20 s deadline ends it); 5/5 alone on SDL3 + GLFW. (It hung again on 2026-11-01: the client's wait was UIA's
+foreground fallback, not the window's procedure — fixed 2026-11-02, §5 "Fix: the UI Automation platform test's hang".) Release (fix included): 1046/1046, skips 19, 73 s; run from PowerShell. Before: 1018, all passing in
 Debug and Release (GPU XPBD G0: + 18 gfx_physics_gpu_xpbd_tests,
 + 2 Vulkan device tests (compute limits/features, 64-bit atomics + memory model), + 1 PhysicsDecoupling.GpuBackendImportsOnlyPhysicsAndGraphics;
 skips Debug 4, Release 19; run from PowerShell). Before: 997 (after sandbox S6: documentation only). Before: 997 (after sandbox S5: + 7

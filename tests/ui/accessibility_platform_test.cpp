@@ -1,7 +1,8 @@
 // The accessibility tree reaching a screen reader's API: a window of every platform backend gets a
 // UiAccessibilityAdapter (AccessKit); a Windows UI Automation client on another thread (as a screen reader is a
 // client) finds the UI's nodes under the window and invokes a button, while this thread pumps the platform and runs
-// frames. The tree is built only once the client asked for it.
+// frames. The tree is built only once the client asked for it. The client is nudged out of a wait in UI Automation
+// that can last forever, and bounded (see the test).
 #include <gfx/windows_headers.hpp>
 
 #if defined(_WIN32)
@@ -34,12 +35,30 @@ struct ClientResult
     bool invoked = false;
 };
 
+/// What the client's thread shares with the test's: on the heap, so that a client that never returns can be left
+/// behind without writing into the test's stack.
+struct ClientState
+{
+    std::atomic<DWORD> thread{0};
+    std::atomic<const char*> step{"starting"};
+    std::atomic<bool> done{false};
+    ClientResult result{};
+};
+
+/// How long the client may take before its thread is nudged out of UI Automation's foreground wait (see the test),
+/// how far apart the nudges are (beyond that wait's own 2 s timeout), and how long it may take at all.
+constexpr std::chrono::seconds CLIENT_NUDGE_AFTER{5};
+constexpr std::chrono::seconds CLIENT_NUDGE_INTERVAL{3};
+constexpr std::chrono::seconds CLIENT_LIMIT{90};
+
 /// A UI Automation client (on its own COM apartment): queries every element under @p window until one is named
 /// @p button (the tree arrives a frame after the client's first request) or @p deadline passes, then invokes it.
+/// @p step names what it is doing.
 auto
 query_window(HWND window,
              std::wstring_view button,
-             std::chrono::steady_clock::time_point deadline) -> ClientResult
+             std::chrono::steady_clock::time_point deadline,
+             std::atomic<const char*>& step) -> ClientResult
 {
     ClientResult result;
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
@@ -55,6 +74,7 @@ query_window(HWND window,
     while (!result.found_button && std::chrono::steady_clock::now() < deadline)
     {
         // Every element under the window, by name.
+        step = "finding the window's elements (ElementFromHandle, FindAll)";
         IUIAutomationElement* root = nullptr;
         IUIAutomationCondition* every = nullptr;
         IUIAutomationElementArray* found = nullptr;
@@ -90,6 +110,7 @@ query_window(HWND window,
                     element->GetCurrentPatternAs(UIA_InvokePatternId, IID_IUIAutomationInvokePattern, reinterpret_cast<void**>(&invoke));
                     if (invoke != nullptr)
                     {
+                        step = "invoking the button (IUIAutomationInvokePattern::Invoke)";
                         result.invoked = SUCCEEDED(invoke->Invoke());
                         invoke->Release();
                     }
@@ -111,6 +132,7 @@ query_window(HWND window,
             std::this_thread::sleep_for(50ms);
         }
     }
+    step = "releasing UI Automation";
     automation->Release();
     CoUninitialize();
     return result;
@@ -167,18 +189,37 @@ TEST_P(UiAccessibilityPlatformTest, AUiAutomationClientFindsTheNodesAndInvokesAB
     // The client on its own thread while this one pumps and runs frames; then the Invoke request arrives. Frames run
     // until the client returns: its calls (FindAll, Invoke) are answered by the window's procedure on this thread, so
     // joining before it is done waits forever (a cap of 30 s from the start hung a loaded run); its deadline ends it.
-    std::atomic<bool> done{false};
-    ClientResult result;
-    std::jthread client{[&]
+    // Before an Invoke, UI Automation brings the window to the foreground on the client's thread. When Windows refuses
+    // (another process's window is in front: a parallel test run), it registers a hotkey, injects its key and waits for
+    // the WM_HOTKEY in a loop of MsgWaitForMultipleObjects (2 s) then GetMessageW without a timeout: when the first
+    // reports input the second does not return, the client waits for a posted message that never comes (a full run
+    // hung there). A WM_NULL posted to the client's thread ends GetMessageW; UIA's next 2 s wait then times out and the
+    // Invoke goes on. A client that has not returned within CLIENT_LIMIT fails the test and is left behind.
+    const std::shared_ptr<ClientState> state = std::make_shared<ClientState>();
+    std::jthread client{[state, native]
     {
-        result = query_window(native, L"Save", std::chrono::steady_clock::now() + 20s);
-        done = true;
+        state->thread = GetCurrentThreadId();
+        state->result = query_window(native, L"Save", std::chrono::steady_clock::now() + 20s, state->step);
+        state->done = true;
     }};
-    while (!done)
+    const auto client_start = std::chrono::steady_clock::now();
+    auto next_nudge = client_start + CLIENT_NUDGE_AFTER;
+    while (!state->done && std::chrono::steady_clock::now() - client_start < CLIENT_LIMIT)
     {
         frame();
+        if (std::chrono::steady_clock::now() >= next_nudge)
+        {
+            static_cast<void>(PostThreadMessageW(state->thread, WM_NULL, 0, 0));
+            next_nudge += CLIENT_NUDGE_INTERVAL;
+        }
+    }
+    if (!state->done)
+    {
+        client.detach();
+        FAIL() << "the UI Automation client did not return within " << CLIENT_LIMIT.count() << " s; it was " << state->step.load();
     }
     client.join();
+    const ClientResult& result = state->result;
     for (std::int32_t settle = 0; settle < 10 && saved == 0; ++settle)
     {
         frame();
