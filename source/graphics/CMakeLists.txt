@@ -100,6 +100,7 @@ if(GFX_BACKEND_VULKAN)
         backends/vulkan/vulkan_swapchain.cpp
         backends/vulkan/vulkan_surface.cpp
         backends/vulkan/renderdoc_capture.cpp
+        backends/vulkan/vulkan_host_clock.cpp
         backends/vulkan/vma_implementation.cpp)
     target_compile_definitions(gfx PRIVATE GFX_WITH_VULKAN_BACKEND=1)
     # Vulkan structures are initialized with designated initializers that leave the members they do not

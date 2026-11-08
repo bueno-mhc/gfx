@@ -81,6 +81,23 @@ enum class TraceFormat : std::uint8_t
     BINARY_COMPRESSED, ///< The same, compressed with zstd.
 };
 
+/// @brief Whether a GPU scope was timed, and why not.
+enum class GpuScopeStatus : std::uint8_t
+{
+    TIMED,       ///< Both timestamps were written and read.
+    DROPPED,     ///< Its frame's timestamp queries were used up: recorded, not timed (its times are when it was recorded).
+    UNAVAILABLE, ///< Its queue writes no timestamps.
+    INCOMPLETE,  ///< Its timestamps were not written in time (its commands were not submitted, or did not finish).
+};
+
+/// @brief How a GPU track's times were placed on the CPU's timeline.
+enum class GpuClockAlignment : std::uint8_t
+{
+    CALIBRATED,  ///< From calibrated timestamps (the device paired its clock with the host's).
+    ESTIMATED,   ///< From a submission writing a timestamp, timed on the CPU: off by up to half its round trip.
+    UNAVAILABLE, ///< Not placed: the queue writes no timestamps.
+};
+
 /// @brief Where a session is.
 enum class SessionState : std::uint8_t
 {
@@ -115,8 +132,8 @@ inline constexpr std::size_t PROFILER_CACHE_LINE_SIZE = 64;
 /// @brief The first bytes of a binary trace.
 inline constexpr std::string_view PROFILER_TRACE_MAGIC = "GFXTRACE";
 
-/// @brief The version of the binary trace format this library writes and reads.
-inline constexpr std::uint32_t PROFILER_TRACE_VERSION = 1;
+/// @brief The version of the binary trace format this library writes and reads (2: GPU tracks and scopes).
+inline constexpr std::uint32_t PROFILER_TRACE_VERSION = 2;
 
 /// @brief Bytes of a binary trace's header.
 inline constexpr std::size_t PROFILER_TRACE_HEADER_SIZE = 32;
@@ -186,6 +203,29 @@ struct EnumerationTraits<profiler::TraceFormat>
 };
 
 template<>
+struct EnumerationTraits<profiler::GpuScopeStatus>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{profiler::GpuScopeStatus::TIMED, "TIMED"},
+        EnumeratorName{profiler::GpuScopeStatus::DROPPED, "DROPPED"},
+        EnumeratorName{profiler::GpuScopeStatus::UNAVAILABLE, "UNAVAILABLE"},
+        EnumeratorName{profiler::GpuScopeStatus::INCOMPLETE, "INCOMPLETE"},
+    };
+};
+
+template<>
+struct EnumerationTraits<profiler::GpuClockAlignment>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{profiler::GpuClockAlignment::CALIBRATED, "CALIBRATED"},
+        EnumeratorName{profiler::GpuClockAlignment::ESTIMATED, "ESTIMATED"},
+        EnumeratorName{profiler::GpuClockAlignment::UNAVAILABLE, "UNAVAILABLE"},
+    };
+};
+
+template<>
 struct EnumerationTraits<profiler::SessionState>
 {
     static constexpr bool IS_BITMASK = false;
@@ -205,6 +245,8 @@ static_assert(verify<profiler::ProfilerSubsystem>(), "EnumerationTraits<profiler
 static_assert(verify<profiler::ProfilerCategory>(), "EnumerationTraits<profiler::ProfilerCategory>::NAMES is out of sync with the enumeration");
 static_assert(verify<profiler::RecordKind>(), "EnumerationTraits<profiler::RecordKind>::NAMES is out of sync with the enumeration");
 static_assert(verify<profiler::TraceFormat>(), "EnumerationTraits<profiler::TraceFormat>::NAMES is out of sync with the enumeration");
+static_assert(verify<profiler::GpuScopeStatus>(), "EnumerationTraits<profiler::GpuScopeStatus>::NAMES is out of sync with the enumeration");
+static_assert(verify<profiler::GpuClockAlignment>(), "EnumerationTraits<profiler::GpuClockAlignment>::NAMES is out of sync with the enumeration");
 static_assert(verify<profiler::SessionState>(), "EnumerationTraits<profiler::SessionState>::NAMES is out of sync with the enumeration");
 
 } // namespace gfx::enumeration_verification

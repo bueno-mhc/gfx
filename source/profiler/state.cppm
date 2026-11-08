@@ -10,6 +10,7 @@ import gfx.profiler.enums;
 import gfx.profiler.handles;
 import :site;
 import :trace;
+import :gpu;
 import :session;
 
 namespace gfx::profiler
@@ -141,6 +142,16 @@ struct SessionData
     std::vector<TraceThread> threads{};
     std::vector<ThreadSessionState> per_context{};                    // by ThreadContext::index
     std::map<std::pair<std::uint64_t, std::uint64_t>, OpenAsync> open_async{}; // (name identifier, token)
+    std::vector<TraceGpuTrack> gpu_tracks{};
+    std::unordered_map<const GpuTimingSource*, std::uint32_t> gpu_track_of{};    // source → index in gpu_tracks
+    std::vector<TraceGpuScope> pending_gpu{};                                     // collected, frame not ended yet
+};
+
+/// A GPU source a profiler collects from.
+struct GpuSourceEntry
+{
+    GpuSourceHandle handle{};
+    GpuTimingSource* source{nullptr};
 };
 
 /// A live sink.
@@ -167,6 +178,7 @@ struct Profiler::Implementation : private HandleIssuer
     [[nodiscard]] static auto session_handle(std::uint32_t index) -> SessionHandle;
     [[nodiscard]] static auto sink_handle(std::uint32_t index,
                                           std::uint32_t generation) -> SinkHandle;
+    [[nodiscard]] static auto gpu_source_handle(std::uint32_t index) -> GpuSourceHandle;
     [[nodiscard]] static auto index_of(SessionHandle handle) noexcept -> std::uint32_t;
     [[nodiscard]] static auto index_of(SinkHandle handle) noexcept -> std::uint32_t;
 
@@ -176,6 +188,12 @@ struct Profiler::Implementation : private HandleIssuer
     /// Discards what the rings hold (records made after a session ended).
     void discard_records();
 
+    /// Collects from every GPU source (waiting for every scope with @p wait) into @p data's pending GPU scopes, then
+    /// files those that began before its last frame ended (all of them with @p file_all, the late ones into the last frame).
+    void collect_gpu(SessionData& data,
+                     bool wait,
+                     bool file_all);
+
     std::uint64_t id;                                   // unique among the process's profilers
     ProfilerDescription description;
     std::mutex mutex{};                                 // guards contexts (and their names) and sinks
@@ -184,6 +202,9 @@ struct Profiler::Implementation : private HandleIssuer
     std::atomic<std::uint32_t> recording_categories{0}; // what its recording session records (0: none)
     std::vector<SinkEntry> sinks{};
     std::uint32_t sink_generation{0};
+    std::vector<GpuSourceEntry> gpu_sources{};
+    std::uint32_t gpu_source_generation{0};
+    std::vector<GpuScopeRecord> collected_gpu{};        // reused by collect_gpu()
     std::vector<ThreadContext*> drained{};              // reused by end_frame()
 };
 

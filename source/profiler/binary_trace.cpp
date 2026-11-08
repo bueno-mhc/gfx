@@ -179,6 +179,13 @@ payload_of(const Trace& trace) -> std::vector<std::byte>
     {
         writer.put_string(thread.name);
     }
+    writer.put_u32(static_cast<std::uint32_t>(trace.gpu_tracks().size()));
+    for (const TraceGpuTrack& track : trace.gpu_tracks())
+    {
+        writer.put_string(track.name);
+        writer.put_u8(std::to_underlying(track.alignment));
+        writer.put_i64(track.deviation);
+    }
     writer.put_u32(static_cast<std::uint32_t>(trace.frames().size()));
     for (const TraceFrame& frame : trace.frames())
     {
@@ -215,6 +222,17 @@ payload_of(const Trace& trace) -> std::vector<std::byte>
             writer.put_i64(span.begin);
             writer.put_i64(span.end);
         }
+        writer.put_u32(static_cast<std::uint32_t>(frame.gpu_scopes.size()));
+        for (const TraceGpuScope& scope : frame.gpu_scopes)
+        {
+            writer.put_u32(scope.track);
+            writer.put_u32(scope.site);
+            writer.put_i64(scope.begin);
+            writer.put_i64(scope.end);
+            writer.put_u32(scope.depth);
+            writer.put_u32(scope.query);
+            writer.put_u8(std::to_underlying(scope.status));
+        }
     }
     return std::move(writer).bytes();
 }
@@ -241,7 +259,20 @@ trace_of(std::span<const std::byte> payload) -> Trace
         thread.name = reader.string();
     }
 
-    // Indices into the sites and threads are checked: a reader of the trace may use them unchecked.
+    std::vector<TraceGpuTrack> tracks(reader.count(13));
+    for (TraceGpuTrack& track : tracks)
+    {
+        track.name = reader.string();
+        const std::uint8_t alignment = reader.u8();
+        if (alignment >= ENUMERATOR_COUNT<GpuClockAlignment>)
+        {
+            throw_invalid(std::format("GPU clock alignment {}", alignment));
+        }
+        track.alignment = static_cast<GpuClockAlignment>(alignment);
+        track.deviation = reader.i64();
+    }
+
+    // Indices into the sites, threads and GPU tracks are checked: a reader of the trace may use them unchecked.
     const auto check_site = [&sites](std::uint32_t site)
     {
         if (site >= sites.size())
@@ -258,7 +289,15 @@ trace_of(std::span<const std::byte> payload) -> Trace
         }
         return thread;
     };
-    std::vector<TraceFrame> frames(reader.count(48));
+    const auto check_track = [&tracks](std::uint32_t track)
+    {
+        if (track >= tracks.size())
+        {
+            throw_invalid(std::format("GPU track {} of {}", track, tracks.size()));
+        }
+        return track;
+    };
+    std::vector<TraceFrame> frames(reader.count(52));
     for (TraceFrame& frame : frames)
     {
         frame.index = reader.u64();
@@ -299,12 +338,28 @@ trace_of(std::span<const std::byte> payload) -> Trace
             span.begin = reader.i64();
             span.end = reader.i64();
         }
+        frame.gpu_scopes.resize(reader.count(33));
+        for (TraceGpuScope& scope : frame.gpu_scopes)
+        {
+            scope.track = check_track(reader.u32());
+            scope.site = check_site(reader.u32());
+            scope.begin = reader.i64();
+            scope.end = reader.i64();
+            scope.depth = reader.u32();
+            scope.query = reader.u32();
+            const std::uint8_t status = reader.u8();
+            if (status >= ENUMERATOR_COUNT<GpuScopeStatus>)
+            {
+                throw_invalid(std::format("GPU scope status {}", status));
+            }
+            scope.status = static_cast<GpuScopeStatus>(status);
+        }
     }
     if (!reader.finished())
     {
         throw_invalid("bytes follow the last frame");
     }
-    return Trace{std::move(name), std::move(sites), std::move(threads), std::move(frames)};
+    return Trace{std::move(name), std::move(sites), std::move(threads), std::move(frames), std::move(tracks)};
 }
 
 } // namespace

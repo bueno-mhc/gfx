@@ -10,12 +10,20 @@ namespace gfx::profiler
 Trace::Trace(std::string name,
              std::vector<TraceSite> sites,
              std::vector<TraceThread> threads,
-             std::vector<TraceFrame> frames)
+             std::vector<TraceFrame> frames,
+             std::vector<TraceGpuTrack> gpu_tracks)
     : m_name{std::move(name)}
     , m_sites{std::move(sites)}
     , m_threads{std::move(threads)}
     , m_frames{std::move(frames)}
+    , m_gpu_tracks{std::move(gpu_tracks)}
 {
+}
+
+auto
+Trace::gpu_tracks() const noexcept -> std::span<const TraceGpuTrack>
+{
+    return m_gpu_tracks;
 }
 
 auto
@@ -81,9 +89,22 @@ canonical_trace(const Trace& trace) -> std::string
         text += std::format("thread {} '{}'\n", position, threads[thread_order[position]].name);
     }
 
+    // GPU tracks ranked by name, as threads.
+    const std::span<const TraceGpuTrack> tracks = trace.gpu_tracks();
+    std::vector<std::uint32_t> track_order(tracks.size());
+    std::ranges::iota(track_order, 0U);
+    std::ranges::stable_sort(track_order, {}, [&tracks](std::uint32_t track) -> const std::string& { return tracks[track].name; });
+    std::vector<std::uint32_t> track_rank(tracks.size());
+    for (std::uint32_t position = 0; position < track_order.size(); ++position)
+    {
+        track_rank[track_order[position]] = position;
+        text += std::format("gpu track {} '{}' {}\n", position, tracks[track_order[position]].name, tracks[track_order[position]].alignment);
+    }
+
     // Each frame, thread by thread: scopes in the order they began, samples in the order recorded; then the spans.
     std::vector<TraceScope> scopes;
     std::vector<TraceAsyncSpan> spans;
+    std::vector<TraceGpuScope> gpu_scopes;
     std::vector<std::uint32_t> thread_rank(threads.size());
     for (std::uint32_t position = 0; position < thread_order.size(); ++position)
     {
@@ -121,6 +142,16 @@ canonical_trace(const Trace& trace) -> std::string
         {
             text += std::format("  span site {} token {} threads {} {}\n", site_rank[span.site], span.token, thread_rank[span.begin_thread],
                                 thread_rank[span.end_thread]);
+        }
+        gpu_scopes.assign(frame.gpu_scopes.begin(), frame.gpu_scopes.end());
+        std::ranges::sort(gpu_scopes, [&track_rank](const TraceGpuScope& first, const TraceGpuScope& second)
+        {
+            return std::pair{track_rank[first.track], first.query} < std::pair{track_rank[second.track], second.query};
+        });
+        for (const TraceGpuScope& scope : gpu_scopes)
+        {
+            text += std::format("  gpu track {} site {} depth {} query {} {}\n", track_rank[scope.track], site_rank[scope.site], scope.depth, scope.query,
+                                scope.status);
         }
     }
     return text;

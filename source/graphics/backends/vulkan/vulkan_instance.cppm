@@ -18,6 +18,13 @@ import :common;
 namespace gfx::vulkan
 {
 
+/// @brief The host time domain calibrated timestamps pair with the device's: the clock steady_clock reads.
+#ifdef _WIN32
+inline constexpr VkTimeDomainKHR HOST_TIME_DOMAIN = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+inline constexpr VkTimeDomainKHR HOST_TIME_DOMAIN = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
+#endif
+
 class VulkanInstance;
 
 /// @brief Everything a physical device reports, queried once when the instance is created. The
@@ -111,6 +118,10 @@ public:
     {
         return m_capabilities;
     }
+
+    /// @brief Whether calibrated timestamps pair the device's clock with the host clock steady_clock follows
+    ///        (VK_KHR_ or VK_EXT_calibrated_timestamps offering both time domains).
+    [[nodiscard]] auto calibrates_timestamps() const noexcept -> bool;
 
 private:
     void query_capabilities();

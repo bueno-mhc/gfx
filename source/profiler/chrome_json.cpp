@@ -1,5 +1,5 @@
-// Chrome Tracing JSON: one process; track 0 holds the frames, track n + 1 the trace's thread n. Times in microseconds
-// with three decimals (the trace's nanoseconds).
+// Chrome Tracing JSON: process 1 holds the CPU (track 0 the frames, track n + 1 the trace's thread n), process 2 the GPU
+// (track n + 1 the trace's GPU track n). Times in microseconds with three decimals (the trace's nanoseconds).
 module gfx.profiler;
 
 import std;
@@ -81,6 +81,17 @@ to_chrome_json(const Trace& trace) -> std::string
         add(std::format(R"({{"ph":"M","pid":1,"tid":{},"name":"thread_name","args":{{"name":"{}"}}}})", thread + 1,
                         escaped(name.empty() ? std::format("thread {}", thread) : name)));
     }
+    if (!trace.gpu_tracks().empty())
+    {
+        add(R"({"ph":"M","pid":1,"tid":0,"name":"process_name","args":{"name":"CPU"}})");
+        add(R"({"ph":"M","pid":2,"tid":0,"name":"process_name","args":{"name":"GPU"}})");
+    }
+    for (std::size_t track = 0; track < trace.gpu_tracks().size(); ++track)
+    {
+        const TraceGpuTrack& gpu_track = trace.gpu_tracks()[track];
+        add(std::format(R"json({{"ph":"M","pid":2,"tid":{},"name":"thread_name","args":{{"name":"{} ({}, deviation {} ns)"}}}})json", track + 1, escaped(gpu_track.name),
+                        gpu_track.alignment, gpu_track.deviation));
+    }
 
     for (const TraceFrame& frame : trace.frames())
     {
@@ -108,6 +119,22 @@ to_chrome_json(const Trace& trace) -> std::string
                                                                               : std::format("{}", sample.value);
             add(std::format(R"({{"ph":"C","pid":1,"tid":{},"name":"{}","cat":"{}","ts":{},"args":{{"{}":{}}}}})", sample.thread + 1, escaped(site.name),
                             site.category, microseconds(sample.time), sample.kind == RecordKind::MEMORY ? "bytes" : "value", value));
+        }
+        for (const TraceGpuScope& scope : frame.gpu_scopes)
+        {
+            // Timed scopes as complete events; untimed ones as instants where they were recorded.
+            const TraceSite& site = sites[scope.site];
+            if (scope.status == GpuScopeStatus::TIMED)
+            {
+                add(std::format(R"({{"ph":"X","pid":2,"tid":{},"name":"{}","cat":"{}","ts":{},"dur":{},"args":{{"query":{},"depth":{}}}}})",
+                                scope.track + 1, escaped(site.name), site.category, microseconds(scope.begin), microseconds(scope.duration()), scope.query,
+                                scope.depth));
+            }
+            else
+            {
+                add(std::format(R"json({{"ph":"i","s":"t","pid":2,"tid":{},"name":"{} ({})","cat":"{}","ts":{}}})json", scope.track + 1, escaped(site.name),
+                                scope.status, site.category, microseconds(scope.begin)));
+            }
         }
         for (const TraceAsyncSpan& span : frame.async_spans)
         {

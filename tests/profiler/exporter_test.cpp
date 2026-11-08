@@ -22,6 +22,7 @@ sample_trace(int frames) -> Trace
         {.identifier = 4, .name_identifier = 14, .name = "error", .category = ProfilerCategory::GENERAL, .file = "a.cpp", .line = 40},
         {.identifier = 5, .name_identifier = 15, .name = "staging", .category = ProfilerCategory::GPU | ProfilerCategory::GRAPHICS, .file = "a.cpp", .line = 50},
         {.identifier = 6, .name_identifier = 16, .name = "submission", .category = ProfilerCategory::GRAPHICS, .file = "a.cpp", .line = 60},
+        {.identifier = 7, .name_identifier = 17, .name = "dispatch", .category = ProfilerCategory::GPU, .file = "a.cpp", .line = 70},
     };
     std::vector<TraceFrame> trace_frames;
     for (int frame = 0; frame < frames; ++frame)
@@ -38,10 +39,13 @@ sample_trace(int frames) -> Trace
                          {.thread = 1, .site = 4, .time = base + 32, .kind = RecordKind::MEMORY, .value = 4096},
                          {.thread = 1, .site = 1, .time = base + 33, .kind = RecordKind::MARKER, .value = 0}},
              .async_spans = {{.site = 5, .token = 0xABCDEF, .begin_thread = 0, .end_thread = 1, .begin = base + 40, .end = base + 800}},
+             .gpu_scopes = {{.track = 0, .site = 6, .begin = base + 200, .end = base + 700, .depth = 0, .query = 0, .status = GpuScopeStatus::TIMED},
+                            {.track = 0, .site = 6, .begin = base + 210, .end = base + 210, .depth = 1, .query = 2, .status = GpuScopeStatus::DROPPED}},
              .dropped_records = static_cast<std::uint64_t>(frame),
              .unmatched_records = 1});
     }
-    return Trace{"exported \"session\"", std::move(sites), {{.name = "main"}, {.name = ""}}, std::move(trace_frames)};
+    return Trace{"exported \"session\"", std::move(sites), {{.name = "main"}, {.name = ""}}, std::move(trace_frames),
+                 {{.name = "GPU \"compute\"", .alignment = GpuClockAlignment::CALIBRATED, .deviation = 1500}}};
 }
 
 TEST(ProfilerExporterTest, ChromeJsonIsValidAndHoldsEveryEvent)
@@ -49,10 +53,10 @@ TEST(ProfilerExporterTest, ChromeJsonIsValidAndHoldsEveryEvent)
     const std::string json = to_chrome_json(sample_trace(3));
     const ChromeJsonSummary summary = summarize_chrome_json(json.data(), json.size(), "step");
     ASSERT_TRUE(summary.valid) << json.substr(0, 400);
-    EXPECT_EQ(summary.metadata, 3);          // the frames' track and two threads
-    EXPECT_EQ(summary.complete, 3 + 3 * 2);  // a frame and two scopes per frame
+    EXPECT_EQ(summary.metadata, 3 + 2 + 1);  // the frames' track, two threads, the two processes' names, the GPU track
+    EXPECT_EQ(summary.complete, 3 * 4);      // a frame, two scopes and a timed GPU scope per frame
     EXPECT_EQ(summary.counters, 3 * 3);      // counter, float counter, size
-    EXPECT_EQ(summary.instants, 3);
+    EXPECT_EQ(summary.instants, 3 * 2);      // a marker and a dropped GPU scope per frame
     EXPECT_EQ(summary.async_begins, 3);
     EXPECT_EQ(summary.async_ends, 3);
     EXPECT_EQ(summary.named_complete, 6);
@@ -60,6 +64,8 @@ TEST(ProfilerExporterTest, ChromeJsonIsValidAndHoldsEveryEvent)
     EXPECT_NE(json.find(R"("name":"say \"hi\"\n")"), std::string::npos);
     EXPECT_NE(json.find(R"("file":"C:\\step.cpp")"), std::string::npos);
     EXPECT_NE(json.find(R"("id":"0xabcdef")"), std::string::npos);
+    EXPECT_NE(json.find(R"json("name":"GPU \"compute\" (CALIBRATED, deviation 1500 ns)")json"), std::string::npos) << json.substr(0, 1200);
+    EXPECT_NE(json.find(R"json("name":"dispatch (DROPPED)")json"), std::string::npos);
 }
 
 TEST(ProfilerExporterTest, BinaryTracesReadBackEqual)
@@ -101,12 +107,20 @@ TEST(ProfilerExporterTest, CorruptBinaryTracesAreRefused)
     wrong_magic[0] = std::byte{'X'};
     refused(wrong_magic, "do not begin with 'GFXTRACE'");
     std::vector<std::byte> wrong_version = bytes;
-    wrong_version[8] = std::byte{2};
-    refused(wrong_version, "format version 2 is not 1");
+    wrong_version[8] = std::byte{9};
+    refused(wrong_version, std::format("format version 9 is not {}", PROFILER_TRACE_VERSION));
     refused(std::span{bytes}.first(bytes.size() - 1), "announces");
     std::vector<std::byte> extra = bytes;
     extra.push_back(std::byte{0});
     refused(extra, "announces");
+
+    // A GPU scope naming a track the trace does not have.
+    const Trace trace = sample_trace(1);
+    std::vector<TraceFrame> frames{trace.frames().begin(), trace.frames().end()};
+    frames[0].gpu_scopes[0].track = 5;
+    refused(write_binary_trace(Trace{"wrong track", {trace.sites().begin(), trace.sites().end()}, {trace.threads().begin(), trace.threads().end()},
+                                     std::move(frames), {trace.gpu_tracks().begin(), trace.gpu_tracks().end()}}),
+            "GPU track 5 of 1");
 
     // A payload whose sizes lie: the header patched to a shorter payload ends a string early.
     std::vector<std::byte> truncated{bytes.begin(), bytes.begin() + 60};

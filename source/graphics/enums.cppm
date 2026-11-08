@@ -114,6 +114,8 @@ enum class DeviceFeature : std::uint8_t
     SHADER_INTEGER64_ATOMICS,  ///< 64-bit integer atomic operations on storage buffers and shared memory.
     SHADER_MEMORY_MODEL,       ///< The shader memory model: atomics and barriers with acquire/release semantics at device
                                ///< scope (the Vulkan memory model), so workgroups exchange data within a dispatch.
+    CALIBRATED_TIMESTAMPS,     ///< Device::calibrate_timestamps(): a GPU timestamp and the steady_clock time taken together,
+                               ///< so GPU timings align with the CPU's.
 };
 
 /// @brief Subgroup (wave) operations compute shaders may use (DeviceLimits::subgroup_operations). Bitmask.
@@ -1209,6 +1211,7 @@ struct EnumerationTraits<DeviceFeature>
         EnumeratorName{DeviceFeature::FRAME_LATENCY_WAIT, "FRAME_LATENCY_WAIT"},
         EnumeratorName{DeviceFeature::SHADER_INTEGER64_ATOMICS, "SHADER_INTEGER64_ATOMICS"},
         EnumeratorName{DeviceFeature::SHADER_MEMORY_MODEL, "SHADER_MEMORY_MODEL"},
+        EnumeratorName{DeviceFeature::CALIBRATED_TIMESTAMPS, "CALIBRATED_TIMESTAMPS"},
     };
 };
 

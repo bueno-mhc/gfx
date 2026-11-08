@@ -89,8 +89,40 @@ struct TraceAsyncSpan
     [[nodiscard]] auto operator==(const TraceAsyncSpan&) const -> bool = default;
 };
 
+/// @brief A GPU queue's timings (its index in the trace is its position): one per GpuTimingSource.
+struct TraceGpuTrack
+{
+    std::string name{};                                       ///< The source's name (device, queue).
+    GpuClockAlignment alignment = GpuClockAlignment::UNAVAILABLE; ///< How its times were placed on the CPU's timeline.
+    std::int64_t deviation = 0;                               ///< Nanoseconds they may be off.
+
+    [[nodiscard]] auto operator==(const TraceGpuTrack&) const -> bool = default;
+};
+
+/// @brief A scope of GPU commands (between two timestamps), on the CPU's timeline.
+struct TraceGpuScope
+{
+    std::uint32_t track = 0;                         ///< The GPU track (index in Trace::gpu_tracks()).
+    std::uint32_t site = 0;                          ///< The site (index in Trace::sites()).
+    std::int64_t begin = 0;                          ///< Nanoseconds since the session began (the GPU's begin, or when an
+                                                     ///< untimed scope was recorded).
+    std::int64_t end = 0;                            ///< Nanoseconds since the session began.
+    std::uint32_t depth = 0;                         ///< GPU scopes open around it in its command stream.
+    std::uint32_t query = 0;                         ///< Its first timestamp's index in its frame's queries (recording order).
+    GpuScopeStatus status = GpuScopeStatus::TIMED;   ///< Whether it was timed.
+
+    /// @brief Nanoseconds from its begin to its end.
+    [[nodiscard]] constexpr auto duration() const noexcept -> std::int64_t
+    {
+        return end - begin;
+    }
+
+    [[nodiscard]] auto operator==(const TraceGpuScope&) const -> bool = default;
+};
+
 /// @brief One frame of a session: what was recorded between two end_frame() calls. Scopes and spans belong to the
-///        frame they end in.
+///        frame they end in; GPU scopes to the frame whose time their beginning falls in (they may arrive a few frames
+///        later, when their timestamps are read).
 struct TraceFrame
 {
     std::uint64_t index = 0;                     ///< Its number in the session (from 0).
@@ -99,6 +131,7 @@ struct TraceFrame
     std::vector<TraceScope> scopes{};            ///< Scopes that ended in it, thread by thread.
     std::vector<TraceSample> samples{};          ///< Samples, thread by thread, in recording order.
     std::vector<TraceAsyncSpan> async_spans{};   ///< Spans that ended in it.
+    std::vector<TraceGpuScope> gpu_scopes{};     ///< GPU scopes that began in it, track by track in recording order.
     std::uint64_t dropped_records = 0;           ///< Records lost because a thread's ring was full.
     std::uint64_t unmatched_records = 0;         ///< Scope or span ends without a begin, begins left open.
 
@@ -116,10 +149,12 @@ public:
     /// @param sites   The sites the frames refer to.
     /// @param threads The threads the frames refer to.
     /// @param frames  The frames, in order.
+    /// @param gpu_tracks The GPU tracks the frames' GPU scopes refer to.
     Trace(std::string name,
           std::vector<TraceSite> sites,
           std::vector<TraceThread> threads,
-          std::vector<TraceFrame> frames);
+          std::vector<TraceFrame> frames,
+          std::vector<TraceGpuTrack> gpu_tracks = {});
 
     /// @brief The session's name.
     [[nodiscard]] auto name() const noexcept -> std::string_view;
@@ -133,6 +168,9 @@ public:
     /// @brief The frames, in order.
     [[nodiscard]] auto frames() const noexcept -> std::span<const TraceFrame>;
 
+    /// @brief The GPU tracks.
+    [[nodiscard]] auto gpu_tracks() const noexcept -> std::span<const TraceGpuTrack>;
+
     /// @brief The index of the first site named @p name, if any.
     [[nodiscard]] auto find_site(std::string_view name) const noexcept -> std::optional<std::uint32_t>;
 
@@ -143,11 +181,13 @@ private:
     std::vector<TraceSite> m_sites{};
     std::vector<TraceThread> m_threads{};
     std::vector<TraceFrame> m_frames{};
+    std::vector<TraceGpuTrack> m_gpu_tracks{};
 };
 
 /// @brief @p trace without its times, as text: the sites (sorted by name, file and line), then per frame and per
 ///        thread (threads sorted by name) its scopes in the order they began, its samples and its spans, with their
-///        sites, depths, values and tokens. Two runs of the same workload give the same text (the determinism the
+///        sites, depths, values and tokens, then its GPU scopes track by track in query order, with their depths,
+///        queries and statuses. Two runs of the same workload give the same text (the determinism the
 ///        tests check).
 [[nodiscard]] auto canonical_trace(const Trace& trace) -> std::string;
 

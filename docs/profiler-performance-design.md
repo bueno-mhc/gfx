@@ -1,7 +1,7 @@
 # gfx: a profiler, and the GPU XPBD backend made as fast as Box3D or faster — architecture, decisions and plan
 
-Status: **answers given 2026-11-08: every question of §D as recommended.** PF0 built (§B "PF0 as built"; 5 deviations
-to validate). The numbers of §0.1 were
+Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
+built"; committed 73cae0d). PF1 built (§B "PF1 as built"; 6 deviations to validate). The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -405,6 +405,71 @@ Results: Debug 24 passed, 2 skipped (overhead: not optimized; compiled-out: the 
 13 skipped (the profiler is compiled out); profile 25 passed, 1 skipped. Full runs (1480 tests: 1453 + 26 + the compile-out
 check): Debug 1480 of 1480 (1028 s), Release 1480 of 1480 (964 s); the profile build built every target, its profiler tests
 run.
+
+### PF1 as built (2026-11-08)
+
+**Graphics**: `DeviceFeature::CALIBRATED_TIMESTAMPS` (automatic) and **`Device::calibrate_timestamps()`** → `TimestampCalibration`
+{gpu_ticks, cpu_time (steady_clock), deviation} (in `:device_memory`; pure virtual with a throwing default; FakeDevice forwards
+to it). Vulkan: VK_KHR_ or VK_EXT_calibrated_timestamps when the physical device pairs VK_TIME_DOMAIN_DEVICE with the host
+domain (`HOST_TIME_DOMAIN`: QUERY_PERFORMANCE_COUNTER on Windows, CLOCK_MONOTONIC elsewhere;
+`VulkanPhysicalDevice::calibrates_timestamps()`); the host value is tied to steady_clock by reading the host clock and
+steady_clock right after (plain translation unit `vulkan_host_clock.cpp` behind std-free `vulkan_host_clock.hpp`:
+QueryPerformanceCounter needs `<windows.h>`). **Both GPUs here have them**: deviation 2 µs on the RTX 5060, 120–173 µs on
+the Intel GPU (Debug, validation layers).
+
+**Core (`gfx.profiler`)**: partition `:gpu` — `GpuScopeRecord` {site, begin, end (steady_clock ns), depth, query, status},
+abstract **`GpuTimingSource`** (track_name, alignment, alignment_deviation, collect(scopes, wait), `attached()` counted by the
+profilers it is added to) and the concept **`GpuTimingProvider<Provider, Recorder>`** (`provider.scope(recorder, site)`);
+enumerations `GpuScopeStatus` {TIMED, DROPPED, UNAVAILABLE, INCOMPLETE} and `GpuClockAlignment` {CALIBRATED, ESTIMATED,
+UNAVAILABLE}; handle `GpuSourceHandle`; `Profiler::add_gpu_source()` / `remove_gpu_source()`. At each `end_frame()` the profiler
+collects every source without waiting and files each GPU scope into the first frame that ended after the scope began (later ones
+wait for their frame); `finalize_session()` collects waiting and files the rest (late ones into the last frame). Traces:
+`TraceGpuTrack` {name, alignment, deviation}, `TraceGpuScope` {track, site, begin, end, depth, query, status},
+`TraceFrame::gpu_scopes`, `Trace::gpu_tracks()`; canonical form lists GPU tracks and scopes (by track and query); **binary trace
+version 2**; Chrome JSON puts the GPU in process 2 (a track per GPU track, timed scopes as complete events, untimed ones as
+instants named with their status); reports gain `gpu_stages`, `cpu_time`, `gpu_time` (per-frame busy unions), `overlap_ratio`,
+`idle_ratio`, `untimed_gpu_scopes` (and a Markdown line and table). Macros `PROFILE_GPU_SCOPE(name, recorder, provider)` and
+`PROFILE_DISPATCH(name, recorder, provider, x, y, z)` (compiled out: `recorder.dispatch(x, y, z)` alone — the compile-out
+check covers both).
+
+**Bridge `gfx::profiler_graphics`** (`source/profiler_graphics/`, module `gfx.profiler.graphics`, re-exports gfx and
+gfx.profiler): **`GpuTimer`** (a GpuTimingSource; GpuTimerDescription {queue, frames_in_flight 3, scopes_per_frame 1024,
+always, wait_limit 2 s, recalibration 1 s, calibrated, name}): one QueryPool, a range of 2 × scopes_per_frame queries per frame
+in flight; `begin_frame(recorder)` reads the slot's last frame if nobody did (waiting within the limit), resets its range in
+the recorder; `scope(recorder, site)` → `GpuTimerScope<Type>` (timestamps at NONE and ALL_COMMANDS; queries taken in recording
+order — the same work uses the same queries); scopes beyond the range DROPPED, a queue without timestamp bits UNAVAILABLE,
+timestamps not written within the limit INCOMPLETE (untimed scopes keep their recording time). Timestamps are written only while
+a profiler records GPU with the timer added (or `always`); `latest()` gives the last frame read back. Alignment: calibrated
+timestamps (recalibrated every second), else an **estimate** from five submissions each writing one timestamp, the query polled
+until written (the window between the submission and the first sight of the timestamp; its midpoint, ± half of it). The whole
+pool is reset on the GPU at construction (reading a query never reset is invalid usage). One recording thread at a time;
+collect() and latest() from others (a mutex).
+
+**Found while testing**: the first estimate waited for the submission's timeline value: **4.5 ms** of deviation on both GPUs
+(the wait returned milliseconds after the GPU wrote the timestamp); polling the query brought it to **150 µs**.
+
+**Deviations (for validation).**
+1. **`GpuProfiler` (graphics) is not rebuilt on the timer**: the graphics library cannot depend on the bridge (a cycle); it
+   stays as it is, and the GpuTimer is the profiler's GPU timing.
+2. **The GPU backend's `StepTimer` moves to PF2**, where the backend is instrumented: it feeds `StepStatistics::phase_seconds`
+   in every build, which a GpuTimer with `always` can do.
+3. **GPU scopes go to the frame their beginning falls in**, arriving one to frames_in_flight frames late (the current frame's
+   queries are read only when waited for or reused: it may still record); sinks see a frame before its GPU scopes.
+4. **Binary traces are version 2** (GPU tracks and scopes); version 1 traces (PF0's) are refused.
+5. **`GpuTimerDescription::calibrated`** (not in the design): turns the estimate on where calibrated timestamps exist, which is
+   how the estimate is tested on this machine (both GPUs calibrate).
+6. **The timer needs its queue only with timestamps**: on a device without TIMESTAMP_QUERY (the fake device) it records
+   UNAVAILABLE scopes whatever its queues.
+
+**Tests**: `gfx_profiler_tests` + 2 (GPU sources filed by time, late delivery, waiting at finalize, categories, attachment;
+reports' GPU figures on a hand-built trace) and GPU data in the exporter and canonical tests; **`gfx_profiler_graphics_tests`**
+(17: 8 × 2 GPUs with the validation layers — calibrated timestamps against steady_clock over 50 ms (within 0.1 %), scopes of a
+32 MiB fill and copy nested and inside their submission (calibrated and estimated), dropped beyond the range, incomplete when
+never submitted, the same queries twice, a profiler session with GPU scopes in traces, reports, binary and JSON, the macros —
+and the fake device without timestamps). Measured on the way: a 32 MiB fill takes 86–93 µs on the RTX 5060 and 6 ms on the
+Intel GPU (validation layers). Results: Debug 1497 of 1497 (965 s; then the estimate's change and its test, 17 of 17 GPU timer
+tests), Release 1499 of 1499 (914 s), profile: profiler tests 27 + 1 skipped, GPU timer tests 17, compile-out check; overhead
+54.2 ns per scope, 26.5 ns per counter.
 
 ---
 

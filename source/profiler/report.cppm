@@ -4,7 +4,9 @@
 ///        counters' means and extremes — for regression checks, overlays and the benchmark's Markdown.
 ///        A stage is a site whose scopes ended in the frames; recursion counts once (a scope inside a scope of the
 ///        same site adds nothing). Percentiles are nearest-rank: the smallest value at least that fraction of the
-///        values do not exceed.
+///        values do not exceed. With GPU scopes: GPU stages (timed scopes only), and per frame the CPU's busy time (the
+///        union of every thread's outermost scopes), the GPU's (the union of every track's outermost timed scopes),
+///        the share of the frame both were busy (overlap) and the share the GPU was idle.
 export module gfx.profiler:report;
 
 import std;
@@ -65,7 +67,13 @@ struct Report
     std::string name{};                    ///< The session's name.
     std::uint64_t frames = 0;              ///< Frames counted.
     DurationStatistics frame_time{};       ///< Nanoseconds from each frame's begin to its end.
+    DurationStatistics cpu_time{};         ///< Nanoseconds each frame some thread was in an outermost scope.
+    DurationStatistics gpu_time{};         ///< Nanoseconds each frame some GPU track was in an outermost timed scope.
+    double overlap_ratio = 0.0;            ///< Mean share of a frame the CPU and the GPU were both busy.
+    double idle_ratio = 0.0;               ///< Mean share of a frame the GPU was idle (1 without GPU scopes).
     std::vector<StageReport> stages{};     ///< Longest total first (ties: by name).
+    std::vector<StageReport> gpu_stages{}; ///< GPU sites, longest total first.
+    std::uint64_t untimed_gpu_scopes = 0;  ///< GPU scopes DROPPED, UNAVAILABLE or INCOMPLETE.
     std::vector<CounterReport> counters{}; ///< By name.
     std::uint64_t markers = 0;             ///< Markers recorded.
     std::uint64_t dropped_records = 0;     ///< Records lost to full rings.

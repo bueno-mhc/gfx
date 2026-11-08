@@ -13,6 +13,7 @@ export import gfx.profiler.handles;
 export import gfx.profiler.errors;
 export import :site;
 export import :trace;
+export import :gpu;
 export import :session;
 export import :report;
 export import :exporters;

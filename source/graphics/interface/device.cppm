@@ -93,6 +93,14 @@ public:
     /// @brief The library's own memory blocks and sub-allocations.
     [[nodiscard]] virtual auto memory_statistics() const -> MemoryStatistics = 0;
 
+    // ----------------------------------------------------------------------------- time
+
+    /// @brief A GPU timestamp and the steady_clock time taken together (DeviceFeature::CALIBRATED_TIMESTAMPS): a
+    ///        timestamp t written by any queue happened at cpu_time + (t - gpu_ticks) × timestamp_period_nanoseconds.
+    ///        Calibrate again now and then: the two clocks drift apart.
+    /// @throws BackendCapabilityError without CALIBRATED_TIMESTAMPS.
+    [[nodiscard]] virtual auto calibrate_timestamps() -> TimestampCalibration = 0;
+
     // ----------------------------------------------------------------------------- memory and resources
 
     /// @brief Memory a buffer with this description needs (to place it in a DeviceMemory).
@@ -417,6 +425,12 @@ auto
 Device::memory_budget() const -> std::vector<MemoryHeapBudget>
 {
     throw_not_implemented("Device::memory_budget");
+}
+
+auto
+Device::calibrate_timestamps() -> TimestampCalibration
+{
+    throw_not_implemented("Device::calibrate_timestamps");
 }
 
 auto

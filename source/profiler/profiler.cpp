@@ -167,6 +167,12 @@ Profiler::Implementation::sink_handle(std::uint32_t index,
 }
 
 auto
+Profiler::Implementation::gpu_source_handle(std::uint32_t index) -> GpuSourceHandle
+{
+    return GpuSourceHandle::create(handle_key(), index, 1);
+}
+
+auto
 Profiler::Implementation::index_of(SessionHandle handle) noexcept -> std::uint32_t
 {
     return handle.is_valid() ? handle.index(handle_key()) : 0U;
@@ -205,11 +211,78 @@ Profiler::Implementation::end_frame(SessionData& data)
     data.frame_begin = end;
     data.frame_open = false;
 
+    // GPU scopes resolved since the last frame, filed into the frames they began in.
+    collect_gpu(data, false, false);
+
     // The live sinks see the frame (on this thread).
     for (SinkEntry& sink : sinks)
     {
         sink.function(data.frames.back(), data.sites, data.threads);
     }
+}
+
+void
+Profiler::Implementation::collect_gpu(SessionData& data,
+                                      bool wait,
+                                      bool file_all)
+{
+    // Each source's resolved scopes, its track made on the first ones, the categories the session records only.
+    for (const GpuSourceEntry& entry : gpu_sources)
+    {
+        collected_gpu.clear();
+        entry.source->collect(collected_gpu, wait);
+        if (collected_gpu.empty())
+        {
+            continue;
+        }
+        const auto [track, added] = data.gpu_track_of.try_emplace(entry.source, static_cast<std::uint32_t>(data.gpu_tracks.size()));
+        if (added)
+        {
+            data.gpu_tracks.push_back({.name = entry.source->track_name(),
+                                       .alignment = entry.source->alignment(),
+                                       .deviation = entry.source->alignment_deviation().count()});
+        }
+        for (const GpuScopeRecord& record : collected_gpu)
+        {
+            if (record.site == nullptr || !has_any(record.site->category(), data.description.categories))
+            {
+                continue;
+            }
+            data.pending_gpu.push_back({.track = track->second,
+                                        .site = site_index(data, *record.site),
+                                        .begin = record.begin - data.start,
+                                        .end = record.end - data.start,
+                                        .depth = record.depth,
+                                        .query = record.query,
+                                        .status = record.status});
+        }
+    }
+
+    // Each into the first frame that ended after it began; later ones wait for their frame (or go into the last).
+    if (data.frames.empty())
+    {
+        if (file_all)
+        {
+            data.pending_gpu.clear();
+        }
+        return;
+    }
+    auto kept = data.pending_gpu.begin();
+    for (const TraceGpuScope& scope : data.pending_gpu)
+    {
+        auto frame = std::ranges::upper_bound(data.frames, scope.begin, {}, &TraceFrame::end);
+        if (frame == data.frames.end())
+        {
+            if (!file_all)
+            {
+                *kept++ = scope;
+                continue;
+            }
+            frame = std::prev(data.frames.end());
+        }
+        frame->gpu_scopes.push_back(scope);
+    }
+    data.pending_gpu.erase(kept, data.pending_gpu.end());
 }
 
 void
@@ -240,6 +313,10 @@ Profiler::Profiler(const ProfilerDescription& description)
 
 Profiler::~Profiler()
 {
+    for (const GpuSourceEntry& entry : m_implementation->gpu_sources)
+    {
+        entry.source->m_attachments.fetch_sub(1, std::memory_order_acq_rel);
+    }
     forget_current(*m_implementation);
 }
 
@@ -354,6 +431,9 @@ Profiler::finalize_session(SessionHandle session) -> Trace
     publish_recording(implementation);
     implementation.discard_records();
 
+    // The GPU scopes not collected yet, waited for.
+    implementation.collect_gpu(data, true, true);
+
     // Scopes and spans left open count as unmatched in the last frame.
     std::uint64_t open = data.open_async.size();
     for (const ThreadSessionState& state : data.per_context)
@@ -366,10 +446,12 @@ Profiler::finalize_session(SessionHandle session) -> Trace
     }
 
     data.state = SessionState::FINALIZED;
-    Trace trace{std::move(data.description.name), std::move(data.sites), std::move(data.threads), std::move(data.frames)};
+    Trace trace{std::move(data.description.name), std::move(data.sites), std::move(data.threads), std::move(data.frames), std::move(data.gpu_tracks)};
     data.site_indices.clear();
     data.per_context.clear();
     data.open_async.clear();
+    data.gpu_track_of.clear();
+    data.pending_gpu.clear();
     return trace;
 }
 
@@ -392,6 +474,36 @@ Profiler::remove_sink(SinkHandle sink)
         throw_unknown("Profiler::remove_sink", std::format("{}", sink));
     }
     implementation.sinks.erase(found);
+}
+
+auto
+Profiler::add_gpu_source(GpuTimingSource& source) -> GpuSourceHandle
+{
+    Implementation& implementation = *m_implementation;
+    if (std::ranges::contains(implementation.gpu_sources, &source, &GpuSourceEntry::source))
+    {
+        throw ProfilerError({.subsystem = ProfilerSubsystem::SESSIONS,
+                             .operation = "Profiler::add_gpu_source",
+                             .problem = std::format("the source '{}' is added already", source.track_name()),
+                             .suggestion = "add each source once"});
+    }
+    const GpuSourceHandle handle = Implementation::gpu_source_handle(++implementation.gpu_source_generation);
+    implementation.gpu_sources.push_back({.handle = handle, .source = &source});
+    source.m_attachments.fetch_add(1, std::memory_order_acq_rel);
+    return handle;
+}
+
+void
+Profiler::remove_gpu_source(GpuSourceHandle source)
+{
+    Implementation& implementation = *m_implementation;
+    const auto found = std::ranges::find(implementation.gpu_sources, source, &GpuSourceEntry::handle);
+    if (found == implementation.gpu_sources.end())
+    {
+        throw_unknown("Profiler::remove_gpu_source", std::format("{}", source));
+    }
+    found->source->m_attachments.fetch_sub(1, std::memory_order_acq_rel);
+    implementation.gpu_sources.erase(found);
 }
 
 auto

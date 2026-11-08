@@ -19,6 +19,7 @@ hand_built_trace() -> Trace
         {.identifier = 2, .name_identifier = 12, .name = "inner", .category = ProfilerCategory::PHYSICS, .file = "step.cpp", .line = 20},
         {.identifier = 3, .name_identifier = 13, .name = "bodies", .category = ProfilerCategory::GENERAL, .file = "step.cpp", .line = 30},
         {.identifier = 4, .name_identifier = 14, .name = "rebuilt", .category = ProfilerCategory::GENERAL, .file = "step.cpp", .line = 40},
+        {.identifier = 5, .name_identifier = 15, .name = "dispatch", .category = ProfilerCategory::GPU, .file = "step.cpp", .line = 50},
     };
     std::vector<TraceFrame> frames(2);
     frames[0] = {.index = 0,
@@ -30,6 +31,9 @@ hand_built_trace() -> Trace
                             {.thread = 0, .site = 0, .begin = 0, .end = 100, .depth = 0}},
                  .samples = {{.thread = 0, .site = 2, .time = 5, .kind = RecordKind::COUNTER, .value = 5},
                              {.thread = 0, .site = 3, .time = 6, .kind = RecordKind::MARKER, .value = 0}},
+                 .gpu_scopes = {{.track = 0, .site = 4, .begin = 50, .end = 110, .depth = 0, .query = 0, .status = GpuScopeStatus::TIMED},
+                                {.track = 0, .site = 4, .begin = 60, .end = 80, .depth = 1, .query = 2, .status = GpuScopeStatus::TIMED},
+                                {.track = 0, .site = 4, .begin = 90, .end = 90, .depth = 1, .query = 4, .status = GpuScopeStatus::DROPPED}},
                  .dropped_records = 1};
     frames[1] = {.index = 1,
                  .begin = 120,
@@ -37,7 +41,8 @@ hand_built_trace() -> Trace
                  .scopes = {{.thread = 0, .site = 0, .begin = 130, .end = 330, .depth = 0}},
                  .samples = {{.thread = 0, .site = 2, .time = 135, .kind = RecordKind::COUNTER, .value = 7}},
                  .unmatched_records = 2};
-    return Trace{"hand built", std::move(sites), {{.name = "main"}}, std::move(frames)};
+    return Trace{"hand built", std::move(sites), {{.name = "main"}}, std::move(frames),
+                 {{.name = "GPU", .alignment = GpuClockAlignment::CALIBRATED, .deviation = 0}}};
 }
 
 TEST(ProfilerReportTest, PercentilesAreNearestRank)
@@ -99,6 +104,30 @@ TEST(ProfilerReportTest, StagesCountTheirOutermostScopesPerFrameAndPerCall)
     EXPECT_EQ(report.counters[0].minimum, 5.0);
     EXPECT_EQ(report.counters[0].maximum, 7.0);
     EXPECT_EQ(report.counters[0].last, 7.0);
+}
+
+TEST(ProfilerReportTest, GpuScopesGiveGpuStagesBusyTimesOverlapAndIdleShares)
+{
+    // Frame 0 (120 ns): CPU busy [0, 100], GPU busy [50, 110]: overlap 50, GPU idle 60. Frame 1 (280 ns): no GPU work.
+    const Report report = make_report(hand_built_trace());
+    EXPECT_EQ(report.cpu_time.minimum, 100.0);
+    EXPECT_EQ(report.cpu_time.maximum, 200.0);
+    EXPECT_EQ(report.gpu_time.maximum, 60.0);
+    EXPECT_EQ(report.gpu_time.minimum, 0.0);
+    EXPECT_DOUBLE_EQ(report.overlap_ratio, (50.0 / 120.0 + 0.0) / 2.0);
+    EXPECT_DOUBLE_EQ(report.idle_ratio, (60.0 / 120.0 + 1.0) / 2.0);
+    EXPECT_EQ(report.untimed_gpu_scopes, 1U);
+
+    // "dispatch": its outermost scope (60 ns) once; the nested one adds nothing, the dropped one is not timed.
+    ASSERT_EQ(report.gpu_stages.size(), 1U);
+    EXPECT_EQ(report.gpu_stages[0].name, "dispatch");
+    EXPECT_EQ(report.gpu_stages[0].calls, 1U);
+    EXPECT_EQ(report.gpu_stages[0].total, 60.0);
+    EXPECT_EQ(report.gpu_stages[0].per_frame.maximum, 60.0);
+
+    const std::string markdown = to_markdown(report);
+    EXPECT_NE(markdown.find("| GPU stage |"), std::string::npos) << markdown;
+    EXPECT_NE(markdown.find("overlap 20.8 %, GPU idle 75.0 %; 1 GPU scopes untimed"), std::string::npos) << markdown;
 }
 
 TEST(ProfilerReportTest, SkippedFramesAreLeftOut)

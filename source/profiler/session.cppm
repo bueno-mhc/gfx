@@ -24,6 +24,7 @@ import std;
 import gfx.profiler.enums;
 import gfx.profiler.handles;
 import :trace;
+import :gpu;
 
 export namespace gfx::profiler
 {
@@ -61,7 +62,7 @@ public:
     /// @throws ProfilerError if @p description's ring capacity is not a power of two within bounds.
     explicit Profiler(const ProfilerDescription& description = {});
 
-    /// @brief Stops being current if it is.
+    /// @brief Stops being current if it is, and detaches its GPU sources.
     ~Profiler();
 
     Profiler(const Profiler&) = delete;
@@ -105,6 +106,14 @@ public:
     /// @brief Removes a sink.
     /// @throws ProfilerError if @p sink is not one of this profiler's.
     void remove_sink(SinkHandle sink);
+
+    /// @brief Collects GPU timings from @p source at each end_frame() from now on (and waits for its last ones at
+    ///        finalize_session()). @p source must stay alive until removed (or until the profiler is destroyed).
+    auto add_gpu_source(GpuTimingSource& source) -> GpuSourceHandle;
+
+    /// @brief Stops collecting from a source (what it resolved and was not collected is not).
+    /// @throws ProfilerError if @p source is not one of this profiler's.
+    void remove_gpu_source(GpuSourceHandle source);
 
     /// @brief The state behind it (defined in the library; an incomplete type for applications).
     struct Implementation;

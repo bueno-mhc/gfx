@@ -6,6 +6,7 @@
 add_subdirectory(core)
 add_subdirectory(profiler)
 add_subdirectory(graphics)
+add_subdirectory(profiler_graphics)   # the profiler's GPU timings through the graphics library (QueryPool)
 if(GFX_BUILD_PLATFORM)
     add_subdirectory(platform)
     add_subdirectory(platform_graphics)

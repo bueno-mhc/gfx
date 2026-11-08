@@ -5,6 +5,8 @@ module;
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include "vulkan_host_clock.hpp"
+
 module gfx.backends.vulkan;
 
 import std;
@@ -43,7 +45,7 @@ constexpr std::array AUTOMATIC_FEATURES{
     DeviceFeature::DEPTH_BOUNDS,               DeviceFeature::MULTIVIEW,
     DeviceFeature::SAMPLER_FILTER_MINMAX,      DeviceFeature::MEMORY_BUDGET,
     DeviceFeature::PRESENTATION,               DeviceFeature::FRAME_LATENCY_WAIT,
-    DeviceFeature::SHADER_MEMORY_MODEL,
+    DeviceFeature::SHADER_MEMORY_MODEL,        DeviceFeature::CALIBRATED_TIMESTAMPS,
 };
 
 /// @brief Most native queues a device uses (the deleter records the progress of each).
@@ -292,6 +294,11 @@ VulkanDevice::create_device(const DeviceDescription& description)
 
     // Optional extensions and their features.
     m_extensions.clear();
+    if (enabled(DeviceFeature::CALIBRATED_TIMESTAMPS))
+    {
+        m_extensions.push_back(capabilities.has_extension(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) ? VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
+                                                                                                      : VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    }
     if (enabled(DeviceFeature::MEMORY_BUDGET))
     {
         m_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -666,6 +673,41 @@ VulkanDevice::queue(QueueType type,
                                queue_count(type), type),
         .suggestion = "request it in DeviceDescription::queues",
     });
+}
+
+auto
+VulkanDevice::calibrate_timestamps() -> TimestampCalibration
+{
+    static constexpr std::string_view OPERATION = "Device::calibrate_timestamps";
+    if (!enabled(DeviceFeature::CALIBRATED_TIMESTAMPS))
+    {
+        throw_unsupported(OPERATION, "CALIBRATED_TIMESTAMPS",
+                          std::format("'{}' cannot pair its timestamps with the host clock (VK_KHR_calibrated_timestamps)",
+                                      m_physical_device.properties().name),
+                          "check Device::enabled(DeviceFeature::CALIBRATED_TIMESTAMPS); without it, estimate the offset from a "
+                          "submission that writes a timestamp");
+    }
+
+    // The device's clock and the host's together, then the host clock and steady_clock now: the host clock's progress
+    // since the pairing, subtracted from steady_clock, gives the steady_clock time of the pairing.
+    const std::array informations{
+        VkCalibratedTimestampInfoKHR{.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .pNext = nullptr, .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR},
+        VkCalibratedTimestampInfoKHR{.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .pNext = nullptr, .timeDomain = HOST_TIME_DOMAIN}};
+    std::array<std::uint64_t, 2> values{};
+    std::uint64_t deviation = 0;
+    const bool khr = m_physical_device.capabilities().has_extension(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    const PFN_vkGetCalibratedTimestampsKHR calibrate = khr ? functions().vkGetCalibratedTimestampsKHR : functions().vkGetCalibratedTimestampsEXT;
+    check_result(calibrate(m_device, static_cast<std::uint32_t>(informations.size()), informations.data(), values.data(), &deviation), OPERATION,
+                 khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT");
+    const std::chrono::steady_clock::time_point before = std::chrono::steady_clock::now();
+    const unsigned long long host = gfx_vulkan_host_clock();
+    const std::chrono::steady_clock::time_point after = std::chrono::steady_clock::now();
+    const double frequency = static_cast<double>(gfx_vulkan_host_clock_frequency());
+    const std::chrono::nanoseconds since{std::llround(static_cast<double>(host - values[1]) * 1.0e9 / frequency)};
+    const std::chrono::steady_clock::time_point now = before + (after - before) / 2;
+    return {.gpu_ticks = values[0],
+            .cpu_time = now - since,
+            .deviation = std::chrono::nanoseconds{static_cast<std::int64_t>(deviation)} + (after - before) / 2};
 }
 
 auto

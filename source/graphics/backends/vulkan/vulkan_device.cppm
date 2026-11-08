@@ -520,6 +520,7 @@ public:
     [[nodiscard]] auto bindless_usage() const noexcept -> BindlessTableUsage override;
     [[nodiscard]] auto memory_budget() const -> std::vector<MemoryHeapBudget> override;
     [[nodiscard]] auto memory_statistics() const -> MemoryStatistics override;
+    [[nodiscard]] auto calibrate_timestamps() -> TimestampCalibration override;
     [[nodiscard]] auto memory_requirements(const BufferDescription& description) const -> MemoryRequirements override;
     [[nodiscard]] auto memory_requirements(const ImageDescription& description) const -> MemoryRequirements override;
     [[nodiscard]] auto allocate_memory(const DeviceMemoryDescription& description) -> std::unique_ptr<DeviceMemory> override;

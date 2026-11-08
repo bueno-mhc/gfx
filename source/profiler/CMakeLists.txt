@@ -27,6 +27,7 @@ target_sources(gfx_profiler
             report.cppm
             exporters.cppm
             state.cppm
+            gpu.cppm
     PRIVATE
         errors.cpp
         recording.cpp

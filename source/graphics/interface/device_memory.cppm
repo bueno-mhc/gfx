@@ -19,6 +19,14 @@ struct DeviceMemoryDescription
     std::string_view debug_name{};                         ///< Name shown by debugging tools.
 };
 
+/// @brief A GPU timestamp paired with the CPU's steady_clock (Device::calibrate_timestamps()).
+struct TimestampCalibration
+{
+    std::uint64_t gpu_ticks = 0;                          ///< A timestamp, in the units the queues' timestamps use.
+    std::chrono::steady_clock::time_point cpu_time{};     ///< The steady_clock time it was taken at.
+    std::chrono::nanoseconds deviation{};                 ///< How far the pairing may be off.
+};
+
 /// @brief Budget and usage of one memory heap (Device::memory_budget(), DeviceFeature::MEMORY_BUDGET):
 ///        how much this process may use before the driver starts evicting or failing allocations.
 struct MemoryHeapBudget

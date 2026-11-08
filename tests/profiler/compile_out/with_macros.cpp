@@ -22,3 +22,17 @@ profiler_compile_out_step(int value)
     PROFILE_ASYNC_END("profiler_compile_out_async", profiler_compile_out_argument(result));
     return result;
 }
+
+// GPU macros: the timer is not even declared (the tokens are dropped); PROFILE_DISPATCH still dispatches.
+struct ProfilerCompileOutRecorder
+{
+    void dispatch(unsigned x, unsigned y, unsigned z); // never defined
+};
+
+extern "C" void
+profiler_compile_out_dispatch(ProfilerCompileOutRecorder& recorder,
+                              unsigned groups)
+{
+    PROFILE_GPU_SCOPE("profiler_compile_out_gpu", recorder, profiler_compile_out_timer);
+    PROFILE_DISPATCH("profiler_compile_out_dispatch_scope", recorder, profiler_compile_out_timer, groups, 1, 1);
+}

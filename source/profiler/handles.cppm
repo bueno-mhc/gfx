@@ -17,6 +17,12 @@ struct SessionTag
     static constexpr std::string_view NAME = "ProfilerSession";
 };
 
+/// @brief Tag of GpuSourceHandle.
+struct GpuSourceTag
+{
+    static constexpr std::string_view NAME = "ProfilerGpuSource";
+};
+
 /// @brief Tag of SinkHandle.
 struct SinkTag
 {
@@ -29,8 +35,12 @@ using SessionHandle = Handle<SessionTag>;
 /// @brief A function a Profiler gives each completed frame (a live sink).
 using SinkHandle = Handle<SinkTag>;
 
+/// @brief A source of GPU timings a Profiler collects from (GpuTimingSource).
+using GpuSourceHandle = Handle<GpuSourceTag>;
+
 } // namespace gfx::profiler
 
 // Instantiated here once, so every module importing the handles shares one instantiation (toolchain defect 13).
 template class gfx::Handle<gfx::profiler::SessionTag>;
 template class gfx::Handle<gfx::profiler::SinkTag>;
+template class gfx::Handle<gfx::profiler::GpuSourceTag>;

@@ -1428,6 +1428,11 @@ public:
         return m_memory_statistics;
     }
 
+    [[nodiscard]] auto calibrate_timestamps() -> TimestampCalibration override
+    {
+        return Device::calibrate_timestamps();
+    }
+
     /// What memory_statistics() reports.
     void set_memory_statistics(const MemoryStatistics& statistics) noexcept
     {

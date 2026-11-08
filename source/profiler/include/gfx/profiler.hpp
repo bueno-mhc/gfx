@@ -17,6 +17,13 @@
 //       PROFILE_ASYNC_END("submission", token);
 //   }
 //
+// GPU scopes (`import gfx.profiler.graphics;` for the GpuTimer, or any GpuTimingProvider):
+//
+//   PROFILE_GPU_SCOPE("broad phase", recorder, timer);         // timestamps around the block's commands
+//   PROFILE_DISPATCH("morton codes", recorder, timer, x, y, z); // recorder.dispatch(x, y, z) between timestamps
+//
+// Compiled out, PROFILE_DISPATCH still dispatches (it becomes recorder.dispatch(x, y, z)).
+//
 // Each macro declares a `static constinit` gfx::profiler::ProfileSite (its name, category, file and line, made at
 // compile time) and records through it. With GFX_PROFILER_ENABLED 0 (the option GFX_PROFILER off), every macro expands
 // to nothing: no code, no data, and its arguments are not evaluated. Names must be string literals.
@@ -72,6 +79,11 @@
 #define GFX_PROFILE_ASYNC_END_AT(unique, name, token)                                                                       \
     GFX_PROFILE_RECORD_AT(unique, name, ::gfx::profiler::record_async_end(GFX_PROFILE_SITE_NAME(unique), static_cast<unsigned long long>(token)))
 
+#define GFX_PROFILE_GPU_SCOPE_AT(unique, name, recorder, provider)                                                             static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name, ::gfx::profiler::ProfilerCategory::GPU};     const auto GFX_PROFILE_JOIN(gfx_profile_gpu_scope_, unique) = (provider).scope(recorder, GFX_PROFILE_SITE_NAME(unique))
+
+#define PROFILE_GPU_SCOPE(name, recorder, provider) GFX_PROFILE_GPU_SCOPE_AT(__COUNTER__, name, recorder, provider)
+#define PROFILE_DISPATCH(name, recorder, provider, ...)                                                                        do                                                                                                                          {                                                                                                                               PROFILE_GPU_SCOPE(name, recorder, provider);                                                                                (recorder).dispatch(__VA_ARGS__);                                                                                       } while (false)
+
 #define PROFILE_COUNTER(name, value) GFX_PROFILE_COUNTER_AT(__COUNTER__, name, value)
 #define PROFILE_COUNTER_FLOAT(name, value) GFX_PROFILE_COUNTER_FLOAT_AT(__COUNTER__, name, value)
 #define PROFILE_MEMORY(name, bytes) GFX_PROFILE_MEMORY_AT(__COUNTER__, name, bytes)
@@ -102,5 +114,7 @@ struct DisabledProfileScope
 #define PROFILE_MARKER(name) ((void)0)
 #define PROFILE_ASYNC_BEGIN(name, token) ((void)0)
 #define PROFILE_ASYNC_END(name, token) ((void)0)
+#define PROFILE_GPU_SCOPE(name, recorder, provider) ((void)0)
+#define PROFILE_DISPATCH(name, recorder, provider, ...) (recorder).dispatch(__VA_ARGS__)
 
 #endif

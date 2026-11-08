@@ -353,6 +353,111 @@ TEST_F(ProfilerTest, SinksSeeEachFrame)
     EXPECT_THROW(m_profiler.remove_sink(sink), ProfilerError);
 }
 
+/// A GPU source handing out scripted scopes: what collect() returns at each call, and what it returns when waited for.
+class ScriptedGpuSource final : public GpuTimingSource
+{
+public:
+    [[nodiscard]] auto track_name() const -> std::string override
+    {
+        return "scripted GPU";
+    }
+
+    [[nodiscard]] auto alignment() const noexcept -> GpuClockAlignment override
+    {
+        return GpuClockAlignment::ESTIMATED;
+    }
+
+    [[nodiscard]] auto alignment_deviation() const noexcept -> std::chrono::nanoseconds override
+    {
+        return std::chrono::nanoseconds{250};
+    }
+
+    void collect(std::vector<GpuScopeRecord>& scopes,
+                 bool wait) override
+    {
+        ++m_collections;
+        m_waited = m_waited || wait;
+        scopes.insert(scopes.end(), m_ready.begin(), m_ready.end());
+        m_ready.clear();
+        if (wait)
+        {
+            scopes.insert(scopes.end(), m_late.begin(), m_late.end());
+            m_late.clear();
+        }
+    }
+
+    std::vector<GpuScopeRecord> m_ready{};
+    std::vector<GpuScopeRecord> m_late{};
+    int m_collections = 0;
+    bool m_waited = false;
+};
+
+/// steady_clock nanoseconds now (the GPU sources' timeline).
+auto
+steady_nanoseconds() -> std::int64_t
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+TEST(ProfilerGpuSourceTest, GpuScopesAreFiledIntoTheFramesTheyBeganIn)
+{
+    static constinit const ProfileSite dispatch{"dispatch", ProfilerCategory::GPU};
+    static constinit const ProfileSite ui_pass{"ui pass", ProfilerCategory::UI};
+    Profiler profiler;
+    ScriptedGpuSource source;
+    EXPECT_FALSE(source.attached());
+    const GpuSourceHandle handle = profiler.add_gpu_source(source);
+    EXPECT_TRUE(source.attached());
+    EXPECT_THROW((void)profiler.add_gpu_source(source), ProfilerError);
+
+    // Frame 0 does GPU work that is read back two frames later; frame 2's work is still running when frame 2 ends, and
+    // one scope never comes back until finalize waits; a UI scope is not recorded by this session.
+    const SessionHandle session = profiler.create_session({.name = "gpu", .categories = ProfilerCategory::GPU | ProfilerCategory::GENERAL});
+    std::vector<GpuScopeRecord> frame_zero_work;
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        profiler.begin_frame(session);
+        const std::int64_t now = steady_nanoseconds();
+        if (frame == 0)
+        {
+            frame_zero_work = {{.site = &dispatch, .begin = now + 10, .end = now + 20, .depth = 0, .query = 0, .status = GpuScopeStatus::TIMED},
+                               {.site = &ui_pass, .begin = now + 11, .end = now + 12, .depth = 1, .query = 2, .status = GpuScopeStatus::TIMED}};
+        }
+        if (frame == 2)
+        {
+            source.m_ready = frame_zero_work;
+            source.m_ready.push_back(
+                {.site = &dispatch, .begin = now + 1'000'000'000, .end = now + 1'000'000'100, .depth = 0, .query = 0, .status = GpuScopeStatus::TIMED});
+            source.m_late.push_back({.site = &dispatch, .begin = now + 5, .end = now + 5, .depth = 0, .query = 2, .status = GpuScopeStatus::INCOMPLETE});
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        profiler.end_frame(session);
+    }
+    const Trace trace = profiler.finalize_session(session);
+    EXPECT_TRUE(source.m_waited);
+    EXPECT_GE(source.m_collections, 4);
+
+    ASSERT_EQ(trace.gpu_tracks().size(), 1U);
+    EXPECT_EQ(trace.gpu_tracks()[0].name, "scripted GPU");
+    EXPECT_EQ(trace.gpu_tracks()[0].alignment, GpuClockAlignment::ESTIMATED);
+    EXPECT_EQ(trace.gpu_tracks()[0].deviation, 250);
+    ASSERT_EQ(trace.frames().size(), 3U);
+
+    // Frame 0's scope reached frame 0 (the UI one was left out); frame 2 got the incomplete one and the one beginning
+    // after it ended (finalize files late ones into the last frame).
+    ASSERT_EQ(trace.frames()[0].gpu_scopes.size(), 1U);
+    EXPECT_EQ(trace.sites()[trace.frames()[0].gpu_scopes[0].site].name, "dispatch");
+    EXPECT_EQ(trace.frames()[0].gpu_scopes[0].duration(), 10);
+    EXPECT_TRUE(trace.frames()[1].gpu_scopes.empty());
+    ASSERT_EQ(trace.frames()[2].gpu_scopes.size(), 2U);
+    EXPECT_EQ(std::ranges::count(trace.frames()[2].gpu_scopes, GpuScopeStatus::INCOMPLETE, &TraceGpuScope::status), 1);
+    EXPECT_FALSE(trace.find_site("ui pass").has_value());
+
+    profiler.remove_gpu_source(handle);
+    EXPECT_FALSE(source.attached());
+    EXPECT_THROW(profiler.remove_gpu_source(handle), ProfilerError);
+}
+
 TEST(ProfilerSessionTest, MisuseIsRefusedWithDescriptiveErrors)
 {
     // Ring capacities must be powers of two.

@@ -509,8 +509,36 @@ VulkanPhysicalDevice::supports(DeviceFeature feature) const noexcept -> bool
             return features12.shaderBufferInt64Atomics == VK_TRUE && features12.shaderSharedInt64Atomics == VK_TRUE;
         case DeviceFeature::SHADER_MEMORY_MODEL:
             return features12.vulkanMemoryModel == VK_TRUE && features12.vulkanMemoryModelDeviceScope == VK_TRUE;
+        case DeviceFeature::CALIBRATED_TIMESTAMPS:
+            return calibrates_timestamps();
     }
     return false;
+}
+
+auto
+VulkanPhysicalDevice::calibrates_timestamps() const noexcept -> bool
+{
+    // Either extension, then both time domains among those the device pairs.
+    const bool khr = m_capabilities.has_extension(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    if (!khr && !m_capabilities.has_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
+    {
+        return false;
+    }
+    const PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR query =
+        khr ? vkGetPhysicalDeviceCalibrateableTimeDomainsKHR : vkGetPhysicalDeviceCalibrateableTimeDomainsEXT;
+    if (query == nullptr)
+    {
+        return false;
+    }
+    std::array<VkTimeDomainKHR, 16> domains{};
+    auto count = static_cast<std::uint32_t>(domains.size());
+    const VkResult result = query(m_physical_device, &count, domains.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+    {
+        return false;
+    }
+    const std::span<const VkTimeDomainKHR> offered{domains.data(), count};
+    return std::ranges::contains(offered, VK_TIME_DOMAIN_DEVICE_KHR) && std::ranges::contains(offered, HOST_TIME_DOMAIN);
 }
 
 auto

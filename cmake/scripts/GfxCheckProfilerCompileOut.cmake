@@ -44,7 +44,7 @@ execute_process(COMMAND "${NM}" "${WORK_DIRECTORY}/with_macros.o" OUTPUT_VARIABL
 if(symbols MATCHES "profiler_compile_out_argument|gfx_profile|profiler::")
     message(FATAL_ERROR "the profiler's macros left symbols with GFX_PROFILER_ENABLED=0:\n${symbols}")
 endif()
-file(STRINGS "${WORK_DIRECTORY}/with_macros.o" names REGEX "profiler_compile_out_(scope|category|named|counter|float|memory|marker|async)")
+file(STRINGS "${WORK_DIRECTORY}/with_macros.o" names REGEX "profiler_compile_out_(scope|category|named|counter|float|memory|marker|async|gpu|dispatch_scope)")
 if(names)
     message(FATAL_ERROR "the profiler's macros left their names in the object with GFX_PROFILER_ENABLED=0: ${names}")
 endif()
