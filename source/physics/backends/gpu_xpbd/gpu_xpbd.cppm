@@ -8,12 +8,14 @@
 /// Built with the CMake option GFX_PHYSICS_BACKEND_GPU_XPBD (target gfx::physics_gpu_xpbd), the only part of the physics
 /// library that depends on graphics.
 ///
-/// **Phase G0** (foundations): rigid bodies move under gravity, forces, impulses, damping and their motion locks;
-/// kinematic bodies by their velocities. Colliders, joints, triggers and soft bodies are refused with a
-/// BackendCapabilityError naming the phase that brings them; user constraints are refused for good (their rows are C++
-/// code, which the GPU cannot run). **G1 to G3**: the GPU building blocks the next phases use (GpuPrimitives: scans,
-/// reductions, sorts, compactions; GpuBvh: Karras trees of boxes, treelets, four-wide nodes, pairs, rays; GpuNarrowPhase:
-/// convex shapes, instance boxes, contact manifolds as physics::collide() makes them, the contact cache).
+/// Its worlds simulate what the interface describes — rigid bodies with every shape kind, joints of every kind (limits,
+/// motors, springs, breaking), soft bodies coupled both ways with the rigid bodies, triggers, events, the BACKEND queries
+/// — with the same results for the same inputs on the same device, driver and variants. Refused with a
+/// BackendCapabilityError when recorded: user constraints (their rows are C++ code, which the GPU cannot run) and
+/// replacing a component (CUSTOM_BROAD_PHASE, CUSTOM_NARROW_PHASE, CUSTOM_SOLVER, CUSTOM_INTEGRATOR). The building blocks
+/// a step uses are exported too: GpuPrimitives (scans, reductions, sorts, compactions), GpuBvh (Karras trees of boxes,
+/// treelets, four-wide nodes, pairs, rays) and GpuNarrowPhase (the shape table, instance boxes, contact manifolds as
+/// physics::collide() makes them, the contact cache).
 export module gfx.physics.gpu_xpbd;
 
 import std;

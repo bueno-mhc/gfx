@@ -15,14 +15,16 @@ if(GFX_BACKEND_VULKAN AND TARGET gfx_ui_platform AND TARGET gfx_ui_atlas_builder
     add_subdirectory(ui_editor)
 endif()
 
-# A headless physics scene (Box3D or the reference backend) with a perspective and a map camera, checking the step,
-# the queries and the camera math (physics + camera; no graphics, platform or UI).
+# A headless physics scene (Box3D, the reference backend or the GPU backend) with a perspective and a map camera,
+# checking the step, the queries and the camera math (physics + camera; no graphics, platform or UI but the GPU
+# backend's own device).
 if(TARGET gfx_physics AND TARGET gfx_camera)
     add_subdirectory(physics)
 endif()
 
-# The physics sandbox: a physics world (Box3D or the reference backend) drawn as lit meshes with Vulkan, seen through an
-# orbit camera, with UI panels (physics + camera + graphics + platform + UI, with the UI's atlas tool for its font).
+# The physics sandbox: a physics world (Box3D, the reference backend or the GPU backend on the sandbox's device) drawn
+# as lit meshes with Vulkan, seen through an orbit camera, with UI panels (physics + camera + graphics + platform + UI,
+# with the UI's atlas tool for its font).
 if(GFX_BACKEND_VULKAN AND TARGET gfx_ui_platform AND TARGET gfx_ui_atlas_builder AND TARGET gfx_physics AND TARGET gfx_camera)
     add_subdirectory(physics_sandbox)
 endif()

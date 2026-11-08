@@ -13,7 +13,9 @@ export namespace gfx::physics::gpu_xpbd
 struct GpuXpbdVariants
 {
     GpuVariantChoice subgroups = GpuVariantChoice::AUTOMATIC;         ///< Scans, reductions and sorts with subgroup arithmetic.
-    GpuVariantChoice integer64_atomics = GpuVariantChoice::AUTOMATIC; ///< Nearest hits of queries in one pass of 64-bit atomics.
+    GpuVariantChoice integer64_atomics = GpuVariantChoice::AUTOMATIC; ///< 64-bit atomics on the factory's device when the GPU has
+                                                                      ///< them. Reported only: no pass uses them (queries pick their
+                                                                      ///< nearest hit on the CPU).
 };
 
 /// @brief The backend's own settings (those PhysicsWorldDescription has no place for); worlds made by the factory use
@@ -41,7 +43,8 @@ struct GpuXpbdCapabilities
     std::uint32_t free_storage_buffers = 0;                          ///< Storage buffers the bindless table still holds.
     bool subgroups = false;                                          ///< The subgroup variant runs (else shared memory): subgroup
                                                                      ///< arithmetic, subgroups of GPU_XPBD_MINIMUM_SUBGROUP_SIZE at least.
-    bool integer64_atomics = false;                                  ///< The 64-bit atomic variant runs (else two 32-bit passes).
+    bool integer64_atomics = false;                                  ///< 64-bit atomics enabled on the device and allowed by the
+                                                                     ///< variants (reported only: no pass uses them).
     bool timestamps = false;                                         ///< Its queue writes timestamps (phases timed on the GPU).
     bool float16 = false;                                            ///< 16-bit floating point (reported only: contacts need 32 bits).
     bool storage_images = false;                                     ///< Bindless storage images (reported only: no pass is image-shaped).

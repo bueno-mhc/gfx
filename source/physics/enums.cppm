@@ -48,8 +48,8 @@ enum class PhysicsBackendKind : std::uint8_t
 enum class GpuVariantChoice : std::uint8_t
 {
     AUTOMATIC, ///< The variant using the feature when the device has it, the portable one otherwise.
-    PORTABLE,  ///< The portable variant, whatever the device has (shared memory instead of subgroups, two 32-bit
-               ///< passes instead of 64-bit atomics): what a device without the feature runs.
+    PORTABLE,  ///< The portable variant, whatever the device has (shared memory instead of subgroups; no 64-bit
+               ///< atomics on the factory's device): what a device without the feature runs.
 };
 
 /// @brief The state of a body on the GPU backend: the bits of its flags word, which the backend's shaders receive as

@@ -1,11 +1,12 @@
 # gfx — architecture overview (the code as built)
 
-This document describes the code as it is built, on 2026-10-31: the libraries, their modules, the
-objects and how they relate, the paths a frame, an event and a physics step take, the threads, the physics
-sandbox that puts every library in one window, and how everything is built and tested. The decisions behind
-the platform, UI, physics and camera libraries and the sandbox, with the alternatives considered, are in
-[platform-design.md](platform-design.md), [ui-design.md](ui-design.md), [physics-design.md](physics-design.md)
-and [physics-sandbox-design.md](physics-sandbox-design.md) (the last three also record what each phase built);
+This document describes the code as it is built, on 2026-11-08: the libraries, their modules, the
+objects and how they relate, the paths a frame, an event and a physics step take, the threads, the GPU physics
+backend, the physics sandbox that puts every library in one window, and how everything is built and tested. The
+decisions behind the platform, UI, physics and camera libraries, the GPU backend and the sandbox, with the
+alternatives considered, are in [platform-design.md](platform-design.md), [ui-design.md](ui-design.md),
+[physics-design.md](physics-design.md), [gpu-xpbd-design.md](gpu-xpbd-design.md) and
+[physics-sandbox-design.md](physics-sandbox-design.md) (the last four also record what each phase built);
 the atlas file format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the
 [README](../README.md).
 
@@ -14,7 +15,7 @@ on" unless a diagram says otherwise.
 
 ## 1. Libraries, modules and dependencies
 
-Ten libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
+Eleven libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
 Backends are modules of a **private** file set: only the factory of their library imports them, so no
 consumer can name a backend type or include a native header through gfx.
 
@@ -24,7 +25,7 @@ flowchart TB
         example["gfx_windowed_example<br/>examples/windowed"]
         editor["gfx_ui_editor_example<br/>examples/ui_editor"]
         physics_example["gfx_physics_example<br/>examples/physics"]
-        sandbox["gfx_physics_sandbox<br/>examples/physics_sandbox (§8)"]
+        sandbox["gfx_physics_sandbox<br/>examples/physics_sandbox (§9)"]
         tests["tests/*"]
     end
     subgraph ui_platform_lib["gfx::ui_platform"]
@@ -53,6 +54,9 @@ flowchart TB
         physics_modules["gfx.physics, gfx.camera<br/>worlds, shapes, collision, solvers,<br/>soft bodies, cameras"]
         physics_backends["gfx.physics.backends.box3d / reference / null<br/>(private)"]
     end
+    subgraph gpu_physics_lib["gfx::physics_gpu_xpbd (§8)"]
+        gpu_physics["gfx.physics.gpu_xpbd<br/>XPBD in compute shaders"]
+    end
     subgraph core_lib["gfx::core"]
         core["gfx.core<br/>enums machinery, errors, handles,<br/>identifiers, types, native_window"]
         tables["gfx.core.slot_table, gfx.core.handle_table<br/>(backend utilities)"]
@@ -71,6 +75,9 @@ flowchart TB
     physics_modules --> core
     physics_modules -.->|factory imports| physics_backends
     physics_backends --> third_box3d["Box3D (static)"]
+    physics_modules -.->|factory imports| gpu_physics
+    sandbox --> gpu_physics
+    gpu_physics --> gfx_module
     core --> third_math["cglm, SIMDe<br/>(gfx.core.math at run time)"]
     ui_platform --> ui
     ui_platform --> platform_module
@@ -109,6 +116,7 @@ flowchart TB
 | camera | `source/physics/camera/` | `gfx.camera` = `gfx.camera.interface` (partitions), `gfx.camera.factory` | `gfx::camera` |
 | physics components | `source/physics/` | `gfx.physics.shapes`, `.narrow_phase`, `.tasks`, `.spatial`, `.interface`, `.dynamics`, `.world` (each with partitions) | `gfx::physics` |
 | physics | `source/physics/` | `gfx.physics` (re-exports the interface and the world framework), `gfx.physics.factory` | `gfx::physics` |
+| GPU physics backend | `source/physics/backends/gpu_xpbd/` | `gfx.physics.gpu_xpbd` (partitions `:settings`, `:primitives`, `:bvh`, `:narrow_phase`); built with `GFX_PHYSICS_BACKEND_GPU_XPBD` | `gfx::physics::gpu_xpbd` |
 
 Rules every library follows:
 
@@ -922,12 +930,13 @@ flowchart TB
 ```
 
 - **`gfx::physics_common`**: one enumerations file for physics and camera, 17 handle kinds (core's `Handle<Tag>`,
-  explicitly instantiated once: a toolchain workaround, §9), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
+  explicitly instantiated once: a toolchain workaround, §10), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
   `QueryResult<T> = std::expected<T, QueryFailure>`, and primitives whose tests are constexpr, with SIMD batches
   (frustum culling of boxes and spheres) giving the same bits as the scalar code.
 - **`gfx::camera`** depends on the primitives only; **`gfx::physics_components`** never on the camera.
 - **`gfx::physics`** holds the backends behind the factory: Box3D (when `GFX_PHYSICS_BACKEND_BOX3D`), the reference
-  backend (always), the null one, and a custom one named by `GFX_PHYSICS_CUSTOM_BACKEND_TARGET`.
+  backend (always), the null one, a custom one named by `GFX_PHYSICS_CUSTOM_BACKEND_TARGET`, and the GPU backend's target
+  `gfx::physics_gpu_xpbd` (when `GFX_PHYSICS_BACKEND_GPU_XPBD`: then `gfx::physics` links the graphics library through it, §8).
 
 ### 7.2 Worlds, objects, backends and components
 
@@ -979,6 +988,9 @@ classDiagram
     class ReferenceBackend {
         records are the truth
     }
+    class GpuXpbdBackend {
+        XPBD in compute shaders (§8)
+    }
     class NullWorld {
         throws BackendCapabilityError
     }
@@ -1007,6 +1019,7 @@ classDiagram
     SteppedWorld *-- SteppedWorldBackend
     SteppedWorldBackend <|.. Box3dBackend
     SteppedWorldBackend <|.. ReferenceBackend
+    SteppedWorldBackend <|.. GpuXpbdBackend
     ReferenceBackend *-- BroadPhase
     ReferenceBackend *-- NarrowPhase
     ReferenceBackend *-- Solver
@@ -1130,7 +1143,7 @@ EPA are robust to slivers, origins on a boundary and nearly coplanar points (fou
 tetrahedron whose volume is within the rounding error of its corners, so a shallow overlap of a large shape (a body
 resting on a 100 m floor) is no sliver. Every structure shows its nodes or cells (`nodes()`: `SpatialNode` boxes with
 their depth and proxies), and a broad phase component lists them (`BroadPhase::structure_nodes()`): what the
-sandbox's broad phase view draws (§8).
+sandbox's broad phase view draws (§9); the GPU backend's broad phase lists its two trees' nodes.
 
 ### 7.6 Soft bodies and their coupling with rigid bodies
 
@@ -1201,16 +1214,227 @@ on top of the virtual state, so a custom camera (off-axis stereo, jittered proje
 
 Two worlds share nothing (no global state) and step on two threads at once.
 
-## 8. The physics sandbox: every library in one window
+## 8. The GPU physics backend
+
+`PhysicsBackendKind::GPU_XPBD` simulates a world with extended position-based dynamics in compute shaders of the graphics
+library: every phase of a step runs on the GPU, and the CPU only turns edits into patches, records one command buffer,
+waits for it and reads the results back. It is a `SteppedWorldBackend` like Box3D and the reference backend, so its worlds
+are `SteppedWorld`s: the same handles, edits, snapshots, threads and abstraction queries (§7.2, §7.3). It is the only part
+of the physics library that depends on graphics, in a target of its own built with `GFX_PHYSICS_BACKEND_GPU_XPBD`. The
+decisions behind it, its phases and what each built are in [gpu-xpbd-design.md](gpu-xpbd-design.md).
+
+### 8.1 Target and modules
+
+```mermaid
+flowchart TB
+    subgraph gpu_target["gfx::physics_gpu_xpbd"]
+        direction TB
+        entry["gfx.physics.gpu_xpbd<br/>capabilities(), to_string(), unavailable_reason(),<br/>create_physics_world(description, device, settings)"]
+        exported["exported partitions<br/>:settings, :primitives (GpuPrimitives),<br/>:bvh (GpuBvh), :narrow_phase (GpuNarrowPhase)"]
+        internal["internal partitions<br/>:probing, :resources (GpuArray, GpuPipelines, StepTimer),<br/>:solver (GpuConstraintSolver), :soft_bodies,<br/>:backend (GpuXpbdBackend, GpuBroadPhase)"]
+        shaders["47 compute shaders<br/>(GLSL compiled to SPIR-V at build time, embedded)"]
+    end
+    entry --> internal
+    internal --> exported
+    internal --> shaders
+    factory["gfx.physics.factory<br/>PhysicsBackendKind::GPU_XPBD:<br/>a device of its own"] -.->|imports| entry
+    example["examples/physics"] --> factory
+    sandbox["examples/physics_sandbox<br/>(its own device)"] --> entry
+    internal --> physics_modules["gfx.physics.world, .interface,<br/>.shapes, .narrow_phase, .dynamics"]
+    internal --> graphics["gfx<br/>buffers, compute pipelines, dispatches,<br/>barriers, timeline semaphores, timestamps"]
+    graphics --> vulkan["gfx.backends.vulkan"]
+```
+
+- **Two ways in**: the factory makes a Vulkan instance and a device on the most capable GPU that has what the backend needs;
+  `gpu_xpbd::create_physics_world(description, device, settings)` uses the application's device (its first compute queue,
+  else its graphics queue), so one GPU holds the frames and the physics. Nothing graphics leaves the backend: the physics
+  interface names no graphics object.
+- **Probing** (`:probing`): a compute queue, workgroups of 64 invocations, 16 KiB of shared memory, a 128 MiB storage-buffer
+  range, the Vulkan memory model, the graphics library's core features and 192 free bindless storage buffers; every missing
+  one is listed in one `BackendCapabilityError` with the value required and the value reported.
+- **Variants**: the scans, reductions and sorts exist as two SPIR-V modules each, with subgroup arithmetic and with shared
+  memory (a module declaring subgroup capabilities is invalid on a device without them), chosen at creation. Workgroup sizes,
+  enumerations and limits reach every shader as specialization constants.
+- **The building blocks are public**: `GpuPrimitives`, `GpuBvh` and `GpuNarrowPhase` record into the caller's command
+  buffer, each tested against its CPU counterpart.
+
+### 8.2 A world's objects
+
+```mermaid
+classDiagram
+    direction TB
+    class SteppedWorld {
+        <<final>>
+    }
+    class SteppedWorldBackend {
+        <<interface>>
+    }
+    class GpuXpbdBackend {
+        CPU mirror of what the GPU returned
+        colliders, joints, soft bodies by slot
+        +apply(edits, pending) patches
+        +simulate(seconds, pending)
+        +ray_cast() and the other queries
+    }
+    class GpuConstraintSolver {
+        contacts, joints, islands, colors,
+        sleep, reports, triggers
+    }
+    class GpuSoftBodies {
+        particles, static colors of
+        soft constraints
+    }
+    class GpuBroadPhase {
+        +structure_nodes() both trees read back
+    }
+    class StepTimer {
+        timestamps between phases
+    }
+    class GpuPrimitives {
+        scans, reductions, sorts, compactions
+    }
+    class GpuBvh {
+        Karras tree: moving, static, triggers
+    }
+    class GpuNarrowPhase {
+        shape table, manifolds, contact cache
+    }
+    class Device {
+        <<interface>>
+        the factory's own or the application's
+    }
+    SteppedWorld *-- SteppedWorldBackend
+    SteppedWorldBackend <|.. GpuXpbdBackend
+    GpuXpbdBackend *-- GpuConstraintSolver
+    GpuXpbdBackend *-- GpuSoftBodies
+    GpuXpbdBackend *-- GpuBroadPhase
+    GpuXpbdBackend *-- StepTimer
+    GpuConstraintSolver *-- GpuPrimitives
+    GpuConstraintSolver *-- "3" GpuBvh
+    GpuConstraintSolver *-- GpuNarrowPhase
+    GpuXpbdBackend ..> Device : buffers, pipelines, one command buffer
+```
+
+Each array lives in a storage buffer of its own (structure of arrays), registered in the device's bindless table and named
+in push constants, so no descriptor set changes between passes. Arrays sized by what the CPU knows (bodies, colliders,
+joints, particles) grow with it; those sized by what only the GPU finds (pairs, manifolds, colors) keep last step's counts
+with headroom. Replaced buffers go to the device's `Deleter`, so the GPU never sees a freed buffer.
+
+### 8.3 A step
+
+```mermaid
+sequenceDiagram
+    participant T as stepping thread
+    participant B as GpuXpbdBackend
+    participant G as GPU (compute queue)
+    T->>B: apply(edits, pending)
+    B->>B: edits into patches of bodies, colliders, joints, particles
+    T->>B: simulate(seconds, pending)
+    B->>B: colliders, joints, soft bodies laid out (uploaded when their bytes changed)
+    B->>G: one command buffer: uploads, patches, backups, detection, substeps, results, readback copies
+    G-->>B: timeline semaphore reaches the step
+    B->>B: read the counts
+    alt more pairs, manifolds or colors than the buffers held
+        B->>G: the step again from its backed-up start, buffers grown
+        G-->>B: timeline semaphore
+    end
+    B->>B: read back poses, velocities, particles, joint states
+    B->>B: events from the reported contacts and trigger overlaps (sorted by handle)
+    B-->>T: pending snapshot filled (the framework publishes it)
+```
+
+The CPU never waits inside the step and never reads a value back before the end: counts known only on the GPU (pairs,
+contacts, colors) size indirect dispatches. When a buffer was too small, the counts say by how much and the step is replayed
+from the copies made at its start, so results are never truncated (at most `GPU_XPBD_MAXIMUM_REPLAYS` times).
+
+### 8.4 The step's passes
+
+```mermaid
+flowchart LR
+    subgraph start_group["start"]
+        direction TB
+        uploads["uploads and patches<br/>(bodies, colliders, joints, particles)"] --> backups["backups of the step's start"]
+        backups --> predict_boxes["collider poses, boxes grown<br/>by the step's motion"]
+    end
+    subgraph detection["detection (once)"]
+        direction TB
+        trees["moving tree built,<br/>static tree when it changed"] --> pairs["pairs within and between,<br/>kept within their reach"]
+        pairs --> narrow["narrow phase: pieces, manifolds,<br/>merge, contact cache"]
+        narrow --> prepare["contact constraints<br/>(anchors on cores, margins)"]
+        prepare --> coloring["islands, wake,<br/>Jones–Plassmann colors"]
+    end
+    subgraph substeps["each substep"]
+        direction TB
+        integrate["integrate bodies, then particles"] --> iterations["position iterations: soft colors,<br/>then per color joints and contacts,<br/>overflow Jacobi with mass splitting"]
+        iterations --> velocities["velocities from displacements,<br/>velocity pass: friction, restitution"]
+    end
+    subgraph results_group["results"]
+        direction TB
+        forces["joint forces, breaking"] --> sleep_pass["sleep"]
+        sleep_pass --> reports["touching contacts reported,<br/>triggers overlapped"]
+        reports --> copies["copies into readback buffers"]
+    end
+    start_group --> detection --> substeps --> results_group
+```
+
+Each pass is one or a few compute dispatches (indirect when the GPU counted their work), each followed by the barrier its
+outputs need; inside a substep, each iteration takes a few dispatches per color. Joints and contacts of
+one color touch disjoint bodies, so they are projected in parallel (Gauss–Seidel between colors); constraints left without
+a color, or every constraint in `GpuSolverMode::JACOBI`, correct from the same positions and each body gathers its
+corrections in a fixed order, divided among the joints and touching contacts it takes part in (mass splitting).
+
+### 8.5 The Karras tree
+
+```mermaid
+flowchart TB
+    boxes["collider boxes (particles: spheres)"] --> bounds["reduce: the boxes' bounds"]
+    bounds --> morton["30-bit Morton codes of the centers"]
+    morton --> sort["stable radix sort (code, index)"]
+    sort --> hierarchy["hierarchy: one invocation per internal node,<br/>range and split from common prefixes (Karras 2012)"]
+    hierarchy --> climb["bounds climbed from the leaves:<br/>the second to arrive joins and climbs<br/>(atomic counters, acquire and release)"]
+    climb --> treelets["treelet rounds (optional, Karras and Aila 2013):<br/>7 leaves restructured by dynamic programming"]
+    treelets --> wide["four-wide nodes for traversal (default)"]
+    wide --> users["pairs: count, scan, write<br/>rays, queries, structure_nodes()"]
+```
+
+The same tree is built for the moving colliders every step, for the static colliders when one of them changes, and for the
+triggers at the step's end. Unions of boxes are exact and the SAH costs are evaluated in one order (`precise`), so the GPU's
+tree equals the CPU reference of the same algorithm bit for bit. The narrow phase is the CPU's ported operation by operation
+(analytic pairs, GJK, EPA, clipping, meshes and height fields through the CPU's static BVH uploaded and walked in its order,
+active edges, compounds), and its manifolds are compared with the CPU's on random poses of every pair of shape kinds.
+
+### 8.6 Determinism, queries and tests
+
+- **Determinism**: identical edits, descriptions and step durations give the same bits on the same device, driver and
+  variants: no floating-point atomics; every parallel output goes to a slot given by a scan or a stable sort, never an
+  atomic append; colors come from priorities hashed from stable keys; gathers run in a fixed order. Tests step every scene
+  twice (and on four threads) and compare bytes.
+- **Events**: contacts are reported touching on the GPU (pushed in a substep, or within the slop at the start); the CPU
+  merges them with last step's into BEGIN, HIT and END, carries over pairs of resting bodies without GPU work, and turns the
+  trigger overlaps found at the step's end into ENTER, STAY and EXIT.
+- **Queries** (`QueryEngine::BACKEND`): one at a time under the world's query lock, on a command buffer of their own: the
+  trees walked, the pieces of each shape tested in one pass with one call site of the distance (several made the NVIDIA
+  driver lose the device), the nearest picked on the CPU (ties to the smaller handle). One submission and its wait make a
+  query cost about 0.14 ms on an RTX 5060 against 0.001 ms for the abstraction's; what a query cannot hold, or a query
+  before the first step, the abstraction answers.
+
+| Suite | What it checks |
+|---|---|
+| `gfx_physics_gpu_xpbd_tests` | on each GPU, in both variants or both solver modes, with the validation layers: probing and refusals; scans, reductions and sorts against `std::stable_sort` and serial scans; trees equal to the CPU reference bit for bit, pairs equal to brute force; manifolds against the CPU's `collide()`; stacks, friction, restitution, sleep, joints of every kind, ropes, cloths, volumes, self-collision, events, triggers, queries against the abstraction's; the same bits twice; timings (measurement tests) |
+| `gfx_physics_conformance_tests` | 27 scenarios on every simulating backend — Box3D, the reference backend, the GPU backend on each GPU with its optional features and in its portable configuration — with each backend's refusals required to name their capability |
+| `PhysicsExample.GPU_XPBD`, `PhysicsSandbox.GPU_XPBD` | the physics example through the factory, the sandbox's script on the sandbox's own device (§9.4) |
+
+## 9. The physics sandbox: every library in one window
 
 `examples/physics_sandbox` (`gfx_physics_sandbox`) shows a physics world being simulated and lets the user act on it:
 the platform library gives the window and the input actions, the camera library the orbit and first-person cameras, the
-physics library the world (Box3D or the reference backend, stepped on its own thread) and the debug drawing, the
+physics library the world (Box3D, the reference backend or the GPU backend on the sandbox's device, stepped on its own
+thread) and the debug drawing, the
 graphics library draws the bodies with Vulkan, and the UI library draws the panel. It knows nothing the libraries do
 not show: every scene, control and view goes through their public API. Its decisions and what each step built are in
 [physics-sandbox-design.md](physics-sandbox-design.md).
 
-### 8.1 Modules
+### 9.1 Modules
 
 ```mermaid
 flowchart TB
@@ -1243,7 +1467,7 @@ flowchart TB
 - **`scene`** owns the world and what the sandbox made in it (`std::deque` of bodies with their colliders and colors,
   soft bodies with their drawn triangles, joints with their anchors in their bodies' frames, triggers with what is in
   them), keeps each body's last two completed poses and draws between them, and collects the events between frames.
-- **`presets`** builds a scene into an empty `Scene` of either backend; what a backend refuses (a
+- **`presets`** builds a scene into an empty `Scene` of any backend; what a backend refuses (a
   `BackendCapabilityError`) gets the nearest thing it has and a note. A change of scene or backend builds a new world:
   a world cannot move to another backend.
 - **`interaction`** turns the mouse and keyboard, or a script, into the same `FrameCommands`: the camera rig and the
@@ -1253,7 +1477,7 @@ flowchart TB
   phase's nodes, joints) and the bodies' islands, and scripts the controls for CTest.
 - **`renderer`** draws what a frame lists: shapes as instanced meshes, soft bodies as surfaces, and lines.
 
-### 8.2 A frame
+### 9.2 A frame
 
 ```mermaid
 sequenceDiagram
@@ -1277,7 +1501,7 @@ the world — picking, the views' contacts and nodes, the scripts' observations 
 `advance()`. Steps are a fixed 1/60 s: `advance()` accumulates the frame's time (scaled in slow motion), runs the steps
 due beyond one at once, begins one on the world's thread, and draws the bodies between their last two poses.
 
-### 8.3 Drawing a world
+### 9.3 Drawing a world
 
 ```mermaid
 flowchart TB
@@ -1317,24 +1541,24 @@ The vertex shaders pull vertices and instances from bindless storage buffers (no
 the bindless table): a mesh's vertices from the shared buffer, a surface's from the frame's. The UI draws in a second
 pass because its pipeline has no depth format; the scene pass resolves into the swapchain image first.
 
-### 8.4 Checked by CTest
+### 9.4 Checked by CTest
 
 | Run | What it checks |
 |---|---|
-| `PhysicsSandbox.SDL3` (Box3D), `PhysicsSandbox.GLFW` (the reference backend) | `--script --validation`: 620 frames driven by scripts through the same code as the mouse and keyboard — a grab and a drag, a shot that hits the pyramid, a spawn, a removal, a flight; then a pause, a single step, slow motion, a ball floating without gravity and falling with it, the solver's settings, the broad phase and the integrator replaced (refused by Box3D), every debug view, the islands — fifteen checks, and no message from the validation layers |
+| `PhysicsSandbox.SDL3` (Box3D), `PhysicsSandbox.GLFW` (the reference backend), `PhysicsSandbox.GPU_XPBD` (the GPU backend, first platform backend) | `--script --validation`: 620 frames driven by scripts through the same code as the mouse and keyboard — a grab and a drag, a shot that hits the pyramid, a spawn, a removal, a flight; then a pause, a single step, slow motion, a ball floating without gravity and falling with it, the solver's settings, the broad phase and the integrator replaced (refused by Box3D), every debug view, the islands — fifteen checks, and no message from the validation layers |
 | `PhysicsSandbox.Tour` | `--tour --validation`: every preset on every physics backend, built in turn through the same rebuilding as the panel's, 90 frames each; every body and particle finite, above the floor, under 30 m/s |
 
 The sandbox found three defects of the libraries this way, each fixed with a regression test: contact points that
 turned with spinning spheres and hits resolved within one step (the reference backend), and shallow overlaps of a large
 box taken for GJK slivers (bodies pushed through the floor).
 
-## 9. Build and tests
+## 10. Build and tests
 
 ```mermaid
 flowchart TB
-    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_PHYSICS, GFX_PHYSICS_BACKEND_BOX3D,<br/>GFX_SIMD_INSTRUCTION_SET, GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
+    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_PHYSICS, GFX_PHYSICS_BACKEND_BOX3D,<br/>GFX_PHYSICS_BACKEND_GPU_XPBD,<br/>GFX_SIMD_INSTRUCTION_SET, GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
     configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), gfx_add_ui_atlas(), gfx_require_decoupled(),<br/>test helpers"]
-    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, gfx_physics_common, gfx_camera,<br/>gfx_physics_components, gfx_physics, examples, tests"]
+    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, gfx_physics_common, gfx_camera,<br/>gfx_physics_components, gfx_physics,<br/>gfx_physics_gpu_xpbd, examples, tests"]
     targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, decoupling checks,<br/>atlas tool runs, example runs"]
 ```
 
@@ -1347,11 +1571,11 @@ flowchart TB
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
 | `tests/platform_graphics` | presentation to visible windows on every platform backend and GPU: cleared frames read back, the UI renderer drawing into the window (with the UI library), resize, minimize, frame latency, unsupported settings |
 | `tests/ui` | the atlas tools (every font format, decoder, generator and packer; reproducible bytes; the command-line tool), embedded atlases, text layout (bidi, fallbacks, shaping, breaking, the cache), the text editor, draw lists, the renderer on every GPU (shapes and text read back, text compared with the field evaluated on the CPU), the context under synthetic input (windows, widgets, tables, docking and layouts, navigation, shortcuts, the accessibility tree; drawn on every GPU), allocation counts (`operator new` replaced: none after the first frames), the platform adapter, a UI in visible windows, a UI Automation client reading the tree through AccessKit |
-| `tests/physics` | the primitives at compile time and against references, SIMD batches against the scalar code, shapes and shape queries against exact answers, GJK/EPA under random sweeps, spatial structures and broad phases against brute force, the cameras, debug drawing (meshes closed and on the surface, volumes converging), the structures' nodes covering their proxies, the world framework on a recording backend (edits in order, snapshots, the reader handshake, the error contract of every interface), integrators against analytic orbits, soft bodies with known outcomes, Box3D, the reference backend (stacks, pendulum periods, joints, friction, restitution, continuous bodies, user constraints, each component replaced), the same bits on one and four threads; the decoupling checks (link closures and imports) |
+| `tests/physics` | the primitives at compile time and against references, SIMD batches against the scalar code, shapes and shape queries against exact answers, GJK/EPA under random sweeps, spatial structures and broad phases against brute force, the cameras, debug drawing (meshes closed and on the surface, volumes converging), the structures' nodes covering their proxies, the world framework on a recording backend (edits in order, snapshots, the reader handshake, the error contract of every interface), integrators against analytic orbits, soft bodies with known outcomes, Box3D, the reference backend (its components replaced, its exact fall, user constraints), the GPU backend on every GPU (§8.6), the conformance suite (27 scenarios — stacks, pendulum periods, joints, friction, restitution, continuous bodies, events, triggers, queries, soft bodies, the same bits on one and four threads — on every simulating backend); the decoupling checks (link closures and imports) |
 | `tests/compilation` | code that must not compile (handle kinds that do not mix, draws on compute recorders, invalid input schemas, UI misuse such as sliders over booleans, ...) and a check that no enumerator collides with a platform macro |
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
-| `PhysicsExample.*` | the physics example on Box3D and on the reference backend: four seconds of the scene on four threads, every check passing (label `example`) |
-| `PhysicsSandbox.*` | the physics sandbox's scripted runs on each platform backend, one with each physics backend, and its tour of every preset on both physics backends, with the validation layers (§8.4, label `example`) |
+| `PhysicsExample.*` | the physics example on Box3D, on the reference backend and on the GPU backend: four seconds of the scene on four threads, every check passing (label `example`) |
+| `PhysicsSandbox.*` | the physics sandbox's scripted runs, one with each physics backend, and its tour of every preset on every physics backend, with the validation layers (§9.4, label `example`) |
 | `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 
 Toolchain workarounds the build applies (each with a detector test): `--allow-multiple-definition`

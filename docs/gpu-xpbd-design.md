@@ -5,7 +5,9 @@ as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; co
 (§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
 with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323), **G6
 accepted** with its 7 (§B "G6 as built"; committed cad9b8e), **G7 accepted** with its 6 (§B "G7 as built"; committed
-31de7c4), **G8 accepted** with its 7 (§B "G8 as built"; committed 66af4ca).
+31de7c4), **G8 accepted** with its 7 (§B "G8 as built"; committed 66af4ca), **G9 accepted** with its 7 (§B "G9 as built";
+committed fb58b7e; the 64-bit atomics setting stays a reported capability, as recommended). **G10 built** (§B "G10 as
+built": documentation; 3 deviations to validate). Every phase of the plan is built.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -1337,6 +1339,53 @@ back between steps (with the queries' command buffer and lock; the moving tree r
 the step left it otherwise, as for a query) and converts them with G2's `structure_nodes()`: the moving tree's nodes, then
 the static tree's, each depth first from its root, one collider per leaf (a soft body's particles are leaves of the moving
 tree).
+
+### G10 as built (2026-11-08)
+
+**README** ([README.md](../README.md)): the library table and the status name the GPU backend; the Physics section counts
+four backends; a new section **"Physics on the GPU"**: what runs where (the CPU patches, records, waits and reads back; every
+phase on the GPU), a usage snippet (the application's device, `gpu_xpbd::capabilities()` and `to_string()`, the direct
+entry with substeps and a solver mode, a column of boxes and a cloth, contact events counted, a ray answered by the GPU and by
+the abstraction, a phase's GPU time), then the two ways in, the model (substeps, multipliers reset per substep, contacts on
+cores plus margins, speculative points held rigidly, static friction over the patch, joints as parts, particles as nodes),
+collision (the two Karras trees, treelets off by default, four-wide traversal, pairs counted then written, the narrow
+phase's agreement with the CPU's), the solver (coloring, Jacobi with mass splitting, islands, replay on overflow),
+capability probing (the requirements and the one error listing all that is missing), the variants, determinism (and its
+boundary: other GPUs and drivers), events and queries (synchronous: 0.14 ms against 0.001 ms), refusals, the step times
+measured in G5–G8 on both GPUs, and the conformance suite. The capability table has a GPU column and three new rows
+(compounds, soft bodies, own queries; six-DOF joints and user constraints split); the options table has
+`GFX_PHYSICS_BACKEND_GPU_XPBD`; the examples' paragraphs name `gpu_xpbd` and the sandbox's GPU run; the threading table, the
+project layout and the tests' description name the backend. The debug-drawing snippet now catches the refusal of
+`structure_nodes()` instead of testing `is_external()`, so it draws the GPU's trees too.
+
+**Snippets compiled and run**: the GPU snippet, the debug-drawing snippet and the first physics snippet extracted into a
+temporary target (`examples/readme_snippet_check`, `-Werror`), built, run (GPU: "5 contacts begun; the column's top at 4.993 m
+(GPU query), 4.993 m (CPU query); narrow phase 0.043 ms" on the RTX 5060; debug drawing: "1 mesh, 56 lines"), removed.
+
+**architecture.md**: a new **§8 "The GPU physics backend"** with five diagrams — 8.1 target and modules (flowchart), 8.2 a
+world's objects (class diagram), 8.3 a step (sequence diagram: one command buffer, the timeline wait, replays, readback,
+events), 8.4 the step's passes (flowchart), 8.5 the Karras tree (flowchart) — and 8.6 determinism, events, queries and the
+tests; the sandbox is now §9 and build and tests §10 (references renumbered); §1's diagram and table, §7.1, §7.2's class
+diagram and the build diagram name the backend. All 37 diagrams render in Mermaid 10.9.1 and 11.4.1 (`graph` is a reserved
+node id in flowcharts: a node so named failed to parse in 11.4.1).
+
+**launch.json**: the physics example's and the sandbox's backend choice (`physicsBackend`) offers `gpu_xpbd` (the GPU and
+conformance test executables were added in G9).
+
+**Deviations (for validation).**
+1. **Code changed in a documentation phase**: the capability summary said a device without 64-bit atomics ran "two 32-bit
+   passes for nearest hits", which G9 found no pass does; `to_string()` now prints "64-bit atomics: yes/no (reported only)"
+   (and "scans, reductions and sorts" for the subgroup variant), `GpuXpbdTest.CapabilitiesAreReportedAndVariantsChosen` checks
+   the new text, and the documentation of `GpuXpbdVariants::integer64_atomics`, `GpuXpbdCapabilities::integer64_atomics` and
+   `GpuVariantChoice::PORTABLE` says the same.
+2. **The module's documentation** (`gfx.physics.gpu_xpbd`) described phase G0 (colliders, joints, triggers and soft bodies
+   refused); it now describes the backend as built.
+3. **The overview's new chapter is §8**, before the sandbox (now §9), rather than a subsection of §7: the backend is a target
+   of its own with its own dependencies (graphics), and the sandbox uses it.
+
+**Tests.** No test added or removed (1453). Full runs from PowerShell with `--timeout 900`, the physics library rebuilt (a
+comment of `source/physics/enums.cppm` changed): Debug 1453 of 1453 (980 s, 4 skipped), Release 1453 of 1453 (968 s, 19
+skipped).
 
 ## C. The API as proposed (for validation, not final code)
 

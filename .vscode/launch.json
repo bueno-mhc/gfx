@@ -169,7 +169,7 @@
             "id": "physicsBackend",
             "type": "pickString",
             "description": "Physics backend of the example",
-            "options": ["box3d", "reference"],
+            "options": ["box3d", "reference", "gpu_xpbd"],
             "default": "box3d"
         },
         {

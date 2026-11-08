@@ -188,12 +188,12 @@ to_string(const GpuXpbdCapabilities& capabilities) -> std::string
                        "  workgroups: {} invocations at most, {} bytes of shared memory; storage buffers of {} bytes at most; {} bindless storage "
                        "buffers free\n"
                        "  subgroups: {} to {} invocations; operations: {}\n"
-                       "  variants: {} for scans and sorts, {} for nearest hits\n"
+                       "  variants: {} for scans, reductions and sorts; 64-bit atomics: {} (reported only)\n"
                        "  timestamps: {}; 16-bit floats: {} (not used); storage images: {} (not used)",
                        capabilities.device_name, capabilities.queue_type, capabilities.queue_family, capabilities.maximum_workgroup_invocations,
                        capabilities.maximum_compute_shared_memory_size, capabilities.maximum_storage_buffer_range, capabilities.free_storage_buffers,
                        capabilities.minimum_subgroup_size, capabilities.maximum_subgroup_size, capabilities.subgroup_operations,
-                       capabilities.subgroups ? "subgroup arithmetic" : "shared memory", capabilities.integer64_atomics ? "64-bit atomics" : "two 32-bit passes",
+                       capabilities.subgroups ? "subgroup arithmetic" : "shared memory", yes(capabilities.integer64_atomics),
                        yes(capabilities.timestamps), yes(capabilities.float16), yes(capabilities.storage_images));
 }
 

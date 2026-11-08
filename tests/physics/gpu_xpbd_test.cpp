@@ -116,8 +116,8 @@ TEST_P(GpuXpbdTest, CapabilitiesAreReportedAndVariantsChosen)
     EXPECT_FALSE(portable.integer64_atomics);
     const std::string summary = gpu::to_string(portable);
     EXPECT_TRUE(contains(summary, found.device_name)) << summary;
-    EXPECT_TRUE(contains(summary, "shared memory for scans and sorts")) << summary;
-    EXPECT_TRUE(contains(summary, "two 32-bit passes for nearest hits")) << summary;
+    EXPECT_TRUE(contains(summary, "shared memory for scans, reductions and sorts")) << summary;
+    EXPECT_TRUE(contains(summary, "64-bit atomics: no (reported only)")) << summary;
     std::cout << gpu::to_string(found) << '\n';
 }
 
