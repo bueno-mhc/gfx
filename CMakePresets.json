@@ -28,18 +28,25 @@
       "name": "debug",
       "displayName": "Debug - GCC (MSYS2 UCRT64) + Ninja",
       "inherits": "msys2-ucrt64",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "GFX_PROFILER": "ON" }
     },
     {
       "name": "release",
       "displayName": "Release - GCC (MSYS2 UCRT64) + Ninja",
       "inherits": "msys2-ucrt64",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "GFX_PROFILER": "OFF" }
+    },
+    {
+      "name": "profile",
+      "displayName": "Profile - Release with the profiler on (measurements, benchmarks)",
+      "inherits": "msys2-ucrt64",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "GFX_PROFILER": "ON" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "profile", "configurePreset": "profile" }
   ],
   "testPresets": [
     {
@@ -51,6 +58,12 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": "" }
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile",
       "output": { "outputOnFailure": true },
       "execution": { "jobs": "" }
     }
@@ -70,6 +83,14 @@
         { "type": "configure", "name": "release" },
         { "type": "build", "name": "release" },
         { "type": "test", "name": "release" }
+      ]
+    },
+    {
+      "name": "profile",
+      "steps": [
+        { "type": "configure", "name": "profile" },
+        { "type": "build", "name": "profile" },
+        { "type": "test", "name": "profile" }
       ]
     }
   ]

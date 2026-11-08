@@ -186,6 +186,7 @@
             "options": [
                 { "label": "core       - EnumerationTest.*, IdentifierTest.*, BackendIdentityTest.*, NativeWindowHandleTest.*, MathTest.*", "value": "core/gfx_core_tests.exe" },
                 { "label": "slot table - SlotTableTest.*", "value": "core/slot_table/gfx_slot_table_tests.exe" },
+                { "label": "profiler   - ProfilerTest.*, ProfilerSessionTest.*, ProfilerReportTest.*, ProfilerExporterTest.*, ProfilerDeterminismTest.*, ProfilerOverheadTest.*", "value": "profiler/gfx_profiler_tests.exe" },
                 { "label": "enums      - EnumsTest.*", "value": "graphics/enums/gfx_enums_tests.exe" },
                 { "label": "errors     - ErrorsTest.*", "value": "graphics/errors/gfx_errors_tests.exe" },
                 { "label": "handles    - HandlesTest.*", "value": "graphics/handles/gfx_handles_tests.exe" },

@@ -42,7 +42,10 @@ class CMakeBuilder:
     def __init__(self, arguments: argparse.Namespace) -> None:
         self.arguments = arguments
         self.source_directory = Path(arguments.source_directory).resolve()
-        build_directory = arguments.build_directory or f"build/{arguments.build_type.lower()}"
+        if arguments.profile:
+            # The profile build: Release flags with the profiler on, in a directory of its own.
+            arguments.build_type = "Release"
+        build_directory = arguments.build_directory or ("build/profile" if arguments.profile else f"build/{arguments.build_type.lower()}")
         self.build_directory = (self.source_directory / build_directory).resolve()
         self.environment = self._create_environment()
 
@@ -77,6 +80,8 @@ class CMakeBuilder:
             f"-DGFX_WARNINGS_AS_ERRORS={'ON' if self.arguments.warnings_as_errors else 'OFF'}",
             # Development builds build every backend (the GPU physics backend is OFF by default for consumers).
             "-DGFX_PHYSICS_BACKEND_GPU_XPBD=ON",
+            # The profiler records in Debug builds and in the profile build, not in Release builds.
+            f"-DGFX_PROFILER={'ON' if self.arguments.profile or self.arguments.build_type == 'Debug' else 'OFF'}",
         ]
         if self.arguments.import_std_gate:
             command.append(f"-DGFX_IMPORT_STD_GATE={self.arguments.import_std_gate}")
@@ -160,6 +165,7 @@ Examples:
   python build.py                          # Debug build into build/debug
   python build.py --test                   # build, then run all tests in parallel
   python build.py --build-type Release --test
+  python build.py --profile --test         # Release with the profiler on, into build/profile
   python build.py --test --test-regex Toolchain
   python build.py --clean-all              # delete the build directory
 """)
@@ -177,6 +183,8 @@ Examples:
                              "(default: $MSYS2_ROOT or C:/msys64)")
     parser.add_argument("--build-type", choices=["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
                         default="Debug", help="Build type (default: Debug)")
+    parser.add_argument("--profile", action="store_true",
+                        help="The profile build: Release with the profiler on (GFX_PROFILER), into build/profile")
     parser.add_argument("--import-std-gate",
                         help="UUID for CMake's experimental `import std` gate (see CMakeLists.txt)")
     parser.add_argument("--no-tests", dest="build_tests", action="store_false",

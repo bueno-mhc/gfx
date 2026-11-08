@@ -49,6 +49,16 @@ cmake_dependent_option(GFX_PHYSICS_BACKEND_BOX3D "Build the Box3D physics backen
 cmake_dependent_option(GFX_PHYSICS_BACKEND_GPU_XPBD "Build the GPU physics backend (XPBD on the graphics library's Vulkan compute)" OFF
                        "GFX_BUILD_PHYSICS;GFX_BACKEND_VULKAN" OFF)
 
+# The profiler (docs/profiler-performance-design.md): its PROFILE_* macros and recording functions record only with
+# GFX_PROFILER on (GFX_PROFILER_ENABLED 1); off, they produce no code. On by default in Debug builds; the `profile`
+# preset (python build.py --profile) turns it on in an optimized build, for measurements.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_gfx_profiler_default ON)
+else()
+    set(_gfx_profiler_default OFF)
+endif()
+option(GFX_PROFILER "Record profiling scopes, counters and timings (on by default in Debug builds)" ${_gfx_profiler_default})
+
 # The SIMD instruction set the math (gfx.core.math) and everything built on it compile for: SSE2 (every
 # x86-64 processor; NEON on 64-bit ARM, WASM SIMD on WebAssembly), AVX2 (with FMA: Intel Haswell, AMD
 # Excavator and later), NATIVE (the building machine's: not portable to other machines). Consumers

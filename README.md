@@ -1616,6 +1616,7 @@ its version, its license and what of it ends up in a program.
 | `GFX_PHYSICS_BACKEND_BOX3D` | `ON` | The Box3D physics backend (Box3D fetched, pinned by SHA-256 and linked statically) |
 | `GFX_PHYSICS_BACKEND_GPU_XPBD` | `OFF` (`ON` in the presets and `build.py`) | The GPU physics backend (`gfx::physics_gpu_xpbd`, `import gfx.physics.gpu_xpbd;`; needs `GFX_BACKEND_VULKAN`): with it, `gfx::physics` links the graphics library through this backend, for the factory's `PhysicsBackendKind::GPU_XPBD` |
 | `GFX_PHYSICS_CUSTOM_BACKEND_TARGET` | (empty) | A target whose module `gfx.physics.backends.custom` becomes the factory's `PhysicsBackendKind::CUSTOM` (it links `gfx::physics_components` and exports `gfx::physics::custom_backend::unavailable_reason()` and `create_physics_world(description)`) |
+| `GFX_PROFILER` | `ON` in Debug, `OFF` otherwise | The profiler records (`gfx::profiler`, `import gfx.profiler;`, the `PROFILE_*` macros of `<gfx/profiler.hpp>`); off, its macros compile to nothing. The `profile` preset (`python build.py --profile`, into `build/profile`) is a Release build with it on, for measurements |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one and the UI editor need the platform library and Vulkan, the UI editor the UI library and its atlas tools too; the physics one needs the physics library) |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
@@ -1775,6 +1776,13 @@ or, with CMake presets:
 
 ```bash
 cmake --workflow --preset debug
+```
+
+Measurements (the profiler's overhead test, later the benchmarks) need an optimized build that records: the
+`profile` build is Release with `GFX_PROFILER` on, in `build/profile`:
+
+```bash
+python build.py --profile --test
 ```
 
 Tests run in parallel through CTest (`ctest --preset debug`). Each GoogleTest case is registered as
