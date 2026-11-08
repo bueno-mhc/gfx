@@ -6,8 +6,8 @@ as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; co
 with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323), **G6
 accepted** with its 7 (§B "G6 as built"; committed cad9b8e), **G7 accepted** with its 6 (§B "G7 as built"; committed
 31de7c4), **G8 accepted** with its 7 (§B "G8 as built"; committed 66af4ca), **G9 accepted** with its 7 (§B "G9 as built";
-committed fb58b7e; the 64-bit atomics setting stays a reported capability, as recommended). **G10 built** (§B "G10 as
-built": documentation; 3 deviations to validate). Every phase of the plan is built.
+committed fb58b7e; the 64-bit atomics setting stays a reported capability, as recommended). **G10 accepted** with its 3 (§B "G10 as
+built": documentation; committed 66dbbd0). Every phase of the plan is built and accepted.
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
