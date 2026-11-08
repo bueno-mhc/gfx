@@ -8,8 +8,9 @@
 // abstraction's BVH and GJK, and through the backend's own queries), screen and world points go back and forth, the
 // view computed at compile time is the one the camera object computes at run time, and the frustums see what they should.
 //
-// Usage: gfx_physics_example [--backend box3d|reference] [--steps <count>] [--threads <count>]
-//   --backend    the physics backend (default: Box3D when it is built, else the reference backend)
+// Usage: gfx_physics_example [--backend box3d|reference|gpu_xpbd] [--steps <count>] [--threads <count>]
+//   --backend    the physics backend (default: Box3D when it is built, else the reference backend; gpu_xpbd: the GPU
+//                backend, on its own device on the most capable GPU)
 //   --steps N    steps of 1/60 s (default 240: four seconds; the crate lands after about 0.9 s)
 //   --threads N  threads of the task scheduler the world splits its steps over (default: the hardware's)
 // The exit code is 0 when every check passes, 1 when one fails (each check is printed), 2 for a bad command line.
@@ -128,7 +129,7 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         }
         else
         {
-            std::println(std::cerr, "usage: gfx_physics_example [--backend box3d|reference] [--steps <count>] [--threads <count>]");
+            std::println(std::cerr, "usage: gfx_physics_example [--backend box3d|reference|gpu_xpbd] [--steps <count>] [--threads <count>]");
             return std::nullopt;
         }
     }

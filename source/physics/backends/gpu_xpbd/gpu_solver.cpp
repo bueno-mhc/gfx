@@ -639,6 +639,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         .trigger_ranges = state.trigger_ranges.index(),
         .trigger_manifolds = state.trigger_manifolds.index(),
         .trigger_results = state.trigger_results.index(),
+        .tables = state.narrow_phase.table_index(),
     };
     state.parameters = parameters;
     state.collision = step.collision;
@@ -923,6 +924,18 @@ GpuConstraintSolver::query_layout() const -> GpuQueryLayout
             .static_count = state.statics,
             .region_instance = state.moving + state.statics + state.triggers,
             .trees = (moving ? 1U : 0U) | (statics ? 2U : 0U)};
+}
+
+auto
+GpuConstraintSolver::moving_tree() const noexcept -> const GpuBvh&
+{
+    return m_state->moving_tree;
+}
+
+auto
+GpuConstraintSolver::static_tree() const noexcept -> const GpuBvh&
+{
+    return m_state->static_tree;
 }
 
 auto

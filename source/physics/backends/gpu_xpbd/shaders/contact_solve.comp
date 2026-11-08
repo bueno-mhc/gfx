@@ -1,19 +1,26 @@
 #version 460
 // An iteration of the contact constraints' position projection for one color (or the overflow set), one invocation per
-// constraint (Müller et al. 2020, §3.5; XPBD, Macklin et al. 2016). Per point of the manifold, in order:
-//   - non-penetration: C = the anchors' separation along the normal, at most maximum_push_speed · h deep (depenetration
-//     bounded); Δλ = (−C − α̃λ) / (w + α̃), λ kept ≥ 0, with the contact's compliance from contact_hertz (k = m_eff ω²,
-//     α̃ = w / (ω h)²; 0 Hz: rigid). contact_damping_ratio is not used: the velocity pass sets each contact's normal
+// constraint (Müller et al. 2020, §3.5; XPBD, Macklin et al. 2016). Every point of the manifold first, then every point again:
+//   - non-penetration: C = the separation along the normal of the points on the surfaces (over the cores' anchors); the
+//     overlap the point started the step with is undone at most maximum_push_speed · h at a time (depenetration bounded),
+//     overlap the step's motion made is undone at once; Δλ = (−C − α̃λ) / (w + α̃), λ kept ≥ 0, with the contact's
+//     compliance from contact_hertz (k = m_eff ω², α̃ = w / (ω h)²; 0 Hz: rigid) for a point that started the step touching or
+//     within LINEAR_SLOP, rigid for one that started farther apart (a speculative contact: its bodies approach until they
+//     touch, as the reference backend's and Box3D's do; against a 30 Hz contact a ball at 150 m/s would sink 0.8 m, through
+//     a thin wall). contact_damping_ratio is not used: the velocity pass sets each contact's normal
 //     speed (restitution), which is the damping these contacts need — XPBD's damping term (γ = 2ζ / (ω h), 25 for the
 //     default ratio 10) left so little of each correction that columns of boxes leaned over and piles sank;
-//   - static friction while the point touches: the friction anchors' tangential drift corrected to zero (α = 0) as long
-//     as the tangential multiplier stays within μs λ; beyond, the point slips (its friction anchors are renewed next step)
-//     and dynamic friction acts in the velocity pass.
+//   - static friction at the points that push: the friction anchors' tangential drift corrected to zero (α = 0) as long
+//     as the manifold's tangential multipliers stay within μs times its whole push (Coulomb's cone over the contact patch:
+//     a face's first point removes the whole body's drift, which its share of the push alone could not hold); beyond, the
+//     point slips (its friction anchors are renewed next step) and dynamic friction acts in the velocity pass.
 // The multipliers reset at the substep's first iteration (mode bit 0). Colored constraints write their bodies at once (no
 // two of a color share one); the overflow set (mode bit 1) writes each side's correction for the Jacobi gather, computed
 // with the sides' parts (split_node()).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
+
+layout(constant_id = 67) const float LINEAR_SLOP = 0.0;
 
 const float PI = 3.14159265358979;
 
@@ -57,19 +64,22 @@ void main()
 
     for (uint point = 0U; point < header.z; ++point)
     {
-        const uint anchors = base + 3U + 4U * point;
-        const vec4 anchor_first = gpu_vectors[SOLVER.contacts].values[anchors];
-        const vec4 anchor_second = gpu_vectors[SOLVER.contacts].values[anchors + 1U];
-
-        // Non-penetration.
-        const vec3 lever_first = rotate_by(first.orientation, anchor_first.xyz);
-        const vec3 lever_second = rotate_by(second.orientation, anchor_second.xyz);
+        // Non-penetration, at the points on the surfaces over the cores' anchors: the start's overlap undone at the
+        // bounded speed, the step's new overlap at once.
+        vec3 lever_first;
+        vec3 lever_second;
+        contact_levers(base, point, first, second, normal, lever_first, lever_second);
         const float separation = dot((second.center + lever_second) - (first.center + lever_first), normal);
         const float inverse_mass = generalized_inverse_mass(first, lever_first, normal) + generalized_inverse_mass(second, lever_second, normal);
         if (inverse_mass > 0.0)
         {
-            const float compliance = inverse_mass * compliance_factor;
-            const float bounded = max(separation, -SOLVER.maximum_push_speed * h);
+            const float start_separation = gpu_vectors[SOLVER.contacts].values[base + 3U + 4U * point].w;
+            const float compliance = start_separation > LINEAR_SLOP ? 0.0 : inverse_mass * compliance_factor;
+            const float initial = max(-start_separation, 0.0);
+            const float penetration = -separation;
+            const float pushed = penetration <= initial ? min(penetration, SOLVER.maximum_push_speed * h)
+                                                        : penetration - initial + min(initial, SOLVER.maximum_push_speed * h);
+            const float bounded = penetration > 0.0 ? -pushed : separation;
             const float delta = (-bounded - compliance * normal_multipliers[point]) / (inverse_mass + compliance);
             const float multiplier = max(normal_multipliers[point] + delta, 0.0);
             const float applied = multiplier - normal_multipliers[point];
@@ -80,8 +90,13 @@ void main()
                 correct_position(first, lever_first, -applied * normal);
             }
         }
+    }
 
-        // Static friction at the friction anchors.
+    // Static friction at the friction anchors of the points that push, within μs times the manifold's whole push.
+    const float patch_push = normal_multipliers.x + normal_multipliers.y + normal_multipliers.z + normal_multipliers.w;
+    for (uint point = 0U; point < header.z; ++point)
+    {
+        const uint anchors = base + 3U + 4U * point;
         if (normal_multipliers[point] <= 0.0 || static_friction <= 0.0)
         {
             continue;
@@ -106,7 +121,9 @@ void main()
             continue;
         }
         const float delta = -length_tangential / tangential_mass;
-        if (abs(friction_multipliers[point] + delta) <= static_friction * normal_multipliers[point])
+        const vec4 held = abs(friction_multipliers);
+        const float patch_held = held.x + held.y + held.z + held.w - held[point] + abs(friction_multipliers[point] + delta);
+        if (patch_held <= static_friction * patch_push)
         {
             friction_multipliers[point] += delta;
             correct_position(second, friction_lever_second, delta * tangent);

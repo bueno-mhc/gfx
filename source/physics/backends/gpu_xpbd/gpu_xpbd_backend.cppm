@@ -157,6 +157,47 @@ struct OwnedDevice
     std::unique_ptr<Device> device{};
 };
 
+class GpuXpbdBackend;
+
+/// The world's broad phase as PhysicsWorld::broad_phase() shows it: the backend's own, so its operations are refused as the
+/// framework's description of a backend's own broad phase refuses them (CUSTOM_BROAD_PHASE), except structure_nodes(),
+/// which reads the two collider trees back (between steps).
+class GpuBroadPhase final : public BroadPhase
+{
+public:
+    explicit GpuBroadPhase(GpuXpbdBackend& backend) noexcept;
+
+    [[nodiscard]] auto kind() const noexcept -> BroadPhaseKind override
+    {
+        return BroadPhaseKind::BACKEND;
+    }
+
+    [[nodiscard]] auto is_external() const noexcept -> bool override
+    {
+        return false;
+    }
+
+    auto insert(ColliderHandle collider,
+                const Aabb& box,
+                const CollisionFilter& filter) -> SpatialProxyHandle override;
+    void remove(SpatialProxyHandle proxy) override;
+    auto move(SpatialProxyHandle proxy,
+              const Aabb& box,
+              Vector3 displacement) -> bool override;
+    void set_filter(SpatialProxyHandle proxy,
+                    const CollisionFilter& filter) override;
+    void update(TaskScheduler* scheduler) override;
+    [[nodiscard]] auto pairs() const -> std::span<const BroadPhasePair> override;
+    [[nodiscard]] auto new_pairs() const -> std::span<const BroadPhasePair> override;
+    [[nodiscard]] auto ended_pairs() const -> std::span<const BroadPhasePair> override;
+
+    /// The moving colliders' tree (the published poses), then the static colliders', each depth first from its root.
+    void structure_nodes(std::vector<SpatialNode>& nodes) const override;
+
+private:
+    GpuXpbdBackend* m_backend = nullptr;
+};
+
 /// The GPU backend.
 class GpuXpbdBackend final : public SteppedWorldBackend, private HandleIssuer
 {
@@ -201,10 +242,19 @@ public:
         return m_capabilities;
     }
 
+    [[nodiscard]] auto broad_phase_component() noexcept -> BroadPhase* override
+    {
+        return &m_broad_phase;
+    }
+
+    /// The collider trees' nodes (GpuBroadPhase::structure_nodes()): read back between steps, with the queries' command
+    /// buffer.
+    void read_structure(std::vector<SpatialNode>& nodes);
+
     // ------------------------------------------------------------------------------------------------ queries on the GPU
     // One at a time (between steps, as the framework calls them); nothing (the abstraction answers) when the GPU cannot
     // answer exactly: no step yet, a hull to cast or test that the shape table lacks, more colliders or pieces than a query
-    // holds, a GPU failure.
+    // holds; UNSUPPORTED when the GPU fails.
 
     [[nodiscard]] auto ray_cast(const Ray& ray,
                                 float maximum,
@@ -437,6 +487,10 @@ private:
     HostBuffer m_query_results{"query results", MemoryLocation::HOST_READBACK, BufferUsage::TRANSFER_DESTINATION};
     std::array<std::uint32_t, 2> m_query_records{};
     bool m_query_tree_current = false;
+
+    // The broad phase PhysicsWorld::broad_phase() shows; the collider trees read back for it.
+    GpuBroadPhase m_broad_phase{*this};
+    HostBuffer m_structure_readback{"collider trees read back", MemoryLocation::HOST_READBACK, BufferUsage::TRANSFER_DESTINATION};
 
     // Contacts: the pairs touching after the last step (sorted by their handles) and their contacts; this step's
     // (scratch, swapped with them when read).

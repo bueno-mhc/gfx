@@ -110,9 +110,10 @@ struct GpuSolverParameters
     std::uint32_t trigger_pairs = 0;      ///< their instances (GpuPair),
     std::uint32_t trigger_ranges = 0;     ///< their manifolds' ranges,
     std::uint32_t trigger_manifolds = 0;  ///< their manifolds,
-    std::uint32_t trigger_results = 0;    ///< the overlaps (GpuTriggerOverlap).
+    std::uint32_t trigger_results = 0;    ///< the overlaps (GpuTriggerOverlap);
+    std::uint32_t tables = 0;             ///< the narrow phase's shape table (the contacts' margins).
 };
-static_assert(sizeof(GpuSolverParameters) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
+static_assert(sizeof(GpuSolverParameters) == 308 && offsetof(GpuSolverParameters, tables) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
               offsetof(GpuSolverParameters, corrections) == 184 && offsetof(GpuSolverParameters, joint_count) == 188 &&
               offsetof(GpuSolverParameters, joined_pairs) == 216 && offsetof(GpuSolverParameters, overflow_counts) == 224 &&
               offsetof(GpuSolverParameters, boxes) == 232);
@@ -182,7 +183,7 @@ inline constexpr std::uint32_t GPU_COLLIDER_PARTICLE = 2;
 inline constexpr std::uint32_t GPU_COLLIDER_TRIGGER = 4;
 
 /// The size of a contact constraint (GpuContact in solver.glsl: CONTACT_VECTORS vectors).
-inline constexpr std::uint32_t GPU_CONTACT_BYTES = 19 * sizeof(GpuVector);
+inline constexpr std::uint32_t GPU_CONTACT_BYTES = 20 * sizeof(GpuVector);
 
 /// A joint on the GPU (Joint in solver.glsl), by joint slot: its bodies, flags and parts; its frames about its bodies'
 /// centers of mass, in their frames (the world's for no second body); its breaking thresholds.
@@ -368,6 +369,11 @@ public:
 
     /// What queries read (between steps).
     [[nodiscard]] auto query_layout() const -> GpuQueryLayout;
+
+    /// The moving colliders' tree and the static colliders' (read back for debug views between steps; which are built:
+    /// query_layout().trees).
+    [[nodiscard]] auto moving_tree() const noexcept -> const GpuBvh&;
+    [[nodiscard]] auto static_tree() const noexcept -> const GpuBvh&;
 
     /// The contact reports (GpuContactReport; copied into the readback).
     [[nodiscard]] auto reports_buffer() const noexcept -> const Buffer&;

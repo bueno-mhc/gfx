@@ -1,5 +1,6 @@
-// The physics sandbox of gfx: every library at work in one window. A physics world (Box3D or the reference backend,
-// gfx.physics) steps at 60 Hz on its own thread while the main thread reads the window's events (gfx.platform), turns
+// The physics sandbox of gfx: every library at work in one window. A physics world (Box3D, the reference backend, or the
+// GPU backend on the sandbox's own device; gfx.physics) steps at 60 Hz on its own thread while the main thread reads the
+// window's events (gfx.platform), turns
 // them into actions (its input system), moves a camera (gfx.camera), lets the mouse pick, drag, shoot, spawn and remove
 // bodies, builds a UI (gfx.ui) and draws the bodies as lit meshes with Vulkan (gfx), interpolated between the last two
 // steps.
@@ -13,9 +14,10 @@
 // phase and integrator) and turn on debug views (wireframe, bounding boxes, contacts, the broad phase's structure,
 // joints, bodies colored by sleep or island).
 //
-// Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--views <list>]
+// Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference|gpu_xpbd] [--preset <name>] [--views <list>]
 //                            [--device <index>] [--threads <count>] [--frames <count>] [--script | --tour] [--validation]
 //                            [--capture <file.ppm>] [--capture-frame <index>]
+//   --physics B    simulates with backend B (gpu_xpbd: the GPU backend, on the sandbox's own device)
 //   --preset P     starts with scene P (showcase, stacks, dominoes, chains, cloth, soft_volumes, friction, bouncing,
 //                  triggers)
 //   --views L      starts with the debug views of the comma-separated list L on (wireframe, boxes, contacts, broad_phase,
@@ -38,6 +40,9 @@ import physics_sandbox.renderer;
 import physics_sandbox.scene;
 import physics_sandbox.presets;
 import physics_sandbox.interaction;
+#if GFX_SANDBOX_GPU_XPBD
+import gfx.physics.gpu_xpbd;    // the GPU backend's direct entry: its worlds on the sandbox's own device
+#endif
 import physics_sandbox.controls;
 
 namespace
@@ -138,12 +143,12 @@ struct Options
     std::optional<std::uint64_t> capture_frame{};
 };
 
-/// The physics backends built.
+/// The physics backends built (the GPU backend when the machine has a GPU it runs on).
 auto
 available_physics_backends() -> std::vector<physics::PhysicsBackendKind>
 {
     std::vector<physics::PhysicsBackendKind> backends;
-    for (const physics::PhysicsBackendKind kind : {physics::PhysicsBackendKind::BOX3D, physics::PhysicsBackendKind::REFERENCE})
+    for (const physics::PhysicsBackendKind kind : {physics::PhysicsBackendKind::BOX3D, physics::PhysicsBackendKind::REFERENCE, physics::PhysicsBackendKind::GPU_XPBD})
     {
         if (physics::physics_backend_availability(kind).available)
         {
@@ -151,6 +156,21 @@ available_physics_backends() -> std::vector<physics::PhysicsBackendKind>
         }
     }
     return backends;
+}
+
+/// A physics backend as the panel names it.
+auto
+backend_label(physics::PhysicsBackendKind backend) -> std::string_view
+{
+    switch (backend)
+    {
+        case physics::PhysicsBackendKind::BOX3D:
+            return "Box3D";
+        case physics::PhysicsBackendKind::GPU_XPBD:
+            return "GPU";
+        default:
+            return "reference";
+    }
 }
 
 /// @p name in capitals (enumerator names).
@@ -280,7 +300,7 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         }
         else
         {
-            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference] [--preset <name>] [--views <list>] [--device <index>] "
+            std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference|gpu_xpbd] [--preset <name>] [--views <list>] [--device <index>] "
                                     "[--threads <count>] [--frames <count>] [--script | --tour] [--validation] [--capture <file.ppm>] [--capture-frame <index>]");
             std::print(std::cerr, "presets:");
             for (std::size_t preset = 0; preset < PRESET_COUNT; ++preset)
@@ -676,7 +696,7 @@ statistics_panel(gfx::ui::UiFrame& frame,
                 {
                     frame.same_line();
                 }
-                if (frame.radio_button(backend == physics::PhysicsBackendKind::BOX3D ? "Box3D" : "reference", backend == scene.backend())
+                if (frame.radio_button(backend_label(backend), backend == scene.backend())
                     && backend != scene.backend())
                 {
                     request.backend = backend;
@@ -863,7 +883,10 @@ run(const Options& options) -> int
                                    .debug_callback = [&validation_errors](const gfx::DebugMessage& message) { validation_errors.report(message); }});
     gfx::PhysicalDevice& physical_device =
         options.physical_device ? instance->physical_device(*options.physical_device) : instance->select_physical_device();
-    static constexpr std::array QUEUES{gfx::QueueRequest{.type = gfx::QueueType::GRAPHICS, .count = 1, .priority = 1.0F}};
+    // A graphics queue for the frames, a compute queue for the GPU physics backend's steps (the graphics family's when the
+    // GPU has no other).
+    static constexpr std::array QUEUES{gfx::QueueRequest{.type = gfx::QueueType::GRAPHICS, .count = 1, .priority = 1.0F},
+                                       gfx::QueueRequest{.type = gfx::QueueType::COMPUTE, .count = 1, .priority = 1.0F}};
     const std::unique_ptr<gfx::Device> device = physical_device.create_device({.queues = QUEUES, .debug_name = "sandbox device"});
     gfx::Queue& queue = device->queue(gfx::QueueType::GRAPHICS);
 
@@ -929,6 +952,20 @@ run(const Options& options) -> int
     ViewSettings views = options.views;
     SimulationControl control;
     DebugViews debug;
+
+    // The GPU backend's worlds on the sandbox's device (its steps on the compute queue, beside the frames); the others
+    // through the factory.
+    const WorldFactory make_world = [&device](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
+#if GFX_SANDBOX_GPU_XPBD
+        if (backend == physics::PhysicsBackendKind::GPU_XPBD)
+        {
+            return physics::gpu_xpbd::create_physics_world(description, *device);
+        }
+#else
+        static_cast<void>(device);
+#endif
+        return physics::create_physics_world(description, backend);
+    };
     const auto build = [&](Preset next,
                            physics::PhysicsBackendKind backend) -> PresetResult
     {
@@ -940,7 +977,7 @@ run(const Options& options) -> int
         interaction.reset();
         scene.reset();
         renderer.clear_meshes();
-        scene = std::make_unique<Scene>(backend, scheduler);
+        scene = std::make_unique<Scene>(backend, scheduler, make_world);
         PresetResult built = build_preset(next, *scene);
         interaction = std::make_unique<Interaction>(*scene);
         control.adopt(*scene);

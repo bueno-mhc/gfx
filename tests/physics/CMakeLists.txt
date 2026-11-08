@@ -46,8 +46,8 @@ gfx_add_test(gfx_physics_dynamics_tests
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
 
-# The Box3D backend: simulations with known outcomes, events, determinism, capability errors, queries; the abstraction's
-# soft bodies coupled with Box3D bodies.
+# The Box3D backend: what its factory makes, and a light rope holding a heavy Box3D body (its shared scenarios are the
+# conformance suite's, below).
 if(GFX_PHYSICS_BACKEND_BOX3D)
     gfx_add_test(gfx_physics_box3d_tests
         SOURCES
@@ -56,7 +56,8 @@ if(GFX_PHYSICS_BACKEND_BOX3D)
         LIBRARIES gfx::physics)
 endif()
 
-# The reference backend: the Box3D scenarios, what only it simulates, its components replaced, its soft bodies.
+# The reference backend: its components, its integrator's exact fall, discrete bodies tunneling, user constraints in
+# detail, components replaced (its shared scenarios are the conformance suite's, below).
 gfx_add_test(gfx_physics_reference_tests
     SOURCES reference_test.cpp
     LIBRARIES gfx::physics)
@@ -77,6 +78,26 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     endif()
     target_compile_definitions(gfx_physics_gpu_xpbd_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}")
     target_include_directories(gfx_physics_gpu_xpbd_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
+endif()
+
+# The conformance suite: the same scenarios on every simulating backend of the build — Box3D, the reference backend, and
+# the GPU backend on each GPU in its two configurations (a full device; a portable one: no 64-bit atomics, shared-memory
+# variants, the Jacobi solver mode) with the Vulkan validation layers — each expectation conditional on what the backend
+# refuses (a BackendCapabilityError naming the capability when it is recorded).
+set(_gfx_conformance_sources conformance_rigid_test.cpp conformance_joint_test.cpp conformance_event_test.cpp conformance_soft_body_test.cpp)
+if(GFX_PHYSICS_BACKEND_GPU_XPBD)
+    gfx_add_test(gfx_physics_conformance_tests
+        SOURCES ${_gfx_conformance_sources}
+        LIBRARIES gfx::physics gfx::physics_gpu_xpbd gfx::gfx
+        GPU_TESTS .*GPU_XPBD.*)
+    target_compile_definitions(gfx_physics_conformance_tests PRIVATE GFX_TEST_GPU_XPBD=1
+                               GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}")
+    target_include_directories(gfx_physics_conformance_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan ${CMAKE_CURRENT_SOURCE_DIR})
+else()
+    gfx_add_test(gfx_physics_conformance_tests
+        SOURCES ${_gfx_conformance_sources}
+        LIBRARIES gfx::physics)
+    target_compile_definitions(gfx_physics_conformance_tests PRIVATE GFX_TEST_GPU_XPBD=0)
 endif()
 
 # Worlds: the interfaces' error contract, the factory and the null backend, SteppedWorld on a recording backend (deferred

@@ -354,7 +354,7 @@ struct EditApplier
                                          .rollingResistance = change.material.friction.rolling};
         for (const b3ShapeId shape : backend.m_colliders[Box3dBackend::slot(change.collider)].shapes)
         {
-            b3Shape_SetSurfaceMaterial(shape, material);
+            set_surface_material(shape, material);
         }
     }
 

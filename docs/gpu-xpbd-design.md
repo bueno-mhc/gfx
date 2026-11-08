@@ -5,7 +5,7 @@ as built"; committed a0414c5), **G1 accepted** with its 4 (§B "G1 as built"; co
 (§B "G2 as built"; committed 6858652), **G3 accepted** with its 5 (§B "G3 as built"; committed c3623c9), **G4 accepted**
 with its 5 (§B "G4 as built"; committed ac87393), **G5 accepted** with its 9 (§B "G5 as built"; committed c51d323), **G6
 accepted** with its 7 (§B "G6 as built"; committed cad9b8e), **G7 accepted** with its 6 (§B "G7 as built"; committed
-31de7c4). **G8 implemented** (§B "G8 as built", 7 deviations), awaiting validation.
+31de7c4), **G8 accepted** with its 7 (§B "G8 as built"; committed 66af4ca).
 
 The request (2026-10-31): a new physics backend, selectable through the existing factory, that simulates rigid and soft
 bodies with **extended position-based dynamics (XPBD)** entirely on the GPU through the graphics library's compute
@@ -1223,6 +1223,120 @@ submission and its wait per query dominate. A synchronous `BACKEND` query pays o
 pieces; many queries at once need the batch API §D7 left for later (one submission for many rays). The other phases'
 measurements held: G5's pyramid 4.1 ms (coloring) on the RTX 5060, G6's chains 2.5 / 1.4 ms, G7's cloth 15.1 / 7.7 ms (Intel
 GPU 99 / 62 ms, which varies from run to run with its clocks).
+
+### G9 as built (2026-11-08)
+
+**The conformance suite** (`gfx_physics_conformance_tests`: `conformance_test.hpp` and four files of scenarios) runs the
+same scenarios on every simulating backend of the build: Box3D, the reference backend, and the GPU backend on each GPU in
+two configurations — **full** (a device with 64-bit atomics where the GPU has them, the automatic variants, graph coloring)
+and **portable** (a device without 64-bit atomics, the portable variants forced: shared memory instead of subgroups, two
+32-bit passes; the Jacobi solver mode) — with the Vulkan validation layers (any message fails the case). §0 row 12's fourth
+configuration, a device without a compute queue, stays `GpuXpbdTest`'s capability test on the graphics tests' fake device
+(no simulation runs there). Each backend's refusals are listed with the suite (`refused_capabilities()`: Box3D's limits,
+the GPU's user constraints, the pipelines of both); a scenario needing a refused capability runs its operation through
+`supports()`, which then requires the BackendCapabilityError naming the capability and the backend, and stops there; one
+the backend does not refuse must succeed. The scenarios come from the Box3D, reference and Box3D soft-body tests, with the
+tolerances they shared:
+- rigid bodies: a world names its backend and refuses an invalid description; free fall (g, ½ g t² within 1 %, the
+  published mass); a five-box stack at rest within 3 cm, asleep, its bottom box touching two colliders with three points or
+  more, woken by a push within six steps; a kinematic platform reaching its targets with a crate on it; every convex kind
+  dropped tilted, none into the floor; a ball spinning at 200 rad/s keeping its contact; restitution 0.8 and rolling
+  resistance; a continuous ball stopped by a 5 cm wall at 150 m/s; a compound on a height field and a ball under a two-sided
+  mesh; a closed mesh on a moving body and separate static and dynamic friction (where not refused); 60 thrown bodies giving
+  the same bits twice and on four threads;
+- joints: a pendulum's period within 2 % (eight sub-steps); a hinge's limit, a rope's length, a breaking weld, a motor's
+  speed; a lid's hinge breaking at the landing whatever the sub-steps (1, 4, 8) while a hook reports its block's weight;
+  six-DOF joints keeping their locked axes and user constraints holding and breaking (where not refused);
+- events, queries, threads: a ball through a zone onto the floor (BEGIN, HIT, ENTER, STAY, EXIT, its contact from its side,
+  END when its collider goes); a ball bouncing off a wall within a step (BEGIN, HIT, END); the backend's queries against the
+  abstraction's (rays, every hit along a ray, a cast, an overlap); two asynchronous worlds answering four threads' rays with
+  completed steps only; a destroyed body's collider out of the simulation; the broad phase's structure (every collider
+  listed, its center in a node listing colliders; Box3D's refused); every capability honored or refused when recorded;
+- soft bodies: a cloth onto a table, never through it, at rest; a rope holding a 1 kg body and letting it fall when
+  unpinned; a soft cube pushing a floating body with the momentum kept within 2 %; a cloth and a rope giving the same bits
+  twice and on four threads.
+
+**Found by the suite** (its first run: 143 of 156 cases passed; the four scenarios below failed, each fixed and checked
+by it):
+- **A spinning ball sank through the floor on the GPU** (200 rad/s: −0.42 m, every configuration): the contacts' anchors
+  were material points of the bodies, so a ball's point under it turned away within a substep (0.83 rad) and stopped
+  pushing — the reference backend's defect of S3 (physics-design.md §B "Follow-up after PH8: contacts of spinning and fast
+  bodies"). Now as the reference: `contact_prepare` reads the shapes' margins where they touch from the narrow phase's table
+  (a convex shape's own, a compound child's, none for triangles; `GpuSolverParameters::tables`), anchors the
+  non-penetration on the cores (the point moved in by the margin) and `contact_solve`/`contact_velocity` add the margins back
+  along the normal (`contact_levers()`; `GpuContact` has a twentieth vector, the margins); the friction anchors stay
+  material points on the surfaces (a ball rolling without slipping is not held back).
+- **A continuous ball at 150 m/s went through a 5 cm wall on the GPU** (it ended at x = 5.29 m, the wall at 4.975–5.025):
+  the pair was found and the contact made, but (1) the depenetration bound (`maximum_push_speed · h` per projection) applied
+  to overlap the step's motion made, not only to the overlap a point started with, and (2) the contact was soft
+  (`contact_hertz`: against 30 Hz a ball at 150 m/s sinks v/ω = 0.8 m). Now the bound covers the overlap the point started
+  the step with only, and a point that started the step farther apart than `LINEAR_SLOP` is held rigidly (a speculative
+  contact: its bodies approach until they touch, Box2D's rule, as the reference backend and Box3D do); resting contacts
+  (within the slop) stay soft as before. The ball stops at 4.925 m (the reference's 4.925 m).
+- **Static friction never held when μs > μd on the GPU** (a box at rest on a 20° slope, μs 0.8, μd 0.2, slid 1.7 m in 1.5 s):
+  static friction was checked point by point against each point's share of the push, while a face's first point removes
+  the whole body's drift; with the soft contact's partial push in the first substeps every check failed, the box slid, and
+  the drift a sliding body makes never fitted the cone again (with μs = μd the velocity pass's dynamic friction stopped it,
+  which is why G5's slopes held). Now `contact_solve` projects non-penetration at every point first, then holds static
+  friction while the manifold's tangential multipliers stay within μs times its whole push (Coulomb's cone over the contact
+  patch). The box moves 0.3 mm, then sleeps.
+- **Box3D's rolling resistance was a quarter to a third of the reference's** (a ball with rolling resistance 0.02 still
+  rolled at 0.73 m/s after 5 s; the reference stops it in 3.6 s): the interface's coefficient is a lever in meters (PH7: "the
+  relative turn opposed up to the coefficient, a lever in meters, times the push"; the GPU's likewise), while Box3D multiplies
+  its coefficient by the larger radius of the shapes. The Box3D backend now sets each shape's coefficient to the lever over
+  the radius Box3D multiplies by (`set_surface_material()`: a sphere's or capsule's radius, a quarter of a hull's inner
+  radius; meshes and height fields, which Box3D gives no radius, keep the lever, multiplied by the other shape's radius).
+  `Friction::rolling`'s documentation now says what it is.
+
+**Deviations (for validation).**
+1. **Two GPU configurations per GPU, not four**: "full" and "portable" (§0 row 12's device without 64-bit atomics and its
+   forced portable variants together, in the Jacobi mode — the other solver mode, so each configuration runs one); the device
+   without a compute queue stays `GpuXpbdTest`'s capability test on the fake device (no simulation can run there).
+2. **The 64-bit atomics variant is unused**: no pass uses 64-bit atomics since G8 picks a query's nearest hit on the CPU (§0
+   row 6 planned them for that). `GpuXpbdVariants::integer64_atomics` and `GpuXpbdCapabilities::integer64_atomics` are reported
+   only; a device without them runs the same passes (the portable configuration shows it). To decide: keep the setting as a
+   report (recommended: the batch query API of §D7 may use them), or remove it.
+3. **The shared scenarios moved into the suite**: the Box3D and reference test files keep what only their backend shows (Box3D:
+   its factory's world, a 0.2 kg rope holding a 4 kg body; the reference: its components, its integrator's exact fall,
+   discrete bodies tunneling, user constraints in detail, components replaced); the Box3D soft-body cloth, cube and determinism
+   tests and the reference's shared scenarios run in the suite on every backend.
+4. **The sandbox's GPU worlds share its device** (the direct entry; the example uses the factory's own device): the sandbox now
+   requests a compute queue beside its graphics queue; `Scene` takes a `WorldFactory`.
+5. **The GPU's contacts changed** (Found): non-penetration anchored on the shapes' cores; a point starting the step apart
+   rigid; the depenetration bound on the start's overlap only; static friction per contact patch. G5–G8's tests all still
+   pass (284 cases).
+6. **The Box3D backend's rolling resistance converted**, and `Friction::rolling`'s documentation says what it is (a lever in
+   meters): an interface comment, no interface change.
+7. **The GPU's broad phase shows its trees** (closes G8's deviation 6): `PhysicsWorld::broad_phase()` is the GPU's own object
+   now, its kind still `BACKEND`, its component operations refused as before.
+
+**Tests.** The suite: 162 cases (27 scenarios × 6 backends — Box3D, the reference backend, and the GPU backend full and
+portable on the RTX 5060 and on the Intel GPU), all passing after the fixes; G5–G8's GPU tests unchanged and passing (284
+cases); 28 tests left the Box3D and reference executables (their scenarios are the suite's); CTest `PhysicsExample.GPU_XPBD`
+and `PhysicsSandbox.GPU_XPBD` added. Full runs: Debug 1453 of 1453 (1205 s); Release 1452 of 1453, `PhysicsSandbox.Tour`
+stopped by its then 300 s timeout, then passing in 174 s with 900 s. Found while running them: a build directory configured
+with `cmake --preset` (compilers named `g++`) made the next `build.py` (which names them `g++.EXE`) delete the cache, and
+CMake's re-run configure dropped `GFX_PHYSICS_BACKEND_GPU_XPBD=ON`: a first Debug run had no GPU backend (1039 tests).
+
+**The GPU backend in the physics example** (`--backend gpu_xpbd`, through the factory: a device of its own on the most
+capable GPU) and its CTest run `PhysicsExample.GPU_XPBD` (`--steps 240 --threads 4`; the CTest GPU resource).
+
+**The GPU backend in the sandbox**: on the sandbox's own device (its direct entry `gpu_xpbd::create_physics_world(description,
+device)`: one GPU for the frames and the physics, the steps on a compute queue the sandbox now requests beside its graphics
+queue — the graphics family's when the GPU has no other); `Scene` takes a `WorldFactory` (the program's; the factory's
+`create_physics_world()` when empty); the panel's backend buttons, `--physics gpu_xpbd` and the tour include it; CTest
+`PhysicsSandbox.GPU_XPBD` runs the script on the first platform backend. The tour now visits 27 scenes (2430 frames paced by
+the display: 232 s alone in Release on this laptop in its silent power mode, its NVIDIA display at 50 Hz), so
+`PhysicsSandbox.Tour` has a 900 s timeout (300 s by default: the first Release run stopped it there). The control script's
+check of refused components compares the integrator with the world's own (the GPU's is XPBD, not semi-implicit Euler).
+
+**The GPU's broad phase shows its trees** (G8's deviation 6): the backend returns its own `BroadPhase` (`GpuBroadPhase`:
+`PhysicsWorld::broad_phase()`), whose component operations are refused as the framework's description of a backend's own
+broad phase refuses them (CUSTOM_BROAD_PHASE), and whose `structure_nodes()` reads the moving and the static collider trees
+back between steps (with the queries' command buffer and lock; the moving tree rebuilt from the published poses first when
+the step left it otherwise, as for a query) and converts them with G2's `structure_nodes()`: the moving tree's nodes, then
+the static tree's, each depth first from its root, one collider per leaf (a soft body's particles are leaves of the moving
+tree).
 
 ## C. The API as proposed (for validation, not final code)
 

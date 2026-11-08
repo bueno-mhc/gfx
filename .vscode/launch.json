@@ -218,6 +218,8 @@
                 { "label": "physics dynamics - IntegratorTest.*, SoftBodyPresetTest.*, SoftBodyModelTest.*, XpbdSolverTest.*, JointRowsTest.*, SequentialImpulseSolverTest.*", "value": "physics/gfx_physics_dynamics_tests.exe" },
                 { "label": "physics reference - ReferenceTest.*", "value": "physics/gfx_physics_reference_tests.exe" },
                 { "label": "physics Box3D - Box3dTest.*, Box3dSoftBodyTest.*", "value": "physics/gfx_physics_box3d_tests.exe" },
+                { "label": "physics GPU - GpuXpbdTest.*, Gpu/GpuPrimitivesTest.*, Gpu/GpuBvhTest.*, Gpu/GpuNarrowPhaseTest.*, Gpu/GpuXpbdRigidTest.*, Gpu/GpuXpbdJointTest.*, Gpu/GpuXpbdSoftBodyTest.*, Gpu/GpuXpbdEventTest.* (every GPU)", "value": "physics/gfx_physics_gpu_xpbd_tests.exe" },
+                { "label": "physics conformance - Backends/RigidConformanceTest.*, Backends/JointConformanceTest.*, Backends/EventConformanceTest.*, Backends/SoftBodyConformanceTest.* (every backend)", "value": "physics/gfx_physics_conformance_tests.exe" },
                 { "label": "toolchain  - ToolchainTest.*", "value": "toolchain/gfx_toolchain_tests.exe" }
             ],
             "default": "graphics/handles/gfx_handles_tests.exe"

@@ -25,7 +25,8 @@ struct Friction
 {
     float static_coefficient = 0.6F;  ///< At least 0.
     float dynamic_coefficient = 0.6F; ///< At least 0.
-    float rolling = 0.0F;             ///< Rolling resistance, at least 0.
+    float rolling = 0.0F;             ///< Rolling resistance, at least 0: a lever in meters (a turn of the two bodies
+                                      ///< against each other is opposed by an angular impulse up to it times the push).
 
     [[nodiscard]] constexpr auto operator==(const Friction&) const noexcept -> bool = default;
 };

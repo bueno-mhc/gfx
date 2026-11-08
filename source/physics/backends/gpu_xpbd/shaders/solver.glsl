@@ -107,6 +107,7 @@ struct SolverParameters
     uint trigger_ranges;
     uint trigger_manifolds;
     uint trigger_results;
+    uint tables; // the narrow phase's shape table (the contacts' margins)
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -243,12 +244,15 @@ uint instance_collider(uint instance)
 
 // A contact constraint (GpuContact), one per manifold slot: its bodies, points, flags; its normal (first to second; w:
 // restitution); its material (static and dynamic friction, rolling resistance; w: its coloring priority); per point, the
-// anchors on the first and second bodies (relative to their centers of mass, body frames; w of the first: the separation
-// at the step's start) and the friction anchors (w of the first: 1 when static friction gave way). Flags: active (the
-// manifold has points), touching (a point touches, or will within the step: counted by the Jacobi gather's mass splitting),
-// pushed (the solver pushed its bodies apart in a substep: reported). The second anchor's w: the point's approach speed at
-// the step's start.
-const uint CONTACT_VECTORS = 19U;
+// anchors on the first and second bodies' cores (relative to their centers of mass, body frames: the point moved into the
+// shape by its margin along the normal, so a turning round shape keeps its point under it; w of the first: the separation
+// at the step's start) and the friction anchors (the material points on the surfaces; w of the first: 1 when static
+// friction gave way); last, the margins of the two shapes where they touch (x: the first's, y: the second's). Flags: active
+// (the manifold has points), touching (a point touches, or will within the step: counted by the Jacobi gather's mass
+// splitting), pushed (the solver pushed its bodies apart in a substep: reported). The second anchor's w: the point's approach
+// speed at the step's start.
+const uint CONTACT_VECTORS = 20U;
+const uint CONTACT_MARGINS = 19U;
 const uint CONTACT_ACTIVE = 1U;
 const uint CONTACT_TOUCHING = 2U;
 const uint CONTACT_PUSHED = 4U;
@@ -488,6 +492,16 @@ uint color_count(uint key)
 uint color_constraint(uint key, uint index)
 {
     return gpu_words[SOLVER.color_lists].words[gpu_words[SOLVER.color_begin].words[key] + index];
+}
+
+// The levers from the bodies' centers to a contact's point on each surface: the anchors on the cores, turned with the
+// bodies, then out along the normal by the shapes' margins.
+void contact_levers(uint base, uint point, Body first, Body second, vec3 normal, out vec3 lever_first, out vec3 lever_second)
+{
+    const uint anchors = base + 3U + 4U * point;
+    const vec2 margins = gpu_vectors[SOLVER.contacts].values[base + CONTACT_MARGINS].xy;
+    lever_first = rotate_by(first.orientation, gpu_vectors[SOLVER.contacts].values[anchors].xyz) + normal * margins.x;
+    lever_second = rotate_by(second.orientation, gpu_vectors[SOLVER.contacts].values[anchors + 1U].xyz) - normal * margins.y;
 }
 
 #endif

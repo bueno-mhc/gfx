@@ -108,13 +108,20 @@ struct ShapeLibrary
     std::shared_ptr<const gfx::physics::Shape> ball{};                                  ///< What shooting throws.
 };
 
+/// Makes the world of a backend from the scene's description: how the program wants it (the GPU backend on the program's
+/// own device); empty, the factory makes it (create_physics_world()).
+using WorldFactory =
+    std::function<std::unique_ptr<gfx::physics::PhysicsWorld>(const gfx::physics::PhysicsWorldDescription& description, gfx::physics::PhysicsBackendKind backend)>;
+
 /// A world and the bodies in it.
 class Scene
 {
 public:
-    /// @brief A world of @p backend whose steps run on its own thread and split over @p scheduler (outlives the scene).
+    /// @brief A world of @p backend, made by @p make_world (else the factory), whose steps run on its own thread and
+    ///        split over @p scheduler (outlives the scene).
     Scene(gfx::physics::PhysicsBackendKind backend,
-          gfx::physics::TaskScheduler& scheduler);
+          gfx::physics::TaskScheduler& scheduler,
+          const WorldFactory& make_world = {});
     ~Scene();
 
     Scene(const Scene&) = delete;

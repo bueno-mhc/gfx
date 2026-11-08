@@ -61,6 +61,34 @@ to_box3d(const CollisionFilter& filter) noexcept -> b3Filter
     return {.categoryBits = std::to_underlying(filter.category), .maskBits = std::to_underlying(filter.mask), .groupIndex = filter.group};
 }
 
+/// Gives @p shape @p material, whose rolling resistance is the interface's: a lever in meters (the turn opposed up to it
+/// times the normal push). Box3D multiplies a contact's coefficient by the larger radius of its shapes (a sphere's or a
+/// capsule's own, a quarter of a hull's inner radius), so the coefficient set is the lever over the shape's radius; a
+/// shape Box3D gives no radius (a mesh, a height field) keeps the lever as its coefficient, which Box3D multiplies by the
+/// other shape's radius.
+inline void
+set_surface_material(b3ShapeId shape,
+                     b3SurfaceMaterial material) noexcept
+{
+    float radius = 0.0F;
+    switch (b3Shape_GetType(shape))
+    {
+        case b3_sphereShape:
+            radius = b3Shape_GetSphere(shape).radius;
+            break;
+        case b3_capsuleShape:
+            radius = b3Shape_GetCapsule(shape).radius;
+            break;
+        case b3_hullShape:
+            radius = 0.25F * b3Shape_GetHull(shape)->innerRadius;
+            break;
+        default:
+            break;
+    }
+    material.rollingResistance = radius > 0.0F ? material.rollingResistance / radius : material.rollingResistance;
+    b3Shape_SetSurfaceMaterial(shape, material);
+}
+
 /// Equal Box3D ids.
 template<class Id>
 [[nodiscard]] inline auto

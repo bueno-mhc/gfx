@@ -1238,6 +1238,20 @@ two-sided mesh and a compound's child, level and tilted, 2000 rays from above an
 the old code — checked) and `ShapeQueryTest.BoxRayCastsHitFacesExactly` (a 100 m floor and a small turned box: 600 rays
 onto every face, the face's normal within 1e-5, a ray from inside, a ray beside).
 
+### Follow-up after PH8: rolling resistance on Box3D (2026-11-08, found by the conformance suite of the GPU backend's G9)
+
+The conformance suite (gpu-xpbd-design.md §B "G9 as built") runs one rolling ball with resistance 0.02 on every backend:
+the reference backend (and the GPU's) stops it within 4 s, Box3D let it roll on at 0.73 m/s after 5 s. The interface's
+coefficient is a lever in meters (PH7 as built: "the relative turn opposed up to the coefficient, a lever in meters, times
+the push"), Box3D's a coefficient its contacts multiply by the larger radius of their shapes (a sphere's or capsule's own, a
+quarter of a hull's inner radius). The Box3D backend passed the interface's value through, a quarter to a third of the
+resistance on a 0.25 m ball. It now sets each Box3D shape's coefficient to the lever over the radius Box3D multiplies by
+(`set_surface_material()` in its `:backend` partition, at creation and on material changes); a mesh or a height field, to
+which Box3D gives no radius, keeps the lever as its coefficient (Box3D multiplies it by the other shape's radius). When both
+shapes resist, Box3D takes the larger coefficient and the larger radius: exact when the rolling body is the rounder one.
+`Friction::rolling`'s documentation now says it is a lever in meters. Checked by the suite's
+`BallsBounceAndRollingResistanceStopsThem` on Box3D (it failed before).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

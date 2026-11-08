@@ -314,3 +314,14 @@ Documentation of the sandbox as built; no code changed.
 
 CTest runs the sandbox on both physics backends (`PhysicsSandbox.SDL3` with Box3D, `PhysicsSandbox.GLFW` with the reference
 backend, `PhysicsSandbox.Tour` with both), as the plan asked.
+
+### Follow-up: the GPU physics backend (2026-11-08, GPU XPBD phase G9)
+
+The GPU backend (docs/gpu-xpbd-design.md) is a third physics backend of the sandbox: the panel's backend buttons (Box3D,
+reference, GPU), `--physics gpu_xpbd` and the tour include it. Its worlds run on the sandbox's own device through the
+backend's direct entry (`gpu_xpbd::create_physics_world(description, device)`): one GPU draws the frames and simulates, the
+steps on a compute queue the sandbox now requests beside its graphics queue (the graphics family's when the GPU has no
+other). `Scene` takes a `WorldFactory` (the program's; the factory's `create_physics_world()` when empty). The broad phase
+view draws the GPU's two collider trees, read back between steps. The control script's check of refused components compares
+the integrator with the world's own (the GPU's is XPBD). CTest `PhysicsSandbox.GPU_XPBD` runs the script on the first
+platform backend; the tour visits every preset on the three backends.

@@ -168,6 +168,10 @@ Box3dBackend::create_shapes(const Shape& shape,
     const auto add = [&](b3ShapeId id) {
         own_shape(id, owner);
         shapes.push_back(id);
+        if (definition.baseMaterial.rollingResistance > 0.0F)
+        {
+            set_surface_material(id, definition.baseMaterial);
+        }
     };
     const auto add_hull = [&](std::span<const b3Vec3> points) {
         b3HullData* hull = make_hull(points);

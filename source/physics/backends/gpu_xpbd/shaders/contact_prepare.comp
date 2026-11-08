@@ -1,9 +1,12 @@
 #version 460
 // A contact constraint per manifold slot of the step (GpuContact): its bodies (the colliders' bodies), its normal, its
 // materials (friction as the geometric mean of the colliders', rolling resistance and restitution as the larger, as the
-// reference backend mixes them), per point the anchors on both bodies (the point less and plus half its separation along
-// the normal, relative to the centers of mass, in the body frames) and the friction anchors — the matched point's of the
-// previous step when static friction held it there (the contact cache found it), else the anchors. With mode 1 (the
+// reference backend mixes them), the shapes' margins where they touch (a convex shape's own, a compound child's, none for
+// triangles: the reference backend's contact_margin()), per point the anchors on both bodies' cores (the point less and
+// plus half its separation along the normal, and further in by the margin, relative to the centers of mass, in the body
+// frames: a spinning ball's point stays under it) and the friction anchors — the matched point's of the previous step when
+// static friction held it there (the contact cache found it), else the points on the surfaces (material points: a ball
+// rolling without slipping is not held back). With mode 1 (the
 // collider lists changed: instance indices name other colliders) no previous anchor is used. A particle's contacts have no
 // restitution nor rolling resistance, and two particles of a soft body none of their friction (the abstraction's soft-body
 // solver has none). A contact is flagged touching when a point overlaps at the step's start or could within the step: its
@@ -12,8 +15,27 @@
 // pile's candidates keep a gap; the Jacobi gather splits the nodes among their touching contacts only.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
+#include "narrow_phase.glsl"
 
-const uint MANIFOLD_VECTORS = 11U;
+// The margin around the core of a collider's shape where the manifold's sub-shape touches it: a convex shape's own, a
+// compound child's (none for a nested compound), none for the triangles of a mesh or a height field.
+float contact_margin(uint shape, uint sub_shape)
+{
+    ShapeRecord record = load_record(shape);
+    if (record.kind == SHAPE_COMPOUND)
+    {
+        if (sub_shape >= record.count)
+        {
+            return 0.0;
+        }
+        record = load_record(gpu_word_vectors[compound_children].values[2U * (record.first + sub_shape)].w);
+        if (record.kind == SHAPE_COMPOUND)
+        {
+            return 0.0;
+        }
+    }
+    return record.kind == SHAPE_TRIANGLE_MESH || record.kind == SHAPE_HEIGHT_FIELD ? 0.0 : record.margin;
+}
 
 void main()
 {
@@ -52,6 +74,10 @@ void main()
     const uint points = min(header.z, 4U);
     gpu_vectors[SOLVER.contacts].values[base + 1U] = vec4(normal, particle ? 0.0 : max(first.material.w, second.material.w));
     gpu_vectors[SOLVER.contacts].values[base + 2U] = material;
+    load_tables(SOLVER.tables);
+    const float first_margin = contact_margin(first.shape, sub_shapes.x);
+    const float second_margin = contact_margin(second.shape, sub_shapes.y);
+    gpu_vectors[SOLVER.contacts].values[base + CONTACT_MARGINS] = vec4(first_margin, second_margin, 0.0, 0.0);
 
     // The anchors, and the friction anchors kept or new.
     const vec3 first_center = node_center(first.body);
@@ -74,10 +100,10 @@ void main()
         const vec3 relative = (second_body.linear_velocity + cross(second_body.angular_velocity, on_second - second_center)) -
                               (first_body.linear_velocity + cross(first_body.angular_velocity, on_first - first_center));
         const float approach = max(-dot(relative, normal), 0.0);
-        const vec3 anchor_first = rotate_by(quaternion_conjugate(first_orientation), on_first - first_center);
-        const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second - second_center);
-        vec4 friction_first = vec4(anchor_first, 0.0);
-        vec4 friction_second = vec4(anchor_second, 0.0);
+        const vec3 anchor_first = rotate_by(quaternion_conjugate(first_orientation), on_first - normal * first_margin - first_center);
+        const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second + normal * second_margin - second_center);
+        vec4 friction_first = vec4(rotate_by(quaternion_conjugate(first_orientation), on_first - first_center), 0.0);
+        vec4 friction_second = vec4(rotate_by(quaternion_conjugate(second_orientation), on_second - second_center), 0.0);
         const uint predecessor = push.mode == 0U ? gpu_words[SOLVER.predecessors].words[4U * slot + point] : 0xFFFFFFFFU;
         if (predecessor != 0xFFFFFFFFU)
         {

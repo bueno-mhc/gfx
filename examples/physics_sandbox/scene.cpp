@@ -71,11 +71,14 @@ make_library() -> ShapeLibrary
 } // namespace
 
 Scene::Scene(PhysicsBackendKind backend,
-             physics::TaskScheduler& scheduler)
+             physics::TaskScheduler& scheduler,
+             const WorldFactory& make_world)
     : m_backend{backend}
     , m_shapes{make_library()}
-    , m_world{create_physics_world({.asynchronous_stepping = true, .task_scheduler = &scheduler, .debug_name = "sandbox"}, backend)}
 {
+    // Steps on the world's own thread, split over the scheduler's.
+    const PhysicsWorldDescription description{.asynchronous_stepping = true, .task_scheduler = &scheduler, .debug_name = "sandbox"};
+    m_world = make_world ? make_world(description, backend) : create_physics_world(description, backend);
 }
 
 Scene::~Scene()

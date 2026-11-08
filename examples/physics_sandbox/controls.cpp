@@ -582,7 +582,7 @@ ControlScript::observe(std::uint64_t frame,
                 return std::ranges::any_of(control.refusals(), [capability](const std::string& text) { return text.starts_with(capability); });
             };
             m_replaced = refused("CUSTOM_BROAD_PHASE") && refused("CUSTOM_INTEGRATOR") && settings.broad_phase == BroadPhaseChoice::BVH
-                         && settings.integrator == IntegratorKind::SEMI_IMPLICIT_EULER;
+                         && settings.integrator == world.integrator().kind();
             m_replacement_details = std::format("{} refusals, settings back to {} and {}", control.refusals().size(), broad_phase_choice_name(settings.broad_phase),
                                                 settings.integrator);
         }

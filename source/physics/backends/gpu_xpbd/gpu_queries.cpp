@@ -23,6 +23,7 @@ import gfx.physics.gpu_xpbd.shaders;
 import :resources;
 import :primitives;
 import :narrow_phase;
+import :bvh;
 import :solver;
 import :backend;
 
@@ -262,6 +263,163 @@ GpuXpbdBackend::query_results() noexcept -> std::span<const GpuQueryResult>
     std::memcpy(header.data(), bytes.data(), sizeof(header));
     const auto* results = reinterpret_cast<const GpuQueryResult*>(bytes.data() + RESULT_HEADER_BYTES);
     return {results, std::min(std::max(header[0], header[2]), GPU_XPBD_QUERY_PAIRS)};
+}
+
+// ===================================================================================================== the collider trees
+
+void
+GpuXpbdBackend::read_structure(std::vector<SpatialNode>& nodes)
+{
+    // The trees as queries see them: the moving tree rebuilt from the published poses unless the step left it so.
+    nodes.clear();
+    const std::scoped_lock lock{m_query_mutex};
+    if (m_submitted == 0)
+    {
+        return;
+    }
+    const GpuQueryLayout layout = m_solver.query_layout();
+    struct Tree
+    {
+        const GpuBvh* tree = nullptr;
+        std::uint32_t leaves = 0;
+        std::uint64_t offset = 0;
+    };
+    std::array<Tree, 2> trees{Tree{.tree = &m_solver.moving_tree(), .leaves = (layout.trees & 1U) != 0 ? layout.moving_count : 0U},
+                              Tree{.tree = &m_solver.static_tree(), .leaves = (layout.trees & 2U) != 0 ? layout.static_count : 0U}};
+    std::uint64_t bytes = 0;
+    for (Tree& tree : trees)
+    {
+        tree.offset = bytes;
+        bytes += tree.leaves > 0 ? sizeof(GpuBvhHeader) + std::uint64_t{2 * tree.leaves - 1} * sizeof(GpuBvhNode) : 0U;
+    }
+    if (bytes == 0)
+    {
+        return;
+    }
+
+    // Each tree's header and 2n − 1 nodes copied back.
+    m_structure_readback.reserve(m_device, bytes, m_retired);
+    m_query_pool->reset();
+    {
+        ComputeRecorder recorder{*m_query_commands};
+        recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
+        if (!m_query_tree_current)
+        {
+            m_solver.record_query_tree(recorder);
+        }
+        recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
+        for (const Tree& tree : trees)
+        {
+            if (tree.leaves == 0)
+            {
+                continue;
+            }
+            const std::array header{BufferCopyRegion{.destination_offset = tree.offset, .size = sizeof(GpuBvhHeader)}};
+            recorder.copy_buffer(tree.tree->header_buffer().handle(), m_structure_readback.buffer().handle(), header);
+            const std::array region{BufferCopyRegion{.destination_offset = tree.offset + sizeof(GpuBvhHeader),
+                                                     .size = std::uint64_t{2 * tree.leaves - 1} * sizeof(GpuBvhNode)}};
+            recorder.copy_buffer(tree.tree->node_buffer().handle(), m_structure_readback.buffer().handle(), region);
+        }
+        recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+    }
+    run_commands(m_query_commands.get());
+    m_query_tree_current = true;
+
+    // The moving tree's nodes, then the static tree's.
+    m_structure_readback.buffer().invalidate_mapped_range();
+    const std::span<std::byte> read = m_structure_readback.bytes();
+    for (const Tree& tree : trees)
+    {
+        if (tree.leaves == 0)
+        {
+            continue;
+        }
+        GpuBvhHeader header{};
+        std::memcpy(&header, read.data() + tree.offset, sizeof(header));
+        std::vector<GpuBvhNode> tree_nodes(2 * tree.leaves - 1);
+        std::memcpy(tree_nodes.data(), read.data() + tree.offset + sizeof(GpuBvhHeader), tree_nodes.size() * sizeof(GpuBvhNode));
+        structure_nodes(header, tree_nodes, nodes);
+    }
+}
+
+GpuBroadPhase::GpuBroadPhase(GpuXpbdBackend& backend) noexcept
+    : BroadPhase{PhysicsBackendKind::GPU_XPBD}
+    , m_backend{&backend}
+{
+}
+
+namespace
+{
+
+/// Refuses an operation of the backend's own broad phase, as the framework's description of one does.
+[[noreturn]] void
+refuse_broad_phase(std::string_view operation)
+{
+    throw_unsupported(PhysicsBackendKind::GPU_XPBD, operation, PhysicsCapability::CUSTOM_BROAD_PHASE,
+                      "the world runs the backend's own component, which cannot be driven from outside",
+                      "use the abstraction's component directly (gfx.physics.spatial, gfx.physics.narrow_phase), or a backend that takes components "
+                      "(PhysicsBackendKind::REFERENCE)");
+}
+
+} // namespace
+
+auto
+GpuBroadPhase::insert(ColliderHandle /*collider*/,
+                      const Aabb& /*box*/,
+                      const CollisionFilter& /*filter*/) -> SpatialProxyHandle
+{
+    refuse_broad_phase("BroadPhase::insert");
+}
+
+void
+GpuBroadPhase::remove(SpatialProxyHandle /*proxy*/)
+{
+    refuse_broad_phase("BroadPhase::remove");
+}
+
+auto
+GpuBroadPhase::move(SpatialProxyHandle /*proxy*/,
+                    const Aabb& /*box*/,
+                    Vector3 /*displacement*/) -> bool
+{
+    refuse_broad_phase("BroadPhase::move");
+}
+
+void
+GpuBroadPhase::set_filter(SpatialProxyHandle /*proxy*/,
+                          const CollisionFilter& /*filter*/)
+{
+    refuse_broad_phase("BroadPhase::set_filter");
+}
+
+void
+GpuBroadPhase::update(TaskScheduler* /*scheduler*/)
+{
+    refuse_broad_phase("BroadPhase::update");
+}
+
+auto
+GpuBroadPhase::pairs() const -> std::span<const BroadPhasePair>
+{
+    refuse_broad_phase("BroadPhase::pairs");
+}
+
+auto
+GpuBroadPhase::new_pairs() const -> std::span<const BroadPhasePair>
+{
+    refuse_broad_phase("BroadPhase::new_pairs");
+}
+
+auto
+GpuBroadPhase::ended_pairs() const -> std::span<const BroadPhasePair>
+{
+    refuse_broad_phase("BroadPhase::ended_pairs");
+}
+
+void
+GpuBroadPhase::structure_nodes(std::vector<SpatialNode>& nodes) const
+{
+    m_backend->read_structure(nodes);
 }
 
 // ===================================================================================================== the queries

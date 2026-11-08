@@ -86,8 +86,9 @@ void main()
             continue;
         }
         total_normal += normal_multipliers[point];
-        const vec3 lever_first = rotate_by(first.orientation, gpu_vectors[SOLVER.contacts].values[anchors].xyz);
-        const vec3 lever_second = rotate_by(second.orientation, gpu_vectors[SOLVER.contacts].values[anchors + 1U].xyz);
+        vec3 lever_first;
+        vec3 lever_second;
+        contact_levers(base, point, first, second, normal, lever_first, lever_second);
         const vec3 relative = (second.linear_velocity + cross(second.angular_velocity, lever_second)) -
                               (first.linear_velocity + cross(first.angular_velocity, lever_first));
         const float normal_speed = dot(relative, normal);
