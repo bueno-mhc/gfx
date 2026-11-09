@@ -1619,6 +1619,7 @@ its version, its license and what of it ends up in a program.
 | `GFX_PROFILER` | `ON` in Debug, `OFF` otherwise | The profiler records (`gfx::profiler`, `import gfx.profiler;`, the `PROFILE_*` macros of `<gfx/profiler.hpp>`); off, its macros compile to nothing. The `profile` preset (`python build.py --profile`, into `build/profile`) is a Release build with it on, for measurements |
 | `GFX_SIMD_INSTRUCTION_SET` | `SSE2` | The instruction set of the SIMD paths: `SSE2`, `AVX2` (with FMA) or `NATIVE` (`-march=native`) |
 | `GFX_BUILD_EXAMPLES` | `ON` | The examples (the windowed one and the UI editor need the platform library and Vulkan, the UI editor the UI library and its atlas tools too; the physics one needs the physics library) |
+| `GFX_BUILD_BENCHMARKS` | `ON` | The benchmarks (`benchmarks/`; `gfx_physics_benchmark` needs the physics library): a short smoke run in the default CTest runs, the benchmark itself (CTest label `benchmark`) only with `GFX_RUN_BENCHMARKS=1` in the environment — measure in the `profile` build |
 | `GFX_BUILD_TESTS` | `ON` | The tests, registered with CTest |
 | `GFX_TEST_TIMEOUT` | `300` | Seconds a test may run before CTest stops it and reports it as failed |
 | `GFX_TEST_GPU_SLOTS` | `8` | How many tests using a GPU CTest runs at once |

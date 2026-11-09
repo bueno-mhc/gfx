@@ -17,6 +17,7 @@ project(gfx
 
 option(GFX_BUILD_TESTS "Build the GoogleTest unit tests and register them with CTest" ON)
 option(GFX_BUILD_EXAMPLES "Build the examples (examples/; the windowed and UI ones need the platform library, the physics one the physics library)" ON)
+option(GFX_BUILD_BENCHMARKS "Build the benchmarks (benchmarks/; the physics one needs the physics library)" ON)
 option(GFX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
 # Backends. gfx::create_instance() throws a descriptive error for a backend that was not built.
@@ -80,4 +81,10 @@ endif()
 # After the tests: the examples' automated runs reuse what the tests found (the validation layers).
 if(GFX_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# The benchmarks (docs/profiler-performance-design.md, PF3): their CTest tests have the label "benchmark"; the long ones
+# run only when GFX_RUN_BENCHMARKS=1 is in the environment (skipped otherwise).
+if(GFX_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()

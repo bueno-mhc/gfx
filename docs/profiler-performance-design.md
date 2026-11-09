@@ -1,8 +1,8 @@
 # gfx: a profiler, and the GPU XPBD backend made as fast as Box3D or faster — architecture, decisions and plan
 
 Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
-built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). PF2 built (§B "PF2 as built"; 6
-deviations to validate). The numbers of §0.1 were
+built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). **PF2 accepted** with its 6
+deviations (§B "PF2 as built"). PF3 built (§B "PF3 as built"; 8 deviations to validate, a GPU defect found). The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -579,6 +579,104 @@ Results: Debug 1513 of 1513 (1093 s; 6 skipped), Release 1513 of 1513 (1039 s; 4
 yet `PhasesAreTimedOnTheGpuWithoutAProfiler` runs there: the phases come from the GPU timer in every build), profile: the
 68 profiler, GPU timer, profiling and decoupling tests (1 skipped: the compiled-out check), overhead 57.1 ns per scope and
 27.1 ns per counter.
+
+### PF3 as built (2026-11-09)
+
+**Target `gfx_physics_benchmark`** (`benchmarks/physics/`; option **`GFX_BUILD_BENCHMARKS`**, on; `benchmarks/CMakeLists.txt`):
+module `physics_benchmark.scenes` (scenes.cppm: the scenes, their quality checks), `benchmark.cpp` (options, the runner, the
+report, the baselines), `environment.cpp` behind std-free `environment.hpp` (a plain translation unit: the processor's
+brand string by cpuid, the operating system by `ver`, the power scheme by `powercfg /getactivescheme` — this laptop's ASUS
+"Silent" mode shows there). Arguments: `--scenes`, `--backends box3d,gpu_xpbd,reference` (default Box3D and the GPU
+backend), `--warm-up 100`, `--steps 1000`, `--threads 16`, `--scale 1`, `--gpu-device`, `--trace-frames 100`, `--output`,
+`--check-baseline <directory>`, `--record-baseline <directory>`, `--sleep`, `--note`, `--only-when-asked`; exit codes 0
+passed, 1 failed (a run, a quality check or a regression of a judged backend), 2 bad arguments, 77 not asked.
+
+**Scenes** (one function each, the same for every backend through `PhysicsWorld`; sleep off unless `--sleep`):
+`many_boxes` 50 000 boxes (0.8 m) resting on a floor 1.5 m apart; `pyramid` 29 370 boxes as a square pyramid (44 layers, a
+44 × 44 base, 1 cm gaps); `cloth` 316 × 316 = 99 856 particles falling 1 m onto a floor; `chain` 100 chains of 200 links held
+by rods, starting horizontal; `mixed` 10 000 boxes — 16 boxes of 1 m under the cloth, 9 984 beside it — and a cloth of
+224 × 224 = 50 176 particles falling 2 m onto them; `stress_constraints` a 10 × 10 × 10 lattice of balls, each held by rods
+to the next 100 in creation order (100 000 rods; 200 per ball) and its top layer hung from the world by 100 more;
+`two_worlds` two worlds of 25 000 resting boxes stepped one after the other (the GPU backend's on one device). **Quality
+checks** that hold at any moment of a run: every body finite and above y = −1 m; resting boxes within 25 % of their half
+height (+ 5 cm) of rest and upright; the pyramid's top box sunk less than 1 m; rods within 30 % of their length (chains and
+lattice; the report shows the worst); particles above −5 cm and below their start + 25 cm.
+
+**Runner**: per scene and backend, the world(s) with the shared `ThreadTaskScheduler` (16 threads); the GPU backend on the
+benchmark's own device (a Vulkan instance without validation layers, the physical device the graphics library selects or
+`--gpu-device`, a compute queue, 64-bit atomics when offered), shared by the worlds of a scene; creation and building
+timed, the first step timed apart, the warm-up, then the measured steps as profiler frames (`step()` wall clock taken
+around them); the report's GPU busy time, overlap and idle shares; **CPU work** = every thread's outermost scopes summed
+per frame (Box3D's tasks on the scheduler's threads included); Box3D's own step time (its counter); a **Chrome trace of the
+last 100 frames** per run (`<scene>_<backend>.json`); the quality checks. **`benchmark_report.md`** (generated): the
+environment, every measurement (mean, p50, p95, p99, maximum, CPU work, GPU busy, overlap, GPU idle, Box3D native, first
+step, quality), the GPU backend against Box3D (mean speed-up, target 1.25× from 10 000 bodies or particles or 100 000
+constraints, else 1×), and against the baseline.
+
+**Baselines**: `benchmarks/physics/baselines/baseline-<FNV-1a 64 of "processor | GPU driver | operating system">.tsv`
+(machine, settings — build, warm-up, steps, threads, scale, sleep —, date, then each scene and backend's p50, mean, p95,
+p99); compared only when the machine and the settings match; a median more than 5 % above the baseline's fails the run —
+**for gfx's own backends only** (the GPU and reference backends) and **only when it persists**: a median above the
+threshold is measured again (`--confirmations`, 2 by default) and the best run judged. **CTest**: `PhysicsBenchmark.Smoke` (label `example`, in
+the default runs: every scene at a hundredth of its size, 2 + 5 steps, on Box3D, the GPU backend and the reference backend)
+and `PhysicsBenchmark.Suite` (label `benchmark`; exit 77, skipped, unless `GFX_RUN_BENCHMARKS=1`; RUN_SERIAL, 2 hours;
+`--check-baseline` the source tree's baselines; report in `<build>/benchmarks/physics/suite/`).
+
+**Today's baseline** (recorded 2026-11-09 in the profile build: i9-14900HX, RTX 5060 Laptop driver 610.74.0, Windows
+10.0.26200, power scheme "Silent"; Box3D on 16 threads; sleep off; 100 + 1 000 steps; mean ms per step):
+
+| Scene | Box3D | GPU | Speed-up | Target | GPU busy | Quality |
+|---|---|---|---|---|---|---|
+| many_boxes | 22.04 | 41.27 | 0.53× | 1.25× | 7.3 | both pass |
+| pyramid | 103.26 | 88.57 | 1.17× | 1.25× | 38.3 | both pass (top box −1.5 / −8.1 cm) |
+| cloth | 83.61 | 23.30 | 3.59× | 1.25× | 11.4 | both pass |
+| chain | 12.19 | 16.17 | 0.75× | 1.25× | 3.8 | both pass (worst rod 21.0 / 16.2 %) |
+| mixed | 45.21 | — | — | 1.25× | — | **GPU fails** (below) |
+| stress_constraints | 67.58 | 26.99 | 2.50× | 1.25× | 11.6 | **Box3D fails** (below); GPU passes (16.6 %) |
+| two_worlds | 21.02 | 44.11 | 0.48× | 1.25× | 10.0 | both pass |
+
+The target is met on the cloth and the lattice only. Runs against this baseline with the same code moved the GPU's
+medians by −1.8 to +4.6 % — once +11.1 % (`two_worlds`) — and Box3D's by −10.6 to +6.2 %: hence Box3D is reported, not
+judged, and a suspected regression is measured again (checked: `many_boxes` on the GPU first +6.0 %, then +2.6 %, passed).
+Both runs reproduced the failures below identically.
+
+**Found by the benchmark.**
+1. **A GPU backend defect** (`mixed`): the boxes under the cloth are pushed into the floor — box 1 at y = −0.35 m by step
+   60, through it (−2 m) by step 120 — and once things fly apart the trees' pairs pass 2²⁴ (16 871 629 pairs, of which
+   42 986 kept: the trees' boxes all grow by the fastest motion of anything): the step still overflows after 4 replays and
+   throws. The framework's CPU XPBD (Box3D's world) holds the same scene. Hypothesis: a box of 1 m touches up to ~400
+   particles; beyond the 32 colors those contacts go to the Jacobi overflow set, whose mass splitting divides the box's
+   corrections among its touching contacts, and the floor's push loses to the particles'. **To fix before PF4** (proposed).
+2. **Box3D comes apart on `stress_constraints`**: by step 100 a ball is flung 10 m above the anchors, later rods are 4 756 to
+   7 774 % off their length; smaller lattices hold (0.04 % at 30 balls, 0.06 % at 100, 2 % at 300). The GPU backend holds the
+   full lattice (worst rod 16.6 %).
+3. **At rest the GPU backend is about twice as slow as Box3D** (`many_boxes`, `two_worlds`: 41–44 against 21–22 ms; the GPU
+   busy 7–10 ms): the CPU side and the framework, as PF2's traces showed.
+4. The first GPU world of a profile build took 36 s (the driver compiling every pipeline with a cold cache; 2.5 s warm):
+   PF4's shared pipelines and cache.
+
+**Deviations (for validation).**
+1. **Sleep off in every scene** (`--sleep` turns it on): the benchmark measures the simulation, not sleeping bodies (as
+   Box2D's benchmarks do); the request's sleep tuning is then measured apart.
+2. **`pyramid` is a square pyramid of 29 370 boxes**: the wall of 29 890 boxes of §0.1 topples sideways in three dimensions
+   within the run (and a box falling 244 m went through the floor on the GPU).
+3. **`stress_constraints` hangs from the world** (100 000 rods + 100 to the world, no floor): a lattice landing on a floor
+   pushed balls through it on both backends.
+4. **`mixed` puts 16 boxes under the cloth, the rest beside it**: the framework's CPU XPBD tests every particle against
+   every collider in the cloth's box; 10 000 boxes under it would take minutes per step in Box3D's world.
+5. **Only gfx's backends are judged** (failures and regressions); Box3D's are reported. **A regression must persist**: a
+   median above 5 % is measured again (2 more runs at most) and the best run judged.
+6. **The long run is skipped, not filtered out**: `PhysicsBenchmark.Suite` exits 77 unless `GFX_RUN_BENCHMARKS=1` (CTest has
+   no default label filter for plain `ctest` runs); the quick smoke run is in the default runs.
+7. **Files**: the scenes in one module, not a file each; the reference backend runs when asked (and in the smoke run);
+   rods in the chains and the lattice tolerate 30 % (the chains measured 16–21 % at the bottom of their swing).
+8. **The suite fails on this machine today** — the GPU's `mixed` (finding 1) — until that defect is fixed.
+
+Results: Debug and Release builds with every test: 1515 of 1515 in Debug (994 s); Release 1513 of 1515 (1017 s), the two
+others the benchmark's, not run because its executable failed to compile at the time (a helper declared before the type it
+used) — fixed, then `PhysicsBenchmark.Smoke` passes and `PhysicsBenchmark.Suite` is skipped (not asked) in Debug, Release
+and profile. Profile suite with `GFX_RUN_BENCHMARKS=1`: fails as expected on the GPU's `mixed` (finding 1); its gate, checked
+apart after the confirmation change, passes the other GPU scenes.
 
 ---
 

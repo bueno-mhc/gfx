@@ -1,0 +1,18 @@
+# gfx physics benchmark baseline (gfx_physics_benchmark --record-baseline): step() medians and means in milliseconds
+machine	Intel(R) Core(TM) i9-14900HX | NVIDIA GeForce RTX 5060 Laptop GPU 610.74.0 | Microsoft Windows [versão 10.0.26200.9711]
+settings	optimized build, profiler on; warm-up 100, steps 1000, threads 16, scale 1, sleep off
+recorded	2026-11-09 02:45 UTC
+scene	backend	p50	mean	p95	p99
+many_boxes	box3d	21.1863	22.0384	27.1228	34.6518
+many_boxes	gpu_xpbd	39.9523	41.2664	53.4282	55.7164
+pyramid	box3d	101.7072	103.2646	111.2778	145.9080
+pyramid	gpu_xpbd	88.4029	88.5738	93.6209	95.9511
+cloth	box3d	84.3593	83.6148	87.6579	89.1465
+cloth	gpu_xpbd	22.9620	23.3015	26.2259	27.6508
+chain	box3d	11.8329	12.1928	15.8052	17.9125
+chain	gpu_xpbd	15.7419	16.1676	19.8296	20.7232
+mixed	box3d	44.5843	45.2065	50.3535	60.1003
+stress_constraints	box3d	64.0494	67.5822	88.9037	92.2888
+stress_constraints	gpu_xpbd	26.7306	26.9926	29.6247	36.2076
+two_worlds	box3d	20.5060	21.0175	26.4872	30.7749
+two_worlds	gpu_xpbd	41.4698	44.1129	55.0037	57.4067
