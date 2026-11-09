@@ -1,7 +1,8 @@
 # gfx: a profiler, and the GPU XPBD backend made as fast as Box3D or faster — architecture, decisions and plan
 
 Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
-built"; committed 73cae0d). PF1 built (§B "PF1 as built"; 6 deviations to validate). The numbers of §0.1 were
+built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). PF2 built (§B "PF2 as built"; 6
+deviations to validate). The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -35,7 +36,7 @@ of 16 threads on the Intel Core i9-14900HX, 24 cores and 32 threads), Release bu
 | 50 000 boxes, the same | 36.8 | 25.3–30.7 | 13–15 | 1.8 | 0.8 | 2.9–5.8 | 3.6–4.1 | 631 / 638 |
 | a two-dimensional pyramid of 29 890 boxes (base 244) | 64.6 | 41.9–47.6 | 11.5 | 1.1 | 1.1 | 15.3 (solver 12.2 on the GPU) | 13.0 | 805 / 812 |
 | 100 chains of 200 links held by rods (20 000 joints) | 13.6 | 12.1–14.8 | 6.2 | 2.1 | 0.8 | 2.6 | 0.4 | 735 / 634 |
-| a cloth of 316 × 316 particles (99 856) falling onto a floor | 16.9 (the framework's CPU XPBD) | 20.3–20.8 | ≈ 0 | 5.7 | 4.2 | 11.6 | 0.3 | 747 / 754 |
+| a cloth of 316 × 316 particles (99 856) falling onto a floor | 16.9 (the framework's CPU XPBD; measured falling — landed: 77, PF2's traces) | 20.3–20.8 (landed: 22) | ≈ 0 | 5.7 | 4.2 | 11.6 | 0.3 | 747 / 754 |
 
 Box3D's own broad phase, narrow phase and solver (its profile) take 4.2 of its 36.8 ms at 50 000 boxes, 14.0 of 64.6 ms
 in the pyramid and 3.3 of 13.6 ms in the chains: the rest is our Box3D wrapper's capture of states and contacts and the
@@ -470,6 +471,114 @@ and the fake device without timestamps). Measured on the way: a 32 MiB fill take
 Intel GPU (validation layers). Results: Debug 1497 of 1497 (965 s; then the estimate's change and its test, 17 of 17 GPU timer
 tests), Release 1499 of 1499 (914 s), profile: profiler tests 27 + 1 skipped, GPU timer tests 17, compile-out check; overhead
 54.2 ns per scope, 26.5 ns per counter.
+
+### PF2 as built (2026-11-08)
+
+**Profiler additions.** `GpuScopeTiming` {WHEN_RECORDED, ALWAYS}: a scope timed whether or not a profiler records it (the
+GPU backend's phases, read back into `StepStatistics::phase_seconds` in every build). `GpuTimer::begin_scope()` /
+`end_scope()` (a `GpuScopeToken`) for scopes that do not follow a block, `scope(recorder, site, timing)`,
+**`finish_frame()`** (reads the frame just completed: `latest()` gives it, a collecting profiler gets it at its next
+`end_frame()`), `latest(vector&)`; resolved scopes are kept for a profiler only while it records. **GPU sources and
+profilers know each other** (a library mutex for the links, a mutex per profiler for its sources; add and remove from any
+thread): whichever is destroyed first ends the link (`GpuTimingSource::detach()`, called first by `GpuTimer`'s destructor),
+`attached_to(profiler)`, and **`attach_to_current_profiler(source)`** (adds the source to the current profiler unless it is
+added already). **Stage coverage**: `StageCoverageKind` {RECORDED, FUSED_IN, ABSENT}, `StageCoverage` {stage, kind, site,
+reason} and `missing_stages(trace, stages)` (in `:report`). The header's macros take their category from
+`GFX_PROFILE_CATEGORY` when a translation unit defines it before including the header (physics units: PHYSICS); the GPU
+macros were given back their line continuations.
+
+**The framework** (`gfx::physics_components` links `gfx::profiler`): scopes "World: step", "run the step", "apply the
+edits to the records", "backend apply", "backend simulate", "soft bodies", "update the bounds", "wait for the step",
+"publish", "copy the records", "copy the events and contacts", "update the query tree"; counters (edits, rigid bodies,
+awake bodies, joints, soft bodies, candidate pairs, contact points, touching pairs, contact events); the world's thread is
+named "physics world", the `ThreadTaskScheduler`'s workers "physics task N"; the CPU soft-body solver's sub-steps
+("Soft bodies (CPU): predict, colored constraints, tethers and pins, contacts, self-collision, velocities"). **Box3D**:
+"Box3D: apply the edits", "b3World_Step", "capture the bodies / contacts / triggers / joints", a scope per Box3D task, and
+Box3D's own profile and counters as counters ("Box3D: step (ms)", pairs, collide, solve, solver set-up, constraints, sleep
+islands, refit; contacts, awake contacts, islands, tasks). **Reference backend**: a scope per stage (edits, bodies, broad
+phase, narrow phase, islands, solver set-up, each sub-step with its integration and solve, results, sleep, events) and
+counters.
+
+**The GPU backend**: the **`StepTimer` is gone**: the step records into a `GpuTimer` (2 frames in flight,
+`GPU_XPBD_TIMED_SCOPES` 2 048 scopes, replacing `GPU_XPBD_TIMESTAMPS`) through a `PhaseTimer` (the phases "GPU XPBD:
+broad phase / narrow phase / solver / soft bodies / events" as ALWAYS scopes, marked as the StepTimer marked them) and a
+`PassTimer` per component (`set_timer()` on `GpuPrimitives`, `GpuBvh` and `GpuNarrowPhase`, exported; the solver's and the
+soft bodies' internal): a GPU scope per primitive and radix pass, per tree build, pair search and pass inside them, per
+narrow-phase pass, per group of solver passes (islands, graph, coloring, one per position, velocity and soft iteration —
+not per color), per readback. At each step the backend attaches its timer to the current profiler. CPU scopes "GPU XPBD:
+apply the edits", "update the soft bodies / colliders / joints", "record the step", "submit", "wait for the GPU", "read
+the bodies back", "contacts and their events", "trigger events", "report the contacts again", "query"; counters from the
+command buffer (dispatches, barriers, transfers) and from `GpuSolverCounts` (tree pairs, candidates, manifold slots,
+contact constraints and points, constraints, colors, overflow constraints, touching contacts and points, trigger
+overlaps), a marker per replay. **`gpu_xpbd::stage_coverage()`** (exported): 81 stages of §A5 and the phases, each
+RECORDED by a site, FUSED_IN a site with the reason (the common-prefix search and split in `bvh_hierarchy`, leaf boxes in
+`bvh_bounds`, GJK, EPA and feature identifiers in `narrow_phase_collide`, joint and contact projections and contact
+velocities by color in their iteration's scope) or ABSENT with the reason (descriptor-arena reset: bindless; treelets: 0
+rounds by default; refit: rebuilt each step; compliance warm start: multipliers reset each substep, GPU XPBD answer D8).
+
+**Deviations (for validation).**
+1. **GPU timings reach a profiler by the source attaching itself** (`attach_to_current_profiler()`, called by the GPU
+   backend at each step) rather than the application adding the backend's timer to its session: the physics interface
+   has no place to hand a timer out, and the two-way links make either order of destruction safe.
+2. **GJK and EPA iterations are not counted**: counting them means atomics in the narrow-phase kernel; their stages are
+   FUSED_IN `narrow_phase_collide` with the reason. Counted when the narrow phase becomes a cost worth optimizing.
+3. **Counters not recorded yet**: soft constraints per color, BVH nodes and depth (a header readback), refit or rebuild
+   (always rebuild today), workgroups dispatched, bytes per array (the traffic model of §A5). They come with the
+   optimizations that need them (PF4/PF5: incremental layouts, BVH_REFIT, fusion).
+4. **The solve is timed per iteration** (position, velocity, soft), not per color, as §A5 planned.
+5. **Two sites share a name** ("jacobi_gather" after the position and after the velocity iterations): reports keep them
+   apart by site (file and line), traces show the scope around each.
+6. **Exported API added**: `set_timer()` on the three exported GPU components and `gpu_xpbd::stage_coverage()`.
+
+**Tests.** `gfx_profiler_tests` + 1 (sources and profilers leave each other whichever goes first, attaching once, by hand
+and to the current profiler); `gfx_profiler_graphics_tests` + 2 (a scope timed ALWAYS around one that is not, tokens,
+`finish_frame()`, on both GPUs); new **`gfx_physics_profiling_tests`** (3: the reference backend's and Box3D's traces of a
+scene of every object kind — boxes, joints, a cloth, a trigger — cover the framework's stages and theirs, counters and
+named task threads; `missing_stages()` names what is missing); `gfx_physics_gpu_xpbd_tests` + 8 (`GpuXpbdProfilingTest` on
+both GPUs with the validation layers: the trace covers every stage of `stage_coverage()` and the framework's, every GPU
+scope timed, none dropped, counters; every GPU scope inside its submission on the CPU's timeline; the same steps give the
+same canonical trace; the phases timed without a profiler, in every build). The scene's cloth has 66 × 66 particles for
+the GPU test: below 4 096 keys the sorts take the rank sort, and the radix passes would be missing (the rank sort is a
+stage too).
+
+**Traces of the §0.1 scenes** (`profile` build, Release with the profiler; a temporary program, kept in the session's
+scratchpad, removed from the tree; Box3D on 16 scheduler threads; GPU on the RTX 5060; 20 warm-up and 40 traced steps;
+milliseconds per step, means):
+
+| Scene | Box3D `step()` | GPU `step()` | Framework (bounds + publish; of which the query tree) | Box3D: `b3World_Step` / capture of contacts | GPU: CPU side (layouts + recording + readback + events) / wait / GPU busy |
+|---|---|---|---|---|---|
+| 10 000 boxes | 7.34 | 7.37 | 2.6–2.7 (1.9) | 3.2 / 1.2 | 2.3 / 2.4 / 2.1 |
+| 50 000 boxes | 37.97 | 37.19 | 16.6–17.2 (11.5–12.1) | 8.9 / 10.6 | 13.7 / 6.3 / 5.0 |
+| pyramid, 29 890 boxes | 48.93 | 44.37 | 11.1–12.6 (7.5–7.7) | 12.6 / 24.0 | 15.3 / 16.1 / 15.3 |
+| 100 chains × 200 links | 12.43 | 13.74 | 6.5–6.6 (5.2–5.3) | 4.5 / — (joints 0.8) | 3.9 / 3.1 / 2.4 |
+| cloth, 99 856 particles | 68.24 | 21.20 | 0.3 | — (framework CPU XPBD 67.9) | 9.7 / 11.0 / 10.7 |
+
+What the traces show:
+- **The framework is the largest single cost at 50 000 bodies**: 17 ms of a 37–38 ms step on both backends, **the query
+  tree 70 % of it** (every moved collider's proxy updated at every publish), then the bounds (2.9 ms) and the copies of
+  records (1.5 ms). §0.1 guessed this split; it is now measured.
+- **Contacts and events on the CPU**: the GPU backend's 8.5 ms (50 000 boxes) and 11.9 ms (pyramid); Box3D's wrapper
+  pays the same kind of cost capturing contacts — 10.6 and 24.0 ms, more than `b3World_Step` itself in the pyramid.
+- **The GPU is idle 49–86 % of a GPU step** (overlap 0.14–0.51): the stepping thread waits for the GPU about 0.3–1.3 ms
+  longer than the GPU works, and does the rest of the step around it.
+- **The GPU's own time goes to the solve**: velocity iterations (8 per substep) cost about twice the position iterations
+  (3 per substep): 1.6 against 0.8 ms at 50 000 boxes, 7.6 against 4.1 ms in the pyramid; the broad and narrow phases
+  0.3–1.9 and 0.2–1.1 ms; the events phase and the readback copies 0.3–2.0 ms together.
+- **Per-step layouts**: colliders 2.1 ms at 50 000 boxes and 4.0 ms for the cloth's particle colliders, soft bodies 1.5 ms,
+  joints 1.6 ms for 20 000 joints; recording 0.6–3.9 ms.
+- **Correction to §0.1**: the cloth's 16.9 ms for "Box3D" (the framework's CPU XPBD) was measured while the cloth fell; on
+  the floor each of its particles meets the floor every sub-step and a step takes 77 ms (the trace shows 15–19 ms per
+  step falling, 75–84 ms landed; "Soft bodies (CPU): contacts" 50 ms per step on average over the traced steps). The GPU
+  backend's cloth takes 14.5 ms falling
+  and 22 ms landed: **3.5 times faster than Box3D's world once landed**.
+- Comparison through `step()` today: a tie at 10 000 and 50 000 boxes, GPU 1.10× faster in the pyramid, 0.90× in the
+  chains, 3.2× on the cloth (means over the traced steps; this laptop's clocks move such numbers by 10–25 % run to run:
+  Box3D's 10 000 boxes took 5.9 ms in §0.1, its pyramid 64.6 ms).
+
+Results: Debug 1513 of 1513 (1093 s; 6 skipped), Release 1513 of 1513 (1039 s; 44 skipped — the profiler is compiled out,
+yet `PhasesAreTimedOnTheGpuWithoutAProfiler` runs there: the phases come from the GPU timer in every build), profile: the
+68 profiler, GPU timer, profiling and decoupling tests (1 skipped: the compiled-out check), overhead 57.1 ns per scope and
+27.1 ns per counter.
 
 ---
 

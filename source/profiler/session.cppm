@@ -108,10 +108,13 @@ public:
     void remove_sink(SinkHandle sink);
 
     /// @brief Collects GPU timings from @p source at each end_frame() from now on (and waits for its last ones at
-    ///        finalize_session()). @p source must stay alive until removed (or until the profiler is destroyed).
+    ///        finalize_session()), until it is removed or either is destroyed (each removes itself from the other).
+    ///        May be called from any thread.
+    /// @throws ProfilerError if @p source is added already.
     auto add_gpu_source(GpuTimingSource& source) -> GpuSourceHandle;
 
-    /// @brief Stops collecting from a source (what it resolved and was not collected is not).
+    /// @brief Stops collecting from a source (what it resolved and was not collected is not). May be called from any
+    ///        thread.
     /// @throws ProfilerError if @p source is not one of this profiler's.
     void remove_gpu_source(GpuSourceHandle source);
 

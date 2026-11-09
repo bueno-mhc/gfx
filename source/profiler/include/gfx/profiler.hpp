@@ -17,6 +17,9 @@
 //       PROFILE_ASYNC_END("submission", token);
 //   }
 //
+// The category of the macros that name none is GENERAL, or GFX_PROFILE_CATEGORY when a translation unit defines it
+// before including this header (a library's units: `#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS`).
+//
 // GPU scopes (`import gfx.profiler.graphics;` for the GpuTimer, or any GpuTimingProvider):
 //
 //   PROFILE_GPU_SCOPE("broad phase", recorder, timer);         // timestamps around the block's commands
@@ -39,6 +42,10 @@
 #define GFX_PROFILE_JOIN(first, second) GFX_PROFILE_JOIN_IMPLEMENTATION(first, second)
 #define GFX_PROFILE_SITE_NAME(unique) GFX_PROFILE_JOIN(gfx_profile_site_, unique)
 
+#ifndef GFX_PROFILE_CATEGORY
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::GENERAL
+#endif
+
 #if GFX_PROFILER_ENABLED
 
 // A site and a scope sharing one unique number.
@@ -47,22 +54,22 @@
     const ::gfx::profiler::ProfileScope GFX_PROFILE_JOIN(gfx_profile_scope_, unique){GFX_PROFILE_SITE_NAME(unique)}
 
 #define GFX_PROFILE_FUNCTION_AT(unique)                                                                                     \
-    static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique) = ::gfx::profiler::ProfileSite::function(); \
+    static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique) = ::gfx::profiler::ProfileSite::function(GFX_PROFILE_CATEGORY); \
     const ::gfx::profiler::ProfileScope GFX_PROFILE_JOIN(gfx_profile_scope_, unique){GFX_PROFILE_SITE_NAME(unique)}
 
 #define GFX_PROFILE_NAMED_SCOPE_AT(unique, variable, name)                                                                  \
-    static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name};                                \
+    static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name, GFX_PROFILE_CATEGORY};          \
     ::gfx::profiler::ProfileScope variable{GFX_PROFILE_SITE_NAME(unique)}
 
 #define GFX_PROFILE_RECORD_AT(unique, name, call)                                                                           \
     do                                                                                                                      \
     {                                                                                                                       \
-        static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name};                            \
+        static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name, GFX_PROFILE_CATEGORY};      \
         call;                                                                                                               \
     } while (false)
 
 #define PROFILE_SCOPE_CATEGORY(name, category) GFX_PROFILE_SCOPE_AT(__COUNTER__, name, category)
-#define PROFILE_SCOPE(name) PROFILE_SCOPE_CATEGORY(name, ::gfx::profiler::ProfilerCategory::GENERAL)
+#define PROFILE_SCOPE(name) PROFILE_SCOPE_CATEGORY(name, GFX_PROFILE_CATEGORY)
 #define PROFILE_FUNCTION() GFX_PROFILE_FUNCTION_AT(__COUNTER__)
 #define PROFILE_NAMED_SCOPE(variable, name) GFX_PROFILE_NAMED_SCOPE_AT(__COUNTER__, variable, name)
 
@@ -79,10 +86,17 @@
 #define GFX_PROFILE_ASYNC_END_AT(unique, name, token)                                                                       \
     GFX_PROFILE_RECORD_AT(unique, name, ::gfx::profiler::record_async_end(GFX_PROFILE_SITE_NAME(unique), static_cast<unsigned long long>(token)))
 
-#define GFX_PROFILE_GPU_SCOPE_AT(unique, name, recorder, provider)                                                             static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name, ::gfx::profiler::ProfilerCategory::GPU};     const auto GFX_PROFILE_JOIN(gfx_profile_gpu_scope_, unique) = (provider).scope(recorder, GFX_PROFILE_SITE_NAME(unique))
+#define GFX_PROFILE_GPU_SCOPE_AT(unique, name, recorder, provider)                                                          \
+    static constinit const ::gfx::profiler::ProfileSite GFX_PROFILE_SITE_NAME(unique){name, ::gfx::profiler::ProfilerCategory::GPU}; \
+    const auto GFX_PROFILE_JOIN(gfx_profile_gpu_scope_, unique) = (provider).scope(recorder, GFX_PROFILE_SITE_NAME(unique))
 
 #define PROFILE_GPU_SCOPE(name, recorder, provider) GFX_PROFILE_GPU_SCOPE_AT(__COUNTER__, name, recorder, provider)
-#define PROFILE_DISPATCH(name, recorder, provider, ...)                                                                        do                                                                                                                          {                                                                                                                               PROFILE_GPU_SCOPE(name, recorder, provider);                                                                                (recorder).dispatch(__VA_ARGS__);                                                                                       } while (false)
+#define PROFILE_DISPATCH(name, recorder, provider, ...)                                                                     \
+    do                                                                                                                      \
+    {                                                                                                                       \
+        PROFILE_GPU_SCOPE(name, recorder, provider);                                                                        \
+        (recorder).dispatch(__VA_ARGS__);                                                                                   \
+    } while (false)
 
 #define PROFILE_COUNTER(name, value) GFX_PROFILE_COUNTER_AT(__COUNTER__, name, value)
 #define PROFILE_COUNTER_FLOAT(name, value) GFX_PROFILE_COUNTER_FLOAT_AT(__COUNTER__, name, value)

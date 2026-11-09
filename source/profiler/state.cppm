@@ -202,6 +202,7 @@ struct Profiler::Implementation : private HandleIssuer
     std::atomic<std::uint32_t> recording_categories{0}; // what its recording session records (0: none)
     std::vector<SinkEntry> sinks{};
     std::uint32_t sink_generation{0};
+    std::mutex sources_mutex{};                         // guards gpu_sources (after the library's link mutex)
     std::vector<GpuSourceEntry> gpu_sources{};
     std::uint32_t gpu_source_generation{0};
     std::vector<GpuScopeRecord> collected_gpu{};        // reused by collect_gpu()

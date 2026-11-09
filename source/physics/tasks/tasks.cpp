@@ -1,8 +1,10 @@
 // The library's task schedulers: inline, and a pool of std::jthread workers that take ranges with an atomic counter
-// while the caller takes some too and then waits for the last range, and that run started work from a queue.
+// while the caller takes some too and then waits for the last range, and that run started work from a queue. Workers are
+// named in profiler traces ("physics task 1" ...).
 module gfx.physics.tasks;
 
 import std;
+import gfx.profiler;
 
 namespace gfx::physics
 {
@@ -171,7 +173,10 @@ ThreadTaskScheduler::ThreadTaskScheduler(std::uint32_t threads)
     m_state->threads = std::max(1U, threads);
     for (std::uint32_t index = 1; index < m_state->threads; ++index)
     {
-        m_state->workers.emplace_back([state = m_state.get()](const std::stop_token& stop) { state->worker(stop); });
+        m_state->workers.emplace_back([state = m_state.get(), index](const std::stop_token& stop) {
+            profiler::set_thread_name(std::format("physics task {}", index));
+            state->worker(stop);
+        });
     }
 }
 

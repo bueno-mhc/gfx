@@ -1,6 +1,13 @@
 // GpuSoftBodies: the particles' arrays (state uploaded whole when the soft bodies change, kept by the GPU between steps,
-// backed up for replays), the soft bodies' settings and their constraints by color, and the passes of a substep.
+// backed up for replays), the soft bodies' settings and their constraints by color, and the passes of a substep (a GPU
+// scope each: PROFILE_GPU_SCOPE through set_timer()'s timer).
+module;
+
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
+
+import gfx.profiler;
 
 import std;
 import gfx.enums;
@@ -71,6 +78,8 @@ struct GpuSoftBodies::State
     GpuArray multipliers{"GPU physics: soft constraint multipliers", sizeof(float)};
     GpuArray position_backup{"GPU physics: particle position backup", sizeof(GpuVector)};
     GpuArray velocity_backup{"GPU physics: particle velocity backup", sizeof(GpuVector)};
+
+    PassTimer passes{}; ///< What its passes are timed through.
 };
 
 GpuSoftBodies::GpuSoftBodies(Device& device)
@@ -79,6 +88,12 @@ GpuSoftBodies::GpuSoftBodies(Device& device)
 }
 
 GpuSoftBodies::~GpuSoftBodies() = default;
+
+void
+GpuSoftBodies::set_timer(profiler::GpuTimer* timer) noexcept
+{
+    m_state->passes.set(timer);
+}
 
 void
 GpuSoftBodies::set_state(std::span<const GpuVector> positions,
@@ -222,6 +237,7 @@ GpuSoftBodies::record_integrate(ComputeRecorder& recorder,
     const State& state = *m_state;
     if (state.particle_count > 0)
     {
+        PROFILE_GPU_SCOPE("particle_integrate", recorder, state.passes);
         record_pass(recorder, *state.integrate, step_parameters, workgroups(state.particle_count));
     }
 }
@@ -237,6 +253,7 @@ GpuSoftBodies::record_iteration(ComputeRecorder& recorder,
     {
         return;
     }
+    PROFILE_GPU_SCOPE("soft_solve iteration", recorder, state.passes);
     for (std::size_t color = 0; color + 1 < state.color_starts.size(); ++color)
     {
         const std::uint32_t first = state.color_starts[color];
@@ -263,6 +280,7 @@ GpuSoftBodies::record_velocity_update(ComputeRecorder& recorder,
     const State& state = *m_state;
     if (state.particle_count > 0)
     {
+        PROFILE_GPU_SCOPE("particle_velocity_update", recorder, state.passes);
         record_pass(recorder, *state.velocity_update, step_parameters, workgroups(state.particle_count));
     }
 }

@@ -171,8 +171,9 @@ target_sources(gfx_physics_components
         debug_draw/debug_draw.cpp)
 
 target_compile_features(gfx_physics_components PUBLIC cxx_std_23)
+# The framework times its steps with the profiler (gfx::profiler depends on gfx::core only).
 target_link_libraries(gfx_physics_components
-    PUBLIC gfx::physics_common
+    PUBLIC gfx::physics_common gfx::profiler
     PRIVATE gfx::project_options gfx::simde)
 gfx_require_decoupled(gfx_physics_components FORBIDDEN ${GFX_PHYSICS_FORBIDDEN_DEPENDENCIES} gfx_camera)
 
@@ -216,8 +217,10 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
             backends/gpu_xpbd/gpu_queries.cpp
             backends/gpu_xpbd/gpu_xpbd_world.cpp)
     target_compile_features(gfx_physics_gpu_xpbd PUBLIC cxx_std_23)
+    # Its GPU passes are timed through gfx::profiler_graphics (a GpuTimer: the step's phases always, the passes while a
+    # profiler records them).
     target_link_libraries(gfx_physics_gpu_xpbd
-        PUBLIC gfx::physics_components gfx::graphics
+        PUBLIC gfx::physics_components gfx::graphics gfx::profiler_graphics
         PRIVATE gfx::project_options)
     gfx_add_shaders(gfx_physics_gpu_xpbd
         MODULE gfx.physics.gpu_xpbd.shaders

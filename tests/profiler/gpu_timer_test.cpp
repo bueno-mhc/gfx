@@ -328,6 +328,46 @@ TEST_P(GpuTimerTest, GpuMacrosTimeThroughTheTimer)
     EXPECT_EQ(trace.frames()[0].gpu_scopes[0].status, GpuScopeStatus::TIMED);
 }
 
+TEST_P(GpuTimerTest, ScopesTimedAlwaysAreReadWhenTheFrameFinishes)
+{
+    // A timer no profiler collects from: only the scope timed ALWAYS gets timestamps (begun and ended by tokens, around
+    // scopes that are not); finish_frame() reads the frame just completed into latest().
+    GpuTimer timer{*m_device, {.queue = QueueType::COMPUTE, .frames_in_flight = 2}};
+    std::unique_ptr<CommandPool> pool = m_device->create_command_pool({.queue_type = QueueType::COMPUTE, .debug_name = "always"});
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        pool->reset();
+        std::unique_ptr<CommandBuffer> commands = pool->allocate(CommandBufferLevel::PRIMARY, "always");
+        {
+            ComputeRecorder recorder{*commands};
+            timer.begin_frame(recorder);
+            const GpuScopeToken outer = timer.begin_scope(recorder, OUTER_SITE, GpuScopeTiming::ALWAYS);
+            {
+                const auto fill = timer.scope(recorder, FILL_SITE);
+                recorder.fill_buffer(m_source->handle(), 0, BYTES, 1U);
+            }
+            timer.end_scope(recorder, outer);
+        }
+        const std::int64_t before = steady_now();
+        submit_and_wait(m_device->queue(QueueType::COMPUTE), commands->handle());
+        const std::int64_t after = steady_now();
+        timer.finish_frame();
+        const std::vector<GpuScopeRecord> latest = timer.latest();
+        ASSERT_EQ(latest.size(), 1U);
+        EXPECT_EQ(latest[0].site, &OUTER_SITE);
+        EXPECT_EQ(latest[0].status, GpuScopeStatus::TIMED);
+        EXPECT_EQ(latest[0].query, 0U);
+        const std::int64_t margin = timer.alignment_deviation().count() + 200'000;
+        EXPECT_GE(latest[0].begin, before - margin);
+        EXPECT_LE(latest[0].end, after + margin);
+    }
+
+    // Nothing kept for a profiler (none collects): a collection finds only what it waits for, the current frame read.
+    std::vector<GpuScopeRecord> collected;
+    timer.collect(collected, false);
+    EXPECT_TRUE(collected.empty());
+}
+
 INSTANTIATE_TEST_SUITE_P(Gpu,
                          GpuTimerTest,
                          testing::ValuesIn(timed_physical_devices()),

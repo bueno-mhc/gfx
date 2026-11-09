@@ -1,6 +1,13 @@
+// The reference backend's world: edits, the step (its stages are profiler scopes, "Reference: ..."), what it reports.
+module;
+
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.backends.reference;
 
 import std;
+import gfx.profiler;
 import gfx.core.errors;
 import gfx.core.handles;
 import gfx.core.math;
@@ -520,6 +527,7 @@ void
 ReferenceBackend::apply(std::span<const WorldEdit> edits,
                         WorldSnapshot& pending)
 {
+    PROFILE_SCOPE("Reference: apply the edits");
     m_last_pending = &pending;
     const EditApplier applier{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
@@ -547,6 +555,7 @@ ReferenceBackend::simulate(float seconds,
     // ------------------------------------------------------------------------------------------------ the bodies
     // Bodies an edit woke are awake; each body as the solver sees it (asleep and static ones do not move); the awake
     // dynamic ones take their impulses now, their forces and gravity at each sub-step through the integrator.
+    PROFILE_NAMED_SCOPE(bodies_scope, "Reference: bodies");
     m_solver_bodies.assign(body_count, SolverBody{});
     m_body_forces.assign(body_count, Vector3{});
     m_body_torques.assign(body_count, Vector3{});
@@ -600,6 +609,8 @@ ReferenceBackend::simulate(float seconds,
     // ------------------------------------------------------------------------------------------------ contacts
     // The bodies that may not collide; the colliders' boxes (stretched by the motion of continuous bodies); the broad
     // phase's pairs; their manifolds.
+    bodies_scope.end();
+    PROFILE_NAMED_SCOPE(broad_phase_scope, "Reference: broad phase");
     m_joined.clear();
     for (const JointRecord& joint : pending.joints)
     {
@@ -642,13 +653,18 @@ ReferenceBackend::simulate(float seconds,
         (void)m_broad_phase->move(entry.proxy, box, displacement);
     }
     m_broad_phase->update(m_scheduler);
+    broad_phase_scope.end();
     const Clock::time_point broad = Clock::now();
-    find_contacts(seconds, pending);
+    {
+        PROFILE_SCOPE("Reference: narrow phase");
+        find_contacts(seconds, pending);
+    }
     const Clock::time_point narrow = Clock::now();
 
     // ------------------------------------------------------------------------------------------------ islands
     // Bodies joined by contacts, joints or constraints (dynamic ones only: static and kinematic bodies do not join
     // islands); an island with an awake body (or touching a moving kinematic one) is awake as a whole.
+    PROFILE_NAMED_SCOPE(islands_scope, "Reference: islands");
     m_islands.resize(body_count);
     std::ranges::iota(m_islands, 0U);
     m_island_awake.assign(body_count, 0);
@@ -727,6 +743,8 @@ ReferenceBackend::simulate(float seconds,
 
     // ------------------------------------------------------------------------------------------------ the solver
     // Contacts of a pair with a moving body, with the pair's materials; joints and constraints that hold a moving body.
+    islands_scope.end();
+    PROFILE_NAMED_SCOPE(set_up_scope, "Reference: solver set-up");
     m_solver_contacts.clear();
     m_contact_manifolds.clear();
     for (std::uint32_t index = 0; index < m_manifolds.size(); ++index)
@@ -830,9 +848,12 @@ ReferenceBackend::simulate(float seconds,
             geometry.second[point] = rotate(conjugate(second.orientation), core_second - second.center);
         }
     }
+    set_up_scope.end();
     for (std::uint32_t sub_step = 0; sub_step < sub_steps; ++sub_step)
     {
         // Forces and gravity, torques, damping.
+        PROFILE_SCOPE("Reference: sub-step");
+        PROFILE_NAMED_SCOPE(integrate_scope, "Reference: integrate");
         m_integrated.clear();
         m_centers.clear();
         m_velocities.clear();
@@ -870,6 +891,8 @@ ReferenceBackend::simulate(float seconds,
         }
 
         // The contacts' points where their bodies now are (the first sub-step's are the narrow phase's).
+        integrate_scope.end();
+        PROFILE_NAMED_SCOPE(solve_scope, "Reference: solve");
         if (sub_step > 0)
         {
             for (std::size_t index = 0; index < m_solver_contacts.size(); ++index)
@@ -893,6 +916,7 @@ ReferenceBackend::simulate(float seconds,
             {.seconds = sub_seconds, .settings = world.solver, .bodies = m_solver_bodies, .contacts = m_solver_contacts, .joints = m_solver_joints, .scheduler = m_scheduler});
 
         // The pairs the solver pushed apart in this sub-step touched in the step, even if they parted by its end.
+        solve_scope.end();
         for (std::size_t index = 0; index < m_solver_contacts.size(); ++index)
         {
             const ContactManifold& manifold = m_solver_contacts[index].manifold;
@@ -917,6 +941,7 @@ ReferenceBackend::simulate(float seconds,
 
     // ------------------------------------------------------------------------------------------------ results
     // The moving bodies' poses and velocities (of their frames' origins).
+    PROFILE_NAMED_SCOPE(results_scope, "Reference: results");
     for (std::uint32_t slot_index = 0; slot_index < body_count; ++slot_index)
     {
         RigidBodyRecord& record = pending.rigid_bodies[slot_index];
@@ -971,10 +996,12 @@ ReferenceBackend::simulate(float seconds,
                                             .constraint = constraint ? pending.constraints[record_slot].handle : ConstraintHandle{}});
         }
     }
+    results_scope.end();
     const Clock::time_point solved = Clock::now();
 
     // ------------------------------------------------------------------------------------------------ sleep
     // An island falls asleep when all its bodies have stayed slow long enough (and may sleep).
+    PROFILE_NAMED_SCOPE(sleep_scope, "Reference: sleep");
     m_island_sleep.assign(body_count, std::numeric_limits<float>::infinity());
     for (std::uint32_t slot_index = 0; slot_index < body_count; ++slot_index)
     {
@@ -1017,14 +1044,23 @@ ReferenceBackend::simulate(float seconds,
     }
 
     // ------------------------------------------------------------------------------------------------ events and statistics
-    report_contacts(pending);
-    update_triggers(pending);
-    m_manifold_cache.end_step();
+    sleep_scope.end();
+    {
+        PROFILE_SCOPE("Reference: events");
+        report_contacts(pending);
+        update_triggers(pending);
+        m_manifold_cache.end_step();
+    }
     StepStatistics& statistics = pending.statistics;
     statistics.phase_seconds[std::to_underlying(StepPhase::BROAD_PHASE)] = std::chrono::duration<double>(broad - start).count();
     statistics.phase_seconds[std::to_underlying(StepPhase::NARROW_PHASE)] = std::chrono::duration<double>(narrow - broad).count();
     statistics.phase_seconds[std::to_underlying(StepPhase::SOLVER)] = std::chrono::duration<double>(solved - narrow).count();
     statistics.pairs = static_cast<std::uint32_t>(m_broad_phase->pairs().size());
+    PROFILE_COUNTER("Reference: pairs", statistics.pairs);
+    PROFILE_COUNTER("Reference: manifolds", m_manifolds.size());
+    PROFILE_COUNTER("Reference: solver contacts", m_solver_contacts.size());
+    PROFILE_COUNTER("Reference: solver joints", m_solver_joints.size());
+    PROFILE_COUNTER("Reference: sub-steps", sub_steps);
 }
 
 } // namespace gfx::physics::reference_backend

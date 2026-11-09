@@ -1,8 +1,14 @@
 // GpuBvh: the passes of a build, a refit, the pair searches and the ray casts recorded with their push constants (the
-// layouts of the shaders' Push blocks), the tree's buffers sized by reserve(); structure_nodes() on the CPU.
+// layouts of the shaders' Push blocks), the tree's buffers sized by reserve(); structure_nodes() on the CPU. A GPU scope
+// per build, refit, pair search and ray cast and per pass inside them (PROFILE_GPU_SCOPE through set_timer()'s timer).
+module;
+
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
 
 import std;
+import gfx.profiler;
 import gfx.enums;
 import gfx.errors;
 import gfx.handles;
@@ -192,6 +198,7 @@ struct GpuBvh::State
     void record_bounds(ComputeRecorder& recorder,
                        GpuSpan boxes) const
     {
+        PROFILE_GPU_SCOPE("bvh_bounds", recorder, passes);
         record_pass(recorder, *bounds,
                     BoundsPush{.boxes_buffer = boxes.buffer,
                                .boxes_first = boxes.first,
@@ -202,6 +209,7 @@ struct GpuBvh::State
 
     void record_reset(ComputeRecorder& recorder) const
     {
+        PROFILE_GPU_SCOPE("bvh_reset", recorder, passes);
         record_pass(recorder, *reset, tree(), workgroups(std::max(built, 1U)));
     }
 
@@ -209,6 +217,7 @@ struct GpuBvh::State
     {
         if (wide != nullptr)
         {
+            PROFILE_GPU_SCOPE("bvh_wide", recorder, passes);
             record_pass(recorder, *wide, tree(), workgroups(std::max(built, 1U)));
         }
     }
@@ -222,6 +231,7 @@ struct GpuBvh::State
                       std::uint32_t capacity) const
     {
         // Count, scan the counts into offsets (their sum into the pair count), write.
+        PROFILE_GPU_SCOPE("BVH pairs", recorder, passes);
         PairsPush push{.query_header = header->bindless_index().value(),
                        .query_nodes = nodes->bindless_index().value(),
                        .target = target.tree(),
@@ -231,9 +241,13 @@ struct GpuBvh::State
                        .pairs_buffer = pair_span.buffer,
                        .pairs_first = pair_span.first,
                        .capacity = capacity};
-        record_pass(recorder, *pairs, push, workgroups(std::max(built, 1U)));
+        {
+            PROFILE_GPU_SCOPE("bvh_pairs (count)", recorder, passes);
+            record_pass(recorder, *pairs, push, workgroups(std::max(built, 1U)));
+        }
         primitives.exclusive_scan(recorder, span_of(*pair_counts), span_of(*pair_offsets), leaf_count(), pair_count);
         push.flags |= WRITE;
+        PROFILE_GPU_SCOPE("bvh_pairs (write)", recorder, passes);
         record_pass(recorder, *pairs, push, workgroups(std::max(built, 1U)));
     }
 
@@ -268,6 +282,8 @@ struct GpuBvh::State
     std::unique_ptr<Buffer> wide_nodes{};        ///< A four-wide node per internal node (FOUR_WIDE).
     std::unique_ptr<Buffer> pair_counts{};       ///< A word per leaf: its pairs.
     std::unique_ptr<Buffer> pair_offsets{};      ///< A word per leaf: its first pair.
+
+    PassTimer passes{};                          ///< What its passes are timed through.
 };
 
 // ===================================================================================================== GpuBvh
@@ -331,6 +347,12 @@ GpuBvh::description() const noexcept -> const GpuBvhDescription&
 }
 
 void
+GpuBvh::set_timer(profiler::GpuTimer* timer) noexcept
+{
+    m_state->passes.set(timer);
+}
+
+void
 GpuBvh::build(ComputeRecorder& recorder,
               GpuSpan boxes,
               const GpuCount& count)
@@ -344,34 +366,42 @@ GpuBvh::build(ComputeRecorder& recorder,
     state.built = count.maximum;
     state.has_built = true;
     const std::uint32_t invocations = workgroups(std::max(count.maximum, 1U));
+    PROFILE_GPU_SCOPE("BVH build", recorder, state.passes);
 
     // The codes of the box centers in the box around them, sorted with the boxes' indices.
     state.primitives.reduce_bounds(recorder, boxes, span_of(*state.scene_box), count);
-    record_pass(recorder, *state.morton,
-                MortonPush{.boxes_buffer = boxes.buffer,
-                           .boxes_first = boxes.first,
-                           .bounds_buffer = state.scene_box->bindless_index().value(),
-                           .keys_buffer = state.codes->bindless_index().value(),
-                           .values_buffer = state.indices->bindless_index().value(),
-                           .maximum = count.maximum,
-                           .count_buffer = count.word.buffer,
-                           .count_word = count.word.first},
-                invocations);
+    {
+        PROFILE_GPU_SCOPE("bvh_morton", recorder, state.passes);
+        record_pass(recorder, *state.morton,
+                    MortonPush{.boxes_buffer = boxes.buffer,
+                               .boxes_first = boxes.first,
+                               .bounds_buffer = state.scene_box->bindless_index().value(),
+                               .keys_buffer = state.codes->bindless_index().value(),
+                               .values_buffer = state.indices->bindless_index().value(),
+                               .maximum = count.maximum,
+                               .count_buffer = count.word.buffer,
+                               .count_word = count.word.first},
+                    invocations);
+    }
     state.primitives.sort(recorder, span_of(*state.codes), span_of(*state.indices), span_of(*state.sorted_codes), span_of(*state.sorted_primitives),
                           count, 3 * GPU_XPBD_MORTON_BITS);
 
     // The hierarchy, the bounds, the treelet rounds (γ doubling), the four-wide nodes.
-    record_pass(recorder, *state.hierarchy,
-                HierarchyPush{.codes_buffer = state.sorted_codes->bindless_index().value(),
-                              .maximum = count.maximum,
-                              .count_buffer = count.word.buffer,
-                              .count_word = count.word.first,
-                              .tree = state.tree()},
-                invocations);
+    {
+        PROFILE_GPU_SCOPE("bvh_hierarchy", recorder, state.passes);
+        record_pass(recorder, *state.hierarchy,
+                    HierarchyPush{.codes_buffer = state.sorted_codes->bindless_index().value(),
+                                  .maximum = count.maximum,
+                                  .count_buffer = count.word.buffer,
+                                  .count_word = count.word.first,
+                                  .tree = state.tree()},
+                    invocations);
+    }
     state.record_bounds(recorder, boxes);
     for (std::uint32_t round = 0; round < state.description.treelet_rounds; ++round)
     {
         state.record_reset(recorder);
+        PROFILE_GPU_SCOPE("bvh_treelet", recorder, state.passes);
         record_pass(recorder, *state.treelet,
                     TreeletPush{.tree = state.tree(), .minimum_leaves = GPU_XPBD_TREELET_LEAVES << std::min(round, 24U)}, invocations);
     }
@@ -384,6 +414,7 @@ GpuBvh::refit(ComputeRecorder& recorder,
 {
     const State& state = *m_state;
     state.require_built("refit");
+    PROFILE_GPU_SCOPE("BVH refit", recorder, state.passes);
     state.record_reset(recorder);
     state.record_bounds(recorder, boxes);
     state.record_wide(recorder);
@@ -421,6 +452,7 @@ GpuBvh::cast_rays(ComputeRecorder& recorder,
 {
     const State& state = *m_state;
     state.require_built("cast_rays");
+    PROFILE_GPU_SCOPE("bvh_rays", recorder, state.passes);
     record_pass(recorder, *state.rays,
                 RaysPush{.tree = state.tree(),
                          .flags = state.wide != nullptr ? WIDE : 0U,

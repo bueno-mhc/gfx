@@ -14,6 +14,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.physics.enums;
 import :resources;
 
@@ -74,6 +75,9 @@ public:
 
     GpuSoftBodies(const GpuSoftBodies&) = delete;
     auto operator=(const GpuSoftBodies&) -> GpuSoftBodies& = delete;
+
+    /// Times its passes through @p timer.
+    void set_timer(profiler::GpuTimer* timer) noexcept;
 
     /// Sets the particles' positions and velocities, uploaded by the next record_uploads() (what the GPU had is replaced).
     void set_state(std::span<const GpuVector> positions,

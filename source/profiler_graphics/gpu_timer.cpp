@@ -329,7 +329,23 @@ GpuTimer::GpuTimer(Device& device,
 {
 }
 
-GpuTimer::~GpuTimer() = default;
+GpuTimer::~GpuTimer()
+{
+    // No profiler collects from it once it starts going.
+    detach();
+}
+
+namespace
+{
+
+/// Whether resolved scopes are kept for a profiler: one collects from @p timer and records.
+[[nodiscard]] auto
+collecting(const GpuTimer& timer) noexcept -> bool
+{
+    return timer.attached() && is_recording();
+}
+
+} // namespace
 
 auto
 GpuTimer::start_frame() -> std::uint32_t
@@ -347,7 +363,7 @@ GpuTimer::start_frame() -> std::uint32_t
     Slot& slot = implementation.slots[implementation.current];
     if (slot.recorded && !slot.read)
     {
-        (void)implementation.read_slot(slot, implementation.current, true, attached());
+        (void)implementation.read_slot(slot, implementation.current, true, collecting(*this));
     }
     slot.recorded = true;
     slot.read = false;
@@ -361,11 +377,12 @@ GpuTimer::start_frame() -> std::uint32_t
 }
 
 auto
-GpuTimer::open_scope(const ProfileSite& site) -> std::pair<std::uint32_t, std::uint32_t>
+GpuTimer::open_scope(const ProfileSite& site,
+                     GpuScopeTiming timing) -> std::pair<std::uint32_t, std::uint32_t>
 {
     // Nothing records it: no bookkeeping, no timestamp.
     Implementation& implementation = *m_implementation;
-    if (!implementation.description.always && !(attached() && is_recording(site.category())))
+    if (timing != GpuScopeTiming::ALWAYS && !implementation.description.always && !(attached() && is_recording(site.category())))
     {
         return {NO_INDEX, NO_INDEX};
     }
@@ -422,11 +439,35 @@ GpuTimer::queries_per_frame() const noexcept -> std::uint32_t
     return m_implementation->queries_per_frame;
 }
 
+void
+GpuTimer::finish_frame()
+{
+    Implementation& implementation = *m_implementation;
+    const std::scoped_lock lock{implementation.mutex};
+    if (!implementation.frame_started)
+    {
+        return;
+    }
+    Slot& slot = implementation.slots[implementation.current];
+    if (slot.recorded && !slot.read)
+    {
+        (void)implementation.read_slot(slot, implementation.current, true, collecting(*this));
+    }
+    implementation.frame_started = false;
+}
+
 auto
 GpuTimer::latest() const -> std::vector<GpuScopeRecord>
 {
     const std::scoped_lock lock{m_implementation->mutex};
     return m_implementation->latest;
+}
+
+void
+GpuTimer::latest(std::vector<GpuScopeRecord>& scopes) const
+{
+    const std::scoped_lock lock{m_implementation->mutex};
+    scopes.insert(scopes.end(), m_implementation->latest.begin(), m_implementation->latest.end());
 }
 
 auto

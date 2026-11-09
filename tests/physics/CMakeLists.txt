@@ -62,12 +62,18 @@ gfx_add_test(gfx_physics_reference_tests
     SOURCES reference_test.cpp
     LIBRARIES gfx::physics)
 
+# Profiler traces of the CPU backends' steps: the framework's stages and the reference backend's and Box3D's covered
+# (docs/profiler-performance-design.md, PF2; the GPU backend's are in gfx_physics_gpu_xpbd_tests).
+gfx_add_test(gfx_physics_profiling_tests
+    SOURCES profiling_test.cpp
+    LIBRARIES gfx::physics)
+
 # The GPU backend on every GPU of the machine with the Vulkan validation layers (found by tests/graphics/vulkan; its
 # fixtures in vulkan_test.hpp), and on the graphics tests' fake device (no compute) for its capability errors.
 if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     gfx_add_test(gfx_physics_gpu_xpbd_tests
         SOURCES gpu_xpbd_test.cpp gpu_primitives_test.cpp gpu_bvh_test.cpp gpu_narrow_phase_test.cpp gpu_xpbd_rigid_test.cpp gpu_xpbd_joint_test.cpp
-            gpu_xpbd_soft_body_test.cpp gpu_xpbd_event_test.cpp
+            gpu_xpbd_soft_body_test.cpp gpu_xpbd_event_test.cpp gpu_xpbd_profiling_test.cpp
         MODULES ${PROJECT_SOURCE_DIR}/tests/graphics/interface/fake_backend.cppm
         MODULE_BASE_DIRECTORY ${PROJECT_SOURCE_DIR}/tests/graphics/interface
         LIBRARIES gfx::physics gfx::physics_gpu_xpbd gfx::gfx
@@ -109,17 +115,18 @@ gfx_add_test(gfx_physics_world_tests
     MODULES world_test_support.cppm
     LIBRARIES gfx::physics)
 
-# The physics and camera sources import only core, physics and camera modules, and the camera's only the physics
+# The physics and camera sources import only core, profiler, physics and camera modules, and the camera's only the physics
 # foundations (the link side is checked when CMake configures: gfx_require_decoupled); the check itself finds a forbidden
 # import in a fixture.
 set(_gfx_import_check ${PROJECT_SOURCE_DIR}/cmake/scripts/GfxCheckModuleImports.cmake)
 add_test(NAME PhysicsDecoupling.SourcesImportOnlyCoreAndPhysics
-         COMMAND ${CMAKE_COMMAND} -DDIRECTORY=${PROJECT_SOURCE_DIR}/source/physics "-DALLOWED=gfx.core;gfx.physics;gfx.camera"
+         COMMAND ${CMAKE_COMMAND} -DDIRECTORY=${PROJECT_SOURCE_DIR}/source/physics "-DALLOWED=gfx.core;gfx.profiler;gfx.physics;gfx.camera"
                  -DEXCLUDE=backends/gpu_xpbd -P ${_gfx_import_check})
-# The GPU backend imports graphics too, and only its interface (no platform, UI or camera).
+# The GPU backend imports graphics too, and only its interface (no platform, UI or camera), and the profiler (its GPU
+# timings through gfx.profiler.graphics).
 add_test(NAME PhysicsDecoupling.GpuBackendImportsOnlyPhysicsAndGraphics
          COMMAND ${CMAKE_COMMAND} -DDIRECTORY=${PROJECT_SOURCE_DIR}/source/physics/backends/gpu_xpbd
-                 "-DALLOWED=gfx.core;gfx.physics;gfx.enums;gfx.errors;gfx.handles;gfx.interface;gfx.backend_factory"
+                 "-DALLOWED=gfx.core;gfx.profiler;gfx.physics;gfx.enums;gfx.errors;gfx.handles;gfx.interface;gfx.backend_factory"
                  -P ${_gfx_import_check})
 set(_gfx_camera_imports "gfx.core;gfx.physics.enums;gfx.physics.handles;gfx.physics.errors;gfx.physics.primitives;gfx.camera")
 add_test(NAME PhysicsDecoupling.CameraImportsNoPhysicsInterface

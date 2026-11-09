@@ -15,10 +15,12 @@
 ///     PROFILE_DISPATCH("morton codes", recorder, timer, groups, 1, 1);
 /// }
 /// @endcode
-///        Scopes are written only while a profiler records the GPU category with the timer added (or always, with
-///        GpuTimerDescription::always: then latest() gives the last frame read back). One recording thread at a time;
-///        collect() and latest() may run on other threads. Beyond scopes_per_frame a frame's scopes are DROPPED;
-///        a queue without timestamps gives UNAVAILABLE scopes; timestamps not written within wait_limit, INCOMPLETE.
+///        Scopes are written only while a profiler records their category with the timer added (or always: with
+///        GpuTimerDescription::always every scope, with GpuScopeTiming::ALWAYS that scope; latest() gives the last frame
+///        read back, finish_frame() reads the frame just completed). One recording thread at a time; collect() and
+///        latest() may run on other threads. Beyond scopes_per_frame a frame's scopes are DROPPED; a queue without
+///        timestamps gives UNAVAILABLE scopes; timestamps not written within wait_limit, INCOMPLETE. Scopes that do not
+///        follow a block: begin_scope() and end_scope().
 export module gfx.profiler.graphics;
 
 import std;
@@ -43,6 +45,14 @@ struct GpuTimerDescription
 };
 
 class GpuTimer;
+
+/// @brief A GPU scope opened by GpuTimer::begin_scope() and closed by GpuTimer::end_scope() (for scopes that do not
+///        follow a block of code, such as a step's phases).
+struct GpuScopeToken
+{
+    std::uint32_t scope = 0xFFFF'FFFFU; ///< The timer's index of it in its frame (none: not recorded).
+    std::uint32_t query = 0xFFFF'FFFFU; ///< Its first timestamp's query (none: not timed).
+};
 
 /// @brief Closes a GPU scope (its end timestamp) when destroyed.
 template<QueueType Type>
@@ -89,6 +99,8 @@ public:
     /// @throws ProfilerError if @p description has no frame in flight or no scope per frame.
     GpuTimer(Device& device,
              const GpuTimerDescription& description = {});
+
+    /// @brief Leaves the profilers it was added to first.
     ~GpuTimer() override;
 
     /// @brief Starts a frame of commands recorded into @p recorder (before any scope of the frame): the next slot of
@@ -106,9 +118,10 @@ public:
     /// @brief Opens a GPU scope of @p site in @p recorder's commands, closed when the returned object is destroyed.
     template<QueueType Type>
     [[nodiscard]] auto scope(Recorder<Type>& recorder,
-                             const ProfileSite& site) -> GpuTimerScope<Type>
+                             const ProfileSite& site,
+                             GpuScopeTiming timing = GpuScopeTiming::WHEN_RECORDED) -> GpuTimerScope<Type>
     {
-        const auto [scope_index, query] = open_scope(site);
+        const auto [scope_index, query] = open_scope(site, timing);
         if (query != NO_INDEX)
         {
             recorder.write_timestamp(query_pool(), PipelineStage::NONE, query);
@@ -116,8 +129,46 @@ public:
         return GpuTimerScope<Type>{this, recorder, scope_index, query};
     }
 
-    /// @brief The scopes of the last frame read back, in query order (for direct use, with GpuTimerDescription::always).
+    /// @brief Opens a GPU scope of @p site in @p recorder's commands, closed by end_scope() (in the same frame).
+    template<QueueType Type>
+    [[nodiscard]] auto begin_scope(Recorder<Type>& recorder,
+                                   const ProfileSite& site,
+                                   GpuScopeTiming timing = GpuScopeTiming::WHEN_RECORDED) -> GpuScopeToken
+    {
+        const auto [scope_index, query] = open_scope(site, timing);
+        if (query != NO_INDEX)
+        {
+            recorder.write_timestamp(query_pool(), PipelineStage::NONE, query);
+        }
+        return {.scope = scope_index, .query = query};
+    }
+
+    /// @brief Closes a scope begin_scope() opened.
+    template<QueueType Type>
+    void end_scope(Recorder<Type>& recorder,
+                   GpuScopeToken token)
+    {
+        if (token.query != NO_INDEX)
+        {
+            recorder.write_timestamp(query_pool(), PipelineStage::ALL_COMMANDS, token.query + 1);
+        }
+        if (token.scope != NO_INDEX)
+        {
+            close_scope(token.scope);
+        }
+    }
+
+    /// @brief Reads the frame begun last, its commands completed (waiting for its timestamps within wait_limit):
+    ///        latest() then gives its scopes, and a profiler collecting from the timer gets them at its next
+    ///        end_frame(). Scopes recorded after it until the next begin_frame() are ignored. Without it, a frame is
+    ///        read when its slot is reused or when a profiler waits for it.
+    void finish_frame();
+
+    /// @brief The scopes of the last frame read back, in query order (for direct use: scopes timed always).
     [[nodiscard]] auto latest() const -> std::vector<GpuScopeRecord>;
+
+    /// @brief Appends to @p scopes the scopes of the last frame read back (latest() without a copy of its own).
+    void latest(std::vector<GpuScopeRecord>& scopes) const;
 
     /// @brief How it was created.
     [[nodiscard]] auto description() const noexcept -> const GpuTimerDescription&;
@@ -140,7 +191,8 @@ private:
     [[nodiscard]] auto query_pool() const noexcept -> QueryPoolHandle;
     [[nodiscard]] auto queries_per_frame() const noexcept -> std::uint32_t;
     [[nodiscard]] auto start_frame() -> std::uint32_t;
-    [[nodiscard]] auto open_scope(const ProfileSite& site) -> std::pair<std::uint32_t, std::uint32_t>;
+    [[nodiscard]] auto open_scope(const ProfileSite& site,
+                                  GpuScopeTiming timing) -> std::pair<std::uint32_t, std::uint32_t>;
     void close_scope(std::uint32_t scope) noexcept;
 
     std::unique_ptr<Implementation> m_implementation;

@@ -399,4 +399,47 @@ to_markdown(const Report& report) -> std::string
     return text;
 }
 
+auto
+missing_stages(const Trace& trace,
+               std::span<const StageCoverage> stages) -> std::vector<std::string>
+{
+    // The names of the sites some scope of the trace has (CPU or GPU).
+    const std::span<const TraceSite> sites = trace.sites();
+    std::vector<bool> scoped(sites.size(), false);
+    for (const TraceFrame& frame : trace.frames())
+    {
+        for (const TraceScope& scope : frame.scopes)
+        {
+            scoped[scope.site] = true;
+        }
+        for (const TraceGpuScope& scope : frame.gpu_scopes)
+        {
+            scoped[scope.site] = true;
+        }
+    }
+    std::set<std::string_view> names;
+    for (std::size_t site = 0; site < sites.size(); ++site)
+    {
+        if (scoped[site])
+        {
+            names.insert(sites[site].name);
+        }
+    }
+
+    // Each stage against them.
+    std::vector<std::string> missing;
+    for (const StageCoverage& stage : stages)
+    {
+        if (stage.kind != StageCoverageKind::RECORDED && stage.reason.empty())
+        {
+            missing.push_back(std::format("'{}' is {} without a reason", stage.stage, stage.kind));
+        }
+        if (stage.kind != StageCoverageKind::ABSENT && !names.contains(stage.site))
+        {
+            missing.push_back(std::format("'{}' ({} '{}'): no scope of that site in the trace", stage.stage, stage.kind, stage.site));
+        }
+    }
+    return missing;
+}
+
 } // namespace gfx::profiler

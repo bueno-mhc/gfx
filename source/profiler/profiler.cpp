@@ -15,6 +15,30 @@ namespace gfx::profiler
 namespace
 {
 
+/// Guards the links between GPU timing sources and profilers (each source's list of profilers, each profiler's list of
+/// sources: taken before a profiler's sources_mutex).
+auto
+link_mutex() -> std::mutex&
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+/// Removes @p source from @p profiler's sources (the link mutex held), the attachment counted down.
+void
+unlink(Profiler::Implementation& profiler,
+       GpuTimingSource& source,
+       std::atomic<std::uint32_t>& attachments) noexcept
+{
+    const std::scoped_lock lock{profiler.sources_mutex};
+    const auto found = std::ranges::find(profiler.gpu_sources, &source, &GpuSourceEntry::source);
+    if (found != profiler.gpu_sources.end())
+    {
+        profiler.gpu_sources.erase(found);
+        attachments.fetch_sub(1, std::memory_order_acq_rel);
+    }
+}
+
 /// The index of @p site in @p data's sites, added on first sight (sites alike in name, file and line are one).
 auto
 site_index(SessionData& data,
@@ -226,7 +250,9 @@ Profiler::Implementation::collect_gpu(SessionData& data,
                                       bool wait,
                                       bool file_all)
 {
-    // Each source's resolved scopes, its track made on the first ones, the categories the session records only.
+    // Each source's resolved scopes, its track made on the first ones, the categories the session records only (sources
+    // removing themselves meanwhile wait).
+    std::unique_lock sources_lock{sources_mutex};
     for (const GpuSourceEntry& entry : gpu_sources)
     {
         collected_gpu.clear();
@@ -257,6 +283,8 @@ Profiler::Implementation::collect_gpu(SessionData& data,
                                         .status = record.status});
         }
     }
+
+    sources_lock.unlock();
 
     // Each into the first frame that ended after it began; later ones wait for their frame (or go into the last).
     if (data.frames.empty())
@@ -313,9 +341,16 @@ Profiler::Profiler(const ProfilerDescription& description)
 
 Profiler::~Profiler()
 {
-    for (const GpuSourceEntry& entry : m_implementation->gpu_sources)
+    // Its sources forget it; it stops being current.
+    const std::scoped_lock links{link_mutex()};
     {
-        entry.source->m_attachments.fetch_sub(1, std::memory_order_acq_rel);
+        const std::scoped_lock lock{m_implementation->sources_mutex};
+        for (const GpuSourceEntry& entry : m_implementation->gpu_sources)
+        {
+            std::erase(entry.source->m_profilers, this);
+            entry.source->m_attachments.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        m_implementation->gpu_sources.clear();
     }
     forget_current(*m_implementation);
 }
@@ -480,6 +515,8 @@ auto
 Profiler::add_gpu_source(GpuTimingSource& source) -> GpuSourceHandle
 {
     Implementation& implementation = *m_implementation;
+    const std::scoped_lock links{link_mutex()};
+    const std::scoped_lock lock{implementation.sources_mutex};
     if (std::ranges::contains(implementation.gpu_sources, &source, &GpuSourceEntry::source))
     {
         throw ProfilerError({.subsystem = ProfilerSubsystem::SESSIONS,
@@ -489,6 +526,7 @@ Profiler::add_gpu_source(GpuTimingSource& source) -> GpuSourceHandle
     }
     const GpuSourceHandle handle = Implementation::gpu_source_handle(++implementation.gpu_source_generation);
     implementation.gpu_sources.push_back({.handle = handle, .source = &source});
+    source.m_profilers.push_back(this);
     source.m_attachments.fetch_add(1, std::memory_order_acq_rel);
     return handle;
 }
@@ -497,13 +535,59 @@ void
 Profiler::remove_gpu_source(GpuSourceHandle source)
 {
     Implementation& implementation = *m_implementation;
+    const std::scoped_lock links{link_mutex()};
+    const std::scoped_lock lock{implementation.sources_mutex};
     const auto found = std::ranges::find(implementation.gpu_sources, source, &GpuSourceEntry::handle);
     if (found == implementation.gpu_sources.end())
     {
         throw_unknown("Profiler::remove_gpu_source", std::format("{}", source));
     }
+    std::erase(found->source->m_profilers, this);
     found->source->m_attachments.fetch_sub(1, std::memory_order_acq_rel);
     implementation.gpu_sources.erase(found);
+}
+
+// ===================================================================================================== GpuTimingSource
+
+GpuTimingSource::~GpuTimingSource()
+{
+    detach();
+}
+
+void
+GpuTimingSource::detach() noexcept
+{
+    const std::scoped_lock links{link_mutex()};
+    for (Profiler* profiler : m_profilers)
+    {
+        unlink(ProfilerAccess::implementation(*profiler), *this, m_attachments);
+    }
+    m_profilers.clear();
+}
+
+auto
+GpuTimingSource::attached_to(const Profiler& profiler) const -> bool
+{
+    const std::scoped_lock links{link_mutex()};
+    return std::ranges::contains(m_profilers, &profiler);
+}
+
+void
+attach_to_current_profiler(GpuTimingSource& source)
+{
+    // The current profiler is read under the link mutex: one being destroyed waits for it, or is no longer current.
+    const std::scoped_lock links{link_mutex()};
+    Profiler* profiler = current_profiler();
+    if (profiler == nullptr || std::ranges::contains(source.m_profilers, profiler))
+    {
+        return;
+    }
+    Profiler::Implementation& implementation = ProfilerAccess::implementation(*profiler);
+    const std::scoped_lock lock{implementation.sources_mutex};
+    const GpuSourceHandle handle = Profiler::Implementation::gpu_source_handle(++implementation.gpu_source_generation);
+    implementation.gpu_sources.push_back({.handle = handle, .source = &source});
+    source.m_profilers.push_back(profiler);
+    source.m_attachments.fetch_add(1, std::memory_order_acq_rel);
 }
 
 auto

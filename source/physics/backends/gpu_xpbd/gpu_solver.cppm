@@ -15,6 +15,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.core.math;
 import gfx.physics.enums;
 import gfx.physics.interface;
@@ -230,7 +231,7 @@ struct ContactStep
     CollisionSettings collision{};       ///< The world's collision settings (the speculative distance replaced).
     bool lists_changed = false;          ///< The collider lists changed since the last completed step (instances name
                                          ///< other colliders: no contact keeps its previous anchors).
-    StepTimer* timer = nullptr;          ///< Marks the broad phase, the narrow phase, the solver's set-up (when timed).
+    PhaseTimer* timer = nullptr;         ///< Marks the broad phase, the narrow phase, the solver's set-up (when timed).
 };
 
 /// What a query of the GPU reads of the solver's buffers (between steps).
@@ -294,6 +295,9 @@ public:
 
     /// The narrow phase (its shape table).
     [[nodiscard]] auto narrow_phase() noexcept -> GpuNarrowPhase&;
+
+    /// Times its passes (and its primitives', trees' and narrow phase's) through @p timer.
+    void set_timer(profiler::GpuTimer* timer) noexcept;
 
     /// Sets the colliders (by slot) and the lists of moving and static colliders' and of triggers' entries, uploaded by
     /// the next record_uploads(); @p static_changed: the static tree is rebuilt.

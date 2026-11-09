@@ -1,9 +1,15 @@
 // GpuConstraintSolver: the constraint passes of a step recorded in order, their arrays grown with headroom from what
 // earlier steps counted, the colliders, lists and joints uploaded when they change, the previous step's manifolds and
-// contacts kept for the contact cache (two of each, swapped when a step completes).
+// contacts kept for the contact cache (two of each, swapped when a step completes). A GPU scope per group of passes
+// (PROFILE_GPU_SCOPE through set_timer()'s timer): one per iteration of the solve, not per color.
+module;
+
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
 
 import std;
+import gfx.profiler;
 import gfx.enums;
 import gfx.errors;
 import gfx.handles;
@@ -334,6 +340,8 @@ struct GpuConstraintSolver::State
     GpuArray trigger_ranges{"GPU physics: trigger pair ranges", 2 * sizeof(std::uint32_t)};
     GpuArray trigger_manifolds{"GPU physics: trigger manifolds", sizeof(GpuManifold)};
     GpuArray trigger_results{"GPU physics: trigger overlaps", sizeof(GpuTriggerOverlap)};
+
+    PassTimer passes{}; ///< What its passes are timed through.
 };
 
 // ===================================================================================================== GpuConstraintSolver
@@ -351,6 +359,19 @@ auto
 GpuConstraintSolver::narrow_phase() noexcept -> GpuNarrowPhase&
 {
     return m_state->narrow_phase;
+}
+
+void
+GpuConstraintSolver::set_timer(profiler::GpuTimer* timer) noexcept
+{
+    State& state = *m_state;
+    state.passes.set(timer);
+    state.primitives.set_timer(timer);
+    state.narrow_phase.set_timer(timer);
+    for (GpuBvh* tree : {&state.moving_tree, &state.static_tree, &state.trigger_tree})
+    {
+        tree->set_timer(timer);
+    }
 }
 
 void
@@ -653,7 +674,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     }
     if (instances > 0)
     {
-        state.pass(recorder, *state.collider_poses, 0, 0, posed);
+        {
+            PROFILE_GPU_SCOPE("collider_poses", recorder, state.passes);
+            state.pass(recorder, *state.collider_poses, 0, 0, posed);
+        }
         state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = instances}, step.speculative_distance);
     }
     if (state.static_dirty)
@@ -680,9 +704,12 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     }
 
     // The pairs worth a narrow phase, compacted in order; their manifolds; each point's predecessor.
-    state.pass(recorder, *state.pairs_filter, 0, 0, candidates);
-    state.primitives.compact(recorder, span_of(state.pair_flags.buffer()), {}, span_of(state.pair_indices.buffer()), state.count(CANDIDATES), {.maximum = candidates});
-    state.pass(recorder, *state.pairs_filter, 0, 1, candidates);
+    {
+        PROFILE_GPU_SCOPE("pairs_filter", recorder, state.passes);
+        state.pass(recorder, *state.pairs_filter, 0, 0, candidates);
+        state.primitives.compact(recorder, span_of(state.pair_flags.buffer()), {}, span_of(state.pair_indices.buffer()), state.count(CANDIDATES), {.maximum = candidates});
+        state.pass(recorder, *state.pairs_filter, 0, 1, candidates);
+    }
     if (step.timer != nullptr)
     {
         step.timer->mark(recorder, StepPhase::NARROW_PHASE);
@@ -705,7 +732,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     }
 
     // The contact constraints (and the step's counts of constraints).
-    state.pass(recorder, *state.contact_prepare, 0, keeps_anchors ? 0U : 1U, slots);
+    {
+        PROFILE_GPU_SCOPE("contact_prepare", recorder, state.passes);
+        state.pass(recorder, *state.contact_prepare, 0, keeps_anchors ? 0U : 1U, slots);
+    }
 
     // Islands over contacts and joints: labels hooked and compressed (the last round counts its changes), awake islands,
     // kinematic touches, bodies woken.
@@ -713,35 +743,53 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     {
         step.timer->mark(recorder, StepPhase::SOLVER);
     }
-    state.pass(recorder, *state.islands, 0, 0, step.body_count);
-    for (std::uint32_t round = 0; round < state.island_rounds; ++round)
     {
-        state.pass(recorder, *state.islands, round + 1 == state.island_rounds ? 1U : 0U, 1, constraints);
-        state.pass(recorder, *state.islands, 0, 2, step.body_count);
+        PROFILE_GPU_SCOPE("islands", recorder, state.passes);
+        state.pass(recorder, *state.islands, 0, 0, step.body_count);
+        for (std::uint32_t round = 0; round < state.island_rounds; ++round)
+        {
+            state.pass(recorder, *state.islands, round + 1 == state.island_rounds ? 1U : 0U, 1, constraints);
+            state.pass(recorder, *state.islands, 0, 2, step.body_count);
+        }
+        state.pass(recorder, *state.islands, 0, 3, step.body_count);
+        state.pass(recorder, *state.islands, 0, 4, constraints);
+        state.pass(recorder, *state.islands, 0, 5, step.body_count);
     }
-    state.pass(recorder, *state.islands, 0, 3, step.body_count);
-    state.pass(recorder, *state.islands, 0, 4, constraints);
-    state.pass(recorder, *state.islands, 0, 5, step.body_count);
 
     // The graph: each body's constraints in order (joints, then contacts).
-    state.pass(recorder, *state.graph, 0, 0, constraints);
-    state.primitives.sort(recorder, span_of(state.graph_keys.buffer()), span_of(state.graph_values.buffer()), span_of(state.graph_sorted_keys.buffer()),
-                          span_of(state.graph_sorted_values.buffer()), {.maximum = 2 * constraints, .word = state.count(GRAPH_ENTRIES)});
-    state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.node_count, 2 * constraints, GRAPH_ENTRIES);
+    {
+        PROFILE_GPU_SCOPE("graph", recorder, state.passes);
+        state.pass(recorder, *state.graph, 0, 0, constraints);
+        state.primitives.sort(recorder, span_of(state.graph_keys.buffer()), span_of(state.graph_values.buffer()), span_of(state.graph_sorted_keys.buffer()),
+                              span_of(state.graph_sorted_values.buffer()), {.maximum = 2 * constraints, .word = state.count(GRAPH_ENTRIES)});
+        PROFILE_GPU_SCOPE("ranges", recorder, state.passes);
+        state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.node_count, 2 * constraints, GRAPH_ENTRIES);
+    }
 
     // The colors (the overflow set only, in the Jacobi mode), the lists by color and kind, their dispatch arguments.
+    PROFILE_GPU_SCOPE("coloring", recorder, state.passes);
     const bool coloring = state.coloring();
-    state.pass(recorder, *state.coloring_pass, coloring ? 0U : 1U, 0, constraints);
-    const std::uint32_t rounds = coloring ? GPU_XPBD_COLORING_ROUNDS : 0;
-    for (std::uint32_t round = 0; round < rounds; ++round)
     {
-        state.pass(recorder, *state.coloring_pass, round, 1, constraints);
+        PROFILE_GPU_SCOPE("color", recorder, state.passes);
+        state.pass(recorder, *state.coloring_pass, coloring ? 0U : 1U, 0, constraints);
+        const std::uint32_t rounds = coloring ? GPU_XPBD_COLORING_ROUNDS : 0;
+        for (std::uint32_t round = 0; round < rounds; ++round)
+        {
+            state.pass(recorder, *state.coloring_pass, round, 1, constraints);
+        }
+        state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
     }
-    state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
-    state.pass(recorder, *state.jacobi_gather, 0, 2, step.node_count);
+    {
+        PROFILE_GPU_SCOPE("jacobi_gather (counts)", recorder, state.passes);
+        state.pass(recorder, *state.jacobi_gather, 0, 2, step.node_count);
+    }
     state.primitives.sort(recorder, span_of(state.color_keys.buffer()), span_of(state.color_values.buffer()), span_of(state.color_sorted_keys.buffer()),
                           span_of(state.color_lists.buffer()), {.maximum = constraints, .word = state.count(CONSTRAINTS)}, key_bits(COLOR_KEYS - 1));
-    state.ranges(recorder, state.color_sorted_keys, state.color_begin, state.color_end, COLOR_KEYS, constraints, CONSTRAINTS);
+    {
+        PROFILE_GPU_SCOPE("ranges", recorder, state.passes);
+        state.ranges(recorder, state.color_sorted_keys, state.color_begin, state.color_end, COLOR_KEYS, constraints, CONSTRAINTS);
+    }
+    PROFILE_GPU_SCOPE("color dispatch arguments", recorder, state.passes);
     state.pass(recorder, *state.coloring_pass, state.color_arguments.index(), 3, DISPATCHED_KEYS, COMPUTE_TO_INDIRECT);
 }
 
@@ -752,6 +800,7 @@ GpuConstraintSolver::record_positions(ComputeRecorder& recorder,
     // The colors one after the other (Gauss-Seidel; a color's joints and contacts together), then the overflow set
     // (Jacobi) and its gather.
     const State& state = *m_state;
+    PROFILE_GPU_SCOPE("position iteration", recorder, state.passes);
     const std::uint32_t reset = first ? 1U : 0U;
     const std::uint32_t colors = state.coloring() ? state.recorded_colors : 0;
     const bool joints = state.joint_count > 0;
@@ -768,6 +817,7 @@ GpuConstraintSolver::record_positions(ComputeRecorder& recorder,
         state.color_pass(recorder, *state.joint_solve, joint_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U, false);
     }
     state.color_pass(recorder, *state.contact_solve, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
+    PROFILE_GPU_SCOPE("jacobi_gather", recorder, state.passes);
     state.pass(recorder, *state.jacobi_gather, 0, 0, state.node_count);
 }
 
@@ -777,6 +827,7 @@ GpuConstraintSolver::record_velocities(ComputeRecorder& recorder,
 {
     // Contacts only: joints have no velocity pass.
     const State& state = *m_state;
+    PROFILE_GPU_SCOPE("velocity iteration", recorder, state.passes);
     const std::uint32_t reset = first ? 1U : 0U;
     const std::uint32_t colors = state.coloring() ? state.recorded_colors : 0;
     for (std::uint32_t color = 0; color < colors; ++color)
@@ -784,6 +835,7 @@ GpuConstraintSolver::record_velocities(ComputeRecorder& recorder,
         state.color_pass(recorder, *state.contact_velocity, contact_key(color), reset);
     }
     state.color_pass(recorder, *state.contact_velocity, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
+    PROFILE_GPU_SCOPE("jacobi_gather", recorder, state.passes);
     state.pass(recorder, *state.jacobi_gather, 0, 1, state.node_count);
 }
 
@@ -793,6 +845,7 @@ GpuConstraintSolver::record_joint_forces(ComputeRecorder& recorder)
     const State& state = *m_state;
     if (state.joint_count > 0)
     {
+        PROFILE_GPU_SCOPE("joint_forces", recorder, state.passes);
         state.pass(recorder, *state.joint_forces, 0, 0, state.joint_count);
     }
 }
@@ -801,6 +854,7 @@ void
 GpuConstraintSolver::record_sleep(ComputeRecorder& recorder)
 {
     const State& state = *m_state;
+    PROFILE_GPU_SCOPE("sleep", recorder, state.passes);
     state.pass(recorder, *state.sleep, 0, 0, state.body_count);
     state.pass(recorder, *state.sleep, 0, 1, state.body_count);
 }
@@ -810,6 +864,7 @@ GpuConstraintSolver::record_reports(ComputeRecorder& recorder)
 {
     // The touching contacts' slots flagged, compacted in slot order, their reports written.
     State& state = *m_state;
+    PROFILE_GPU_SCOPE("contacts_report", recorder, state.passes);
     state.pass(recorder, *state.contacts_report, 0, 0, state.manifold_capacity);
     state.primitives.compact(recorder, span_of(state.report_flags.buffer()), {}, span_of(state.report_indices.buffer()), state.count(REPORTED),
                              {.maximum = state.manifold_capacity});
@@ -849,6 +904,7 @@ GpuConstraintSolver::record_triggers(ComputeRecorder& recorder)
     }
 
     // Every instance at its final pose, their boxes (no growth); the moving tree rebuilt from them, the triggers' tree.
+    PROFILE_GPU_SCOPE("triggers", recorder, state.passes);
     const std::uint32_t colliders = state.moving + state.statics;
     state.pass(recorder, *state.collider_poses, 0, 0, colliders + state.triggers);
     state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = colliders + state.triggers});
@@ -871,6 +927,7 @@ GpuConstraintSolver::record_triggers(ComputeRecorder& recorder)
                                       state.count(TRIGGER_STATIC_PAIRS), state.trigger_between_capacity);
     }
     const std::uint32_t raw = state.trigger_within_capacity + state.trigger_between_capacity;
+    PROFILE_GPU_SCOPE("triggers_filter", recorder, state.passes);
     state.pass(recorder, *state.triggers_filter, 0, 0, raw);
     state.primitives.compact(recorder, span_of(state.trigger_pair_flags.buffer()), {}, span_of(state.trigger_pair_indices.buffer()), state.count(TRIGGER_CANDIDATES),
                              {.maximum = raw});

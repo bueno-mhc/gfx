@@ -98,6 +98,21 @@ enum class GpuClockAlignment : std::uint8_t
     UNAVAILABLE, ///< Not placed: the queue writes no timestamps.
 };
 
+/// @brief When a GPU scope is timed.
+enum class GpuScopeTiming : std::uint8_t
+{
+    WHEN_RECORDED, ///< Only while a profiler records its category with the timing source added.
+    ALWAYS,        ///< Whether or not a profiler records it (code reading its own times back, such as a step's phases).
+};
+
+/// @brief How a stage of a workload shows in its traces (StageCoverage).
+enum class StageCoverageKind : std::uint8_t
+{
+    RECORDED, ///< A scope of its own (CPU or GPU), of the site named.
+    FUSED_IN, ///< Inside the scope of the site named, without one of its own (its work shares a pass or a function).
+    ABSENT,   ///< Not done by this implementation, for the reason given.
+};
+
 /// @brief Where a session is.
 enum class SessionState : std::uint8_t
 {
@@ -226,6 +241,27 @@ struct EnumerationTraits<profiler::GpuClockAlignment>
 };
 
 template<>
+struct EnumerationTraits<profiler::GpuScopeTiming>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{profiler::GpuScopeTiming::WHEN_RECORDED, "WHEN_RECORDED"},
+        EnumeratorName{profiler::GpuScopeTiming::ALWAYS, "ALWAYS"},
+    };
+};
+
+template<>
+struct EnumerationTraits<profiler::StageCoverageKind>
+{
+    static constexpr bool IS_BITMASK = false;
+    static constexpr std::array NAMES{
+        EnumeratorName{profiler::StageCoverageKind::RECORDED, "RECORDED"},
+        EnumeratorName{profiler::StageCoverageKind::FUSED_IN, "FUSED_IN"},
+        EnumeratorName{profiler::StageCoverageKind::ABSENT, "ABSENT"},
+    };
+};
+
+template<>
 struct EnumerationTraits<profiler::SessionState>
 {
     static constexpr bool IS_BITMASK = false;
@@ -247,6 +283,8 @@ static_assert(verify<profiler::RecordKind>(), "EnumerationTraits<profiler::Recor
 static_assert(verify<profiler::TraceFormat>(), "EnumerationTraits<profiler::TraceFormat>::NAMES is out of sync with the enumeration");
 static_assert(verify<profiler::GpuScopeStatus>(), "EnumerationTraits<profiler::GpuScopeStatus>::NAMES is out of sync with the enumeration");
 static_assert(verify<profiler::GpuClockAlignment>(), "EnumerationTraits<profiler::GpuClockAlignment>::NAMES is out of sync with the enumeration");
-static_assert(verify<profiler::SessionState>(), "EnumerationTraits<profiler::SessionState>::NAMES is out of sync with the enumeration");
+static_assert(verify<profiler::GpuScopeTiming>(), "EnumerationTraits<profiler::GpuScopeTiming>::NAMES is out of sync with the enumeration");
+static_assert(verify<profiler::StageCoverageKind>(), "EnumerationTraits<profiler::StageCoverageKind>::NAMES is out of sync with the enumeration");
+static_assert(verify<profiler::SessionState>(),"EnumerationTraits<profiler::SessionState>::NAMES is out of sync with the enumeration");
 
 } // namespace gfx::enumeration_verification

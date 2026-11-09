@@ -458,6 +458,48 @@ TEST(ProfilerGpuSourceTest, GpuScopesAreFiledIntoTheFramesTheyBeganIn)
     EXPECT_THROW(profiler.remove_gpu_source(handle), ProfilerError);
 }
 
+TEST(ProfilerGpuSourceTest, SourcesAndProfilersLeaveEachOtherWhicheverGoesFirst)
+{
+    // No current profiler: attaching does nothing.
+    auto first = std::make_unique<ScriptedGpuSource>();
+    attach_to_current_profiler(*first);
+    EXPECT_FALSE(first->attached());
+
+    // Attached to the current profiler once, however often asked; destroyed first, the profiler forgets it (its frames
+    // collect from no dangling source).
+    auto profiler = std::make_unique<Profiler>();
+    set_current_profiler(profiler.get());
+    attach_to_current_profiler(*first);
+    attach_to_current_profiler(*first);
+    EXPECT_TRUE(first->attached());
+    EXPECT_TRUE(first->attached_to(*profiler));
+    first.reset();
+    const SessionHandle session = profiler->create_session({.name = "sources"});
+    profiler->begin_frame(session);
+    profiler->end_frame(session);
+    EXPECT_TRUE(profiler->finalize_session(session).gpu_tracks().empty());
+
+    // Another source; the profiler destroyed first: the source is no longer attached, and goes without touching it.
+    ScriptedGpuSource second;
+    attach_to_current_profiler(second);
+    EXPECT_TRUE(second.attached_to(*profiler));
+    profiler.reset();
+    EXPECT_FALSE(second.attached());
+    EXPECT_EQ(current_profiler(), nullptr);
+
+    // A source added by hand and removed by hand, then attached again: one link each time.
+    Profiler other;
+    const GpuSourceHandle handle = other.add_gpu_source(second);
+    EXPECT_TRUE(second.attached_to(other));
+    other.remove_gpu_source(handle);
+    EXPECT_FALSE(second.attached_to(other));
+    set_current_profiler(&other);
+    attach_to_current_profiler(second);
+    EXPECT_TRUE(second.attached_to(other));
+    EXPECT_THROW((void)other.add_gpu_source(second), ProfilerError);
+    set_current_profiler(nullptr);
+}
+
 TEST(ProfilerSessionTest, MisuseIsRefusedWithDescriptiveErrors)
 {
     // Ring capacities must be powers of two.

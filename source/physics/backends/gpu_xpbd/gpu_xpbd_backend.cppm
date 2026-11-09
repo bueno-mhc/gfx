@@ -8,6 +8,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.core.handles;
 import gfx.core.math;
 import gfx.physics.enums;
@@ -399,7 +400,9 @@ private:
     GpuPipelines m_pipelines;
     GpuConstraintSolver m_solver;
     GpuSoftBodies m_soft_bodies;
-    StepTimer m_timer;
+    profiler::GpuTimer m_gpu_timer; ///< The step's GPU timings: its phases always, its passes while a profiler records them.
+    PhaseTimer m_phases;            ///< The phases (StepStatistics::phase_seconds), through m_gpu_timer.
+    PassTimer m_passes{};           ///< The backend's own passes, through m_gpu_timer.
 
     // The body arrays (one storage buffer each).
     GpuArray m_centers{"body centers", sizeof(GpuVector)};

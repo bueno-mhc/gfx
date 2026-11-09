@@ -3,10 +3,18 @@
 // coloring of joints and contacts, substeps of prediction, soft-constraint, joint and contact projection and velocity
 // update with the contacts' velocity pass, the joints' forces, sleep), submitted and waited for on the stepping thread,
 // replayed from its backed-up start when a buffer or the recorded passes overflowed, and read back into the pending
-// snapshot (bodies, joint states, broken joints, particles).
+// snapshot (bodies, joint states, broken joints, particles). The step's CPU stages are profiler scopes ("GPU XPBD: ..."),
+// its GPU phases and passes GPU scopes of the backend's GpuTimer (added to the current profiler at each step), its sizes
+// counters.
+module;
+
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
 
 import std;
+import gfx.profiler;
 import gfx.enums;
 import gfx.errors;
 import gfx.handles;
@@ -599,8 +607,18 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
     , m_pipelines{device}
     , m_solver{device, m_capabilities, settings}
     , m_soft_bodies{device}
-    , m_timer{device, m_capabilities.timestamps, m_capabilities.queue_family}
+    , m_gpu_timer{device,
+                  {.queue = m_capabilities.queue_type,
+                   .frames_in_flight = 2,
+                   .scopes_per_frame = GPU_XPBD_TIMED_SCOPES,
+                   .name = std::format("GPU XPBD: {} {}", m_capabilities.device_name, m_capabilities.queue_type)}}
+    , m_phases{m_gpu_timer}
 {
+    // Every component's passes timed through the step's timer.
+    m_solver.set_timer(&m_gpu_timer);
+    m_soft_bodies.set_timer(&m_gpu_timer);
+    m_passes.set(&m_gpu_timer);
+
     // The queries' command buffer, pipeline and buffers (made now: a query never allocates), the records their regions and
     // shapes take in the shape table.
     m_query_pool = device.create_command_pool({.queue_type = m_capabilities.queue_type, .debug_name = "GPU physics queries"});
@@ -766,6 +784,7 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
                       WorldSnapshot& pending)
 {
     // What changed first, then the forces and impulses about the centers the patches will have.
+    PROFILE_SCOPE("GPU XPBD: apply the edits");
     const ChangeMarker marker{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
     {
@@ -1300,6 +1319,11 @@ GpuXpbdBackend::simulate(float seconds,
     // The patches were made by apply() (the framework times it as the EDITS phase).
     using Clock = std::chrono::steady_clock;
     const Clock::time_point start = Clock::now();
+    if constexpr (profiler::PROFILER_ENABLED)
+    {
+        // The current profiler (if any) collects the step's GPU scopes.
+        profiler::attach_to_current_profiler(m_gpu_timer);
+    }
     const auto body_count = static_cast<std::uint32_t>(pending.rigid_bodies.size());
     const bool soft_bodies = std::ranges::any_of(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); });
     if (body_count == 0 && !soft_bodies && m_particle_count == 0)
@@ -1314,9 +1338,18 @@ GpuXpbdBackend::simulate(float seconds,
     std::string_view stage = "recording the step";
     try
     {
-        update_soft_bodies(pending);
-        update_colliders(pending);
-        update_joints(pending);
+        {
+            PROFILE_SCOPE("GPU XPBD: update the soft bodies");
+            update_soft_bodies(pending);
+        }
+        {
+            PROFILE_SCOPE("GPU XPBD: update the colliders");
+            update_colliders(pending);
+        }
+        {
+            PROFILE_SCOPE("GPU XPBD: update the joints");
+            update_joints(pending);
+        }
         m_substep_seconds = seconds / static_cast<float>(substeps);
 
         // The step, replayed from its start while a buffer or the recorded passes overflowed (each time with room for
@@ -1325,14 +1358,22 @@ GpuXpbdBackend::simulate(float seconds,
         for (std::uint32_t attempt = 0;; ++attempt)
         {
             stage = "recording the step";
-            record_step(body_count, pending, seconds, attempt > 0);
+            {
+                PROFILE_SCOPE("GPU XPBD: record the step");
+                record_step(body_count, pending, seconds, attempt > 0);
+            }
+            PROFILE_COUNTER("GPU XPBD: dispatches", m_command_buffer->statistics().dispatches);
+            PROFILE_COUNTER("GPU XPBD: barriers", m_command_buffer->statistics().barriers);
+            PROFILE_COUNTER("GPU XPBD: transfers", m_command_buffer->statistics().transfers);
             stage = "running the step on the GPU";
             run_commands();
+            m_gpu_timer.finish_frame();
             counts = read_counts();
             if (!m_solver.overflowed(counts))
             {
                 break;
             }
+            PROFILE_MARKER("GPU XPBD: replay");
             if (attempt == GPU_XPBD_MAXIMUM_REPLAYS)
             {
                 throw PhysicsError({.backend = identity(),
@@ -1344,19 +1385,37 @@ GpuXpbdBackend::simulate(float seconds,
             }
         }
         const Clock::time_point solved = Clock::now();
-        if (m_timer.enabled())
+        if (m_phases.enabled())
         {
-            m_timer.read(pending.statistics.phase_seconds);
+            m_phases.read(pending.statistics.phase_seconds);
         }
         else
         {
             pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, solved);
         }
-        const double gpu_events = m_timer.enabled() ? pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] : 0.0;
+        const double gpu_events = m_phases.enabled() ? pending.statistics.phase_seconds[phase(StepPhase::EVENTS)] : 0.0;
+
+        // The step's sizes, as the GPU counted them.
+        PROFILE_COUNTER("GPU XPBD: bodies", body_count);
+        PROFILE_COUNTER("GPU XPBD: particles", m_soft_bodies.particle_count());
+        PROFILE_COUNTER("GPU XPBD: joints", m_solver.joint_count());
+        PROFILE_COUNTER("GPU XPBD: tree pairs", counts.within_pairs + counts.between_pairs);
+        PROFILE_COUNTER("GPU XPBD: candidate pairs", counts.candidates);
+        PROFILE_COUNTER("GPU XPBD: manifold slots", counts.manifold_slots);
+        PROFILE_COUNTER("GPU XPBD: contact constraints", counts.active_constraints);
+        PROFILE_COUNTER("GPU XPBD: contact points", counts.contact_points);
+        PROFILE_COUNTER("GPU XPBD: constraints", counts.constraints);
+        PROFILE_COUNTER("GPU XPBD: colors", counts.colors);
+        PROFILE_COUNTER("GPU XPBD: overflow constraints", counts.overflow_constraints);
+        PROFILE_COUNTER("GPU XPBD: touching contacts", counts.reported);
+        PROFILE_COUNTER("GPU XPBD: touching points", counts.touching_points);
+        PROFILE_COUNTER("GPU XPBD: trigger overlaps", counts.trigger_overlaps);
+        PROFILE_COUNTER("GPU XPBD: substeps", substeps);
 
         // More touching contacts than the reports had room for: reported again (the step's contacts are still on the GPU).
         if (counts.reported > m_solver.report_capacity())
         {
+            PROFILE_SCOPE("GPU XPBD: report the contacts again");
             stage = "reading the contacts back";
             m_command_pool->reset();
             {
@@ -1371,9 +1430,19 @@ GpuXpbdBackend::simulate(float seconds,
             run_commands();
         }
         stage = "reading the step back";
-        read_back(pending);
-        const std::uint32_t kept_points = read_contacts(pending, counts.reported);
-        read_triggers(pending, counts.trigger_overlaps);
+        {
+            PROFILE_SCOPE("GPU XPBD: read the bodies back");
+            read_back(pending);
+        }
+        std::uint32_t kept_points = 0;
+        {
+            PROFILE_SCOPE("GPU XPBD: contacts and their events");
+            kept_points = read_contacts(pending, counts.reported);
+        }
+        {
+            PROFILE_SCOPE("GPU XPBD: trigger events");
+            read_triggers(pending, counts.trigger_overlaps);
+        }
         m_query_tree_current = m_solver.trigger_capacity() > 0;
         m_solver.complete_step(counts);
         m_lists_changed = false;
@@ -1412,22 +1481,25 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
 
     m_command_pool->reset();
     ComputeRecorder recorder{*m_command_buffer};
-    m_timer.begin(recorder);
+    m_gpu_timer.begin_frame(recorder);
 
     // The arrays hold every slot (grown ones keep the slots the GPU had); the contacts' arrays and uploads.
-    const std::uint32_t kept = m_body_count;
-    for (GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities, &m_inverse_inertias, &m_inertias, &m_forces,
-                            &m_torques, &m_displacements, &m_rotations, &m_flags, &m_previous_linear, &m_previous_angular, &m_sleep_timers})
     {
-        (void)array->reserve(m_device, recorder, body_count, kept, m_retired);
+        PROFILE_GPU_SCOPE("uploads", recorder, m_passes);
+        const std::uint32_t kept = m_body_count;
+        for (GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities, &m_inverse_inertias, &m_inertias, &m_forces,
+                                &m_torques, &m_displacements, &m_rotations, &m_flags, &m_previous_linear, &m_previous_angular, &m_sleep_timers})
+        {
+            (void)array->reserve(m_device, recorder, body_count, kept, m_retired);
+        }
+        for (GpuArray& backup : m_backups)
+        {
+            (void)backup.reserve(m_device, recorder, body_count, kept, m_retired);
+        }
+        m_body_count = body_count;
+        m_solver.record_uploads(recorder, body_count, body_count + particle_count, m_retired);
+        m_soft_bodies.record_uploads(recorder, m_retired);
     }
-    for (GpuArray& backup : m_backups)
-    {
-        (void)backup.reserve(m_device, recorder, body_count, kept, m_retired);
-    }
-    m_body_count = body_count;
-    m_solver.record_uploads(recorder, body_count, body_count + particle_count, m_retired);
-    m_soft_bodies.record_uploads(recorder, m_retired);
 
     // The parameters and the patches; this step's forces start from zero (the patches give some).
     const GpuStepParameters parameters{
@@ -1497,18 +1569,21 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         }
     };
     recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
-    m_timer.mark(recorder, StepPhase::SOLVER);
+    m_phases.mark(recorder, StepPhase::SOLVER);
     if (!replay)
     {
         if (patch_count > 0)
         {
+            PROFILE_GPU_SCOPE("patch_bodies", recorder, m_passes);
             pass(m_pipelines.patch_bodies(), patch_count);
         }
         recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
+        PROFILE_GPU_SCOPE("state backup", recorder, m_passes);
         copy_state(false);
     }
     else
     {
+        PROFILE_GPU_SCOPE("state restore", recorder, m_passes);
         copy_state(true);
     }
     recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
@@ -1525,7 +1600,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                            .sleep = pending.configuration.sleep,
                            .collision = pending.configuration.collision,
                            .lists_changed = m_lists_changed,
-                           .timer = &m_timer};
+                           .timer = &m_phases};
     m_solver.record_detection(recorder, step);
     const std::uint32_t position_iterations = std::max(solver.position_iterations, 1U);
     const std::uint32_t iterations = std::max(position_iterations, m_soft_bodies.iterations());
@@ -1538,10 +1613,13 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         const auto soft = [&](bool begins) {
             if (particles)
             {
-                m_timer.mark(recorder, begins ? StepPhase::SOFT_BODIES : StepPhase::SOLVER);
+                m_phases.mark(recorder, begins ? StepPhase::SOFT_BODIES : StepPhase::SOLVER);
             }
         };
-        pass(m_pipelines.integrate(), body_count);
+        {
+            PROFILE_GPU_SCOPE("xpbd_integrate", recorder, m_passes);
+            pass(m_pipelines.integrate(), body_count);
+        }
         soft(true);
         m_soft_bodies.record_integrate(recorder, parameters_index);
         for (std::uint32_t iteration = 0; iteration < iterations; ++iteration)
@@ -1554,7 +1632,10 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                 m_solver.record_positions(recorder, iteration == 0);
             }
         }
-        pass(m_pipelines.update_velocities(), body_count);
+        {
+            PROFILE_GPU_SCOPE("xpbd_velocity_update", recorder, m_passes);
+            pass(m_pipelines.update_velocities(), body_count);
+        }
         soft(true);
         m_soft_bodies.record_velocity_update(recorder, parameters_index);
         soft(false);
@@ -1565,58 +1646,61 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     }
     m_solver.record_joint_forces(recorder);
     m_solver.record_sleep(recorder);
-    m_timer.mark(recorder, StepPhase::EVENTS);
+    m_phases.mark(recorder, StepPhase::EVENTS);
     m_solver.record_reports(recorder);
     m_solver.record_triggers(recorder);
 
     // The results into the readback buffer: the bodies' arrays, their flags, the solver's counts, the joints' results.
-    recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
-    std::uint64_t offset = 0;
-    for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
     {
-        if (vectors > 0)
+        PROFILE_GPU_SCOPE("readback copies", recorder, m_passes);
+        recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
+        std::uint64_t offset = 0;
+        for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
         {
-            const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
-            recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+            if (vectors > 0)
+            {
+                const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
+                recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+            }
+            offset += vectors;
         }
-        offset += vectors;
-    }
-    if (words > 0)
-    {
-        const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
-        recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
-    }
-    offset += words;
-    const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
-    recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
-    offset += sizeof(GpuSolverCounts);
-    if (joint_count > 0)
-    {
-        const std::array joint_regions{
-            BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{joint_count} * 2 * sizeof(GpuVector)}};
-        recorder.copy_buffer(m_solver.joint_results_buffer().handle(), m_readback.buffer().handle(), joint_regions);
-    }
-    offset += std::uint64_t{joint_count} * 2 * sizeof(GpuVector);
-    for (const GpuArray* array : {&m_soft_bodies.positions(), &m_soft_bodies.velocities()})
-    {
-        if (particle_count > 0)
+        if (words > 0)
         {
-            const std::array regions{
-                BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{particle_count} * sizeof(GpuVector)}};
-            recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+            const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
+            recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
         }
-        offset += std::uint64_t{particle_count} * sizeof(GpuVector);
+        offset += words;
+        const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
+        recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
+        offset += sizeof(GpuSolverCounts);
+        if (joint_count > 0)
+        {
+            const std::array joint_regions{
+                BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{joint_count} * 2 * sizeof(GpuVector)}};
+            recorder.copy_buffer(m_solver.joint_results_buffer().handle(), m_readback.buffer().handle(), joint_regions);
+        }
+        offset += std::uint64_t{joint_count} * 2 * sizeof(GpuVector);
+        for (const GpuArray* array : {&m_soft_bodies.positions(), &m_soft_bodies.velocities()})
+        {
+            if (particle_count > 0)
+            {
+                const std::array regions{
+                    BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = std::uint64_t{particle_count} * sizeof(GpuVector)}};
+                recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+            }
+            offset += std::uint64_t{particle_count} * sizeof(GpuVector);
+        }
+        const std::array report_regions{BufferCopyRegion{.size = std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport)}};
+        recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), report_regions);
+        if (m_solver.trigger_capacity() > 0)
+        {
+            const std::uint64_t trigger_bytes = std::uint64_t{m_solver.trigger_capacity()} * sizeof(GpuTriggerOverlap);
+            m_trigger_readback.reserve(m_device, trigger_bytes, m_retired);
+            const std::array trigger_regions{BufferCopyRegion{.size = trigger_bytes}};
+            recorder.copy_buffer(m_solver.trigger_results_buffer().handle(), m_trigger_readback.buffer().handle(), trigger_regions);
+        }
     }
-    const std::array report_regions{BufferCopyRegion{.size = std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport)}};
-    recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), report_regions);
-    if (m_solver.trigger_capacity() > 0)
-    {
-        const std::uint64_t trigger_bytes = std::uint64_t{m_solver.trigger_capacity()} * sizeof(GpuTriggerOverlap);
-        m_trigger_readback.reserve(m_device, trigger_bytes, m_retired);
-        const std::array trigger_regions{BufferCopyRegion{.size = trigger_bytes}};
-        recorder.copy_buffer(m_solver.trigger_results_buffer().handle(), m_trigger_readback.buffer().handle(), trigger_regions);
-    }
-    m_timer.end(recorder);
+    m_phases.end(recorder);
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
 }
 

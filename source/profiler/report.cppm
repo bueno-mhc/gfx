@@ -90,4 +90,20 @@ struct Report
 /// @brief @p report as Markdown tables (milliseconds).
 [[nodiscard]] auto to_markdown(const Report& report) -> std::string;
 
+/// @brief A stage of a workload and how its traces show it; a workload's list of them says what a trace of it should
+///        cover (missing_stages()).
+struct StageCoverage
+{
+    std::string_view stage{};                             ///< The stage, as a design or a request names it.
+    StageCoverageKind kind = StageCoverageKind::RECORDED; ///< How it shows.
+    std::string_view site{};                              ///< RECORDED: the site of its scope (CPU or GPU); FUSED_IN: the
+                                                          ///< site whose scope holds it; ABSENT: none.
+    std::string_view reason{};                            ///< FUSED_IN and ABSENT: why it has no scope of its own.
+};
+
+/// @brief What @p trace lacks of @p stages, a line each: a RECORDED or FUSED_IN stage whose site has no scope (CPU or
+///        GPU, timed or not) in any frame, a FUSED_IN or ABSENT stage without a reason. Empty: the trace covers them.
+[[nodiscard]] auto missing_stages(const Trace& trace,
+                                  std::span<const StageCoverage> stages) -> std::vector<std::string>;
+
 } // namespace gfx::profiler

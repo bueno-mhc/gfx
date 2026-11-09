@@ -21,6 +21,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.physics.enums;
 import gfx.physics.narrow_phase;
 import gfx.physics.shapes;
@@ -108,6 +109,10 @@ public:
 
     /// @brief Shapes in the table (a compound's children count).
     [[nodiscard]] auto shape_count() const noexcept -> std::uint32_t;
+
+    /// @brief Times its passes through @p timer (nullptr: not timed): a GPU scope per pass while a profiler records the
+    ///        GPU category with the timer added. Its primitives are timed by their own (GpuPrimitives::set_timer()).
+    void set_timer(profiler::GpuTimer* timer) noexcept;
 
     /// @brief Records the upload of the shape table (after shapes were added; before recording the commands that read
     ///        it, never between recording and submitting them, as GpuPrimitives::reserve()).

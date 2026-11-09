@@ -1,6 +1,13 @@
+// The framework's XPBD soft-body solver; each part of a soft body's step is a profiler scope ("Soft bodies (CPU): ...").
+module;
+
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.dynamics;
 
 import std;
+import gfx.profiler;
 import gfx.core.math;
 import gfx.physics.enums;
 import gfx.physics.errors;
@@ -656,11 +663,14 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
     }
     const float travel = fastest * seconds + length(acceleration) * seconds * seconds;
     reach = reach.expanded(travel + 2.0F * radius);
-    gather_candidates(soft_body, reach, bodies, colliders);
-    self_pairs.clear();
-    if (settings.self_collision)
     {
-        gather_self_pairs(soft_body, 2.0F * radius + 2.0F * travel);
+        PROFILE_SCOPE("Soft bodies (CPU): candidates and self pairs");
+        gather_candidates(soft_body, reach, bodies, colliders);
+        self_pairs.clear();
+        if (settings.self_collision)
+        {
+            gather_self_pairs(soft_body, 2.0F * radius + 2.0F * travel);
+        }
     }
 
     // The sub-steps.
@@ -672,6 +682,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
     for (std::uint32_t sub_step = 0; sub_step < sub_steps; ++sub_step)
     {
         // The bodies where the backend's motion and the corrections so far take them at the sub-step's end.
+        PROFILE_SCOPE("Soft bodies (CPU): sub-step");
+        PROFILE_NAMED_SCOPE(predict_scope, "Soft bodies (CPU): predict");
         const float fraction = static_cast<float>(sub_step + 1) / static_cast<float>(sub_steps);
         for (Proxy& proxy : proxies)
         {
@@ -702,6 +714,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
         }
 
         // The colored constraints, a large color on the scheduler's threads.
+        predict_scope.end();
+        PROFILE_NAMED_SCOPE(colors_scope, "Soft bodies (CPU): colored constraints");
         ColorProjection projection{.constraints = model.constraints().data(), .positions = positions.data(), .inverse_masses = inverse_masses.data(), .squared_step = squared_step};
         for (std::size_t color = 0; color + 1 < color_starts.size(); ++color)
         {
@@ -725,6 +739,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
         }
 
         // Tethers move their particle back within reach of the anchor.
+        colors_scope.end();
+        PROFILE_NAMED_SCOPE(pins_scope, "Soft bodies (CPU): tethers and pins");
         for (const SoftBodyModel::Constraint& tether : model.tethers())
         {
             const std::uint32_t held = tether.particles[0];
@@ -768,6 +784,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
         }
 
         // Contacts with the colliders, with friction: each correction shared with the collider's body.
+        pins_scope.end();
+        PROFILE_NAMED_SCOPE(contacts_scope, "Soft bodies (CPU): contacts");
         std::uint32_t contacts_now = 0;
         for (const Candidate& candidate : candidates)
         {
@@ -828,6 +846,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
         }
 
         // The body's own particles apart by two radii.
+        contacts_scope.end();
+        PROFILE_NAMED_SCOPE(self_scope, "Soft bodies (CPU): self-collision");
         const float contact_distance = 2.0F * radius;
         for (const auto& [first, second] : self_pairs)
         {
@@ -845,6 +865,8 @@ XpbdSoftBodySolver::State::step_soft_body(float seconds,
         }
 
         // The velocities from the positions' change, damped.
+        self_scope.end();
+        PROFILE_SCOPE("Soft bodies (CPU): velocities");
         const float rate = 1.0F / step;
         for (std::uint32_t particle = 0; particle < count; ++particle)
         {

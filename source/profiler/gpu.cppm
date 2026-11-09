@@ -28,12 +28,15 @@ struct GpuScopeRecord
 
 class Profiler;
 
-/// @brief What hands a Profiler GPU timings (Profiler::add_gpu_source()). Its collect() is called from the thread
-///        that ends the profiler's frames, possibly while other threads record GPU scopes into it.
+/// @brief What hands a Profiler GPU timings (Profiler::add_gpu_source(), attach_to_current_profiler()). Its collect()
+///        is called from the thread that ends the profiler's frames, possibly while other threads record GPU scopes into
+///        it. A source and the profilers it was added to know each other: whichever is destroyed first ends the link
+///        (a derived class calls detach() first in its destructor, so that no collect() reaches it half destroyed).
 class GpuTimingSource
 {
 public:
-    virtual ~GpuTimingSource() = default;
+    /// @brief Removes it from the profilers it is added to.
+    virtual ~GpuTimingSource();
 
     GpuTimingSource(const GpuTimingSource&) = delete;
     GpuTimingSource(GpuTimingSource&&) = delete;
@@ -60,14 +63,28 @@ public:
         return m_attachments.load(std::memory_order_acquire) != 0U;
     }
 
+    /// @brief Whether @p profiler collects from it.
+    [[nodiscard]] auto attached_to(const Profiler& profiler) const -> bool;
+
 protected:
     GpuTimingSource() = default;
 
+    /// @brief Removes it from every profiler it is added to, waiting for a collect() in progress to return; a derived
+    ///        class calls it first in its destructor.
+    void detach() noexcept;
+
 private:
     friend class Profiler;
+    friend void attach_to_current_profiler(GpuTimingSource& source);
 
     std::atomic<std::uint32_t> m_attachments{0};
+    std::vector<Profiler*> m_profilers{}; // the profilers it is added to (guarded by the library's link mutex)
 };
+
+/// @brief Adds @p source to the current profiler (current_profiler()) unless it is added to it already; nothing without
+///        one. The link lasts until either is destroyed or the source is removed. Code that times GPU work for whoever
+///        profiles it (a physics world's steps) calls it once per frame: a lock and a search of a short list.
+void attach_to_current_profiler(GpuTimingSource& source);
 
 /// @brief What PROFILE_GPU_SCOPE(name, recorder, provider) records through: `provider.scope(recorder, site)` opens a
 ///        GPU scope in @p Recorder's commands, closed when the returned object is destroyed.

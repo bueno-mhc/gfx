@@ -20,6 +20,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.physics.enums;
 import gfx.physics.spatial;
 import :settings;
@@ -125,6 +126,11 @@ public:
 
     /// @brief Its layout and treelet rounds.
     [[nodiscard]] auto description() const noexcept -> const GpuBvhDescription&;
+
+    /// @brief Times its passes through @p timer (nullptr: not timed): a GPU scope per build, refit, pair search and ray
+    ///        cast and per pass inside them, while a profiler records the GPU category with the timer added. Its primitives
+    ///        are timed by their own (GpuPrimitives::set_timer()).
+    void set_timer(profiler::GpuTimer* timer) noexcept;
 
     /// @brief Records the build of a tree over @p count boxes of @p boxes (two vectors each: minimum, maximum; w ignored),
     ///        whose leaves are the boxes' indices. The boxes are not read afterwards.

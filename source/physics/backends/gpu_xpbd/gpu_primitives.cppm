@@ -17,6 +17,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.physics.enums;
 import :settings;
 
@@ -74,6 +75,10 @@ public:
 
     /// @brief Whether the subgroup variant runs.
     [[nodiscard]] auto uses_subgroups() const noexcept -> bool;
+
+    /// @brief Times its passes through @p timer (nullptr: not timed): a GPU scope per primitive and per radix pass while
+    ///        a profiler records the GPU category with the timer added (gfx.profiler.graphics).
+    void set_timer(profiler::GpuTimer* timer) noexcept;
 
     /// @brief Records the exclusive prefix sum of @p count words of @p input into @p output (which may be @p input), and
     ///        their sum into the word @p total (when valid). Sums wrap around modulo 2³².

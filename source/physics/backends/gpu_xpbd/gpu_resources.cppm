@@ -1,6 +1,6 @@
 // The GPU backend's internal partition of GPU resources: the layouts the CPU and the shaders share (each checked here by
-// size and offset; shaders/step.glsl declares the same), growable device arrays and host buffers, and the compute
-// pipelines of the passes.
+// size and offset; shaders/step.glsl declares the same), growable device arrays and host buffers, the compute pipelines
+// of the passes, and their GPU timing (the step's phases, the passes' scopes).
 module;
 
 #include <stddef.h>
@@ -11,6 +11,7 @@ import std;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
+import gfx.profiler.graphics;
 import gfx.physics.enums;
 import gfx.physics.shapes;
 
@@ -233,43 +234,107 @@ private:
     std::unique_ptr<Buffer> m_buffer{};
 };
 
-// ===================================================================================================== step timer
+// ===================================================================================================== GPU timing
 
-/// Timestamps between a step's phases, when the queue writes them: each mark ends the phase begun at the mark before and
-/// begins another; after the step, the time between marks summed per phase (on the GPU, so the phases' GPU times).
-class StepTimer
+/// The sites of a step's phases as GPU scopes (by StepPhase; EDITS is the framework's, on the CPU).
+inline constexpr std::array<profiler::ProfileSite, ENUMERATOR_COUNT<StepPhase>> PHASE_SITES{
+    profiler::ProfileSite{"GPU XPBD: edits", profiler::ProfilerCategory::GPU},
+    profiler::ProfileSite{"GPU XPBD: broad phase", profiler::ProfilerCategory::GPU},
+    profiler::ProfileSite{"GPU XPBD: narrow phase", profiler::ProfilerCategory::GPU},
+    profiler::ProfileSite{"GPU XPBD: solver", profiler::ProfilerCategory::GPU},
+    profiler::ProfileSite{"GPU XPBD: soft bodies", profiler::ProfilerCategory::GPU},
+    profiler::ProfileSite{"GPU XPBD: events", profiler::ProfilerCategory::GPU},
+};
+
+/// The phases of a step (StepStatistics::phase_seconds) as GPU scopes of the step's GpuTimer, timed in every build when
+/// the queue writes timestamps; the passes' scopes nest in them. Each mark ends the phase begun at the mark before and
+/// begins another; after the step (GpuTimer::finish_frame()), the phases' scopes summed.
+class PhaseTimer
 {
 public:
-    /// @param device  The device (it outlives the timer).
-    /// @param enabled Whether the queue writes timestamps (else every operation does nothing).
-    /// @param family  The queue's family (its timestamps' valid bits).
-    StepTimer(Device& device,
-              bool enabled,
-              std::uint32_t family);
+    /// @param timer The step's timer (it outlives this).
+    explicit PhaseTimer(profiler::GpuTimer& timer) noexcept;
 
+    /// Whether the queue writes timestamps (else the phases are not timed on the GPU).
     [[nodiscard]] auto enabled() const noexcept -> bool;
 
-    /// Begins a step's recording: the queries reset, no phase begun.
-    void begin(ComputeRecorder& recorder);
-
-    /// Begins @p phase (ending the one begun before): a timestamp, unless @p phase is the one begun or the queries are
-    /// used up (its time then goes to the phase before).
+    /// Begins @p phase, ending the one begun before (nothing when @p phase is the one begun).
     void mark(ComputeRecorder& recorder,
               StepPhase phase);
 
     /// Ends the phase begun last.
     void end(ComputeRecorder& recorder);
 
-    /// After the step completed: the seconds of each phase marked into @p seconds (the others untouched).
+    /// After the timer read the step's frame: the seconds of each phase marked into @p seconds (the others untouched).
     void read(std::span<double, ENUMERATOR_COUNT<StepPhase>> seconds);
 
 private:
-    std::unique_ptr<QueryPool> m_pool{};
-    double m_nanoseconds_per_tick = 1.0;
-    std::uint64_t m_mask = 0;
-    std::vector<StepPhase> m_phases{};      ///< The phase each mark begins (the last one: none, the end).
-    std::vector<std::uint64_t> m_ticks{};   ///< Read back (scratch).
-    bool m_ended = false;
+    profiler::GpuTimer* m_timer;
+    std::optional<StepPhase> m_phase{};
+    profiler::GpuScopeToken m_token{};
+    std::vector<profiler::GpuScopeRecord> m_scopes{}; ///< Read back (scratch).
+};
+
+/// Closes a pass's GPU scope (PassTimer::scope()) when destroyed.
+class PassScope
+{
+public:
+    PassScope(profiler::GpuTimer* timer,
+              ComputeRecorder& recorder,
+              profiler::GpuScopeToken token) noexcept
+        : m_timer{timer}
+        , m_recorder{&recorder}
+        , m_token{token}
+    {
+    }
+
+    ~PassScope()
+    {
+        if (m_timer != nullptr)
+        {
+            m_timer->end_scope(*m_recorder, m_token);
+        }
+    }
+
+    PassScope(const PassScope&) = delete;
+    PassScope(PassScope&&) = delete;
+    auto operator=(const PassScope&) -> PassScope& = delete;
+    auto operator=(PassScope&&) -> PassScope& = delete;
+
+private:
+    profiler::GpuTimer* m_timer;
+    ComputeRecorder* m_recorder;
+    profiler::GpuScopeToken m_token;
+};
+
+/// What the passes of a component are timed through (the provider of PROFILE_GPU_SCOPE): the step's GpuTimer (each scope
+/// timed while a profiler records the GPU category with the timer added), or nothing (a component used alone).
+class PassTimer
+{
+public:
+    void set(profiler::GpuTimer* timer) noexcept
+    {
+        m_timer = timer;
+    }
+
+    [[nodiscard]] auto timer() const noexcept -> profiler::GpuTimer*
+    {
+        return m_timer;
+    }
+
+    /// Opens a GPU scope of @p site in @p recorder's commands, closed when the returned object is destroyed.
+    [[nodiscard]] auto scope(ComputeRecorder& recorder,
+                             const profiler::ProfileSite& site) const -> PassScope
+    {
+        if (m_timer == nullptr)
+        {
+            return PassScope{nullptr, recorder, {}};
+        }
+        return PassScope{m_timer, recorder, m_timer->begin_scope(recorder, site)};
+    }
+
+private:
+    profiler::GpuTimer* m_timer = nullptr;
 };
 
 // ===================================================================================================== pipelines

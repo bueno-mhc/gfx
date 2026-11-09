@@ -4,10 +4,17 @@
 // query's region), each piece tested (mode 1), each collider's best piece (mode 2) — then the CPU picks the nearest or
 // sorts, as the abstraction's queries do (ties to the smaller handle). When the GPU cannot answer exactly the abstraction
 // answers: before the first step, a hull the shape table lacks, more colliders or pieces than a query holds; when the GPU
-// fails (a lost device), the query fails (UNSUPPORTED) and the next step reports the error.
+// fails (a lost device), the query fails (UNSUPPORTED) and the next step reports the error. Submissions, waits and
+// queries are profiler scopes.
+module;
+
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
 
 import std;
+import gfx.profiler;
 import gfx.enums;
 import gfx.handles;
 import gfx.interface;
@@ -141,8 +148,12 @@ GpuXpbdBackend::run_commands(CommandBuffer* commands)
     const std::array command_buffers{(commands != nullptr ? commands : m_command_buffer.get())->handle()};
     const std::array signals{TimelineSemaphoreSignal{.semaphore = m_timeline->handle(), .value = m_submitted + 1}};
     const std::array batches{SubmitDescription{.command_buffers = command_buffers, .timeline_signals = signals}};
-    m_queue->submit(batches);
+    {
+        PROFILE_SCOPE("GPU XPBD: submit");
+        m_queue->submit(batches);
+    }
     ++m_submitted;
+    PROFILE_SCOPE("GPU XPBD: wait for the GPU");
     if (m_timeline->wait(m_submitted) != WaitStatus::SIGNALED)
     {
         throw PhysicsError({.backend = identity(), .operation = "PhysicsWorld::step", .problem = "the GPU did not complete", .suggestion = {}});
@@ -154,6 +165,7 @@ GpuXpbdBackend::run_query(GpuQuery query,
                           const Shape* shape,
                           std::string_view operation) noexcept -> std::expected<bool, QueryFailure>
 {
+    PROFILE_SCOPE("GPU XPBD: query");
     const std::scoped_lock lock{m_query_mutex};
     try
     {

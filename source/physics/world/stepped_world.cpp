@@ -1,9 +1,16 @@
 // SteppedWorld: handles and slots, recording edits (liveness, the backend's checks, cascading destructions), stepping
 // on the caller or on the world's thread, applying the edits to the pending records, mass properties and boxes,
-// publishing, the reader handshake, and the pipeline as the backend describes it.
+// publishing, the reader handshake, and the pipeline as the backend describes it. Each stage of a step is a profiler
+// scope ("World: ..."), its sizes counters.
+module;
+
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.world;
 
 import std;
+import gfx.profiler;
 import gfx.core.errors;
 import gfx.core.handles;
 import gfx.core.math;
@@ -1655,6 +1662,7 @@ SteppedWorld::set_sleep_description(const SleepDescription& description)
 void
 SteppedWorld::step(float seconds)
 {
+    PROFILE_SCOPE("World: step");
     begin_step(seconds);
     wait_step();
 }
@@ -1716,6 +1724,7 @@ SteppedWorld::wait_step()
     // The step's end, and what it threw.
     std::exception_ptr error;
     {
+        PROFILE_SCOPE("World: wait for the step");
         std::unique_lock lock{implementation.step_mutex};
         implementation.step_condition.wait(lock, [&implementation] { return implementation.step_finished; });
         implementation.step_finished = false;
@@ -1865,6 +1874,7 @@ void
 SteppedWorld::Implementation::work(std::stop_token stop,
                                    WorldShared& shared)
 {
+    profiler::set_thread_name("physics world");
     std::unique_lock lock{step_mutex};
     while (step_condition.wait(lock, stop, [this] { return step_requested; }))
     {
@@ -1892,6 +1902,7 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
                                        float seconds)
 {
     using Clock = std::chrono::steady_clock;
+    PROFILE_SCOPE("World: run the step");
     const Clock::time_point start = Clock::now();
 
     // A fresh start for what the step reports.
@@ -1904,12 +1915,18 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
 
     // The edits recorded so far, applied to the records then by the backend.
     {
-        const std::scoped_lock lock{shared.mutex};
-        std::swap(stepping_edits, shared.recorded);
+        PROFILE_SCOPE("World: apply the edits to the records");
+        {
+            const std::scoped_lock lock{shared.mutex};
+            std::swap(stepping_edits, shared.recorded);
+        }
+        apply_to_records(stepping_edits);
+        update_masses();
     }
-    apply_to_records(stepping_edits);
-    update_masses();
-    backend->apply(stepping_edits, pending);
+    {
+        PROFILE_SCOPE("World: backend apply");
+        backend->apply(stepping_edits, pending);
+    }
     const bool soft_bodies = steps_soft_bodies();
     if (soft_bodies)
     {
@@ -1919,10 +1936,14 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     const Clock::time_point applied = Clock::now();
 
     // The simulation, the soft bodies' (when the framework steps them), then the boxes the new poses make.
-    backend->simulate(seconds, pending);
+    {
+        PROFILE_SCOPE("World: backend simulate");
+        backend->simulate(seconds, pending);
+    }
     const Clock::time_point simulated = Clock::now();
     if (soft_bodies)
     {
+        PROFILE_SCOPE("World: soft bodies");
         simulate_soft_bodies(seconds);
         pending.statistics.phase_seconds[std::to_underlying(StepPhase::SOFT_BODIES)] = std::chrono::duration<double>(Clock::now() - simulated).count();
     }
@@ -1949,6 +1970,17 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     statistics.joints = static_cast<std::uint32_t>(std::ranges::count_if(pending.joints, [](const JointRecord& record) { return record.handle.is_valid(); }));
     statistics.soft_bodies = static_cast<std::uint32_t>(std::ranges::count_if(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); }));
     stepping_edits.clear();
+
+    // The step's sizes.
+    PROFILE_COUNTER("World: edits", statistics.edits);
+    PROFILE_COUNTER("World: rigid bodies", statistics.rigid_bodies);
+    PROFILE_COUNTER("World: awake bodies", statistics.awake_bodies);
+    PROFILE_COUNTER("World: joints", statistics.joints);
+    PROFILE_COUNTER("World: soft bodies", statistics.soft_bodies);
+    PROFILE_COUNTER("World: candidate pairs", statistics.pairs);
+    PROFILE_COUNTER("World: contact points", statistics.contacts);
+    PROFILE_COUNTER("World: touching pairs", pending.contacts.size());
+    PROFILE_COUNTER("World: contact events", pending.contact_events.size());
 }
 
 void
@@ -2087,6 +2119,7 @@ SteppedWorld::Implementation::forget_soft_body_model(SoftBodyHandle soft_body) n
 void
 SteppedWorld::Implementation::update_bounds()
 {
+    PROFILE_SCOPE("World: update the bounds");
     for (ColliderRecord& collider : pending.colliders)
     {
         if (collider.handle)
@@ -2120,6 +2153,7 @@ void
 SteppedWorld::Implementation::publish(WorldShared& shared)
 {
     // The pending snapshot into the published one, under the getters' lock.
+    PROFILE_SCOPE("World: publish");
     {
         const std::unique_lock lock{shared.published_mutex};
         WorldSnapshot& published = shared.published;
@@ -2128,22 +2162,28 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
             pending.configuration_changed = false;
             published.configuration = pending.configuration;
         }
-        copy_records(published.rigid_bodies, pending.rigid_bodies, [](RigidBodyRecord& to, const RigidBodyRecord& from) { to.state = from.state; });
-        copy_records(published.colliders, pending.colliders, [](ColliderRecord& to, const ColliderRecord& from) { to.world_bounds = from.world_bounds; });
-        copy_records(published.joints, pending.joints, [](JointRecord& to, const JointRecord& from) { to.state = from.state; });
-        copy_records(published.constraints, pending.constraints, [](ConstraintRecord& to, const ConstraintRecord& from) { to.state = from.state; });
-        copy_records(published.triggers, pending.triggers, [](TriggerRecord& to, const TriggerRecord& from) { to.world_bounds = from.world_bounds; });
-        copy_records(published.soft_bodies, pending.soft_bodies, [](SoftBodyRecord& to, const SoftBodyRecord& from) {
-            to.positions = from.positions;
-            to.velocities = from.velocities;
-            to.bounds = from.bounds;
-        });
-        published.contact_events = pending.contact_events;
-        published.trigger_events = pending.trigger_events;
-        published.joint_events = pending.joint_events;
-        published.sleep_events = pending.sleep_events;
-        published.contacts = pending.contacts;
-        published.statistics = pending.statistics;
+        {
+            PROFILE_SCOPE("World: copy the records");
+            copy_records(published.rigid_bodies, pending.rigid_bodies, [](RigidBodyRecord& to, const RigidBodyRecord& from) { to.state = from.state; });
+            copy_records(published.colliders, pending.colliders, [](ColliderRecord& to, const ColliderRecord& from) { to.world_bounds = from.world_bounds; });
+            copy_records(published.joints, pending.joints, [](JointRecord& to, const JointRecord& from) { to.state = from.state; });
+            copy_records(published.constraints, pending.constraints, [](ConstraintRecord& to, const ConstraintRecord& from) { to.state = from.state; });
+            copy_records(published.triggers, pending.triggers, [](TriggerRecord& to, const TriggerRecord& from) { to.world_bounds = from.world_bounds; });
+            copy_records(published.soft_bodies, pending.soft_bodies, [](SoftBodyRecord& to, const SoftBodyRecord& from) {
+                to.positions = from.positions;
+                to.velocities = from.velocities;
+                to.bounds = from.bounds;
+            });
+        }
+        {
+            PROFILE_SCOPE("World: copy the events and contacts");
+            published.contact_events = pending.contact_events;
+            published.trigger_events = pending.trigger_events;
+            published.joint_events = pending.joint_events;
+            published.sleep_events = pending.sleep_events;
+            published.contacts = pending.contacts;
+            published.statistics = pending.statistics;
+        }
     }
 
     // The slots of the objects destroyed in this step become free; the query tree follows the published colliders.
@@ -2160,6 +2200,7 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
 void
 SteppedWorld::Implementation::update_query_tree(const WorldSnapshot& published)
 {
+    PROFILE_SCOPE("World: update the query tree");
     if (collider_proxies.size() < published.colliders.size())
     {
         collider_proxies.resize(published.colliders.size());

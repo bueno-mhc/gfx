@@ -1,14 +1,19 @@
 // The Box3D backend's world: creation, Box3D's task hooks over the world's TaskScheduler, the checks of what Box3D cannot
 // do, the edits applied to the Box3D world in order, the step, and what it reports — body moves and sleep, contacts (begin,
 // end, hit; one touch per pair of colliders however many shapes touch), trigger overlaps (enter, stay, exit), broken
-// joints, joint forces, the contact list, the statistics.
+// joints, joint forces, the contact list, the statistics. The step's stages are profiler scopes ("Box3D: ..."); Box3D's
+// own profile and counters are profiler counters.
 module;
 
 #include <box3d/box3d.h>
 
+#define GFX_PROFILE_CATEGORY ::gfx::profiler::ProfilerCategory::PHYSICS
+#include <gfx/profiler.hpp>
+
 module gfx.physics.backends.box3d;
 
 import std;
+import gfx.profiler;
 import gfx.core.errors;
 import gfx.core.handles;
 import gfx.core.math;
@@ -42,7 +47,10 @@ enqueue_task(b3TaskCallback* task,
         task(task_context);
         return nullptr;
     }
-    bridge.tickets[index] = bridge.scheduler->start([task, task_context] { task(task_context); });
+    bridge.tickets[index] = bridge.scheduler->start([task, task_context] {
+        PROFILE_SCOPE("Box3D: task");
+        task(task_context);
+    });
     return &bridge.tickets[index];
 }
 
@@ -618,6 +626,7 @@ Box3dBackend::apply(std::span<const WorldEdit> edits,
                     WorldSnapshot& pending)
 {
     // In order; then the mass properties of the bodies whose colliders or settings changed, read back from Box3D.
+    PROFILE_SCOPE("Box3D: apply the edits");
     const EditApplier applier{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
     {
@@ -669,24 +678,54 @@ Box3dBackend::simulate(float seconds,
     // The step, then what it reports.
     ++m_step;
     m_tasks->used.store(0, std::memory_order_relaxed);
-    b3World_Step(m_world, seconds, m_sub_steps);
-    capture_bodies(pending);
-    capture_contacts(pending);
-    capture_triggers(pending);
-    capture_joints(pending);
+    {
+        PROFILE_SCOPE("Box3D: b3World_Step");
+        b3World_Step(m_world, seconds, m_sub_steps);
+    }
+    {
+        PROFILE_SCOPE("Box3D: capture the bodies");
+        capture_bodies(pending);
+    }
+    {
+        PROFILE_SCOPE("Box3D: capture the contacts");
+        capture_contacts(pending);
+    }
+    {
+        PROFILE_SCOPE("Box3D: capture the triggers");
+        capture_triggers(pending);
+    }
+    {
+        PROFILE_SCOPE("Box3D: capture the joints");
+        capture_joints(pending);
+    }
 
     // Box3D's profile is in milliseconds.
     const b3Profile profile = b3World_GetProfile(m_world);
+    const b3Counters counters = b3World_GetCounters(m_world);
     StepStatistics& statistics = pending.statistics;
     statistics.phase_seconds[std::to_underlying(StepPhase::BROAD_PHASE)] = static_cast<double>(profile.pairs) / 1000.0;
     statistics.phase_seconds[std::to_underlying(StepPhase::NARROW_PHASE)] = static_cast<double>(profile.collide) / 1000.0;
     statistics.phase_seconds[std::to_underlying(StepPhase::SOLVER)] = static_cast<double>(profile.solve) / 1000.0;
-    statistics.pairs = static_cast<std::uint32_t>(b3World_GetCounters(m_world).contactCount);
+    statistics.pairs = static_cast<std::uint32_t>(counters.contactCount);
     statistics.contacts = 0;
     for (const ContactInfo& contact : pending.contacts)
     {
         statistics.contacts += contact.manifold.point_count;
     }
+
+    // Box3D's own times (what it costs natively) and sizes.
+    PROFILE_COUNTER_FLOAT("Box3D: step (ms)", profile.step);
+    PROFILE_COUNTER_FLOAT("Box3D: pairs (ms)", profile.pairs);
+    PROFILE_COUNTER_FLOAT("Box3D: collide (ms)", profile.collide);
+    PROFILE_COUNTER_FLOAT("Box3D: solve (ms)", profile.solve);
+    PROFILE_COUNTER_FLOAT("Box3D: solver set-up (ms)", profile.solverSetup);
+    PROFILE_COUNTER_FLOAT("Box3D: constraints (ms)", profile.constraints);
+    PROFILE_COUNTER_FLOAT("Box3D: sleep islands (ms)", profile.sleepIslands);
+    PROFILE_COUNTER_FLOAT("Box3D: refit (ms)", profile.refit);
+    PROFILE_COUNTER("Box3D: contacts", counters.contactCount);
+    PROFILE_COUNTER("Box3D: awake contacts", counters.awakeContactCount);
+    PROFILE_COUNTER("Box3D: islands", counters.islandCount);
+    PROFILE_COUNTER("Box3D: tasks", counters.taskCount);
 }
 
 void

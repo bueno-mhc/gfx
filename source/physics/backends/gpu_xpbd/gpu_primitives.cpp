@@ -1,8 +1,14 @@
 // GpuPrimitives: the passes of each primitive recorded with their push constants (the layouts of the shaders' Push
-// blocks), the levels of scans and reductions planned from the maximum count, the scratch buffers sized by reserve().
+// blocks), the levels of scans and reductions planned from the maximum count, the scratch buffers sized by reserve(); a
+// GPU scope per primitive and per radix pass (PROFILE_GPU_SCOPE through the timer set_timer() gave).
+module;
+
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
 
 import std;
+import gfx.profiler;
 import gfx.enums;
 import gfx.errors;
 import gfx.handles;
@@ -239,6 +245,7 @@ struct GpuPrimitives::State
               GpuSpan total) const
     {
         // Up: each level's tiles summed into the level above.
+        PROFILE_GPU_SCOPE("scan", recorder, passes);
         const Levels levels = plan_levels(count.maximum, GPU_XPBD_TILE_SIZE);
         const std::uint32_t partials = scan_partials->bindless_index().value();
         const auto level_span = [&](std::size_t level) {
@@ -302,6 +309,8 @@ struct GpuPrimitives::State
     std::unique_ptr<Buffer> sort_values{};   ///< The values between radix passes.
     std::unique_ptr<Buffer> histogram{};     ///< RADIX_SIZE words per tile.
     std::unique_ptr<Buffer> places{};        ///< The scanned flags of a compaction.
+
+    PassTimer passes{};                      ///< What its passes are timed through.
 };
 
 // ===================================================================================================== GpuPrimitives
@@ -355,6 +364,12 @@ GpuPrimitives::uses_subgroups() const noexcept -> bool
 }
 
 void
+GpuPrimitives::set_timer(profiler::GpuTimer* timer) noexcept
+{
+    m_state->passes.set(timer);
+}
+
+void
 GpuPrimitives::exclusive_scan(ComputeRecorder& recorder,
                               GpuSpan input,
                               GpuSpan output,
@@ -375,6 +390,7 @@ GpuPrimitives::reduce_bounds(ComputeRecorder& recorder,
     // every box).
     const State& state = *m_state;
     state.check_count("reduce_bounds", count);
+    PROFILE_GPU_SCOPE("reduce_bounds", recorder, state.passes);
     const Levels levels = plan_levels(count.maximum, 1);
     const std::uint32_t partials = state.box_partials->bindless_index().value();
     const std::size_t passes = std::max<std::size_t>(levels.count - 1, 1);
@@ -420,8 +436,10 @@ GpuPrimitives::sort(ComputeRecorder& recorder,
     }
 
     // Few keys: by rank, in one pass.
+    PROFILE_GPU_SCOPE("sort", recorder, state.passes);
     if (count.maximum <= GPU_XPBD_RANK_SORT_LIMIT)
     {
+        PROFILE_GPU_SCOPE("rank_sort", recorder, state.passes);
         record_pass(recorder, *state.rank_sort,
                     RankSortPush{.arrays = {.keys_buffer = keys.buffer,
                                             .keys_first = keys.first,
@@ -453,18 +471,22 @@ GpuPrimitives::sort(ComputeRecorder& recorder,
         const GpuSpan destination_keys = into_outputs ? sorted_keys : scratch_keys;
         const GpuSpan destination_values = into_outputs ? sorted_values : scratch_values;
         const std::uint32_t shift = pass * GPU_XPBD_RADIX_BITS;
-        record_pass(recorder, *state.radix_histogram,
-                    RadixHistogramPush{.keys_buffer = source_keys.buffer,
-                                       .keys_first = source_keys.first,
-                                       .histogram_buffer = histogram.buffer,
-                                       .histogram_first = histogram.first,
-                                       .maximum = count.maximum,
-                                       .count_buffer = count.word.buffer,
-                                       .count_word = count.word.first,
-                                       .shift = shift,
-                                       .tile_count = tile_count},
-                    tile_count);
+        {
+            PROFILE_GPU_SCOPE("radix_histogram", recorder, state.passes);
+            record_pass(recorder, *state.radix_histogram,
+                        RadixHistogramPush{.keys_buffer = source_keys.buffer,
+                                           .keys_first = source_keys.first,
+                                           .histogram_buffer = histogram.buffer,
+                                           .histogram_first = histogram.first,
+                                           .maximum = count.maximum,
+                                           .count_buffer = count.word.buffer,
+                                           .count_word = count.word.first,
+                                           .shift = shift,
+                                           .tile_count = tile_count},
+                        tile_count);
+        }
         state.scan(recorder, histogram, histogram, {.maximum = RADIX_SIZE * tile_count}, {});
+        PROFILE_GPU_SCOPE("radix_scatter", recorder, state.passes);
         record_pass(recorder, *state.radix_scatter,
                     RadixScatterPush{.arrays = {.keys_buffer = source_keys.buffer,
                                                 .keys_first = source_keys.first,
@@ -498,8 +520,10 @@ GpuPrimitives::compact(ComputeRecorder& recorder,
     // The places are the scanned flags; their sum is the count kept.
     const State& state = *m_state;
     state.check_count("compact", count);
+    PROFILE_GPU_SCOPE("compact", recorder, state.passes);
     const GpuSpan places = span_of(*state.places);
     state.scan(recorder, flags, places, count, output_count);
+    PROFILE_GPU_SCOPE("compact_scatter", recorder, state.passes);
     record_pass(recorder, *state.compact_scatter,
                 CompactScatterPush{.flags_buffer = flags.buffer,
                                    .flags_first = flags.first,
@@ -526,6 +550,7 @@ GpuPrimitives::dispatch_arguments(ComputeRecorder& recorder,
         refuse("dispatch_arguments", !count.word.is_valid() ? "the count has no word" : "0 elements per workgroup",
                "give the word a pass writes the count into, and a positive number of elements per workgroup");
     }
+    PROFILE_GPU_SCOPE("dispatch_arguments", recorder, m_state->passes);
     record_pass(recorder, *m_state->dispatch_arguments,
                 DispatchArgumentsPush{.count_buffer = count.word.buffer,
                                       .count_word = count.word.first,

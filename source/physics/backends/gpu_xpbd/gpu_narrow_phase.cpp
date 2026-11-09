@@ -1,8 +1,15 @@
 // GpuNarrowPhase: the shape table (records, vertices, hull faces and corners, mesh triangles, the CPU's static
 // hierarchies, height field samples and active edges, compound children) built on the CPU and uploaded through a staging
 // buffer, its arrays' bindless indices in a table buffer the shaders read; collide()'s passes (mid phase counted and
-// written, sub-pairs, merge) and the cache's sorts recorded with their push constants (the shaders' Push blocks).
+// written, sub-pairs, merge) and the cache's sorts recorded with their push constants (the shaders' Push blocks); a GPU
+// scope per pass (PROFILE_GPU_SCOPE through set_timer()'s timer).
+module;
+
+#include <gfx/profiler.hpp>
+
 module gfx.physics.gpu_xpbd;
+
+import gfx.profiler;
 
 import std;
 import gfx.core.math;
@@ -480,6 +487,8 @@ struct GpuNarrowPhase::State
     std::unique_ptr<Buffer> cache_values{};
     std::unique_ptr<Buffer> cache_sorted_keys{};
     std::unique_ptr<Buffer> cache_order{};
+
+    PassTimer passes{}; ///< What its passes are timed through.
 };
 
 // ===================================================================================================== GpuNarrowPhase
@@ -522,6 +531,12 @@ GpuNarrowPhase::shape_count() const noexcept -> std::uint32_t
 }
 
 void
+GpuNarrowPhase::set_timer(profiler::GpuTimer* timer) noexcept
+{
+    m_state->passes.set(timer);
+}
+
+void
 GpuNarrowPhase::upload_shapes(ComputeRecorder& recorder)
 {
     // The whole table again (shapes are few): new arrays, the table buffer naming them, one staging buffer, the copies.
@@ -530,6 +545,7 @@ GpuNarrowPhase::upload_shapes(ComputeRecorder& recorder)
     {
         return;
     }
+    PROFILE_GPU_SCOPE("shape table upload", recorder, state.passes);
     const std::array<std::span<const std::byte>, TABLE_ARRAYS> parts{
         std::as_bytes(std::span{state.shape_records}), std::as_bytes(std::span{state.vertices}), std::as_bytes(std::span{state.hull_faces}),
         std::as_bytes(std::span{state.hull_indices}),  std::as_bytes(std::span{state.triangles}), std::as_bytes(std::span{state.nodes}),
@@ -630,6 +646,7 @@ GpuNarrowPhase::bounds(ComputeRecorder& recorder,
     {
         refuse("bounds", std::format("the expansion is {}", expansion), "grow the boxes by a finite distance of at least 0");
     }
+    PROFILE_GPU_SCOPE("shape_bounds", recorder, state.passes);
     record_pass(recorder, *state.bounds,
                 BoundsPush{.tables = state.table(),
                            .instances_buffer = instances.buffer,
@@ -671,6 +688,7 @@ GpuNarrowPhase::collide(ComputeRecorder& recorder,
     }
 
     // The mid phase counted, the counts scanned into offsets (their sum: the slots needed), the mid phase written.
+    PROFILE_GPU_SCOPE("narrow phase", recorder, state.passes);
     const std::uint32_t pair_workgroups = workgroups(std::max(count.maximum, 1U));
     PairsPush mid_phase{.tables = state.table(),
                         .instances_buffer = instances.buffer,
@@ -686,13 +704,21 @@ GpuNarrowPhase::collide(ComputeRecorder& recorder,
                         .capacity = output.capacity,
                         .writing = 0,
                         .speculative_distance = settings.speculative_distance};
-    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    {
+        PROFILE_GPU_SCOPE("narrow_phase_pairs (count)", recorder, state.passes);
+        record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    }
     state.primitives.exclusive_scan(recorder, span_of(*state.pair_counts), span_of(*state.pair_offsets), count, output.total);
     mid_phase.writing = 1;
-    record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    {
+        PROFILE_GPU_SCOPE("narrow_phase_pairs (write)", recorder, state.passes);
+        record_pass(recorder, *state.pairs, mid_phase, pair_workgroups);
+    }
 
     // Each sub-pair's manifold at its slot, then each pair's merged.
-    record_pass(recorder, *state.collide,
+    {
+        PROFILE_GPU_SCOPE("narrow_phase_collide", recorder, state.passes);
+        record_pass(recorder, *state.collide,
                 CollidePush{.tables = state.table(),
                             .sub_pairs_buffer = state.sub_pairs->bindless_index().value(),
                             .manifolds_buffer = output.manifolds.buffer,
@@ -702,6 +728,8 @@ GpuNarrowPhase::collide(ComputeRecorder& recorder,
                             .count_word = output.total.first,
                             .speculative_distance = settings.speculative_distance},
                 workgroups(std::max(output.capacity, 1U)));
+    }
+    PROFILE_GPU_SCOPE("narrow_phase_merge", recorder, state.passes);
     record_pass(recorder, *state.merge,
                 MergePush{.manifolds_buffer = output.manifolds.buffer,
                           .manifolds_first = output.manifolds.first,
@@ -862,13 +890,21 @@ GpuNarrowPhase::match(ComputeRecorder& recorder,
                       .count_buffer = previous_count.word.buffer,
                       .count_word = previous_count.word.first,
                       .gather = 0};
-    record_pass(recorder, *state.keys, key_push, previous_workgroups);
+    PROFILE_GPU_SCOPE("contact cache", recorder, state.passes);
+    {
+        PROFILE_GPU_SCOPE("contact_keys", recorder, state.passes);
+        record_pass(recorder, *state.keys, key_push, previous_workgroups);
+    }
     state.primitives.sort(recorder, {.buffer = keys}, {.buffer = values}, {.buffer = sorted_keys}, {.buffer = order}, previous_count);
     key_push.gather = 1;
-    record_pass(recorder, *state.keys, key_push, previous_workgroups);
+    {
+        PROFILE_GPU_SCOPE("contact_keys", recorder, state.passes);
+        record_pass(recorder, *state.keys, key_push, previous_workgroups);
+    }
     state.primitives.sort(recorder, {.buffer = keys}, {.buffer = order}, {.buffer = sorted_keys}, {.buffer = values}, previous_count);
 
     // Each current point's predecessor.
+    PROFILE_GPU_SCOPE("contact_match", recorder, state.passes);
     record_pass(recorder, *state.match,
                 MatchPush{.previous_buffer = previous.buffer,
                           .previous_first = previous.first,

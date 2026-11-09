@@ -23,6 +23,7 @@ import gfx.enums;
 import gfx.interface;
 import gfx.physics.enums;
 import gfx.physics.interface;
+import gfx.profiler;
 export import :settings;
 export import :primitives;
 export import :bvh;
@@ -61,5 +62,13 @@ export namespace gfx::physics::gpu_xpbd
 [[nodiscard]] auto create_physics_world(const PhysicsWorldDescription& description,
                                         Device& device,
                                         const GpuXpbdDescription& settings = {}) -> std::unique_ptr<PhysicsWorld>;
+
+/// @brief The stages of a step (docs/profiler-performance-design.md section A5: those a GPU XPBD step is made of) and how
+///        a profiler trace of a world of this backend shows each: the site of its scope (CPU: the framework's
+///        "World: ..." and the backend's "GPU XPBD: ..."; GPU: the backend's GpuTimer, added to the current profiler at
+///        each step), the scope it runs inside, or why the backend does not do it. profiler::missing_stages() checks a
+///        trace against it (a trace of a world with rigid bodies, joints, a soft body and a trigger, stepped twice at
+///        least, has them all).
+[[nodiscard]] auto stage_coverage() noexcept -> std::span<const profiler::StageCoverage>;
 
 } // namespace gfx::physics::gpu_xpbd
