@@ -1,15 +1,16 @@
 #version 460
 // The Jacobi gather of the overflow set (every active constraint in the Jacobi solver mode), with mass splitting (Tonge et
-// al. 2012): each awake dynamic node is split into as many parts as it has overflow constraints acting on it — its joints
-// and its touching contacts (CONTACT_TOUCHING: a contact keeping a gap through the step gives no correction, and counting
-// the speculative margin's candidates made a pile of 400 balls sink 13 cm) —, each constraint computed with its part (the
-// node's inverse mass and inertia times that count: split_node() in solver.glsl), and the node takes the parts' sum over
-// that count: the sum of the impulses its constraints gave it, as its partners took theirs. Momentum is kept whatever the
-// count (a contact that touches unforeseen corrects with a larger part, as Jacobi steps do). In its graph order, without
-// floating-point atomics: the same sum every run. Mode 0: positions, the joints' and the contacts' (the center moves, the
-// orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the contacts' only (joints
-// have no velocity pass); mode 2 (after the coloring): the counts, positions' and velocities', for split_node(). Particles
-// gather theirs too (moved, not turned).
+// al. 2012) weighted by the constraints' shares: each awake dynamic node is split for each overflow constraint acting on
+// it — its joints and its touching contacts (CONTACT_TOUCHING: a contact keeping a gap through the step gives no
+// correction, and counting the speculative margin's candidates made a pile of 400 balls sink 13 cm) — by how much the
+// shares of all of them (its inverse mass over both sides', summed) exceed its whole correction; each constraint is
+// computed with its part and stores its correction scaled back (split_node() in solver.glsl), and the node takes their
+// sum: the sum of the impulses its constraints gave it, as its partners took theirs. Momentum is kept whatever
+// the weights (a contact that touches unforeseen corrects with a larger part, as Jacobi steps do). In its graph order,
+// without floating-point atomics: the same sum every run. Mode 0: positions, the joints' and the contacts' (the center
+// moves, the orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the contacts' only
+// (joints have no velocity pass); mode 2 (after the coloring): the sums of the shares, positions' and velocities', for
+// split_node(). Particles gather theirs too (moved, not turned).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -22,29 +23,32 @@ void main()
     }
     if (push.mode == 2U)
     {
-        // The overflow constraints acting on the node: joints and touching contacts (positions), touching contacts
-        // (velocities).
-        uvec2 counts = uvec2(0U);
+        // The node's shares of the overflow constraints acting on it, summed: joints and touching contacts (positions),
+        // touching contacts (velocities).
+        vec2 shares = vec2(0.0);
+        const float own = scalar_inverse_mass(load_body(body));
         const uint last = gpu_words[SOLVER.body_end].words[body];
         for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < last; ++entry)
         {
-            const uint constraint = gpu_words[SOLVER.graph_sorted_values].words[entry] >> 1U;
+            const uint value = gpu_words[SOLVER.graph_sorted_values].words[entry];
+            const uint constraint = value >> 1U;
             const uint key = gpu_words[SOLVER.color_keys].words[constraint];
             if ((key >> 1U) != OVERFLOW_COLOR)
             {
                 continue;
             }
-            if ((key & 1U) == 0U)
+            const bool joint = (key & 1U) == 0U;
+            if (!joint && (gpu_word_vectors[SOLVER.contacts].values[contact_base(constraint - SOLVER.joint_count)].w & CONTACT_TOUCHING) == 0U)
             {
-                counts.x += 1U;
+                continue;
             }
-            else if ((gpu_word_vectors[SOLVER.contacts].values[contact_base(constraint - SOLVER.joint_count)].w & CONTACT_TOUCHING) != 0U)
-            {
-                counts += uvec2(1U);
-            }
+            const Constraint sides = load_constraint(constraint);
+            const uint partner = (value & 1U) == 0U ? sides.second : sides.first;
+            const float share = own > 0.0 ? constraint_share(own, scalar_inverse_mass(load_body(partner))) : 0.0;
+            shares += joint ? vec2(share, 0.0) : vec2(share);
         }
-        gpu_words[SOLVER.overflow_counts].words[2U * body] = counts.x;
-        gpu_words[SOLVER.overflow_counts].words[2U * body + 1U] = counts.y;
+        gpu_words[SOLVER.overflow_counts].words[2U * body] = floatBitsToUint(shares.x);
+        gpu_words[SOLVER.overflow_counts].words[2U * body + 1U] = floatBitsToUint(shares.y);
         return;
     }
     vec3 first_sum = vec3(0.0);
@@ -69,9 +73,9 @@ void main()
     {
         return;
     }
-    const float parts = float(max(gpu_words[SOLVER.overflow_counts].words[2U * body + push.mode], 1U));
-    const vec3 linear = first_sum / parts;
-    const vec3 angular = second_sum / parts;
+    // The corrections were weighted by the node's parts (split_node()): their sum.
+    const vec3 linear = first_sum;
+    const vec3 angular = second_sum;
     if (is_particle(body))
     {
         const uint particle = particle_of(body);

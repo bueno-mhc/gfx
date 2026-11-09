@@ -2,7 +2,8 @@
 
 Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
 built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). **PF2 accepted** with its 6
-deviations (§B "PF2 as built"). PF3 built (§B "PF3 as built"; 8 deviations to validate, a GPU defect found). The numbers of §0.1 were
+deviations (§B "PF2 as built"). **PF3 accepted** with its 8 deviations (§B "PF3 as built"); the GPU defect it found is fixed and accepted (docs/gpu-xpbd-design.md §B
+"Fix after G10"; the baseline recorded again). PF4 in progress. The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -646,7 +647,9 @@ Both runs reproduced the failures below identically.
    42 986 kept: the trees' boxes all grow by the fastest motion of anything): the step still overflows after 4 replays and
    throws. The framework's CPU XPBD (Box3D's world) holds the same scene. Hypothesis: a box of 1 m touches up to ~400
    particles; beyond the 32 colors those contacts go to the Jacobi overflow set, whose mass splitting divides the box's
-   corrections among its touching contacts, and the floor's push loses to the particles'. **To fix before PF4** (proposed).
+   corrections among its touching contacts, and the floor's push loses to the particles'. **Fixed before PF4** (the
+   hypothesis confirmed: mass splitting is now weighted by the constraints' shares, docs/gpu-xpbd-design.md §B "Fix after
+   G10"); `mixed` then passes on the GPU in 56.0 ms (Box3D 44.6 ms).
 2. **Box3D comes apart on `stress_constraints`**: by step 100 a ball is flung 10 m above the anchors, later rods are 4 756 to
    7 774 % off their length; smaller lattices hold (0.04 % at 30 balls, 0.06 % at 100, 2 % at 300). The GPU backend holds the
    full lattice (worst rod 16.6 %).
@@ -670,7 +673,13 @@ Both runs reproduced the failures below identically.
    no default label filter for plain `ctest` runs); the quick smoke run is in the default runs.
 7. **Files**: the scenes in one module, not a file each; the reference backend runs when asked (and in the smoke run);
    rods in the chains and the lattice tolerate 30 % (the chains measured 16–21 % at the bottom of their swing).
-8. **The suite fails on this machine today** — the GPU's `mixed` (finding 1) — until that defect is fixed.
+8. **The suite failed on this machine** — the GPU's `mixed` (finding 1) — until that defect was fixed (it passes since).
+
+**Baseline recorded again after the fix** (2026-11-09, same machine and settings; mean ms, Box3D / GPU / speed-up):
+many_boxes 25.77 / 43.79 / 0.59×, pyramid 106.24 / 85.36 / 1.24×, cloth 81.65 / 23.11 / 3.53×, chain 12.04 / 16.17 / 0.74×,
+mixed 44.58 / 55.97 / 0.80×, stress_constraints 67.15 (Box3D fails its check) / 27.10 / 2.48× (worst rod 10.2 %), two_worlds
+22.18 / 47.15 / 0.47×; every judged check passes (the benchmark's exit code 0). The target is met on the cloth and the
+lattice: PF4 and PF5 start from here.
 
 Results: Debug and Release builds with every test: 1515 of 1515 in Debug (994 s); Release 1513 of 1515 (1017 s), the two
 others the benchmark's, not run because its executable failed to compile at the time (a helper declared before the type it

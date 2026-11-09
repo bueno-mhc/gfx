@@ -87,7 +87,7 @@ struct SolverParameters
     uint joint_results;
     uint joined_pairs;
     uint node_count; // the rigid bodies and the particles
-    uint overflow_counts; // per node: its overflow constraints, all (positions) and contacts (velocities)
+    uint overflow_counts; // per node: the sums of its overflow constraints' shares (float bits), positions and velocities
     float world_speculative_distance; // the world's own
     uint boxes;           // the instances' boxes (grown by speculative_distance)
     uint pair_capacity;   // kept pairs at most
@@ -428,18 +428,46 @@ void store_body_velocities(uint slot, Body body)
     gpu_vectors[PARAMETERS.body_angular_velocities].values[slot].xyz = body.angular_velocity;
 }
 
-// A node's part in the overflow set (mass splitting, jacobi_gather.comp): its inverse mass and inertia times its count of
-// overflow constraints of the pass (@p velocities: the velocity pass's, contacts only), at least 1. The gather divides the
-// node's corrections by the same count, so each constraint gives both sides the same impulse whatever the count.
-void split_node(inout Body body, uint node, bool velocities)
+// A node's linear inverse mass, as the overflow set's shares weigh it (0 when it does not move).
+float scalar_inverse_mass(Body body)
 {
-    if (!body.moves)
+    return body.moves ? max(body.inverse_mass.x, max(body.inverse_mass.y, body.inverse_mass.z)) : 0.0;
+}
+
+// A node's share of a constraint's motion: its inverse mass over both sides' (the partner's before its own split).
+float constraint_share(float own_inverse_mass,
+                       float partner_inverse_mass)
+{
+    return own_inverse_mass / (own_inverse_mass + partner_inverse_mass);
+}
+
+// A node's part in the overflow set (mass splitting weighted by the constraints' shares, jacobi_gather.comp). Each overflow
+// constraint of the pass (@p velocities: the velocity pass's, contacts only) would, unsplit, move the node by its share
+// s = w / (w + w_partner) of their error; the shares' sum S (stored by jacobi_gather's mode 2) is how much the node would
+// be moved in all, too much when above 1. The constraint sees the node lighter by P = 1 + max(S - 1, 0) / s parts: it then
+// moves the node by s / S of its error, and the moves add up to the node's whole correction at most. The correction it
+// stores for the gather (which sums them) is scaled by 1 / P (returned): each constraint gives both sides the same impulse
+// (momentum is kept). Against static or kinematic partners P is the count of constraints, between equal masses one less
+// (equal splitting is the count: Tonge et al. 2012); a heavy body's contacts with light particles hardly count (S stays
+// near 1): its support keeps its whole push, and each particle's contact sees the body heavy — equal splitting divided a
+// 1 000 kg box's floor contact among its 400 particle contacts, and the box sank through the floor; parts in proportion to
+// the shares made each particle's part of the box as light as the particle, and the cloth sank 5 cm into the box.
+float split_node(inout Body body,
+                 uint node,
+                 float partner_inverse_mass,
+                 bool velocities)
+{
+    const float own = scalar_inverse_mass(body);
+    if (!(own > 0.0))
     {
-        return;
+        return 1.0;
     }
-    const float parts = float(max(gpu_words[SOLVER.overflow_counts].words[2U * node + (velocities ? 1U : 0U)], 1U));
+    const float share = constraint_share(own, partner_inverse_mass);
+    const float shares = max(uintBitsToFloat(gpu_words[SOLVER.overflow_counts].words[2U * node + (velocities ? 1U : 0U)]), share);
+    const float parts = 1.0 + max(shares - 1.0, 0.0) / share;
     body.inverse_mass *= parts;
     body.inverse_inertia *= parts;
+    return 1.0 / parts;
 }
 
 // The generalized inverse mass of a body at the lever r along direction (Müller et al. 2020, eq. 2).

@@ -310,10 +310,15 @@ void main()
     const uint first_part = gpu_word_vectors[SOLVER.joints].values[base + 1U].x;
     Body first = load_body(header.x);
     Body second = load_body(header.y);
+    float first_weight = 1.0;
+    float second_weight = 1.0;
     if ((push.mode & 2U) != 0U)
     {
-        split_node(first, header.x, false);
-        split_node(second, header.y, false);
+        // Each side's part, against the other's unsplit inverse mass; their corrections weighted for the gather.
+        const float first_inverse_mass = scalar_inverse_mass(first);
+        const float second_inverse_mass = scalar_inverse_mass(second);
+        first_weight = split_node(first, header.x, second_inverse_mass, false);
+        second_weight = split_node(second, header.y, first_inverse_mass, false);
     }
     const vec3 first_center = first.center;
     const vec3 first_rotation = first.rotation;
@@ -348,10 +353,10 @@ void main()
 
     if ((push.mode & 2U) != 0U)
     {
-        gpu_vectors[SOLVER.corrections].values[4U * joint] = vec4(first.center - first_center, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * joint + 1U] = vec4(first.rotation - first_rotation, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * joint + 2U] = vec4(second.center - second_center, 0.0);
-        gpu_vectors[SOLVER.corrections].values[4U * joint + 3U] = vec4(second.rotation - second_rotation, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint] = vec4((first.center - first_center) * first_weight, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 1U] = vec4((first.rotation - first_rotation) * first_weight, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 2U] = vec4((second.center - second_center) * second_weight, 0.0);
+        gpu_vectors[SOLVER.corrections].values[4U * joint + 3U] = vec4((second.rotation - second_rotation) * second_weight, 0.0);
         return;
     }
     store_body_pose(header.x, first);

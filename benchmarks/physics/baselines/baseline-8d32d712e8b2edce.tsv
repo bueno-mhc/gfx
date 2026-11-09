@@ -1,18 +1,19 @@
 # gfx physics benchmark baseline (gfx_physics_benchmark --record-baseline): step() medians and means in milliseconds
 machine	Intel(R) Core(TM) i9-14900HX | NVIDIA GeForce RTX 5060 Laptop GPU 610.74.0 | Microsoft Windows [versão 10.0.26200.9711]
 settings	optimized build, profiler on; warm-up 100, steps 1000, threads 16, scale 1, sleep off
-recorded	2026-11-09 02:45 UTC
+recorded	2026-11-09 21:09 UTC
 scene	backend	p50	mean	p95	p99
-many_boxes	box3d	21.1863	22.0384	27.1228	34.6518
-many_boxes	gpu_xpbd	39.9523	41.2664	53.4282	55.7164
-pyramid	box3d	101.7072	103.2646	111.2778	145.9080
-pyramid	gpu_xpbd	88.4029	88.5738	93.6209	95.9511
-cloth	box3d	84.3593	83.6148	87.6579	89.1465
-cloth	gpu_xpbd	22.9620	23.3015	26.2259	27.6508
-chain	box3d	11.8329	12.1928	15.8052	17.9125
-chain	gpu_xpbd	15.7419	16.1676	19.8296	20.7232
-mixed	box3d	44.5843	45.2065	50.3535	60.1003
-stress_constraints	box3d	64.0494	67.5822	88.9037	92.2888
-stress_constraints	gpu_xpbd	26.7306	26.9926	29.6247	36.2076
-two_worlds	box3d	20.5060	21.0175	26.4872	30.7749
-two_worlds	gpu_xpbd	41.4698	44.1129	55.0037	57.4067
+many_boxes	box3d	23.4869	25.7662	38.4889	41.0709
+many_boxes	gpu_xpbd	41.9198	43.7908	55.7545	59.9200
+pyramid	box3d	104.3547	106.2409	116.9820	156.3387
+pyramid	gpu_xpbd	85.2455	85.3562	90.1183	92.1882
+cloth	box3d	81.6722	81.6460	86.6663	94.0350
+cloth	gpu_xpbd	22.7281	23.1057	26.2794	27.6129
+chain	box3d	11.6232	12.0390	15.0373	17.7391
+chain	gpu_xpbd	15.5683	16.1647	19.9286	21.8918
+mixed	box3d	44.1405	44.5794	48.5379	53.1032
+mixed	gpu_xpbd	55.8981	55.9676	60.4929	62.6408
+stress_constraints	box3d	60.3434	67.1477	88.4749	92.4714
+stress_constraints	gpu_xpbd	26.6350	27.0992	31.3881	36.5620
+two_worlds	box3d	21.0233	22.1767	30.5141	35.3450
+two_worlds	gpu_xpbd	45.4957	47.1473	56.7076	60.0875

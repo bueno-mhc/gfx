@@ -522,6 +522,37 @@ TEST_P(GpuXpbdSoftBodyTest, AClothFallsOntoCollidersAndRests)
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
+TEST_P(GpuXpbdSoftBodyTest, AHeavyBoxUnderAClothStaysOnTheFloor)
+{
+    // A 1 m box of 1 000 kg on the floor with a cloth of 1 600 particles falling onto it (about 400 rest on its top): the
+    // box must stay on the floor, the cloth on the box. (The box's particle contacts outnumber the colors: they and, in the
+    // Jacobi mode, its floor contact go to the overflow set, whose mass splitting once shared the floor's push among all of
+    // them — the box sank through the floor; found by the benchmark's `mixed` scene.)
+    Scene world = scene();
+    world.floor();
+    RigidBody& box = world.add({.pose = {.position = {.y = 0.5F}}}, {.shape = box_shape({.x = 0.5F, .y = 0.5F, .z = 0.5F})});
+    SoftBodyDescription description = cloth_preset({.columns = 40, .rows = 40, .spacing = 0.05F, .origin = {.x = -0.975F, .y = 1.3F, .z = -0.975F}, .row_direction = {.z = 1}});
+    description.damping = 0.5F;
+    SoftBody& cloth = world.soft(description);
+    for (int second = 0; second < 3; ++second)
+    {
+        world.run(60);
+        const RigidBodyState state = box.state();
+        EXPECT_NEAR(state.pose.position.y, 0.5F, 0.01F) << "after " << second + 1 << " s: on the floor";
+        EXPECT_GT(gfx::rotate(state.pose.orientation, Vector3{.y = 1}).y, 0.999F) << "upright";
+    }
+    const float radius = description.particle_radius;
+    for (const Vector3 position : positions_of(cloth))
+    {
+        ASSERT_TRUE(finite(position));
+        if (std::abs(position.x) < 0.45F && std::abs(position.z) < 0.45F)
+        {
+            EXPECT_GE(position.y, 1.0F + radius - 5.0e-3F) << "on the box, not through it";
+        }
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdSoftBodyTest, EditsReachTheParticles)
 {
     // Without gravity a particle stays; moved, it is where it was put, at rest; with gravity again it falls; with full

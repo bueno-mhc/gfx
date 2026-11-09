@@ -1387,6 +1387,38 @@ conformance test executables were added in G9).
 comment of `source/physics/enums.cppm` changed): Debug 1453 of 1453 (980 s, 4 skipped), Release 1453 of 1453 (968 s, 19
 skipped).
 
+### Fix after G10: mass splitting weighted by the constraints' shares (2026-11-09)
+
+**Found by the physics benchmark** (docs/profiler-performance-design.md, PF3: its `mixed` scene): 16 boxes of 1 m (1 000 kg)
+under a cloth of 50 176 particles were pushed into the floor (y = −0.35 m by step 60), through it by step 120, and once
+things flew apart the trees' pairs passed 2²⁴ and the step threw (overflow after 4 replays). The framework's CPU XPBD held
+the same scene.
+
+**Cause.** A box under the cloth touches about 400 particles: beyond the 32 colors those contacts go to the overflow set, and
+in the Jacobi mode its floor contact too. G5/G7's mass splitting split every node into as many parts as it had overflow
+constraints (joints and touching contacts) and gave each part the same weight: the floor contact moved the box by 1/401 of
+its penetration per iteration while gravity pulled it down every substep.
+
+**Fix** (shaders only: `solver.glsl`, `jacobi_gather.comp`, `contact_solve.comp`, `contact_velocity.comp`, `joint_solve.comp`).
+A constraint unsplit would move a node by its share s = w / (w + w_partner) of their error (w: linear inverse masses, the
+partner's before its own split); the shares' sum S over the node's overflow constraints of the pass is how much the node
+would be moved in all. `jacobi_gather` mode 2 now stores S (float bits, positions' and velocities') instead of the counts;
+`split_node(body, node, partner_inverse_mass, velocities)` splits the node into **P = 1 + max(S − 1, 0) / s** parts for that
+constraint and returns 1 / P, by which the constraint scales the correction it stores; the gather sums them (no division).
+Each constraint still gives both sides the same impulse (momentum kept), and the moves a node takes add up to at most its
+whole correction (the parts give each constraint s / S of its error). P is the count of constraints against static and
+kinematic partners, one less than the count between equal masses (equal splitting: the count), about 1 for a heavy body's
+support when its other constraints are light (S near 1), and about 400 for each particle's contact with the box (the
+particle sees the box heavy). A first version in proportion to the shares (P = S / s) kept the box up but made each
+particle's part of the box as light as the particle: the cloth sank 5 cm into the box.
+
+**Tests.** `GpuXpbdSoftBodyTest.AHeavyBoxUnderAClothStaysOnTheFloor` (a 1 000 kg box, a cloth of 1 600 particles falling onto
+it, 3 s: the box within 1 cm of rest and upright each second, the particles on its top) failed on both GPUs in both solver
+modes before the fix (the box tipped and went through the floor) and passes after it. The GPU backend's tests, the
+conformance suite and the examples: 554 of 554 in Debug. The benchmark: `mixed` passes on the GPU (56.0 ms against Box3D's
+44.6), the lattice's worst rod 10.2 % (16.6 % before), the pyramid 85.4 ms (88.6). Full runs (1519 tests: + 4, the new test
+on 2 GPUs in 2 modes): Debug 1519 of 1519 (1124 s), Release 1519 of 1519 (1102 s).
+
 ## C. The API as proposed (for validation, not final code)
 
 ### C1. `source/physics/enums.cppm` (additions)
