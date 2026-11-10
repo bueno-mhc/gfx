@@ -121,6 +121,67 @@ TEST_P(GpuXpbdTest, CapabilitiesAreReportedAndVariantsChosen)
     std::cout << gpu::to_string(found) << '\n';
 }
 
+TEST_P(GpuXpbdTest, WorldsOfADeviceSharePipelinesThroughACacheFile)
+{
+    // SHARED_PIPELINES: two worlds of the device share one set of pipelines, written to the cache file once; their steps
+    // give the bits of a world that made its own. The file read back by the next library (the pipelines then come from it).
+    const std::filesystem::path cache = std::filesystem::current_path() / std::format("gpu_xpbd_pipelines_{}.cache", GetParam());
+    std::filesystem::remove(cache);
+    const auto falling_box = [](PhysicsWorld& target, std::vector<std::unique_ptr<RigidBody>>& bodies, std::vector<std::unique_ptr<Collider>>& colliders) {
+        bodies.push_back(target.create_rigid_body({.kind = BodyKind::STATIC, .pose = {.position = {.y = -0.5F}}}));
+        colliders.push_back(bodies.back()->add_collider({.shape = make_shape(BoxShape{.half_extents = {.x = 10, .y = 0.5F, .z = 10}})}));
+        bodies.push_back(target.create_rigid_body({.pose = {.position = {.y = 1.0F}, .orientation = gfx::Quaternion::from_axis_angle({.x = 1}, 0.3F)}}));
+        colliders.push_back(bodies.back()->add_collider({.shape = make_shape(BoxShape{.half_extents = {.x = 0.3F, .y = 0.3F, .z = 0.3F}})}));
+    };
+    std::vector<std::unique_ptr<RigidBody>> bodies;
+    std::vector<std::unique_ptr<Collider>> colliders;
+    {
+        const std::unique_ptr<PhysicsWorld> first = world({}, {.pipeline_cache_path = cache});
+        const gpu::SharedPipelineStatistics made = gpu::shared_pipeline_statistics(*m_device);
+        EXPECT_EQ(made.worlds, 1U);
+        EXPECT_GT(made.pipelines, 30U);
+        EXPECT_FALSE(made.cache_file_loaded) << "no file yet";
+        EXPECT_EQ(made.cache_writes, 1U);
+        EXPECT_TRUE(std::filesystem::exists(cache));
+        EXPECT_GT(std::filesystem::file_size(cache), 0U);
+
+        const std::unique_ptr<PhysicsWorld> second = world({}, {.pipeline_cache_path = cache});
+        const gpu::SharedPipelineStatistics shared = gpu::shared_pipeline_statistics(*m_device);
+        EXPECT_EQ(shared.worlds, 2U);
+        EXPECT_EQ(shared.pipelines, made.pipelines) << "the second world made none";
+        EXPECT_EQ(shared.cache_writes, 1U) << "nothing new to write";
+
+        // The same bits as a world with pipelines of its own.
+        const std::unique_ptr<PhysicsWorld> own = world({}, {.optimizations = GpuOptimization::NONE});
+        std::vector<std::unique_ptr<RigidBody>> own_bodies;
+        std::vector<std::unique_ptr<Collider>> own_colliders;
+        falling_box(*second, bodies, colliders);
+        falling_box(*own, own_bodies, own_colliders);
+        for (int step = 0; step < 60; ++step)
+        {
+            second->step(1.0F / 60.0F);
+            own->step(1.0F / 60.0F);
+        }
+        const RigidBodyState shared_state = bodies.back()->state();
+        const RigidBodyState own_state = own_bodies.back()->state();
+        EXPECT_EQ(std::memcmp(&shared_state.pose, &own_state.pose, sizeof(shared_state.pose)), 0);
+        EXPECT_EQ(std::memcmp(&shared_state.linear_velocity, &own_state.linear_velocity, sizeof(gfx::Vector3)), 0);
+        own_colliders.clear();
+        own_bodies.clear();
+        colliders.clear();
+        bodies.clear();
+    }
+    EXPECT_EQ(gpu::shared_pipeline_statistics(*m_device).worlds, 0U) << "the library went with its worlds";
+
+    // The next library reads the file.
+    {
+        const std::unique_ptr<PhysicsWorld> later = world({}, {.pipeline_cache_path = cache});
+        EXPECT_TRUE(gpu::shared_pipeline_statistics(*m_device).cache_file_loaded);
+    }
+    std::filesystem::remove(cache);
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdTest, ThePipelineIsTheBackendsOwn)
 {
     const std::unique_ptr<PhysicsWorld> simulated = world();

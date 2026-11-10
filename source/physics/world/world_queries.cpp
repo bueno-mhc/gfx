@@ -87,6 +87,7 @@ SteppedWorld::ray_cast(const Ray& ray,
     }
 
     // The nearest hit among the colliders whose boxes the ray enters before it.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     std::optional<RayHit> best;
     float nearest = maximum;
@@ -137,6 +138,7 @@ SteppedWorld::ray_cast_all(const Ray& ray,
     }
 
     // Every hit, the nearest kept in order.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     const auto nearer = [](const RayHit& first, const RayHit& second) {
         return first.distance < second.distance || (first.distance == second.distance && first.collider < second.collider);
@@ -192,6 +194,7 @@ SteppedWorld::shape_cast(const Shape& shape,
     }
 
     // The first touch among the colliders whose boxes the swept box overlaps.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     const Aabb start = shape.bounds(pose);
     const Aabb swept = start.merged(Aabb{.minimum = start.minimum + translation, .maximum = start.maximum + translation});
@@ -244,6 +247,7 @@ SteppedWorld::overlap(const Shape& shape,
     }
 
     // The colliders the shape touches, among those whose boxes overlap its box; the smallest handles kept in order.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     std::size_t count = 0;
     bool exceeded = false;
@@ -283,11 +287,13 @@ SteppedWorld::overlap(const Aabb& box,
     }
 
     // The colliders whose boxes overlap the box.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     std::size_t count = 0;
     bool exceeded = false;
     world.tree.query(box, [&](ColliderHandle key) {
-        if (world.accepted(key) != nullptr)
+        // The tree's boxes are grown: the collider's own box decides.
+        if (const ColliderRecord* collider = world.accepted(key); collider != nullptr && intersects(collider->world_bounds, box))
         {
             exceeded = (count == output.size()) || exceeded;
             keep_smallest(output, count, key, std::less{});
@@ -321,6 +327,7 @@ SteppedWorld::closest_point(Vector3 point,
     }
 
     // Each candidate whose box is nearer than the best so far.
+    m_implementation->ensure_query_tree(m_shared->published);
     const QueryWorld world{.published = m_shared->published, .tree = m_implementation->query_tree, .filter = options.filter};
     std::optional<ClosestPointHit> best;
     float nearest = maximum;

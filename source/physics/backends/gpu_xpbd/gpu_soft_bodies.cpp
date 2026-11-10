@@ -49,9 +49,9 @@ struct GpuSoftBodies::State
 
     Device& device;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
-    std::unique_ptr<ComputePipeline> integrate{};
-    std::unique_ptr<ComputePipeline> velocity_update{};
-    std::unique_ptr<ComputePipeline> solve{};
+    std::shared_ptr<ComputePipeline> integrate{};
+    std::shared_ptr<ComputePipeline> velocity_update{};
+    std::shared_ptr<ComputePipeline> solve{};
 
     // CPU copies uploaded when they change.
     std::vector<GpuVector> state_positions{};

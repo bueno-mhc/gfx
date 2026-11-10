@@ -113,6 +113,18 @@ enum class GpuBvhFlag : std::uint32_t
                               ///< GPU_XPBD_BVH_STACK_SIZE: its results are incomplete.
 };
 
+/// @brief The GPU backend's optimizations (GpuXpbdDescription::optimizations; docs/profiler-performance-design.md §A10):
+///        each changes where or when work happens, not what a step computes. NONE runs the backend as it was before them
+///        (the baseline the benchmarks compare with). Bitmask.
+enum class GpuOptimization : std::uint32_t
+{
+    NONE                = 0,       ///< The baseline.
+    INCREMENTAL_LAYOUTS = 1U << 0, ///< Colliders, joints and soft bodies laid out again only when an edit or a step changed
+                                   ///< what their layout holds (else last step's is kept, as it is on the GPU).
+    SHARED_PIPELINES    = 1U << 1, ///< The compute pipelines made once per device and shared by its worlds, through a
+                                   ///< pipeline cache read from and written to GpuXpbdDescription::pipeline_cache_path.
+};
+
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
 ///        ("[gfx::physics::SPATIAL] Bvh::remove: ...").
 enum class PhysicsSubsystem : std::uint8_t
@@ -557,6 +569,14 @@ inline constexpr std::uint32_t NO_SOLVER_BODY = 0xFFFFFFFFU;
 /// @brief The overlap and the joint error, in meters, position correction leaves (contacts rest there without jitter).
 inline constexpr float LINEAR_SLOP = 0.005F;
 
+/// @brief How far the framework's query tree grows each collider's box (meters): a leaf moves in the tree only when its
+///        collider's box leaves the grown one (Box2D's AABB margin), so bodies at rest or moving slowly cost nothing.
+inline constexpr float QUERY_TREE_MARGIN = 0.1F;
+
+/// @brief Elements a task of the library's CPU loops takes at least (the framework's boxes and published copies, the GPU
+///        backend's contacts read back).
+inline constexpr std::uint32_t FRAMEWORK_PARALLEL_RANGE = 1024;
+
 /// @brief The angular joint error, in radians (2°), position correction leaves.
 inline constexpr float ANGULAR_SLOP = 0.034906585F;
 
@@ -655,6 +675,12 @@ inline constexpr float GPU_XPBD_CAPACITY_HEADROOM = 0.5F;
 /// @brief GPU scopes the GPU backend times in a step at most (its phases always, its passes while a profiler records them;
 ///        two timestamps each): later ones are recorded untimed (DROPPED).
 inline constexpr std::uint32_t GPU_XPBD_TIMED_SCOPES = 2048;
+
+/// @brief The GPU backend's optimizations by default (GpuXpbdDescription::optimizations): every one that passed its
+///        checks (the conformance suite, the determinism tests, the benchmark). A cast: the bitmask operators are
+///        declared after the enumerations' traits.
+inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
+    static_cast<GpuOptimization>(std::to_underlying(GpuOptimization::INCREMENTAL_LAYOUTS) | std::to_underlying(GpuOptimization::SHARED_PIPELINES));
 
 /// @brief Colliders a query of the GPU backend (QueryEngine::BACKEND) tests at most (more: the abstraction answers).
 inline constexpr std::uint32_t GPU_XPBD_QUERY_PAIRS = 4096;
@@ -828,6 +854,16 @@ struct EnumerationTraits<physics::GpuBvhFlag>
     static constexpr bool IS_BITMASK = true;
     static constexpr std::array NAMES{
         EnumeratorName{physics::GpuBvhFlag::STACK_OVERFLOW, "STACK_OVERFLOW"},
+    };
+};
+
+template<>
+struct EnumerationTraits<physics::GpuOptimization>
+{
+    static constexpr bool IS_BITMASK = true;
+    static constexpr std::array NAMES{
+        EnumeratorName{physics::GpuOptimization::INCREMENTAL_LAYOUTS, "INCREMENTAL_LAYOUTS"},
+        EnumeratorName{physics::GpuOptimization::SHARED_PIPELINES, "SHARED_PIPELINES"},
     };
 };
 
@@ -1390,6 +1426,7 @@ static_assert(verify<physics::GpuJointPartKind>(), "EnumerationTraits<physics::G
 static_assert(verify<physics::GpuJointFlag>(), "EnumerationTraits<physics::GpuJointFlag>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhLayout>(), "EnumerationTraits<physics::GpuBvhLayout>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::GpuBvhFlag>(), "EnumerationTraits<physics::GpuBvhFlag>::NAMES is out of sync with the enumeration");
+static_assert(verify<physics::GpuOptimization>(), "EnumerationTraits<physics::GpuOptimization>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsSubsystem>(), "EnumerationTraits<physics::PhysicsSubsystem>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::PhysicsCapability>(), "EnumerationTraits<physics::PhysicsCapability>::NAMES is out of sync with the enumeration");
 static_assert(verify<physics::BodyKind>(), "EnumerationTraits<physics::BodyKind>::NAMES is out of sync with the enumeration");

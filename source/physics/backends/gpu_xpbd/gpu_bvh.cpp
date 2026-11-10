@@ -256,14 +256,14 @@ struct GpuBvh::State
     GpuBvhDescription description{};
     std::string name{};
     std::vector<std::unique_ptr<ShaderModule>> modules{};
-    std::unique_ptr<ComputePipeline> morton{};
-    std::unique_ptr<ComputePipeline> hierarchy{};
-    std::unique_ptr<ComputePipeline> bounds{};
-    std::unique_ptr<ComputePipeline> reset{};
-    std::unique_ptr<ComputePipeline> treelet{};
-    std::unique_ptr<ComputePipeline> wide{};
-    std::unique_ptr<ComputePipeline> pairs{};
-    std::unique_ptr<ComputePipeline> rays{};
+    std::shared_ptr<ComputePipeline> morton{};
+    std::shared_ptr<ComputePipeline> hierarchy{};
+    std::shared_ptr<ComputePipeline> bounds{};
+    std::shared_ptr<ComputePipeline> reset{};
+    std::shared_ptr<ComputePipeline> treelet{};
+    std::shared_ptr<ComputePipeline> wide{};
+    std::shared_ptr<ComputePipeline> pairs{};
+    std::shared_ptr<ComputePipeline> rays{};
 
     // The tree: its header and the box around its boxes always; the rest sized for `maximum` leaves.
     std::unique_ptr<Buffer> header{};

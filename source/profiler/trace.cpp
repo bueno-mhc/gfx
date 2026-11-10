@@ -117,7 +117,8 @@ canonical_trace(const Trace& trace) -> std::string
         {
             scopes.clear();
             std::ranges::copy_if(frame.scopes, std::back_inserter(scopes), [thread](const TraceScope& scope) { return scope.thread == thread; });
-            std::ranges::sort(scopes, [](const TraceScope& first, const TraceScope& second)
+            // Stable: sibling scopes that began in the same clock tick keep the order they ended in (the order they ran).
+            std::ranges::stable_sort(scopes, [](const TraceScope& first, const TraceScope& second)
             {
                 return std::tie(first.begin, first.depth) < std::tie(second.begin, second.depth);
             });

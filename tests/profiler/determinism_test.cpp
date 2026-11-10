@@ -78,4 +78,46 @@ TEST(ProfilerDeterminismTest, TheSameWorkloadGivesTheSameCanonicalTrace)
     EXPECT_EQ(first.frames()[4].unmatched_records, 1U); // the last frame's span is still open
 }
 
+TEST(ProfilerDeterminismTest, ScopesBegunInTheSameClockTickKeepTheOrderTheyRan)
+{
+    // Empty sibling scopes "a" and "b" in turn: many begin in the tick the one before began (a tick is 100 ns here), and
+    // the canonical form still lists them in the order they ran (it sorted them unstably by begin time before: found by
+    // the GPU backend's trace-structure test, PF4).
+    if constexpr (!PROFILER_ENABLED)
+    {
+        GTEST_SKIP() << "the profiler is compiled out (GFX_PROFILER off)";
+    }
+    constexpr int PAIRS = 2000;
+    Profiler profiler;
+    set_current_profiler(&profiler);
+    const SessionHandle session = profiler.create_session({.name = "ties"});
+    profiler.begin_frame(session);
+    {
+        PROFILE_SCOPE("frame");
+        for (int pair = 0; pair < PAIRS; ++pair)
+        {
+            {
+                PROFILE_SCOPE("a");
+            }
+            {
+                PROFILE_SCOPE("b");
+            }
+        }
+    }
+    profiler.end_frame(session);
+    const Trace trace = profiler.finalize_session(session);
+    set_current_profiler(nullptr);
+
+    // Sites in name order: "a" 0, "b" 1, "frame" 2; then the frame scope and the pairs in turn.
+    const std::string canonical = canonical_trace(trace);
+    std::string expected = "  scope thread 0 site 2 depth 0\n";
+    for (int pair = 0; pair < PAIRS; ++pair)
+    {
+        expected += "  scope thread 0 site 0 depth 1\n  scope thread 0 site 1 depth 1\n";
+    }
+    EXPECT_NE(canonical.find(expected), std::string::npos) << "a scope out of the order it ran in";
+    ASSERT_EQ(trace.frames().size(), 1U);
+    EXPECT_EQ(trace.frames()[0].scopes.size(), std::size_t{2 * PAIRS + 1});
+}
+
 } // namespace

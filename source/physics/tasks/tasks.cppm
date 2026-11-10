@@ -52,6 +52,26 @@ public:
     virtual void finish(TaskTicket ticket);
 };
 
+/// @brief Calls @p function(begin, end) over [0, @p count): through @p scheduler's parallel_for() in ranges of at least
+///        @p minimum_range items when it runs several at once and @p count makes two ranges or more, else once on the
+///        caller. @p function must touch only its own items (the results are then those of one loop in order). Allocates
+///        nothing: the task captures one pointer.
+template<class Function>
+void
+for_each_range(TaskScheduler* scheduler,
+               std::size_t count,
+               std::uint32_t minimum_range,
+               const Function& function)
+{
+    if (scheduler == nullptr || scheduler->concurrency() < 2 || count < 2 * std::size_t{minimum_range})
+    {
+        function(std::uint32_t{0}, static_cast<std::uint32_t>(count));
+        return;
+    }
+    const Function* shared = &function;
+    scheduler->parallel_for(static_cast<std::uint32_t>(count), minimum_range, [shared](std::uint32_t begin, std::uint32_t end) { (*shared)(begin, end); });
+}
+
 /// @brief Runs every range on the calling thread, in order.
 class InlineTaskScheduler final : public TaskScheduler
 {

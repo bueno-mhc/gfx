@@ -233,21 +233,21 @@ struct GpuConstraintSolver::State
     GpuBvh static_tree;
     GpuBvh trigger_tree;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
-    std::unique_ptr<ComputePipeline> collider_poses{};
-    std::unique_ptr<ComputePipeline> pairs_filter{};
-    std::unique_ptr<ComputePipeline> contact_prepare{};
-    std::unique_ptr<ComputePipeline> islands{};
-    std::unique_ptr<ComputePipeline> graph{};
-    std::unique_ptr<ComputePipeline> ranges_pass{};
-    std::unique_ptr<ComputePipeline> coloring_pass{};
-    std::unique_ptr<ComputePipeline> contact_solve{};
-    std::unique_ptr<ComputePipeline> contact_velocity{};
-    std::unique_ptr<ComputePipeline> joint_solve{};
-    std::unique_ptr<ComputePipeline> joint_forces{};
-    std::unique_ptr<ComputePipeline> jacobi_gather{};
-    std::unique_ptr<ComputePipeline> sleep{};
-    std::unique_ptr<ComputePipeline> contacts_report{};
-    std::unique_ptr<ComputePipeline> triggers_filter{};
+    std::shared_ptr<ComputePipeline> collider_poses{};
+    std::shared_ptr<ComputePipeline> pairs_filter{};
+    std::shared_ptr<ComputePipeline> contact_prepare{};
+    std::shared_ptr<ComputePipeline> islands{};
+    std::shared_ptr<ComputePipeline> graph{};
+    std::shared_ptr<ComputePipeline> ranges_pass{};
+    std::shared_ptr<ComputePipeline> coloring_pass{};
+    std::shared_ptr<ComputePipeline> contact_solve{};
+    std::shared_ptr<ComputePipeline> contact_velocity{};
+    std::shared_ptr<ComputePipeline> joint_solve{};
+    std::shared_ptr<ComputePipeline> joint_forces{};
+    std::shared_ptr<ComputePipeline> jacobi_gather{};
+    std::shared_ptr<ComputePipeline> sleep{};
+    std::shared_ptr<ComputePipeline> contacts_report{};
+    std::shared_ptr<ComputePipeline> triggers_filter{};
 
     // Colliders and lists (CPU copies uploaded when they change).
     std::vector<GpuCollider> collider_data{};
@@ -668,6 +668,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     state.solver_parameters.buffer().flush_mapped_range();
 
     // Instances and boxes; the moving tree, the static tree when its colliders changed; their pairs.
+    PROFILE_NAMED_SCOPE(broad_scope, "GPU XPBD: record the broad phase");
     if (step.timer != nullptr)
     {
         step.timer->mark(recorder, StepPhase::BROAD_PHASE);
@@ -703,7 +704,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         }
     }
 
+    broad_scope.end();
+
     // The pairs worth a narrow phase, compacted in order; their manifolds; each point's predecessor.
+    PROFILE_NAMED_SCOPE(narrow_scope, "GPU XPBD: record the narrow phase");
     {
         PROFILE_GPU_SCOPE("pairs_filter", recorder, state.passes);
         state.pass(recorder, *state.pairs_filter, 0, 0, candidates);
@@ -731,7 +735,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
                                  span_of(state.predecessors.buffer()));
     }
 
+    narrow_scope.end();
+
     // The contact constraints (and the step's counts of constraints).
+    PROFILE_NAMED_SCOPE(constraints_scope, "GPU XPBD: record the constraints, islands, graph and colors");
     {
         PROFILE_GPU_SCOPE("contact_prepare", recorder, state.passes);
         state.pass(recorder, *state.contact_prepare, 0, keeps_anchors ? 0U : 1U, slots);

@@ -27,9 +27,10 @@ namespace gfx::physics::gpu_xpbd
 /// What the backend keeps of a collider (by slot).
 struct ColliderEntry
 {
-    ColliderHandle handle{};  ///< Null: a free slot.
-    RigidBodyHandle body{};   ///< Its body.
-    std::uint32_t shape = 0;  ///< Its shape in the narrow phase's table.
+    ColliderHandle handle{};     ///< Null: a free slot.
+    RigidBodyHandle body{};      ///< Its body.
+    std::uint32_t shape = 0;     ///< Its shape in the narrow phase's table.
+    bool contact_events = false; ///< Its configuration's contact_events (as of the last update_colliders()).
 };
 
 /// What the backend keeps of a trigger (by slot): its shape, the colliders it overlapped after the last step (sorted).
@@ -89,16 +90,33 @@ struct TouchingPair
     RigidBodyHandle first_body{};    ///< Its body.
     RigidBodyHandle second_body{};   ///< Its body.
     bool reported = false;           ///< Both colliders made contact events when it began (its END is reported too).
-    std::uint32_t first_contact = 0; ///< Its first contact in the list beside it.
+    bool resting = false;            ///< Its bodies all rested after the step (the next skips it): its contacts are kept.
+    std::uint32_t first_contact = 0; ///< Its first contact in the list beside it (when there is one).
     std::uint32_t contact_count = 0; ///< Its contacts (one per manifold: compound children, triangles).
 };
 
-/// A contact the GPU reported, from the smaller collider handle to the larger.
-struct ReportedContact
+/// A contact the GPU reported, as the reports are sorted: its pair (the smaller collider handle first), its sub-shapes
+/// (in that order), and where its report is (converted into a ContactInfo once, in sorted order).
+struct ReportKey
 {
-    RigidBodyHandle first_body{}; ///< The first collider's body.
-    ContactInfo contact{};        ///< Its collider is the smaller handle.
-    float approach_speed = 0.0F;  ///< The fastest approach of its points at the step's start.
+    std::uint64_t pair = 0;                        ///< The pair as one number ordered as the handles are (first's value << 32 | second's).
+    ColliderHandle first{};                        ///< The smaller handle.
+    ColliderHandle second{};                       ///< The larger.
+    RigidBodyHandle first_body{};                  ///< Its body.
+    RigidBodyHandle second_body{};                 ///< Its body.
+    std::uint32_t sub_shape_first = NO_SUB_SHAPE;  ///< The first collider's compound child or triangle.
+    std::uint32_t sub_shape_second = NO_SUB_SHAPE; ///< The second's.
+    std::uint32_t report = 0;                      ///< Its index in the readback.
+    bool flip = false;                             ///< The narrow phase had the pair the other way.
+    bool reported = false;                         ///< Both colliders make contact events.
+    float approach_speed = 0.0F;                   ///< The fastest approach of its points at the step's start.
+};
+
+/// A report's place in the sorted order: its pair (ReportKey::pair) and its key's index.
+struct ReportOrder
+{
+    std::uint64_t pair = 0; ///< As ReportKey::pair.
+    std::uint32_t key = 0;  ///< Its ReportKey's index.
 };
 
 /// A query of the GPU (query.comp's Query).
@@ -203,13 +221,16 @@ private:
 class GpuXpbdBackend final : public SteppedWorldBackend, private HandleIssuer
 {
 public:
-    /// @param owned    The instance and device the world owns (or nothing).
-    /// @param device   The device the world runs on (owned.device when owned).
-    /// @param settings The backend's settings.
+    /// @param owned     The instance and device the world owns (or nothing).
+    /// @param device    The device the world runs on (owned.device when owned).
+    /// @param settings  The backend's settings.
+    /// @param scheduler The world's task scheduler (PhysicsWorldDescription::task_scheduler): the CPU's share of a step
+    ///                  (reading the contacts back) runs on it; null: on the stepping thread.
     /// @throws BackendCapabilityError if @p device lacks a required capability.
     GpuXpbdBackend(OwnedDevice owned,
                    Device& device,
-                   const GpuXpbdDescription& settings);
+                   const GpuXpbdDescription& settings,
+                   TaskScheduler* scheduler);
 
     /// Waits for the last submission, then releases the GPU resources (the device's deleter frees them).
     ~GpuXpbdBackend() override;
@@ -234,6 +255,12 @@ public:
                   WorldSnapshot& pending) override;
 
     [[nodiscard]] auto simulates_soft_bodies() const noexcept -> bool override
+    {
+        return true;
+    }
+
+    /// Its contacts are converted into the published list in place (read_contacts()).
+    [[nodiscard]] auto replaces_contacts() const noexcept -> bool override
     {
         return true;
     }
@@ -291,6 +318,13 @@ public:
     [[nodiscard]] static auto slot(Handle<Tag> handle) noexcept -> std::uint32_t
     {
         return handle.index(handle_key());
+    }
+
+    /// The number @p handle's order follows (handles compare their encoded generation and slot index).
+    template<class Tag>
+    [[nodiscard]] static auto ordering_value(Handle<Tag> handle) noexcept -> std::uint64_t
+    {
+        return (std::uint64_t{handle.generation(handle_key())} << HANDLE_INDEX_BITS) | handle.index(handle_key());
     }
 
     /// The entry of @p body's slot (grown when needed).
@@ -391,12 +425,16 @@ private:
     // Declared first: destroyed last, after every resource of the device.
     OwnedDevice m_owned{};
     Device& m_device;
+    TaskScheduler* m_scheduler = nullptr;
+    bool m_layouts_dirty = true; ///< Colliders, joints and soft bodies to lay out again (always without INCREMENTAL_LAYOUTS).
     GpuXpbdCapabilities m_capabilities{};
     Queue* m_queue = nullptr;
     std::unique_ptr<CommandPool> m_command_pool{};
     std::unique_ptr<CommandBuffer> m_command_buffer{};
     std::unique_ptr<TimelineSemaphore> m_timeline{};
     std::uint64_t m_submitted = 0;
+    std::shared_ptr<GpuPipelineLibrary> m_pipeline_library{}; ///< The device's (SHARED_PIPELINES), else null.
+    PipelineLibraryScope m_library_scope;                     ///< Open while the constructor makes the pipelines.
     GpuPipelines m_pipelines;
     GpuConstraintSolver m_solver;
     GpuSoftBodies m_soft_bodies;
@@ -482,7 +520,7 @@ private:
     std::unique_ptr<CommandPool> m_query_pool{};
     std::unique_ptr<CommandBuffer> m_query_commands{};
     std::vector<std::unique_ptr<ShaderModule>> m_query_modules{};
-    std::unique_ptr<ComputePipeline> m_query_pipeline{};
+    std::shared_ptr<ComputePipeline> m_query_pipeline{};
     std::unique_ptr<Buffer> m_query_pairs{};
     std::unique_ptr<Buffer> m_query_pieces{};
     std::unique_ptr<Buffer> m_query_answers{}; ///< What the passes write (the results' copy is read).
@@ -498,10 +536,14 @@ private:
     // Contacts: the pairs touching after the last step (sorted by their handles) and their contacts; this step's
     // (scratch, swapped with them when read).
     std::vector<TouchingPair> m_was_touching{};
-    std::vector<ContactInfo> m_was_touching_contacts{};
+    std::vector<ContactInfo> m_was_touching_contacts{}; ///< The contacts of last step's resting pairs only.
     std::vector<TouchingPair> m_touching{};
     std::vector<ContactInfo> m_touching_contacts{};
-    std::vector<ReportedContact> m_reported{};
+    std::vector<ReportKey> m_report_keys{};
+    std::vector<ReportOrder> m_report_order{};         ///< The keys, sorted.
+    std::vector<ReportOrder> m_report_order_scratch{}; ///< (The radix sort's other half.)
+    std::vector<std::uint8_t> m_body_rests{};          ///< By body slot after read_back(): static, or dynamic and asleep.
+    std::vector<std::uint8_t> m_body_sleep_changed{};  ///< By body slot during read_back(): woke up or fell asleep.
 };
 
 } // namespace gfx::physics::gpu_xpbd

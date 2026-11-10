@@ -158,10 +158,12 @@ struct SteppedWorld::Implementation
     std::vector<SoftBodyHandle> released_soft_bodies{};
     std::vector<std::uint8_t> mass_changed{};
 
-    // ------------------------------------------------------------------------------------------------ queries (rebuilt when published)
-    Bvh query_tree{};
+    // ------------------------------------------------------------------------------------------------ queries (brought up to date lazily)
+    Bvh query_tree{};                                   ///< The published colliders' boxes, grown by QUERY_TREE_MARGIN.
     std::vector<SpatialProxyHandle> collider_proxies{}; ///< By collider slot.
     std::vector<ColliderHandle> proxy_colliders{};      ///< The collider each proxy was made for, by collider slot.
+    std::mutex query_tree_mutex{};                      ///< Guards the tree's update (the first query after a step).
+    bool query_tree_stale = false;                      ///< A step was published since the tree's last update.
 
     // ------------------------------------------------------------------------------------------------ the handshake
     mutable std::atomic<bool> stepping{false};
@@ -224,8 +226,13 @@ struct SteppedWorld::Implementation
     /// Copies the pending snapshot into the published one and frees the destroyed objects' slots.
     void publish(WorldShared& shared);
 
-    /// The query tree over the published colliders' boxes.
+    /// The query tree over the published colliders' boxes (each leaf's box grown by QUERY_TREE_MARGIN, moved only when
+    /// its collider's box leaves it).
     void update_query_tree(const WorldSnapshot& published);
+
+    /// Brings the query tree up to date with @p published if a step was published since (the first query after a step
+    /// does it; the queries after it wait for it, then only read).
+    void ensure_query_tree(const WorldSnapshot& published);
 };
 
 /// RAII: a query between steps (the reader side of the handshake). Refused (active() false) while a step runs.

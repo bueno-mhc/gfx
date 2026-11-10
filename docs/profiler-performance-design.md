@@ -3,7 +3,7 @@
 Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
 built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). **PF2 accepted** with its 6
 deviations (§B "PF2 as built"). **PF3 accepted** with its 8 deviations (§B "PF3 as built"); the GPU defect it found is fixed and accepted (docs/gpu-xpbd-design.md §B
-"Fix after G10"; the baseline recorded again). PF4 in progress. The numbers of §0.1 were
+"Fix after G10"; the baseline recorded again). **PF4 built** (§B "PF4 as built", 5 deviations), awaiting validation. The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -686,6 +686,119 @@ others the benchmark's, not run because its executable failed to compile at the 
 used) — fixed, then `PhysicsBenchmark.Smoke` passes and `PhysicsBenchmark.Suite` is skipped (not asked) in Debug, Release
 and profile. Profile suite with `GFX_RUN_BENCHMARKS=1`: fails as expected on the GPU's `mixed` (finding 1); its gate, checked
 apart after the confirmation change, passes the other GPU scenes.
+
+### PF4 as built (2026-11-09)
+
+Every change was traced before and after (the benchmark's Chrome traces, `many_boxes` first: the CPU side of a GPU step
+was 31 of its 41 ms); the scopes added to find them stay (below).
+
+**The framework** (every backend, no flag; kept because the conformance suite and the determinism tests pass unchanged):
+- **The query tree is brought up to date lazily**: publishing a step only marks it stale (`query_tree_stale` under
+  `query_tree_mutex`); the first `QueryEngine::ABSTRACTION` query after a step updates it (`ensure_query_tree()`), the
+  queries after it only read. Its leaves are **fat**: a collider's box grown by `QUERY_TREE_MARGIN` (0.1 m), moved only when
+  the collider's box leaves it (Box2D's margin), so resting and slow bodies cost nothing; `overlap(Aabb)` tests the
+  colliders' own boxes. A world nobody queries never builds it (it was 70 % of the framework's 17 ms at 50 000 bodies).
+- **The bounds and the published copies run on the world's task scheduler** (`for_each_range()`, now in
+  `gfx.physics.tasks` for the whole library: ranges of at least `FRAMEWORK_PARALLEL_RANGE` = 1024, one captured pointer, no
+  allocation; the results those of a loop in order).
+- **Events and contacts are swapped** into the published snapshot, not copied (the pending lists are cleared when the next
+  step begins and keep their storage).
+
+**The GPU backend's contacts and events** (no flag: the same events and contacts, from the same reports; 9.1 → 3.0 ms at
+50 000 boxes, 11.2 → 6.9 ms for the pyramid's 133 451 pairs):
+- The reports' **keys** (the pair as one 64-bit number ordered as the handles are — `ordering_value()`: generation << 24 |
+  slot —, the sub-shapes, the report's index, whether both colliders make events: `ColliderEntry::contact_events`, kept by
+  `update_colliders()`) are made in parallel, sorted by an **LSD radix sort on the pair's bytes** (bytes every key shares
+  skipped; a pair's manifolds then by sub-shapes), and each report is **converted once, at its sorted place, in parallel**.
+- BEGIN/HIT and the kept/ended pairs come from **walking this step's and last step's sorted pairs side by side** (no binary
+  search per pair; a first walk only decides whether any pair is carried over, the events keep their order: BEGIN/HIT,
+  then END). When none is, the reports are **converted straight into the published list, in place**: a new
+  `SteppedWorldBackend::replaces_contacts()` (false by default; the GPU backend's true) tells the framework not to clear
+  `WorldSnapshot::contacts` before the step, so `resize()` constructs only what the list grew by and the conversion
+  overwrites the rest (a swap first, then a cleared list value-initialized 33 MB a step in the pyramid: 3–4 ms). With
+  pairs carried over, the old merge into the list. Only the contacts of pairs whose bodies all rest after the step — the
+  ones the next step's GPU skips — are kept for carrying over.
+- **`read_back()` runs in parallel** and records which bodies rest (`m_body_rests`); sleep events still in slot order.
+- **`step_motion()`** (the step's farthest motion, the speculative margin): velocity components below 1e-18 count as zero —
+  their squares are **denormal floats, which the CPU computes about a hundred times slower** (4.06 ms a step over the
+  resting cloth's 99 856 particles; 0.26 ms after) —, one square root of the largest square for the particles, the bodies
+  on the scheduler (an atomic maximum of the float bits: order-independent).
+
+**The flags** (`GpuOptimization` in `source/physics/enums.cppm`, `GpuXpbdDescription::optimizations`, default
+`DEFAULT_GPU_OPTIMIZATIONS` = both; `GpuXpbdCapabilities::optimizations` says which are in effect; `NONE` = the baseline):
+- **`INCREMENTAL_LAYOUTS`**: the colliders', joints' and soft bodies' layouts (`update_colliders/joints/soft_bodies()`) are
+  kept unless an edit other than those listed by `KeepsLayouts` (gravity, a body's velocities, forces, torques, impulses,
+  kinematic moves, damping, gravity scale, sleep permission, awake state) was applied, or a joint broke during the step
+  (`read_back()` marks them); any other edit — including edits added later — lays them out again. `stress_constraints`
+  lost 10 ms a step (its 100 100 joints laid out every step), the cloth 5.6 ms, `many_boxes` 2.2 ms.
+- **`SHARED_PIPELINES`**: a `GpuPipelineLibrary` per device (`:resources`; found through a process-wide registry of weak
+  references, alive while a world of the device holds it) makes each compute pipeline and its module once, through a
+  `PipelineCache` read from `GpuXpbdDescription::pipeline_cache_path` (a file another driver wrote is ignored) and written
+  back after pipelines were made (beside the file, then renamed over it; a failure is ignored). The components still call
+  `make_pipeline()`: while the backend's constructor runs, a thread-local `PipelineLibraryScope` sends it to the library
+  (components hold `std::shared_ptr<ComputePipeline>` now). `gpu_xpbd::shared_pipeline_statistics(device)` reports the
+  worlds, the pipelines, whether the file was loaded and how often it was written.
+
+**Zero allocations in the steady state**: `gfx_physics_gpu_xpbd_allocation_tests` (its own executable: it replaces
+`operator new`) counts every allocation on every thread over 60 steps after 240 warm-up steps of a world with resting
+boxes, a chain of ball joints, a pinned cloth lying on the boxes, a trigger, a force each step and the step's events,
+statistics and contacts read — **0 on both GPUs** (after checking that an allocation in the counted region is counted).
+
+**Found and fixed on the way.**
+1. **The profiler's canonical trace was not deterministic** (PF0): it sorted a thread's scopes by begin time and depth with
+   an unstable sort, so two sibling scopes begun in the same 100 ns tick came out in either order. The faster contact path
+   made "publish the contacts" (a swap) and the next scope begin in one tick: `TheSameStepsGiveTheSameTraceStructure`
+   failed. Now a stable sort (scopes are stored in the order they ended: for siblings, the order they ran); test
+   `ProfilerDeterminismTest.ScopesBegunInTheSameClockTickKeepTheOrderTheyRan` (2 000 empty sibling pairs; fails with the
+   old sort — checked).
+2. **A GCC 16 module defect**: once the `:backend` partition held the new members, a unit importing it that **spells
+   `std::vector`** failed ("failed to read compiled module cluster 389: Bad file data", "failed to load pendings for
+   'std::vector'"); bisected to the spelling itself (the same partition with the radix sort's parameter written as a
+   template type compiles). Workaround: `gpu_events.cpp` spells no `std::vector` (its helper is a template).
+
+**Deviations (for validation).**
+1. **Contacts and events stay on the CPU** (§A10 item 2, `GPU_EVENTS`, not built): the CPU path made linear and parallel
+   gives the same events at 3.0 ms for 50 000 contacts and 6.9 ms for 133 451, and the conversion of every manifold into
+   `ContactInfo` (`contacts_of()` needs them) stays on the CPU whatever the GPU sorts; moving the sort and the merge to the
+   GPU would save about a third of that. The framework gained `SteppedWorldBackend::replaces_contacts()` for it.
+2. **A pair is carried over only when its bodies rested after the previous step** (the GPU skipped it): before, a pair
+   that separated and fell asleep in the same step was carried with its last contacts until woken.
+3. **`COMPACT_READBACK` and `REUSE_RECORDING` move to PF5.** The scenes run with sleep off (PF3 deviation 1), so reading
+   back awake bodies only changes nothing measurable before PF5's sleep tuning measures sleeping scenes; recording is now
+   0.4–1.9 ms a step, and reusing it needs the GPU timer's per-frame query bookkeeping replayed and every per-step count
+   out of the recording — PF5's kernel fusion rewrites those passes first.
+4. **The framework's bounds are computed for every collider** (in parallel), not only awake bodies' (§A10 item 1): with
+   sleep off they are all awake; done with sleep tuning in PF5.
+5. **New CPU scopes** in the GPU backend's step ("sort the contact reports", "touching pairs", "kept and ended pairs",
+   "publish the contacts", "keep the resting pairs", "record the uploads/detection/broad phase/narrow phase/constraints,
+   islands, graph and colors/substeps/events and readback", "the step's farthest motion"): kept; `stage_coverage()`
+   unchanged (the layouts' scopes appear in the steps that lay out).
+
+**Measured** (profile build, same machine and settings as PF3's baseline, power scheme "Silent"; mean ms per step; the
+last run, then in parentheses the run before it, an hour earlier, with the same GPU code except the in-place conversion):
+
+| Scene | Box3D | GPU | Speed-up | GPU against PF3's baseline (p50) | GPU busy |
+|---|---|---|---|---|---|
+| many_boxes | 19.56 (15.27) | 12.94 (14.13) | 1.51× (1.08×) | −69.6 % | 5.8 |
+| pyramid | 100.62 (91.52) | 48.87 (53.95) | 2.06× (1.70×) | −42.7 % | 37.7 |
+| cloth | 79.90 (82.03) | 15.20 (16.55) | 5.26× (4.96×) | −33.5 % | 11.9 |
+| chain | 6.20 (5.14) | 6.06 (6.36) | 1.02× (0.81×) | −63.4 % | 3.4 |
+| mixed | 43.70 (44.59) | 44.93 (50.64) | 0.97× (0.88×) | −19.7 % | 41.0 |
+| stress_constraints | 78.75 (69.54; Box3D fails its check) | 15.36 (16.33) | 5.13× (4.26×) | −43.0 % | 10.9 |
+| two_worlds | 19.35 (14.01) | 14.62 (15.24) | 1.32× (0.92×) | −68.9 % | 6.9 |
+
+The framework's changes made Box3D's worlds faster too (PF3's baseline: many_boxes 23.5 → 14.5–21.6 ms, chain 11.6 →
+5.0–6.4 ms); Box3D's medians moved up to 25 % between these two runs (the GPU's 3–9 %), so the speed-ups of the scenes near
+1× are within that noise. **The target (1.25×) is met on many_boxes, the pyramid, the cloth, the lattice and two_worlds in
+the last run; not on `chain` (1.02×) and `mixed` (0.97×)**, whose steps are now mostly GPU work (`mixed`: 41 of 45 ms;
+`chain`: the GPU's 3.4 ms plus a 1.4 ms wait and 1.3 ms of recording): PF5's GPU side. The benchmark's gate passed (exit 0).
+
+Results: Debug 1528 of 1528 (1210 s), Release 1528 of 1528 (1185 s), run from PowerShell with `--timeout 900`; + 9 tests
+(the allocation test × 2 GPUs, the optimizations against the baseline × 4, the shared pipelines × 2, the profiler's tie
+test). An earlier Release attempt lost three: its build stopped on `gfx_physics_gpu_xpbd_tests`' test discovery (no message;
+the target built cleanly alone, then the whole build), leaving two `_NOT_BUILT` placeholders, and `PhysicsSandbox.Tour` timed
+out while the NVIDIA GPU refused new devices (`VK_ERROR_INITIALIZATION_FAILED` in the benchmark run right after); both GPUs
+answered again later and the full run passed.
 
 ---
 

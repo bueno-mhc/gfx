@@ -14,6 +14,7 @@ import gfx.interface;
 import gfx.profiler.graphics;
 import gfx.physics.enums;
 import gfx.physics.shapes;
+import :settings;
 
 namespace gfx::physics::gpu_xpbd
 {
@@ -340,10 +341,84 @@ private:
 // ===================================================================================================== pipelines
 
 /// A compute pipeline of @p description's shader with the specialization constants it declares (the module kept in
-/// @p modules: it lives as long as the pipeline).
+/// @p modules: it lives as long as the pipeline) — or, while a PipelineLibraryScope of @p device's library is open on
+/// this thread, the library's (made once per device, @p modules untouched).
 [[nodiscard]] auto make_pipeline(Device& device,
                                  const ShaderModuleDescription& description,
-                                 std::vector<std::unique_ptr<ShaderModule>>& modules) -> std::unique_ptr<ComputePipeline>;
+                                 std::vector<std::unique_ptr<ShaderModule>>& modules) -> std::shared_ptr<ComputePipeline>;
+
+/// The compute pipelines of a device and their shader modules, shared by the GPU worlds made on it with SHARED_PIPELINES
+/// (each pipeline made at its first request, through a pipeline cache read from and written to a file when one is named).
+/// Kept while a world holds it; thread-safe.
+class GpuPipelineLibrary
+{
+public:
+    /// The library of @p device: the one a world of the device holds, else a new one (its cache read from
+    /// @p cache_path when given and readable: a file another driver wrote leaves the cache empty).
+    [[nodiscard]] static auto of(Device& device,
+                                 const std::filesystem::path& cache_path) -> std::shared_ptr<GpuPipelineLibrary>;
+
+    /// What the library of @p device holds now (zeros when there is none).
+    [[nodiscard]] static auto statistics(const Device& device) -> SharedPipelineStatistics;
+
+    GpuPipelineLibrary(Device& device,
+                       std::filesystem::path cache_path);
+
+    /// Writes the cache file (save()), then releases the pipelines (the device's deleter frees what the GPU may use).
+    ~GpuPipelineLibrary();
+
+    GpuPipelineLibrary(const GpuPipelineLibrary&) = delete;
+    auto operator=(const GpuPipelineLibrary&) -> GpuPipelineLibrary& = delete;
+
+    [[nodiscard]] auto device() const noexcept -> const Device&
+    {
+        return m_device;
+    }
+
+    /// The pipeline of @p description's shader (made at the first request).
+    [[nodiscard]] auto pipeline(const ShaderModuleDescription& description) -> std::shared_ptr<ComputePipeline>;
+
+    /// Writes the cache to its file when pipelines were made since it was read or written (a failure is ignored: the
+    /// file only saves time).
+    void save() noexcept;
+
+private:
+    /// A pipeline made, by its shader's description (the generated description objects live as long as the program).
+    struct Made
+    {
+        const ShaderModuleDescription* description = nullptr;
+        std::shared_ptr<ComputePipeline> pipeline{};
+    };
+
+    Device& m_device;
+    std::filesystem::path m_cache_path{};
+    std::unique_ptr<PipelineCache> m_cache{};
+    bool m_cache_file_loaded = false;
+    std::mutex m_mutex{};
+    std::vector<std::unique_ptr<ShaderModule>> m_modules{};
+    std::vector<Made> m_made{};
+    bool m_unsaved = false;
+    std::uint32_t m_cache_writes = 0;
+};
+
+/// While it lives (or until end()), make_pipeline() on this thread takes the pipelines of @p library's device from it
+/// (null: makes them, as without a library). Scopes nest: end() restores the enclosing one.
+class PipelineLibraryScope
+{
+public:
+    explicit PipelineLibraryScope(GpuPipelineLibrary* library) noexcept;
+    ~PipelineLibraryScope();
+
+    PipelineLibraryScope(const PipelineLibraryScope&) = delete;
+    auto operator=(const PipelineLibraryScope&) -> PipelineLibraryScope& = delete;
+
+    /// Closes it (once).
+    void end() noexcept;
+
+private:
+    GpuPipelineLibrary* m_enclosing = nullptr;
+    bool m_open = false;
+};
 
 /// The compute pipelines of a step's passes.
 class GpuPipelines
@@ -357,9 +432,9 @@ public:
 
 private:
     std::vector<std::unique_ptr<ShaderModule>> m_modules{};
-    std::unique_ptr<ComputePipeline> m_patch_bodies{};
-    std::unique_ptr<ComputePipeline> m_integrate{};
-    std::unique_ptr<ComputePipeline> m_update_velocities{};
+    std::shared_ptr<ComputePipeline> m_patch_bodies{};
+    std::shared_ptr<ComputePipeline> m_integrate{};
+    std::shared_ptr<ComputePipeline> m_update_velocities{};
 };
 
 // ===================================================================================================== barriers

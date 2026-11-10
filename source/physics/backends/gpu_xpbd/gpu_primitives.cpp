@@ -292,14 +292,14 @@ struct GpuPrimitives::State
     Device& device;
     bool subgroups = false;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
-    std::unique_ptr<ComputePipeline> scan_reduce{};
-    std::unique_ptr<ComputePipeline> scan_downsweep{};
-    std::unique_ptr<ComputePipeline> reduce_bounds{};
-    std::unique_ptr<ComputePipeline> radix_histogram{};
-    std::unique_ptr<ComputePipeline> radix_scatter{};
-    std::unique_ptr<ComputePipeline> rank_sort{};
-    std::unique_ptr<ComputePipeline> compact_scatter{};
-    std::unique_ptr<ComputePipeline> dispatch_arguments{};
+    std::shared_ptr<ComputePipeline> scan_reduce{};
+    std::shared_ptr<ComputePipeline> scan_downsweep{};
+    std::shared_ptr<ComputePipeline> reduce_bounds{};
+    std::shared_ptr<ComputePipeline> radix_histogram{};
+    std::shared_ptr<ComputePipeline> radix_scatter{};
+    std::shared_ptr<ComputePipeline> rank_sort{};
+    std::shared_ptr<ComputePipeline> compact_scatter{};
+    std::shared_ptr<ComputePipeline> dispatch_arguments{};
 
     // Scratch for primitives of up to `maximum` elements.
     std::uint32_t maximum = 0;

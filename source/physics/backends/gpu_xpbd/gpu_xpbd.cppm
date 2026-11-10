@@ -71,4 +71,8 @@ export namespace gfx::physics::gpu_xpbd
 ///        least, has them all).
 [[nodiscard]] auto stage_coverage() noexcept -> std::span<const profiler::StageCoverage>;
 
+/// @brief What the GPU worlds made on @p device with GpuOptimization::SHARED_PIPELINES share now: how many hold the
+///        device's pipelines, how many pipelines were made, whether they came from a cache file.
+[[nodiscard]] auto shared_pipeline_statistics(const Device& device) -> SharedPipelineStatistics;
+
 } // namespace gfx::physics::gpu_xpbd

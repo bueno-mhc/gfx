@@ -103,6 +103,12 @@ public:
     ///        the abstraction's XPBD after simulate().
     [[nodiscard]] virtual auto simulates_soft_bodies() const noexcept -> bool;
 
+    /// @brief Whether simulate() replaces the whole of WorldSnapshot::contacts (resizing it and writing every element);
+    ///        false by default: the framework clears the list before each step and the backend appends. A backend that
+    ///        replaces it reuses the elements left from earlier steps (no element constructed again: the GPU backend
+    ///        converts its contacts into the list in place, in parallel).
+    [[nodiscard]] virtual auto replaces_contacts() const noexcept -> bool;
+
     /// @brief Applies what the abstraction's soft bodies did to its dynamic bodies in the step just simulated (called
     ///        right after it, when there were soft bodies): each body moved by the correction's translation and rotation
     ///        about its center of mass, then given its impulses; their new poses and velocities into @p pending. By

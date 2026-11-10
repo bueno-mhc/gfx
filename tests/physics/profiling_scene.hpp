@@ -83,7 +83,8 @@ make_profiled_scene(std::unique_ptr<physics::PhysicsWorld> world,
     return scene;
 }
 
-/// @brief Steps @p scene @p steps times, a profiler frame each, recorded by a profiler made current meanwhile.
+/// @brief Steps @p scene @p steps times, a profiler frame each, recorded by a profiler made current meanwhile; each frame
+///        also casts a ray with the abstraction's queries (which bring the framework's query tree up to date).
 inline auto
 trace_steps(ProfiledScene& scene,
             std::uint32_t steps,
@@ -96,6 +97,7 @@ trace_steps(ProfiledScene& scene,
     {
         recorder->begin_frame(session);
         scene.world->step(1.0F / 60.0F);
+        (void)scene.world->ray_cast({.origin = {.y = 10.0F}, .direction = {.y = -1.0F}}, 20.0F, {.engine = physics::QueryEngine::ABSTRACTION});
         (void)recorder->end_frame(session);
     }
     profiler::Trace trace = recorder->finalize_session(session);
@@ -133,7 +135,7 @@ inline constexpr std::array FRAMEWORK_STAGES{
     profiler::StageCoverage{"the wait for the step", profiler::StageCoverageKind::RECORDED, "World: wait for the step", {}},
     profiler::StageCoverage{"publish", profiler::StageCoverageKind::RECORDED, "World: publish", {}},
     profiler::StageCoverage{"records copied", profiler::StageCoverageKind::RECORDED, "World: copy the records", {}},
-    profiler::StageCoverage{"events and contacts copied", profiler::StageCoverageKind::RECORDED, "World: copy the events and contacts", {}},
+    profiler::StageCoverage{"events and contacts swapped", profiler::StageCoverageKind::RECORDED, "World: swap the events and contacts", {}},
     profiler::StageCoverage{"the query tree", profiler::StageCoverageKind::RECORDED, "World: update the query tree", {}},
 };
 

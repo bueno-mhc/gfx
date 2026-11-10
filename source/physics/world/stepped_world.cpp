@@ -864,29 +864,32 @@ struct RecordApplier
 };
 
 /// Copies @p from into @p to: whole records whose configuration changed or whose slot holds another object, the state
-/// (what @p copy_state copies) of the others.
+/// (what @p copy_state copies) of the others (on @p scheduler's threads when there are many).
 template<class Record, class CopyState>
 void
 copy_records(std::vector<Record>& to,
              std::vector<Record>& from,
+             TaskScheduler* scheduler,
              CopyState&& copy_state)
 {
     if (to.size() < from.size())
     {
         to.resize(from.size());
     }
-    for (std::size_t index = 0; index < from.size(); ++index)
-    {
-        if (from[index].configuration_changed || from[index].handle != to[index].handle)
+    for_each_range(scheduler, from.size(), FRAMEWORK_PARALLEL_RANGE, [&](std::uint32_t begin, std::uint32_t end) {
+        for (std::size_t index = begin; index < end; ++index)
         {
-            from[index].configuration_changed = false;
-            to[index] = from[index];
+            if (from[index].configuration_changed || from[index].handle != to[index].handle)
+            {
+                from[index].configuration_changed = false;
+                to[index] = from[index];
+            }
+            else
+            {
+                copy_state(to[index], from[index]);
+            }
         }
-        else
-        {
-            copy_state(to[index], from[index]);
-        }
-    }
+    });
 }
 
 /// The identity of @p backend (which must not be null).
@@ -1506,6 +1509,12 @@ SteppedWorldBackend::simulates_soft_bodies() const noexcept -> bool
     return false;
 }
 
+auto
+SteppedWorldBackend::replaces_contacts() const noexcept -> bool
+{
+    return false;
+}
+
 void
 SteppedWorldBackend::apply_soft_body_corrections(std::span<const BodyCorrection> corrections,
                                                  WorldSnapshot& pending)
@@ -1910,7 +1919,10 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     pending.trigger_events.clear();
     pending.joint_events.clear();
     pending.sleep_events.clear();
-    pending.contacts.clear();
+    if (!backend->replaces_contacts())
+    {
+        pending.contacts.clear();
+    }
     pending.statistics = {};
 
     // The edits recorded so far, applied to the records then by the backend.
@@ -2120,13 +2132,16 @@ void
 SteppedWorld::Implementation::update_bounds()
 {
     PROFILE_SCOPE("World: update the bounds");
-    for (ColliderRecord& collider : pending.colliders)
-    {
-        if (collider.handle)
+    for_each_range(scheduler, pending.colliders.size(), FRAMEWORK_PARALLEL_RANGE, [this](std::uint32_t begin, std::uint32_t end) {
+        for (std::size_t index = begin; index < end; ++index)
         {
-            collider.world_bounds = collider.configuration.shape->bounds(world_pose(pending, collider));
+            ColliderRecord& collider = pending.colliders[index];
+            if (collider.handle)
+            {
+                collider.world_bounds = collider.configuration.shape->bounds(world_pose(pending, collider));
+            }
         }
-    }
+    });
     for (TriggerRecord& trigger : pending.triggers)
     {
         if (trigger.handle)
@@ -2164,29 +2179,31 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
         }
         {
             PROFILE_SCOPE("World: copy the records");
-            copy_records(published.rigid_bodies, pending.rigid_bodies, [](RigidBodyRecord& to, const RigidBodyRecord& from) { to.state = from.state; });
-            copy_records(published.colliders, pending.colliders, [](ColliderRecord& to, const ColliderRecord& from) { to.world_bounds = from.world_bounds; });
-            copy_records(published.joints, pending.joints, [](JointRecord& to, const JointRecord& from) { to.state = from.state; });
-            copy_records(published.constraints, pending.constraints, [](ConstraintRecord& to, const ConstraintRecord& from) { to.state = from.state; });
-            copy_records(published.triggers, pending.triggers, [](TriggerRecord& to, const TriggerRecord& from) { to.world_bounds = from.world_bounds; });
-            copy_records(published.soft_bodies, pending.soft_bodies, [](SoftBodyRecord& to, const SoftBodyRecord& from) {
+            copy_records(published.rigid_bodies, pending.rigid_bodies, scheduler, [](RigidBodyRecord& to, const RigidBodyRecord& from) { to.state = from.state; });
+            copy_records(published.colliders, pending.colliders, scheduler, [](ColliderRecord& to, const ColliderRecord& from) { to.world_bounds = from.world_bounds; });
+            copy_records(published.joints, pending.joints, scheduler, [](JointRecord& to, const JointRecord& from) { to.state = from.state; });
+            copy_records(published.constraints, pending.constraints, scheduler, [](ConstraintRecord& to, const ConstraintRecord& from) { to.state = from.state; });
+            copy_records(published.triggers, pending.triggers, scheduler, [](TriggerRecord& to, const TriggerRecord& from) { to.world_bounds = from.world_bounds; });
+            copy_records(published.soft_bodies, pending.soft_bodies, nullptr, [](SoftBodyRecord& to, const SoftBodyRecord& from) {
                 to.positions = from.positions;
                 to.velocities = from.velocities;
                 to.bounds = from.bounds;
             });
         }
         {
-            PROFILE_SCOPE("World: copy the events and contacts");
-            published.contact_events = pending.contact_events;
-            published.trigger_events = pending.trigger_events;
-            published.joint_events = pending.joint_events;
-            published.sleep_events = pending.sleep_events;
-            published.contacts = pending.contacts;
+            // Swapped, not copied (the pending lists are cleared when the next step begins: each keeps its storage).
+            PROFILE_SCOPE("World: swap the events and contacts");
+            published.contact_events.swap(pending.contact_events);
+            published.trigger_events.swap(pending.trigger_events);
+            published.joint_events.swap(pending.joint_events);
+            published.sleep_events.swap(pending.sleep_events);
+            published.contacts.swap(pending.contacts);
             published.statistics = pending.statistics;
         }
     }
 
-    // The slots of the objects destroyed in this step become free; the query tree follows the published colliders.
+    // The slots of the objects destroyed in this step become free; the query tree follows the published colliders when a
+    // query first needs it (no query runs while a step is published).
     shared.release(released_bodies, released_colliders, released_joints, released_constraints, released_triggers, released_soft_bodies);
     released_bodies.clear();
     released_colliders.clear();
@@ -2194,7 +2211,19 @@ SteppedWorld::Implementation::publish(WorldShared& shared)
     released_constraints.clear();
     released_triggers.clear();
     released_soft_bodies.clear();
-    update_query_tree(shared.published);
+    const std::scoped_lock lock{query_tree_mutex};
+    query_tree_stale = true;
+}
+
+void
+SteppedWorld::Implementation::ensure_query_tree(const WorldSnapshot& published)
+{
+    const std::scoped_lock lock{query_tree_mutex};
+    if (query_tree_stale)
+    {
+        update_query_tree(published);
+        query_tree_stale = false;
+    }
 }
 
 void
@@ -2222,14 +2251,15 @@ SteppedWorld::Implementation::update_query_tree(const WorldSnapshot& published)
         {
             continue;
         }
+        // A leaf's box is the collider's grown by the margin; it moves only when the collider's box leaves it.
         if (!proxy)
         {
-            proxy = query_tree.insert(collider.handle, collider.world_bounds);
+            proxy = query_tree.insert(collider.handle, collider.world_bounds.expanded(QUERY_TREE_MARGIN));
             proxy_colliders[slot] = collider.handle;
         }
-        else if (query_tree.box(proxy) != collider.world_bounds)
+        else if (!query_tree.box(proxy).contains(collider.world_bounds))
         {
-            query_tree.update(proxy, collider.world_bounds);
+            query_tree.update(proxy, collider.world_bounds.expanded(QUERY_TREE_MARGIN));
         }
     }
 }

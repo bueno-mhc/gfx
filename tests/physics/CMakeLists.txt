@@ -84,6 +84,14 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     endif()
     target_compile_definitions(gfx_physics_gpu_xpbd_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}")
     target_include_directories(gfx_physics_gpu_xpbd_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
+
+    # The GPU backend's steps allocate nothing after warm-up steps (its own executable: it replaces operator new).
+    gfx_add_test(gfx_physics_gpu_xpbd_allocation_tests
+        SOURCES gpu_xpbd_allocation_test.cpp
+        LIBRARIES gfx::physics gfx::physics_gpu_xpbd gfx::gfx
+        GPU_TESTS .*)
+    target_compile_definitions(gfx_physics_gpu_xpbd_allocation_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}")
+    target_include_directories(gfx_physics_gpu_xpbd_allocation_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
 endif()
 
 # The conformance suite: the same scenarios on every simulating backend of the build — Box3D, the reference backend, and

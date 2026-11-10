@@ -26,6 +26,21 @@ struct GpuXpbdDescription
     GpuSolverMode solver_mode = GpuSolverMode::GRAPH_COLORING; ///< How contact constraints are projected.
     GpuBvhLayout bvh_layout = GpuBvhLayout::FOUR_WIDE;        ///< The collider trees' traversal layout (four-wide: G2's
                                                               ///< measurements, 38 to 59 % fewer pair-search steps).
+    GpuOptimization optimizations = DEFAULT_GPU_OPTIMIZATIONS; ///< Which optimizations run (each: GpuOptimization; NONE: the
+                                                              ///< baseline, as the backend was before them).
+    std::filesystem::path pipeline_cache_path{};              ///< With SHARED_PIPELINES: the file the device's pipeline cache
+                                                              ///< is read from and written to (empty: none; a file another
+                                                              ///< driver wrote is ignored). The first world of a device
+                                                              ///< names it for the device's later worlds.
+};
+
+/// @brief What the GPU worlds of a device share with SHARED_PIPELINES (shared_pipeline_statistics()).
+struct SharedPipelineStatistics
+{
+    std::uint32_t worlds = 0;       ///< Worlds holding the device's pipelines (0: none, the rest is zero too).
+    std::uint32_t pipelines = 0;    ///< Compute pipelines made.
+    bool cache_file_loaded = false; ///< The cache file was read and its driver accepted it.
+    std::uint32_t cache_writes = 0; ///< Times the cache file was written (after pipelines were made).
 };
 
 /// @brief What the backend found on a device and chose to run there.
@@ -48,6 +63,8 @@ struct GpuXpbdCapabilities
     bool timestamps = false;                                         ///< Its queue writes timestamps (phases timed on the GPU).
     bool float16 = false;                                            ///< 16-bit floating point (reported only: contacts need 32 bits).
     bool storage_images = false;                                     ///< Bindless storage images (reported only: no pass is image-shaped).
+    GpuOptimization optimizations = GpuOptimization::NONE;           ///< The optimizations in effect (those asked for that the
+                                                                     ///< device allows).
 };
 
 } // namespace gfx::physics::gpu_xpbd

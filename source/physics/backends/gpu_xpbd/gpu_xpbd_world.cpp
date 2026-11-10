@@ -268,6 +268,88 @@ make_soft_body_entry(SoftBodyHandle handle,
 
 /// Marks what each edit changed of the bodies, colliders and joints (forces and impulses come after: they need the final
 /// centers).
+/// Whether an edit leaves the colliders', joints' and soft bodies' layouts as they are (what INCREMENTAL_LAYOUTS keeps):
+/// the bodies' motion, forces, impulses, damping, gravity scale and sleep, the world's gravity. Any other edit (including
+/// edits added later) lays them out again.
+/// @p velocity's components with those below 1e-18 (m/s, rad/s) as zero: squaring them gives denormal floats, which the
+/// CPU computes about a hundred times slower (step_motion() over a resting cloth of 100 000 particles took 4 ms a step).
+[[nodiscard]] auto
+without_negligible(Vector3 velocity) noexcept -> Vector3
+{
+    constexpr float NEGLIGIBLE = 1.0e-18F;
+    const auto kept = [](float component) { return std::abs(component) < NEGLIGIBLE ? 0.0F : component; };
+    return {.x = kept(velocity.x), .y = kept(velocity.y), .z = kept(velocity.z)};
+}
+
+struct KeepsLayouts
+{
+    auto operator()(const edits::SetGravity& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodyLinearVelocity& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodyAngularVelocity& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::MoveKinematicBody& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::ApplyForce& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::ApplyTorque& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::ApplyLinearImpulse& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::ApplyAngularImpulse& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodyDamping& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodyGravityScale& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodySleepAllowed& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    auto operator()(const edits::SetBodyAwake& /*change*/) const noexcept -> bool
+    {
+        return true;
+    }
+
+    template<class Change>
+    auto operator()(const Change& /*change*/) const noexcept -> bool
+    {
+        return false;
+    }
+};
+
 struct ChangeMarker
 {
     GpuXpbdBackend& backend;
@@ -596,14 +678,18 @@ private:
 
 GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
                                Device& device,
-                               const GpuXpbdDescription& settings)
+                               const GpuXpbdDescription& settings,
+                               TaskScheduler* scheduler)
     : m_owned{std::move(owned)}
     , m_device{device}
+    , m_scheduler{scheduler}
     , m_capabilities{gpu_xpbd::capabilities(device, settings.variants)}
     , m_queue{&device.queue(m_capabilities.queue_type)}
     , m_command_pool{device.create_command_pool({.queue_type = m_capabilities.queue_type, .debug_name = "GPU physics steps"})}
     , m_command_buffer{m_command_pool->allocate(CommandBufferLevel::PRIMARY, "GPU physics step")}
     , m_timeline{device.create_timeline_semaphore({.initial_value = 0, .debug_name = "GPU physics steps"})}
+    , m_pipeline_library{has_all(settings.optimizations, GpuOptimization::SHARED_PIPELINES) ? GpuPipelineLibrary::of(device, settings.pipeline_cache_path) : nullptr}
+    , m_library_scope{m_pipeline_library.get()}
     , m_pipelines{device}
     , m_solver{device, m_capabilities, settings}
     , m_soft_bodies{device}
@@ -614,6 +700,9 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
                    .name = std::format("GPU XPBD: {} {}", m_capabilities.device_name, m_capabilities.queue_type)}}
     , m_phases{m_gpu_timer}
 {
+    // Every optimization asked for runs on every device that runs the backend.
+    m_capabilities.optimizations = settings.optimizations;
+
     // Every component's passes timed through the step's timer.
     m_solver.set_timer(&m_gpu_timer);
     m_soft_bodies.set_timer(&m_gpu_timer);
@@ -624,6 +713,13 @@ GpuXpbdBackend::GpuXpbdBackend(OwnedDevice owned,
     m_query_pool = device.create_command_pool({.queue_type = m_capabilities.queue_type, .debug_name = "GPU physics queries"});
     m_query_commands = m_query_pool->allocate(CommandBufferLevel::PRIMARY, "GPU physics query");
     m_query_pipeline = make_pipeline(device, shaders::query_comp, m_query_modules);
+
+    // Every pipeline made: the scope closed, the device's cache written if it grew.
+    m_library_scope.end();
+    if (m_pipeline_library != nullptr)
+    {
+        m_pipeline_library->save();
+    }
     m_query_pairs = device.create_buffer({.size = std::uint64_t{GPU_XPBD_QUERY_PAIRS} * sizeof(GpuPair), .usage = BufferUsage::STORAGE, .debug_name = "GPU physics: query pairs"});
     m_query_pieces = device.create_buffer(
         {.size = std::uint64_t{GPU_XPBD_QUERY_PIECES} * sizeof(GpuQueryResult), .usage = BufferUsage::STORAGE, .debug_name = "GPU physics: query pieces"});
@@ -786,10 +882,13 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
     // What changed first, then the forces and impulses about the centers the patches will have.
     PROFILE_SCOPE("GPU XPBD: apply the edits");
     const ChangeMarker marker{.backend = *this, .pending = pending};
+    const bool incremental = has_all(m_capabilities.optimizations, GpuOptimization::INCREMENTAL_LAYOUTS);
     for (const WorldEdit& edit : edits)
     {
         std::visit(marker, edit);
+        m_layouts_dirty = m_layouts_dirty || !incremental || !std::visit(KeepsLayouts{}, edit);
     }
+    m_layouts_dirty = m_layouts_dirty || !incremental;
     const PushCollector collector{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
     {
@@ -921,6 +1020,7 @@ GpuXpbdBackend::update_colliders(const WorldSnapshot& pending)
     for (std::uint32_t collider = 0; collider < collider_count; ++collider)
     {
         const ColliderRecord& record = pending.colliders[collider];
+        m_colliders[collider].contact_events = record.handle && record.configuration.contact_events;
         const RigidBodyRecord* body = record.handle ? find(pending, record.body) : nullptr;
         if (body == nullptr)
         {
@@ -1279,35 +1379,49 @@ GpuXpbdBackend::step_motion(const WorldSnapshot& pending,
 {
     // The farthest a moving body's colliders get in the step (its speed and its turn at its radius, gravity's growth):
     // the margin the boxes and the speculative contacts grow by, so that what a step brings into contact is found.
-    float farthest = 0.0F;
+    // The bodies on the scheduler's threads: each range's farthest, then the largest of them (non-negative floats order as
+    // their bits do: the result does not depend on the ranges).
     const float gravity = length(pending.configuration.gravity) * seconds * seconds;
-    for (std::uint32_t slot = 0; slot < m_body_radii.size() && slot < pending.rigid_bodies.size(); ++slot)
-    {
-        const RigidBodyRecord& record = pending.rigid_bodies[slot];
-        const bool moves = record.handle && (record.configuration.kind == BodyKind::KINEMATIC || (record.configuration.kind == BodyKind::DYNAMIC && record.state.awake));
-        if (!moves || slot >= m_bodies.size())
+    const std::size_t body_count = std::min({m_body_radii.size(), pending.rigid_bodies.size(), m_bodies.size()});
+    std::atomic<std::uint32_t> farthest_bits{0};
+    const auto bodies = [&](std::uint32_t begin, std::uint32_t end) {
+        float farthest_here = 0.0F;
+        for (std::uint32_t slot = begin; slot < end; ++slot)
         {
-            continue;
+            const RigidBodyRecord& record = pending.rigid_bodies[slot];
+            const bool moves =
+                record.handle && (record.configuration.kind == BodyKind::KINEMATIC || (record.configuration.kind == BodyKind::DYNAMIC && record.state.awake));
+            if (!moves)
+            {
+                continue;
+            }
+            const BodyEntry& entry = m_bodies[slot];
+            const float speed = length(without_negligible(entry.linear_velocity)) + length(without_negligible(entry.angular_velocity)) * m_body_radii[slot];
+            const float scale = record.configuration.kind == BodyKind::DYNAMIC ? std::abs(record.configuration.gravity_scale) : 0.0F;
+            farthest_here = std::max(farthest_here, speed * seconds + gravity * scale);
         }
-        const BodyEntry& entry = m_bodies[slot];
-        const float speed = length(entry.linear_velocity) + length(entry.angular_velocity) * m_body_radii[slot];
-        const float scale = record.configuration.kind == BodyKind::DYNAMIC ? std::abs(record.configuration.gravity_scale) : 0.0F;
-        farthest = std::max(farthest, speed * seconds + gravity * scale);
-    }
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(farthest_here);
+        std::uint32_t known = farthest_bits.load(std::memory_order_relaxed);
+        while (bits > known && !farthest_bits.compare_exchange_weak(known, bits, std::memory_order_relaxed))
+        {
+        }
+    };
+    for_each_range(m_scheduler, body_count, FRAMEWORK_PARALLEL_RANGE, bodies);
+    float farthest = std::bit_cast<float>(farthest_bits.load(std::memory_order_relaxed));
 
-    // And the particles: their speed and gravity's growth.
+    // And the particles: their speed (one square root, of the largest square) and gravity's growth.
     for (const SoftBodyRecord& record : pending.soft_bodies)
     {
         if (!record.handle)
         {
             continue;
         }
-        float fastest = 0.0F;
+        float fastest_squared = 0.0F;
         for (const Vector3 velocity : record.velocities)
         {
-            fastest = std::max(fastest, length(velocity));
+            fastest_squared = std::max(fastest_squared, length_squared(without_negligible(velocity)));
         }
-        farthest = std::max(farthest, fastest * seconds + gravity * std::abs(record.configuration.gravity_scale));
+        farthest = std::max(farthest, std::sqrt(fastest_squared) * seconds + gravity * std::abs(record.configuration.gravity_scale));
     }
     return farthest;
 }
@@ -1328,7 +1442,9 @@ GpuXpbdBackend::simulate(float seconds,
     const bool soft_bodies = std::ranges::any_of(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); });
     if (body_count == 0 && !soft_bodies && m_particle_count == 0)
     {
+        // Nothing touches (the list is the backend's to replace: replaces_contacts()).
         m_body_count = 0;
+        pending.contacts.clear();
         return;
     }
 
@@ -1338,17 +1454,22 @@ GpuXpbdBackend::simulate(float seconds,
     std::string_view stage = "recording the step";
     try
     {
+        // The layouts, unless no edit or step changed what they hold since the last (INCREMENTAL_LAYOUTS).
+        if (m_layouts_dirty)
         {
-            PROFILE_SCOPE("GPU XPBD: update the soft bodies");
-            update_soft_bodies(pending);
-        }
-        {
-            PROFILE_SCOPE("GPU XPBD: update the colliders");
-            update_colliders(pending);
-        }
-        {
-            PROFILE_SCOPE("GPU XPBD: update the joints");
-            update_joints(pending);
+            {
+                PROFILE_SCOPE("GPU XPBD: update the soft bodies");
+                update_soft_bodies(pending);
+            }
+            {
+                PROFILE_SCOPE("GPU XPBD: update the colliders");
+                update_colliders(pending);
+            }
+            {
+                PROFILE_SCOPE("GPU XPBD: update the joints");
+                update_joints(pending);
+            }
+            m_layouts_dirty = false;
         }
         m_substep_seconds = seconds / static_cast<float>(substeps);
 
@@ -1468,6 +1589,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                             bool replay)
 {
     // Host buffers large enough (before recording: their bindless indices go into the parameters).
+    PROFILE_NAMED_SCOPE(uploads_scope, "GPU XPBD: record the uploads");
     const auto patch_count = static_cast<std::uint32_t>(m_body_patches.size());
     m_parameters.reserve(m_device, sizeof(GpuStepParameters), m_retired);
     m_patches.reserve(m_device, std::max<std::size_t>(patch_count, 1) * sizeof(GpuBodyPatch), m_retired);
@@ -1587,21 +1709,28 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         copy_state(true);
     }
     recorder.barrier({.memory_barriers = std::span{&BEFORE_PASSES, 1}});
+    uploads_scope.end();
 
     // The contacts, then the substeps: prediction, the position iterations, the velocity update, the velocity
     // iterations; then sleep.
+    PROFILE_NAMED_SCOPE(detection_scope, "GPU XPBD: record the detection");
     const SolverDescription& solver = pending.configuration.solver;
+    PROFILE_NAMED_SCOPE(motion_scope, "GPU XPBD: the step's farthest motion");
+    const float motion = step_motion(pending, seconds);
+    motion_scope.end();
     const ContactStep step{.step_parameters = parameters_index,
                            .body_count = body_count,
                            .node_count = body_count + particle_count,
                            .step_seconds = seconds,
-                           .speculative_distance = pending.configuration.collision.speculative_distance + step_motion(pending, seconds),
+                           .speculative_distance = pending.configuration.collision.speculative_distance + motion,
                            .solver = solver,
                            .sleep = pending.configuration.sleep,
                            .collision = pending.configuration.collision,
                            .lists_changed = m_lists_changed,
                            .timer = &m_phases};
     m_solver.record_detection(recorder, step);
+    detection_scope.end();
+    PROFILE_NAMED_SCOPE(substeps_scope, "GPU XPBD: record the substeps");
     const std::uint32_t position_iterations = std::max(solver.position_iterations, 1U);
     const std::uint32_t iterations = std::max(position_iterations, m_soft_bodies.iterations());
     for (std::uint32_t substep = 0; substep < parameters.substeps; ++substep)
@@ -1644,6 +1773,8 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
             m_solver.record_velocities(recorder, iteration == 0);
         }
     }
+    substeps_scope.end();
+    PROFILE_SCOPE("GPU XPBD: record the events and readback");
     m_solver.record_joint_forces(recorder);
     m_solver.record_sleep(recorder);
     m_phases.mark(recorder, StepPhase::EVENTS);
@@ -1723,32 +1854,54 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
     m_readback.buffer().invalidate_mapped_range();
     const std::span<const std::byte> bytes = m_readback.bytes();
     const std::size_t vectors = std::size_t{m_body_count} * sizeof(GpuVector);
-    for (std::uint32_t slot = 0; slot < m_body_count; ++slot)
-    {
-        RigidBodyRecord& record = pending.rigid_bodies[slot];
-        if (!record.handle || record.configuration.kind == BodyKind::STATIC)
+    m_body_rests.resize(m_body_count);
+    m_body_sleep_changed.assign(m_body_count, 0);
+    std::atomic<bool> sleep_changed{false};
+    const auto read_bodies = [&](std::uint32_t begin, std::uint32_t end) {
+        for (std::uint32_t slot = begin; slot < end; ++slot)
         {
-            continue;
-        }
-        std::uint32_t flags = 0;
-        std::memcpy(&flags, bytes.data() + 4 * vectors + slot * sizeof(std::uint32_t), sizeof(flags));
-        const bool awake = (flags & std::to_underlying(GpuBodyFlag::AWAKE)) != 0;
+            RigidBodyRecord& record = pending.rigid_bodies[slot];
+            if (!record.handle || record.configuration.kind == BodyKind::STATIC)
+            {
+                m_body_rests[slot] = record.handle ? 1 : 0;
+                continue;
+            }
+            std::uint32_t flags = 0;
+            std::memcpy(&flags, bytes.data() + 4 * vectors + slot * sizeof(std::uint32_t), sizeof(flags));
+            const bool awake = (flags & std::to_underlying(GpuBodyFlag::AWAKE)) != 0;
 
-        // The GPU's values, exactly, in the mirror; the frame's pose and velocities in the record.
-        BodyEntry& entry = m_bodies[slot];
-        entry.center = vector3(read_vector(bytes, 0, slot));
-        entry.orientation = quaternion(read_vector(bytes, vectors, slot));
-        entry.linear_velocity = vector3(read_vector(bytes, 2 * vectors, slot));
-        entry.angular_velocity = vector3(read_vector(bytes, 3 * vectors, slot));
-        RigidBodyState& state = record.state;
-        state.pose.orientation = entry.orientation;
-        state.pose.position = entry.center - rotate(entry.orientation, effective_mass(record).center_of_mass);
-        state.linear_velocity = entry.linear_velocity + cross(entry.angular_velocity, state.pose.position - entry.center);
-        state.angular_velocity = entry.angular_velocity;
-        if (record.configuration.kind == BodyKind::DYNAMIC && awake != state.awake)
+            // The GPU's values, exactly, in the mirror; the frame's pose and velocities in the record.
+            BodyEntry& entry = m_bodies[slot];
+            entry.center = vector3(read_vector(bytes, 0, slot));
+            entry.orientation = quaternion(read_vector(bytes, vectors, slot));
+            entry.linear_velocity = vector3(read_vector(bytes, 2 * vectors, slot));
+            entry.angular_velocity = vector3(read_vector(bytes, 3 * vectors, slot));
+            RigidBodyState& state = record.state;
+            state.pose.orientation = entry.orientation;
+            state.pose.position = entry.center - rotate(entry.orientation, effective_mass(record).center_of_mass);
+            state.linear_velocity = entry.linear_velocity + cross(entry.angular_velocity, state.pose.position - entry.center);
+            state.angular_velocity = entry.angular_velocity;
+            if (record.configuration.kind == BodyKind::DYNAMIC && awake != state.awake)
+            {
+                state.awake = awake;
+                m_body_sleep_changed[slot] = 1;
+                sleep_changed.store(true, std::memory_order_relaxed);
+            }
+            m_body_rests[slot] = record.configuration.kind == BodyKind::DYNAMIC && !state.awake ? 1 : 0;
+        }
+    };
+    for_each_range(m_scheduler, m_body_count, FRAMEWORK_PARALLEL_RANGE, read_bodies);
+
+    // Sleep changes reported in slot order.
+    if (sleep_changed.load(std::memory_order_relaxed))
+    {
+        for (std::uint32_t slot = 0; slot < m_body_count; ++slot)
         {
-            state.awake = awake;
-            pending.sleep_events.push_back({.kind = awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+            if (m_body_sleep_changed[slot] != 0)
+            {
+                const RigidBodyRecord& record = pending.rigid_bodies[slot];
+                pending.sleep_events.push_back({.kind = record.state.awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+            }
         }
     }
 
@@ -1770,8 +1923,10 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
         state.torque = vector3(read_vector(bytes, results, 2 * std::size_t{joint_slot} + 1));
         if ((flags & std::to_underlying(GpuJointFlag::BROKEN)) != 0 && state.enabled)
         {
+            // Disabled from the next step (the joints' layout holds which are active).
             state.enabled = false;
             state.broken = true;
+            m_layouts_dirty = true;
             pending.joint_events.push_back(
                 {.kind = JointEventKind::BROKEN, .joint = record.handle, .force = length(state.force), .torque = length(state.torque), .constraint = {}});
         }

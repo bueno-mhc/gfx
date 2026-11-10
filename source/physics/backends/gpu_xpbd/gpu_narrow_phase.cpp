@@ -453,12 +453,12 @@ struct GpuNarrowPhase::State
     Device& device;
     GpuPrimitives& primitives;
     std::vector<std::unique_ptr<ShaderModule>> modules{};
-    std::unique_ptr<ComputePipeline> pairs{};
-    std::unique_ptr<ComputePipeline> collide{};
-    std::unique_ptr<ComputePipeline> merge{};
-    std::unique_ptr<ComputePipeline> bounds{};
-    std::unique_ptr<ComputePipeline> keys{};
-    std::unique_ptr<ComputePipeline> match{};
+    std::shared_ptr<ComputePipeline> pairs{};
+    std::shared_ptr<ComputePipeline> collide{};
+    std::shared_ptr<ComputePipeline> merge{};
+    std::shared_ptr<ComputePipeline> bounds{};
+    std::shared_ptr<ComputePipeline> keys{};
+    std::shared_ptr<ComputePipeline> match{};
 
     // The shape table on the CPU, and on the GPU once uploaded (its arrays, their indices in the table buffer).
     std::vector<GpuShapeRecord> shape_records{};

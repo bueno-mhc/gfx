@@ -1400,6 +1400,12 @@ int main()
   (the same answers). `broad_phase().structure_nodes()` reads the two trees back for debug views.
 - **Refused** (`BackendCapabilityError` when recorded): user constraints (their rows are C++ code) and replacing the
   broad phase, narrow phase, solver or integrator (`CUSTOM_*`).
+- **Optimizations** (`GpuXpbdDescription::optimizations`, a `GpuOptimization` bitmask; every one by default,
+  `GpuOptimization::NONE` runs the backend as it was before them and gives the same bits): `INCREMENTAL_LAYOUTS` keeps
+  the colliders', joints' and soft bodies' layouts while the edits only move bodies (velocities, forces, impulses,
+  kinematic moves, sleep); `SHARED_PIPELINES` makes the compute pipelines once per device for all its worlds and keeps
+  them in a pipeline cache file when `pipeline_cache_path` names one (`gpu_xpbd::shared_pipeline_statistics(device)`
+  says whether it was read). A step allocates nothing once its buffers have grown (checked by a test).
 
 Measured in Release without the validation layers, a step with its recording, submission, wait and readback (graph
 coloring / Jacobi):

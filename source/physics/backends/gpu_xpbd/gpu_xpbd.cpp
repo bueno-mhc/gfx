@@ -13,6 +13,7 @@ import gfx.physics.world;
 import gfx.profiler;
 import :settings;
 import :probing;
+import :resources;
 import :backend;
 
 namespace gfx::physics::gpu_xpbd
@@ -222,7 +223,7 @@ create_physics_world(const PhysicsWorldDescription& description,
     check_world_description(description, PhysicsBackendKind::GPU_XPBD);
     OwnedDevice owned = make_owned_device(settings);
     Device& device = *owned.device;
-    return std::make_unique<SteppedWorld>(description, std::make_unique<GpuXpbdBackend>(std::move(owned), device, settings));
+    return std::make_unique<SteppedWorld>(description, std::make_unique<GpuXpbdBackend>(std::move(owned), device, settings, description.task_scheduler));
 }
 
 auto
@@ -231,7 +232,13 @@ create_physics_world(const PhysicsWorldDescription& description,
                      const GpuXpbdDescription& settings) -> std::unique_ptr<PhysicsWorld>
 {
     check_world_description(description, PhysicsBackendKind::GPU_XPBD);
-    return std::make_unique<SteppedWorld>(description, std::make_unique<GpuXpbdBackend>(OwnedDevice{}, device, settings));
+    return std::make_unique<SteppedWorld>(description, std::make_unique<GpuXpbdBackend>(OwnedDevice{}, device, settings, description.task_scheduler));
+}
+
+auto
+shared_pipeline_statistics(const Device& device) -> SharedPipelineStatistics
+{
+    return GpuPipelineLibrary::statistics(device);
 }
 
 auto

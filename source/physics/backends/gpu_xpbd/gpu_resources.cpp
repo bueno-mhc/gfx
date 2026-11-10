@@ -204,10 +204,19 @@ HostBuffer::bytes() noexcept -> std::span<std::byte>
 
 // ===================================================================================================== GpuPipelines
 
+namespace
+{
+
+/// The library make_pipeline() takes pipelines from on this thread (PipelineLibraryScope).
+thread_local GpuPipelineLibrary* t_library = nullptr;
+
+/// A pipeline of @p description's shader with the specialization constants it declares, through @p cache (null: the
+/// device's own), its module kept in @p modules.
 auto
-make_pipeline(Device& device,
-              const ShaderModuleDescription& description,
-              std::vector<std::unique_ptr<ShaderModule>>& modules) -> std::unique_ptr<ComputePipeline>
+create_pipeline(Device& device,
+                const ShaderModuleDescription& description,
+                std::vector<std::unique_ptr<ShaderModule>>& modules,
+                PipelineCacheHandle cache) -> std::shared_ptr<ComputePipeline>
 {
     // The constants the shader declares, from gfx.physics.enums (a shader declares those it uses only).
     std::unique_ptr<ShaderModule> module = device.create_shader_module(description);
@@ -220,10 +229,181 @@ make_pipeline(Device& device,
             constants.push_back(specialization_constant(id, value));
         }
     }
-    std::unique_ptr<ComputePipeline> pipeline =
-        device.create_compute_pipeline({.shader = module->handle(), .specialization_constants = constants, .debug_name = description.name});
+    std::shared_ptr<ComputePipeline> pipeline =
+        device.create_compute_pipeline({.shader = module->handle(), .specialization_constants = constants, .cache = cache, .debug_name = description.name});
     modules.push_back(std::move(module));
     return pipeline;
+}
+
+/// The libraries of the devices that have one (a device's library lives while one of its worlds holds it).
+struct Libraries
+{
+    std::mutex mutex{};
+    std::vector<std::pair<const Device*, std::weak_ptr<GpuPipelineLibrary>>> entries{};
+};
+
+auto
+libraries() -> Libraries&
+{
+    static Libraries all;
+    return all;
+}
+
+} // namespace
+
+auto
+make_pipeline(Device& device,
+              const ShaderModuleDescription& description,
+              std::vector<std::unique_ptr<ShaderModule>>& modules) -> std::shared_ptr<ComputePipeline>
+{
+    if (t_library != nullptr && &t_library->device() == &device)
+    {
+        return t_library->pipeline(description);
+    }
+    return create_pipeline(device, description, modules, {});
+}
+
+auto
+GpuPipelineLibrary::of(Device& device,
+                       const std::filesystem::path& cache_path) -> std::shared_ptr<GpuPipelineLibrary>
+{
+    Libraries& all = libraries();
+    const std::scoped_lock lock{all.mutex};
+    std::erase_if(all.entries, [](const auto& entry) { return entry.second.expired(); });
+    for (const auto& [owner, library] : all.entries)
+    {
+        if (owner == &device)
+        {
+            if (std::shared_ptr<GpuPipelineLibrary> held = library.lock())
+            {
+                return held;
+            }
+        }
+    }
+    auto made = std::make_shared<GpuPipelineLibrary>(device, cache_path);
+    all.entries.emplace_back(&device, made);
+    return made;
+}
+
+auto
+GpuPipelineLibrary::statistics(const Device& device) -> SharedPipelineStatistics
+{
+    Libraries& all = libraries();
+    const std::scoped_lock lock{all.mutex};
+    for (const auto& [owner, library] : all.entries)
+    {
+        if (owner != &device)
+        {
+            continue;
+        }
+        if (const std::shared_ptr<GpuPipelineLibrary> held = library.lock())
+        {
+            // The worlds are the holders but this one.
+            const std::scoped_lock library_lock{held->m_mutex};
+            return {.worlds = static_cast<std::uint32_t>(library.use_count() - 1),
+                    .pipelines = static_cast<std::uint32_t>(held->m_made.size()),
+                    .cache_file_loaded = held->m_cache_file_loaded,
+                    .cache_writes = held->m_cache_writes};
+        }
+    }
+    return {};
+}
+
+GpuPipelineLibrary::GpuPipelineLibrary(Device& device,
+                                       std::filesystem::path cache_path)
+    : m_device{device}
+    , m_cache_path{std::move(cache_path)}
+{
+    // The cache file's bytes, when there is one to read (else, or unreadable: an empty cache).
+    std::vector<std::byte> data;
+    if (!m_cache_path.empty())
+    {
+        std::ifstream file{m_cache_path, std::ios::binary};
+        if (file)
+        {
+            const std::vector<char> characters{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+            data.resize(characters.size());
+            std::memcpy(data.data(), characters.data(), characters.size());
+        }
+    }
+    m_cache = device.create_pipeline_cache({.initial_data = data, .debug_name = "GPU physics pipelines"});
+    m_cache_file_loaded = !data.empty() && m_cache->loaded_initial_data();
+}
+
+GpuPipelineLibrary::~GpuPipelineLibrary()
+{
+    save();
+}
+
+auto
+GpuPipelineLibrary::pipeline(const ShaderModuleDescription& description) -> std::shared_ptr<ComputePipeline>
+{
+    const std::scoped_lock lock{m_mutex};
+    for (const Made& made : m_made)
+    {
+        if (made.description == &description)
+        {
+            return made.pipeline;
+        }
+    }
+    std::shared_ptr<ComputePipeline> pipeline = create_pipeline(m_device, description, m_modules, m_cache->handle());
+    m_made.push_back({.description = &description, .pipeline = pipeline});
+    m_unsaved = true;
+    return pipeline;
+}
+
+void
+GpuPipelineLibrary::save() noexcept
+{
+    const std::scoped_lock lock{m_mutex};
+    if (m_cache_path.empty() || !m_unsaved)
+    {
+        return;
+    }
+    try
+    {
+        // Written beside, then renamed over the file: a reader never sees half of it.
+        const std::vector<std::byte> data = m_cache->serialize();
+        std::filesystem::path written = m_cache_path;
+        written += ".writing";
+        {
+            std::ofstream file{written, std::ios::binary | std::ios::trunc};
+            file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            if (!file)
+            {
+                return;
+            }
+        }
+        std::filesystem::rename(written, m_cache_path);
+        m_unsaved = false;
+        ++m_cache_writes;
+    }
+    catch (...)
+    {
+        // The file only saves time: a world without it makes its pipelines as before.
+    }
+}
+
+PipelineLibraryScope::PipelineLibraryScope(GpuPipelineLibrary* library) noexcept
+    : m_enclosing{t_library}
+    , m_open{true}
+{
+    t_library = library;
+}
+
+PipelineLibraryScope::~PipelineLibraryScope()
+{
+    end();
+}
+
+void
+PipelineLibraryScope::end() noexcept
+{
+    if (m_open)
+    {
+        t_library = m_enclosing;
+        m_open = false;
+    }
 }
 
 GpuPipelines::GpuPipelines(Device& device)

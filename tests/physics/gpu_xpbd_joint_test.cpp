@@ -192,9 +192,10 @@ protected:
         return std::get<1>(GetParam());
     }
 
-    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {}) -> Scene
+    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {},
+                             GpuOptimization optimizations = DEFAULT_GPU_OPTIMIZATIONS) -> Scene
     {
-        return Scene{gpu::create_physics_world(description, *m_device, {.solver_mode = mode()})};
+        return Scene{gpu::create_physics_world(description, *m_device, {.solver_mode = mode(), .optimizations = optimizations})};
     }
 };
 
@@ -559,6 +560,77 @@ TEST_P(GpuXpbdJointTest, TheSameStepsGiveTheSameBits)
     {
         EXPECT_TRUE(finite(body->state()));
     }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
+{
+    // The default optimizations against none (the baseline) on a scene whose layouts change while it runs — a joint
+    // disabled, a collider's material changed, a body and a collider made, a joint breaking during a step — between steps
+    // whose edits keep them (forces, impulses, velocities): the same states bit for bit every 15 steps, the same events.
+    const auto build = [](Scene& world) {
+        world.floor();
+        std::vector<RigidBody*> bodies;
+        for (int index = 0; index < 5; ++index)
+        {
+            const float x = 0.5F * static_cast<float>(index);
+            bodies.push_back(&world.add({.pose = {.position = {.x = x, .y = 2.0F}}}, {.shape = box_shape({.x = 0.25F, .y = 0.1F, .z = 0.2F})}));
+            if (index > 0)
+            {
+                (void)world.join(hinge_joint({.first = bodies[static_cast<std::size_t>(index - 1)]->handle(),
+                                              .second = bodies.back()->handle(),
+                                              .anchor = {.x = x - 0.25F, .y = 2.0F},
+                                              .axis = {.z = 1.0F}}));
+            }
+        }
+        bodies.push_back(&world.add({.pose = {.position = {.x = -3.0F, .y = 3.0F}}}, {.shape = box_shape({.x = 0.3F, .y = 0.3F, .z = 0.3F})}));
+        (void)world.join(fixed_joint({.first = bodies.back()->handle(), .anchor = {.x = -3.0F, .y = 3.3F}, .breaking = {.force = 60.0F}}));
+        for (int index = 0; index < 6; ++index)
+        {
+            bodies.push_back(&world.add({.pose = {.position = {.x = 3.0F + 0.45F * static_cast<float>(index), .y = 0.2F}}}, {.shape = box_shape({.x = 0.2F, .y = 0.2F, .z = 0.2F})}));
+        }
+        return bodies;
+    };
+    const auto edit = [](Scene& world, std::vector<RigidBody*>& bodies, int step) {
+        // Edits that keep the layouts, every step; one that changes them now and then (the second floor box slides at
+        // 1 m/s every 7 steps: how far depends on its friction, made 0.05 at step 55).
+        bodies[0]->apply_force({.y = 3.0F});
+        if (step % 7 == 0)
+        {
+            bodies[7]->set_linear_velocity({.x = 1.0F});
+            bodies[8]->apply_linear_impulse({.z = 20.0F});
+        }
+        switch (step)
+        {
+            case 40: world.joints[1]->set_enabled(false); break;
+            case 55: world.colliders[8]->set_material({.friction = {.static_coefficient = 0.05F, .dynamic_coefficient = 0.05F}}); break;
+            case 70: bodies.push_back(&world.add({.pose = {.position = {.x = 3.5F, .y = 1.5F}}}, {.shape = box_shape({.x = 0.2F, .y = 0.2F, .z = 0.2F})})); break;
+            case 85: bodies[5]->set_linear_velocity({.y = -20.0F}); break;
+            default: break;
+        }
+    };
+    Scene optimized = scene();
+    std::vector<RigidBody*> optimized_bodies = build(optimized);
+    Scene baseline = scene({}, GpuOptimization::NONE);
+    std::vector<RigidBody*> baseline_bodies = build(baseline);
+    std::size_t broken = 0;
+    for (int step = 0; step < 150; ++step)
+    {
+        edit(optimized, optimized_bodies, step);
+        edit(baseline, baseline_bodies, step);
+        optimized.world->step(STEP);
+        baseline.world->step(STEP);
+        const PhysicsEvents optimized_events = optimized.world->events();
+        const PhysicsEvents baseline_events = baseline.world->events();
+        ASSERT_EQ(optimized_events.contacts.size(), baseline_events.contacts.size()) << "step " << step;
+        ASSERT_EQ(optimized_events.joints.size(), baseline_events.joints.size()) << "step " << step;
+        broken += optimized_events.joints.size();
+        if (step % 15 == 14)
+        {
+            ASSERT_EQ(state_bytes(optimized_bodies), state_bytes(baseline_bodies)) << "step " << step;
+        }
+    }
+    EXPECT_EQ(broken, 1U) << "the weld broke under the box's weight";
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
