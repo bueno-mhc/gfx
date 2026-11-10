@@ -8,6 +8,7 @@
 
 import gfx.physics;
 import gfx.physics.gpu_xpbd;
+import gfx.profiler;
 
 namespace
 {
@@ -25,21 +26,7 @@ constexpr float PI = std::numbers::pi_v<float>;
 auto
 physical_devices() -> std::vector<std::size_t>
 {
-    std::vector<std::size_t> devices;
-    if (!gfx::backend_availability(gfx::BackendKind::VULKAN).available)
-    {
-        return devices;
-    }
-    const std::unique_ptr<gfx::Instance> instance =
-        gfx::create_instance(gfx::BackendKind::VULKAN, {.application_name = "gfx GPU physics tests (enumeration)"});
-    for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
-    {
-        if (instance->physical_device(index).missing_core_features().empty())
-        {
-            devices.push_back(index);
-        }
-    }
-    return devices;
+    return gfx::tests::usable_physical_devices();
 }
 
 auto
@@ -132,9 +119,10 @@ protected:
         return std::get<1>(GetParam());
     }
 
-    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {}) -> Scene
+    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {},
+                             GpuOptimization optimizations = DEFAULT_GPU_OPTIMIZATIONS) -> Scene
     {
-        return Scene{.world = gpu::create_physics_world(description, *m_device, {.solver_mode = mode()})};
+        return Scene{.world = gpu::create_physics_world(description, *m_device, {.solver_mode = mode(), .optimizations = optimizations})};
     }
 
     /// A stack of @p count boxes of half extent @p half on the floor of @p target (1 mm apart), from the bottom.
@@ -477,6 +465,219 @@ pile(Scene& world,
                                     {.shape = shapes[index % shapes.size()]}));
     }
     return bodies;
+}
+
+TEST_P(GpuXpbdRigidTest, HeavyNodesGatherInChunksAsTheGraphGathers)
+{
+    // A plate carrying 100 balls: more contacts on one node than colors, so its overflow constraints are gathered in chunks
+    // (CHUNKED_GATHER, from the second step): the same motion as the graph's gather within 0.1 mm over 1 s, the same bits
+    // when run again, and chunks counted (builds with the profiler). The coloring by the bodies' maxima
+    // (NODE_MAXIMA_COLORING) gives the scan's colors: the same bits without it.
+    const auto build = [](Scene& world) {
+        world.floor();
+        std::vector<RigidBody*> bodies;
+        bodies.push_back(&world.add({.pose = {.position = {.y = 0.1F}}}, {.shape = box_shape({.x = 1.2F, .y = 0.1F, .z = 1.2F})}));
+        const std::shared_ptr<const Shape> ball = make_shape(SphereShape{.radius = 0.08F});
+        for (int row = 0; row < 10; ++row)
+        {
+            for (int column = 0; column < 10; ++column)
+            {
+                const Vector3 position{.x = -0.99F + 0.22F * static_cast<float>(column), .y = 0.281F, .z = -0.99F + 0.22F * static_cast<float>(row)};
+                bodies.push_back(&world.add({.pose = {.position = position}}, {.shape = ball}));
+            }
+        }
+        return bodies;
+    };
+    const GpuOptimization chunked = DEFAULT_GPU_OPTIMIZATIONS;
+    const auto graph = static_cast<GpuOptimization>(std::to_underlying(chunked) & ~std::to_underlying(GpuOptimization::CHUNKED_GATHER));
+    const auto scanned = static_cast<GpuOptimization>(std::to_underlying(chunked) & ~std::to_underlying(GpuOptimization::NODE_MAXIMA_COLORING));
+    std::optional<double> chunks;
+    const auto run = [&](GpuOptimization optimizations, bool trace) {
+        Scene world = scene({}, optimizations);
+        const std::vector<RigidBody*> bodies = build(world);
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = trace ? gfx::profiler::create_profiler() : nullptr;
+        gfx::profiler::SessionHandle session{};
+        if (recorder != nullptr)
+        {
+            gfx::profiler::set_current_profiler(recorder.get());
+            session = recorder->create_session({.name = "chunked gather"});
+        }
+        for (int step = 0; step < 60; ++step)
+        {
+            if (recorder != nullptr)
+            {
+                recorder->begin_frame(session);
+            }
+            world.world->step(STEP);
+            if (recorder != nullptr)
+            {
+                (void)recorder->end_frame(session);
+            }
+        }
+        if (recorder != nullptr)
+        {
+            const gfx::profiler::Trace trace_made = recorder->finalize_session(session);
+            gfx::profiler::set_current_profiler(nullptr);
+            for (const gfx::profiler::TraceFrame& frame : trace_made.frames())
+            {
+                for (const gfx::profiler::TraceSample& sample : frame.samples)
+                {
+                    if (trace_made.sites()[sample.site].name == "GPU XPBD: gather chunks")
+                    {
+                        chunks = std::max(chunks.value_or(0.0), sample.number());
+                    }
+                }
+            }
+        }
+        std::vector<RigidBodyState> states;
+        for (const RigidBody* body : bodies)
+        {
+            states.push_back(body->state());
+        }
+        return std::pair{states, state_bytes(bodies)};
+    };
+    const auto [chunked_states, chunked_bits] = run(chunked, true);
+    const auto [again_states, again_bits] = run(chunked, false);
+    const auto [graph_states, graph_bits] = run(graph, false);
+    const auto [scanned_states, scanned_bits] = run(scanned, false);
+    EXPECT_EQ(chunked_bits, again_bits) << "the same steps, the same bits";
+    EXPECT_EQ(chunked_bits, scanned_bits) << "the bodies' maxima color as the scan colors";
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < chunked_states.size(); ++index)
+    {
+        ASSERT_TRUE(finite(chunked_states[index]));
+        largest = std::max(largest, gfx::length(chunked_states[index].pose.position - graph_states[index].pose.position));
+    }
+    EXPECT_LT(largest, 1.0e-4F) << "chunked sums move the bodies as the graph's";
+    EXPECT_NEAR(chunked_states[0].pose.position.y, 0.1F, 0.01F) << "the plate stays on the floor";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        ASSERT_TRUE(chunks.has_value());
+        EXPECT_GT(*chunks, 0.0) << "the plate's overflow constraints were gathered in chunks";
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+/// @p optimizations without @p removed.
+[[nodiscard]] auto
+without(GpuOptimization optimizations,
+        GpuOptimization removed) -> GpuOptimization
+{
+    return static_cast<GpuOptimization>(std::to_underlying(optimizations) & ~std::to_underlying(removed));
+}
+
+TEST_P(GpuXpbdRigidTest, PassesRecordedForWhatTheLastStepUsedGiveTheSameBits)
+{
+    // RECORDED_PASSES_BY_USE: a plate carrying 23 balls (24 contacts on one body: the coloring's 24 rounds color them all,
+    // one a round — 24 contact colors, no overflow set: 26 colors recorded, no overflow passes), then 11 more landing on
+    // it (35 contacts: 24 colored, 11 in an overflow set, no new color: the step replayed for the overflow passes alone)
+    // give the bits of passes recorded for at least GPU_XPBD_INITIAL_COLORS colors and the overflow set every step; a
+    // chain of joints beside it has joint colors of its own.
+    const auto run = [&](GpuOptimization optimizations) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        std::vector<RigidBody*> bodies;
+        bodies.push_back(&world.add({.pose = {.position = {.y = 0.1F}}}, {.shape = box_shape({.x = 1.2F, .y = 0.1F, .z = 1.2F})}));
+        const std::shared_ptr<const Shape> ball = make_shape(SphereShape{.radius = 0.08F});
+        for (int index = 0; index < 34; ++index)
+        {
+            const int place = index < 23 ? index : 50 + index;
+            const Vector3 position{.x = -0.99F + 0.22F * static_cast<float>(place % 10), .y = index < 23 ? 0.281F : 1.2F,
+                                   .z = -0.99F + 0.22F * static_cast<float>(place / 10)};
+            bodies.push_back(&world.add({.pose = {.position = position}}, {.shape = ball}));
+        }
+        std::vector<std::unique_ptr<Joint>> joints;
+        const std::shared_ptr<const Shape> link = box_shape({.x = 0.05F, .y = 0.05F, .z = 0.2F});
+        RigidBody* previous = nullptr;
+        for (int index = 0; index < 8; ++index)
+        {
+            RigidBody& linked = world.add({.pose = {.position = {.x = 3.0F, .y = 2.0F, .z = 0.4F * static_cast<float>(index)}}}, {.shape = link});
+            bodies.push_back(&linked);
+            joints.push_back(world.world->create_joint(ball_and_socket_joint({.first = linked.handle(),
+                                                                              .second = previous != nullptr ? previous->handle() : RigidBodyHandle{},
+                                                                              .anchor = {.x = 3.0F, .y = 2.0F, .z = 0.4F * static_cast<float>(index) - 0.2F}})));
+            previous = &linked;
+        }
+        world.run(1.0F);
+        std::vector<std::byte> bits = state_bytes(bodies);
+        joints.clear();
+        return bits;
+    };
+    const std::vector<std::byte> by_use = run(DEFAULT_GPU_OPTIMIZATIONS);
+    const std::vector<std::byte> every = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::RECORDED_PASSES_BY_USE));
+    EXPECT_EQ(by_use, every) << "passes recorded for what the last step used give the same bits";
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, ReachBoxesFindThePairsTheFilterKeeps)
+{
+    // REACH_BOXES: a grid of resting boxes 5 cm apart and a ball fired across them at 40 m/s (the step's speculative
+    // distance grows by its 0.67 m a step): each step keeps the same pairs as the common boxes' trees (the steps' counts),
+    // the bodies end where they end with them (within 0.1 mm), and the trees find far fewer pairs (traced builds).
+    const auto run = [&](GpuOptimization optimizations, std::vector<std::uint32_t>& pairs, double& tree_pairs) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        std::vector<RigidBody*> bodies;
+        const std::shared_ptr<const Shape> box = box_shape({.x = 0.1F, .y = 0.1F, .z = 0.1F});
+        for (int row = 0; row < 12; ++row)
+        {
+            for (int column = 0; column < 12; ++column)
+            {
+                const Vector3 position{.x = 0.25F * static_cast<float>(column), .y = 0.1F, .z = 0.25F * static_cast<float>(row)};
+                bodies.push_back(&world.add({.pose = {.position = position}}, {.shape = box}));
+            }
+        }
+        bodies.push_back(&world.add({.pose = {.position = {.x = -3.0F, .y = 1.5F, .z = 1.4F}}, .linear_velocity = {.x = 40.0F}},
+                                    {.shape = make_shape(SphereShape{.radius = 0.1F})}));
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "reach boxes"});
+        for (int step = 0; step < 30; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+            pairs.push_back(world.world->statistics().pairs);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                if (trace.sites()[sample.site].name == "GPU XPBD: tree pairs")
+                {
+                    tree_pairs += sample.number();
+                }
+            }
+        }
+        std::vector<RigidBodyState> states;
+        for (const RigidBody* body : bodies)
+        {
+            states.push_back(body->state());
+        }
+        return states;
+    };
+    std::vector<std::uint32_t> reach_pairs;
+    std::vector<std::uint32_t> common_pairs;
+    double reach_tree_pairs = 0.0;
+    double common_tree_pairs = 0.0;
+    const std::vector<RigidBodyState> reach = run(DEFAULT_GPU_OPTIMIZATIONS, reach_pairs, reach_tree_pairs);
+    const std::vector<RigidBodyState> common = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::REACH_BOXES), common_pairs, common_tree_pairs);
+    EXPECT_EQ(reach_pairs, common_pairs) << "the steps keep the same pairs";
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < reach.size(); ++index)
+    {
+        ASSERT_TRUE(finite(reach[index]));
+        largest = std::max(largest, gfx::length(reach[index].pose.position - common[index].pose.position));
+    }
+    EXPECT_LT(largest, 1.0e-4F) << "the bodies move as with the common boxes";
+    EXPECT_GT(reach.back().pose.position.x, 5.0F) << "the ball crossed the grid";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_LT(4.0 * reach_tree_pairs, common_tree_pairs) << "the trees found " << reach_tree_pairs << " pairs, against " << common_tree_pairs;
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
 }
 
 TEST_P(GpuXpbdRigidTest, TheSameStepsGiveTheSameBits)

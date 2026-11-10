@@ -18,21 +18,7 @@ namespace gpu = gfx::physics::gpu_xpbd;
 auto
 physical_devices() -> std::vector<std::size_t>
 {
-    std::vector<std::size_t> devices;
-    if (!gfx::backend_availability(gfx::BackendKind::VULKAN).available)
-    {
-        return devices;
-    }
-    const std::unique_ptr<gfx::Instance> instance =
-        gfx::create_instance(gfx::BackendKind::VULKAN, {.application_name = "gfx GPU physics tests (enumeration)"});
-    for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
-    {
-        if (instance->physical_device(index).missing_core_features().empty())
-        {
-            devices.push_back(index);
-        }
-    }
-    return devices;
+    return gfx::tests::usable_physical_devices();
 }
 
 auto
@@ -390,6 +376,63 @@ TEST_P(GpuXpbdTest, WhatTheGpuCannotRunIsRefused)
     refused([&] { return body->add_collider({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
     refused([&] { return simulated->create_constraint({.first = body->handle(), .constraint = std::make_shared<OneRowConstraint>()}); }, "USER_CONSTRAINTS");
     refused([&] { return simulated->create_trigger({.shape = nested}); }, "GPU_XPBD_COMPOUND_DEPTH");
+}
+
+TEST_P(GpuXpbdTest, AWorldUsesAtMostTheStorageBuffersItAsksFor)
+{
+    // A world using every part of the backend with every optimization — static and moving colliders, a chain of joints, a
+    // pinned cloth, a trigger, the backend's ray cast, its trees read back — registers at most GPU_XPBD_STORAGE_BUFFERS
+    // storage buffers in its device's bindless table (the free count capabilities() requires of a device).
+    constexpr float STEP = 1.0F / 60.0F;
+    const auto used = [this] { return m_device->bindless_usage().used_by(gfx::BindlessResourceKind::STORAGE_BUFFER); };
+    const std::uint32_t before = used();
+    std::uint32_t most = before;
+    {
+        const std::unique_ptr<PhysicsWorld> physics = world();
+        std::vector<std::unique_ptr<RigidBody>> bodies;
+        std::vector<std::unique_ptr<Collider>> colliders;
+        const auto add = [&](const RigidBodyDescription& body, std::shared_ptr<const Shape> shape) -> RigidBody& {
+            bodies.push_back(physics->create_rigid_body(body));
+            colliders.push_back(bodies.back()->add_collider({.shape = std::move(shape)}));
+            return *bodies.back();
+        };
+        (void)add({.kind = BodyKind::STATIC, .pose = {.position = {.y = -0.5F}}}, make_shape(BoxShape{.half_extents = {.x = 20.0F, .y = 0.5F, .z = 20.0F}}));
+        const std::shared_ptr<const Shape> box = make_shape(BoxShape{.half_extents = {.x = 0.25F, .y = 0.25F, .z = 0.25F}});
+        for (int index = 0; index < 8; ++index)
+        {
+            (void)add({.pose = {.position = {.x = 0.6F * static_cast<float>(index), .y = 0.5F}}}, box);
+        }
+        std::vector<std::unique_ptr<Joint>> joints;
+        const RigidBody* previous = nullptr;
+        for (int index = 0; index < 4; ++index)
+        {
+            const RigidBody& link = add({.pose = {.position = {.y = 4.0F, .z = 3.0F + 0.6F * static_cast<float>(index)}}}, box);
+            joints.push_back(physics->create_joint(ball_and_socket_joint({.first = link.handle(),
+                                                                          .second = previous != nullptr ? previous->handle() : RigidBodyHandle{},
+                                                                          .anchor = {.y = 4.0F, .z = 2.7F + 0.6F * static_cast<float>(index)}})));
+            previous = &link;
+        }
+        SoftBodyDescription cloth = cloth_preset({.columns = 12, .rows = 12, .spacing = 0.1F, .origin = {.x = -3.0F, .y = 2.0F}});
+        cloth.pins = {pin_to_world(cloth, 0), pin_to_world(cloth, 11)};
+        const std::unique_ptr<SoftBody> soft_body = physics->create_soft_body(cloth);
+        const std::unique_ptr<Trigger> trigger = physics->create_trigger({.shape = make_shape(SphereShape{.radius = 1.0F}), .pose = {.position = {.x = 2.0F, .y = 0.5F}}});
+        for (int step = 0; step < 30; ++step)
+        {
+            physics->step(STEP);
+            most = std::max(most, used());
+        }
+        EXPECT_TRUE(physics->ray_cast({.origin = {.x = 1.2F, .y = 5.0F}, .direction = {.y = -1.0F}}, 10.0F).has_value());
+        std::vector<SpatialNode> nodes;
+        physics->broad_phase().structure_nodes(nodes);
+        EXPECT_FALSE(nodes.empty());
+        most = std::max(most, used());
+        joints.clear();
+        colliders.clear();
+        bodies.clear();
+    }
+    RecordProperty("storage_buffers", static_cast<int>(most - before));
+    EXPECT_LE(most - before, GPU_XPBD_STORAGE_BUFFERS) << "a world registered " << most - before << " storage buffers";
+    EXPECT_TRUE(take_validation_messages().empty());
 }
 
 TEST_P(GpuXpbdTest, DevicesWithAGraphicsQueueOnlyStepOnIt)

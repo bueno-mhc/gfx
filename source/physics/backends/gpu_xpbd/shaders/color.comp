@@ -11,12 +11,129 @@
 //                   constraints as values, from the buffer argument names (0: the first);
 //   3 (keys)        the indirect dispatch arguments of each color key, the overflow set's included (argument: their
 //                   buffer).
+// With the bodies' maxima (GpuOptimization::NODE_MAXIMA_COLORING, SOLVER.maxima_coloring), the same colors without
+// scanning: mode 0 also writes each constraint's moving sides and priority (coloring_nodes) and clears its sides' maxima
+// (node_maxima: per node three rounds' priority maxima, three rounds' index maxima, the colors taken), and the rounds keep
+// their colors in the first buffer (a constraint's color changes only in its own invocation of mode 6):
+//   4 (constraints) the first round's priority maxima: each uncolored constraint's priority into its sides' (atomic
+//                   maxima: the same whatever the order);
+//   5 (constraints) a round's ties (argument: the round): an uncolored constraint whose priority is a side's maximum
+//                   puts its index into that side's index maximum;
+//   6 (constraints) a round's choices: an uncolored constraint that is both maxima of each of its sides (the largest
+//                   priority, then index, of its uncolored neighbors and itself: what the scan decides) takes the smallest
+//                   color its sides' colors taken leave (and marks it taken: no other constraint of those sides chooses in
+//                   this round); the others put their priority into the next round's maxima. Each clears its sides'
+//                   maxima of the round after next (three sets rotate: a round reads one, fills the next, clears the
+//                   third).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
 bool moves_a_body(Constraint loaded)
 {
     return body_is_dynamic_awake(body_flags_of(loaded.first)) || body_is_dynamic_awake(body_flags_of(loaded.second));
+}
+
+// A color taken: the colors used, and the colors of the constraint's kind (joints, contacts: the passes recorded for each).
+void count_color(uint index, uint chosen)
+{
+    atomicMax(gpu_words[SOLVER.counts].words[COUNT_COLORS], chosen + 1U);
+    atomicMax(gpu_words[SOLVER.counts].words[index < SOLVER.joint_count ? COUNT_JOINT_COLORS : COUNT_CONTACT_COLORS], chosen + 1U);
+}
+
+// The maxima's words of a node: a round's priority maximum (set = round % 3), index maximum, the colors taken.
+uint priority_word(uint node, uint set)
+{
+    return 8U * node + set;
+}
+
+uint index_word(uint node, uint set)
+{
+    return 8U * node + 3U + set;
+}
+
+uint taken_word(uint node)
+{
+    return 8U * node + 6U;
+}
+
+// An uncolored constraint's priority into its sides' maxima of `set`.
+void raise_priority(uvec4 nodes, uint set)
+{
+    for (uint side = 0U; side < 2U; ++side)
+    {
+        const uint node = side == 0U ? nodes.x : nodes.y;
+        if (node != NO_BODY)
+        {
+            atomicMax(gpu_words[SOLVER.node_maxima].words[priority_word(node, set)], nodes.z);
+        }
+    }
+}
+
+// The rounds by the bodies' maxima (modes 4 to 6).
+void maxima_round(uint index)
+{
+    const uint color = gpu_words[SOLVER.colors_first].words[index];
+    if (color != UNCOLORED)
+    {
+        return;
+    }
+    const uvec4 nodes = gpu_word_vectors[SOLVER.coloring_nodes].values[index];
+    const uint set = push.argument % 3U;
+    if (push.mode == 4U)
+    {
+        raise_priority(nodes, 0U);
+        return;
+    }
+    if (push.mode == 5U)
+    {
+        for (uint side = 0U; side < 2U; ++side)
+        {
+            const uint node = side == 0U ? nodes.x : nodes.y;
+            if (node != NO_BODY && gpu_words[SOLVER.node_maxima].words[priority_word(node, set)] == nodes.z)
+            {
+                atomicMax(gpu_words[SOLVER.node_maxima].words[index_word(node, set)], index);
+            }
+        }
+        return;
+    }
+
+    // Mode 6: the choice; the maxima of the round after next cleared.
+    const uint cleared = (push.argument + 2U) % 3U;
+    bool largest = true;
+    uint used = 0U;
+    for (uint side = 0U; side < 2U; ++side)
+    {
+        const uint node = side == 0U ? nodes.x : nodes.y;
+        if (node == NO_BODY)
+        {
+            continue;
+        }
+        largest = largest && gpu_words[SOLVER.node_maxima].words[priority_word(node, set)] == nodes.z &&
+                  gpu_words[SOLVER.node_maxima].words[index_word(node, set)] == index;
+        used |= gpu_words[SOLVER.node_maxima].words[taken_word(node)];
+        gpu_words[SOLVER.node_maxima].words[priority_word(node, cleared)] = 0U;
+        gpu_words[SOLVER.node_maxima].words[index_word(node, cleared)] = 0U;
+    }
+    if (!largest)
+    {
+        raise_priority(nodes, (push.argument + 1U) % 3U);
+        return;
+    }
+    const uint smallest = used == 0xFFFFFFFFU ? OVERFLOW_COLOR : uint(findLSB(~used));
+    const uint chosen = smallest < MAXIMUM_COLORS ? smallest : OVERFLOW_COLOR;
+    gpu_words[SOLVER.colors_first].words[index] = chosen;
+    if (chosen < MAXIMUM_COLORS)
+    {
+        for (uint side = 0U; side < 2U; ++side)
+        {
+            const uint node = side == 0U ? nodes.x : nodes.y;
+            if (node != NO_BODY)
+            {
+                atomicOr(gpu_words[SOLVER.node_maxima].words[taken_word(node)], 1U << chosen);
+            }
+        }
+        count_color(index, chosen);
+    }
 }
 
 void main()
@@ -42,6 +159,28 @@ void main()
         const Constraint loaded = load_constraint(index);
         const bool in_use = loaded.in_use && moves_a_body(loaded);
         gpu_words[SOLVER.colors_first].words[index] = in_use ? (push.argument == 1U ? OVERFLOW_COLOR : UNCOLORED) : INACTIVE_COLOR;
+        if (SOLVER.maxima_coloring != 0U && in_use && push.argument == 0U)
+        {
+            // The moving sides and the priority; the sides' maxima and colors taken cleared (only an uncolored
+            // constraint's sides are read).
+            const uint first = body_is_dynamic_awake(body_flags_of(loaded.first)) ? loaded.first : NO_BODY;
+            const uint second = body_is_dynamic_awake(body_flags_of(loaded.second)) ? loaded.second : NO_BODY;
+            gpu_word_vectors[SOLVER.coloring_nodes].values[index] = uvec4(first, second, loaded.priority, 0U);
+            for (uint side = 0U; side < 2U; ++side)
+            {
+                const uint node = side == 0U ? first : second;
+                if (node != NO_BODY)
+                {
+                    gpu_word_vectors[SOLVER.node_maxima].values[2U * node] = uvec4(0U);
+                    gpu_word_vectors[SOLVER.node_maxima].values[2U * node + 1U] = uvec4(0U);
+                }
+            }
+        }
+        return;
+    }
+    if (push.mode >= 4U)
+    {
+        maxima_round(index);
         return;
     }
     if (push.mode == 2U)
@@ -106,6 +245,6 @@ void main()
     gpu_words[target].words[index] = chosen;
     if (chosen < MAXIMUM_COLORS)
     {
-        atomicMax(gpu_words[SOLVER.counts].words[COUNT_COLORS], chosen + 1U);
+        count_color(index, chosen);
     }
 }

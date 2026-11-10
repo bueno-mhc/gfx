@@ -357,6 +357,15 @@ GpuBvh::build(ComputeRecorder& recorder,
               GpuSpan boxes,
               const GpuCount& count)
 {
+    build(recorder, boxes, boxes, count);
+}
+
+void
+GpuBvh::build(ComputeRecorder& recorder,
+              GpuSpan boxes,
+              GpuSpan placement,
+              const GpuCount& count)
+{
     State& state = *m_state;
     if (count.maximum > state.maximum)
     {
@@ -368,13 +377,13 @@ GpuBvh::build(ComputeRecorder& recorder,
     const std::uint32_t invocations = workgroups(std::max(count.maximum, 1U));
     PROFILE_GPU_SCOPE("BVH build", recorder, state.passes);
 
-    // The codes of the box centers in the box around them, sorted with the boxes' indices.
-    state.primitives.reduce_bounds(recorder, boxes, span_of(*state.scene_box), count);
+    // The codes of the placement boxes' centers in the box around them, sorted with the boxes' indices.
+    state.primitives.reduce_bounds(recorder, placement, span_of(*state.scene_box), count);
     {
         PROFILE_GPU_SCOPE("bvh_morton", recorder, state.passes);
         record_pass(recorder, *state.morton,
-                    MortonPush{.boxes_buffer = boxes.buffer,
-                               .boxes_first = boxes.first,
+                    MortonPush{.boxes_buffer = placement.buffer,
+                               .boxes_first = placement.first,
                                .bounds_buffer = state.scene_box->bindless_index().value(),
                                .keys_buffer = state.codes->bindless_index().value(),
                                .values_buffer = state.indices->bindless_index().value(),

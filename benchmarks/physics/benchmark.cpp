@@ -16,6 +16,12 @@
 //                       [--steps 1000] [--threads 16] [--scale 1] [--gpu-device <index>] [--trace-frames 100]
 //                       [--output <directory>] [--check-baseline <directory>] [--record-baseline <directory>]
 //                       [--confirmations 2] [--sleep] [--note <text>] [--only-when-asked]
+//                       [--sub-steps 4] [--position-iterations 3] [--velocity-iterations 8] [--check-every 0]
+//
+// The solver options replace the worlds' defaults (SolverDescription) and are part of the settings a baseline holds for:
+// benchmarks/physics/pareto.py runs the scenes over a grid of them (the substep/iteration Pareto front). --check-every N
+// also checks the scenes after every N measured steps (outside the timed steps and the profiler's frames) and reports the
+// worst measure seen (a swinging chain stretches most at the bottom of its swing, not when the run ends).
 //
 // Exit codes: 0 every check passed; 1 a quality check failed, a run failed or a scene regressed; 2 bad arguments; 77 not
 // asked (--only-when-asked without GFX_RUN_BENCHMARKS=1 in the environment: CTest counts it as skipped).
@@ -109,6 +115,9 @@ struct Options
     bool sleep = false;
     std::string note{};
     bool only_when_asked = false;
+    physics::SolverDescription solver{};
+    bool solver_given = false;    ///< Any solver option given (else the defaults, unnamed in the settings).
+    std::uint32_t check_every = 0; ///< Measured steps between checks (0: only after the last).
 };
 
 /// The comma-separated items of @p text.
@@ -225,6 +234,25 @@ parse_options(std::span<char*> arguments) -> std::expected<Options, std::string>
         else if (argument == "--only-when-asked")
         {
             options.only_when_asked = true;
+        }
+        else if (argument == "--check-every")
+        {
+            valid = number(options.check_every);
+        }
+        else if (argument == "--sub-steps")
+        {
+            valid = number(options.solver.sub_steps) && options.solver.sub_steps > 0;
+            options.solver_given = true;
+        }
+        else if (argument == "--position-iterations")
+        {
+            valid = number(options.solver.position_iterations);
+            options.solver_given = true;
+        }
+        else if (argument == "--velocity-iterations")
+        {
+            valid = number(options.solver.velocity_iterations) && options.solver.velocity_iterations > 0;
+            options.solver_given = true;
         }
         else
         {
@@ -422,7 +450,7 @@ measure(BenchmarkScene scene,
         std::vector<SceneObjects> objects;
         for (std::size_t world = 0; world < world_count; ++world)
         {
-            worlds.push_back(make_world(backend, {.task_scheduler = &scheduler, .sleep = {.enabled = options.sleep}, .debug_name = name}, gpu));
+            worlds.push_back(make_world(backend, {.task_scheduler = &scheduler, .solver = options.solver, .sleep = {.enabled = options.sleep}, .debug_name = name}, gpu));
             objects.push_back(gfx::benchmark::build_scene(scene, *worlds.back(), options.scale));
             measurement.bodies += objects.back().dynamic_bodies;
             measurement.joints += static_cast<std::uint32_t>(objects.back().joints.size());
@@ -450,6 +478,22 @@ measure(BenchmarkScene scene,
         const profiler::SessionHandle session = recorder->create_session({.name = name});
         std::vector<double> step_times;
         step_times.reserve(options.steps);
+        double worst_error = -1.0;
+        const auto check_all = [&] {
+            for (const SceneObjects& scene_objects : objects)
+            {
+                const gfx::benchmark::SceneCheck check = gfx::benchmark::check_scene(scene_objects);
+                if (measurement.problem.empty())
+                {
+                    measurement.problem = check.problem;
+                }
+                if (!check.measure.empty() && check.error > worst_error)
+                {
+                    worst_error = check.error;
+                    measurement.measure = check.measure;
+                }
+            }
+        };
         for (std::uint32_t step = 0; step < options.steps; ++step)
         {
             recorder->begin_frame(session);
@@ -457,6 +501,10 @@ measure(BenchmarkScene scene,
             step_all();
             step_times.push_back(milliseconds_since(begin));
             (void)recorder->end_frame(session);
+            if (options.check_every > 0 && (step + 1) % options.check_every == 0)
+            {
+                check_all();
+            }
         }
         const profiler::Trace trace = recorder->finalize_session(session);
         profiler::set_current_profiler(nullptr);
@@ -496,18 +544,25 @@ measure(BenchmarkScene scene,
                                    options.output / std::format("{}_{}.json", gfx::benchmark::information(scene).name, backend_name(backend)));
         }
 
-        // The quality checks.
-        for (const SceneObjects& scene_objects : objects)
+        // The quality checks (after the last step; with --check-every, the worst measure of every check).
+        if (options.check_every == 0)
         {
-            const gfx::benchmark::SceneCheck check = gfx::benchmark::check_scene(scene_objects);
-            if (measurement.problem.empty())
+            for (const SceneObjects& scene_objects : objects)
             {
-                measurement.problem = check.problem;
+                const gfx::benchmark::SceneCheck check = gfx::benchmark::check_scene(scene_objects);
+                if (measurement.problem.empty())
+                {
+                    measurement.problem = check.problem;
+                }
+                if (measurement.measure.empty())
+                {
+                    measurement.measure = check.measure;
+                }
             }
-            if (measurement.measure.empty())
-            {
-                measurement.measure = check.measure;
-            }
+        }
+        else if (options.steps % options.check_every != 0)
+        {
+            check_all();
         }
     }
     catch (const std::exception& error)
@@ -562,8 +617,13 @@ baseline_path(const std::filesystem::path& directory,
 settings_text(const Options& options,
               const Environment& environment) -> std::string
 {
-    return std::format("{}; warm-up {}, steps {}, threads {}, scale {}, sleep {}", environment.build, options.warm_up, options.steps, options.threads,
-                       options.scale, options.sleep ? "on" : "off");
+    std::string text = std::format("{}; warm-up {}, steps {}, threads {}, scale {}, sleep {}", environment.build, options.warm_up, options.steps, options.threads,
+                                   options.scale, options.sleep ? "on" : "off");
+    if (options.solver_given)
+    {
+        text += std::format(", solver {}/{}/{}", options.solver.sub_steps, options.solver.position_iterations, options.solver.velocity_iterations);
+    }
+    return text;
 }
 
 [[nodiscard]] auto
@@ -682,6 +742,11 @@ write_report(const std::filesystem::path& path,
     stream << std::format("| Build | {} |\n| Settings | {} steps after {} warm-up steps of 1/60 s; Box3D and the reference backend on {} scheduler threads; "
                           "scenes at {} times their size; sleep {} |\n",
                           environment.build, options.steps, options.warm_up, options.threads, options.scale, options.sleep ? "on" : "off");
+    if (options.solver_given)
+    {
+        stream << std::format("| Solver | {} substeps, {} position iterations, {} velocity iterations |\n", options.solver.sub_steps,
+                              options.solver.position_iterations, options.solver.velocity_iterations);
+    }
     if (!options.note.empty())
     {
         stream << std::format("| Note | {} |\n", options.note);

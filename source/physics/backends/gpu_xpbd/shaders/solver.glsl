@@ -108,6 +108,22 @@ struct SolverParameters
     uint trigger_manifolds;
     uint trigger_results;
     uint tables; // the narrow phase's shape table (the contacts' margins)
+    uint overflow_flags;     // CHUNKED_GATHER: the graph's entries of the overflow set flagged,
+    uint overflow_positions; // their positions, compacted,
+    uint overflow_keys;      // their keys (nodes),
+    uint overflow_values;    // their values (constraint × 2 + side),
+    uint overflow_begin;     // per node: its first overflow entry,
+    uint overflow_end;       // and one past its last,
+    uint chunk_counts;       // per node: its chunks (heavy nodes only),
+    uint chunk_first;        // per node: its first chunk,
+    uint chunk_descriptors;  // per chunk: node, first entry, entries,
+    uint partials;           // per chunk: its sums (two vectors),
+    uint gather_lists;       // 1: the gathers read the lists (else the graph);
+    // The coloring by the bodies' maxima (NODE_MAXIMA_COLORING):
+    uint coloring_nodes;     // per constraint: its moving sides (or NO_BODY) and its priority (a uvec4),
+    uint node_maxima;        // per node: priority maxima of three rounds, index maxima of three, colors taken (8 words),
+    uint maxima_coloring;    // 1: the rounds compare with the maxima (else they scan the graph);
+    uint reach_boxes;        // REACH_BOXES: the instances' boxes grown by their own reach (the trees' boxes)
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -147,6 +163,10 @@ const uint COUNT_TRIGGER_STATIC_PAIRS = 15U;
 const uint COUNT_TRIGGER_CANDIDATES = 16U;
 const uint COUNT_TRIGGER_SLOTS = 17U;
 const uint COUNT_TRIGGER_OVERLAPS = 18U;
+const uint COUNT_OVERFLOW_ENTRIES = 19U;
+const uint COUNT_GATHER_CHUNKS = 20U;
+const uint COUNT_JOINT_COLORS = 21U;
+const uint COUNT_CONTACT_COLORS = 22U;
 
 uint count_word(uint word)
 {

@@ -19,6 +19,12 @@ namespace
 /// A real-time pause longer than this (a breakpoint, a dragged window) is not caught up.
 constexpr double LONGEST_FRAME = 0.25;
 
+/// Steps a frame runs at once beyond the one it begins. While steps cost more real time than they simulate (the GPU
+/// backend under the validation layers: 60 ms a step), catching up fully made each frame owe more steps than the last,
+/// up to LONGEST_FRAME's worth (15 steps, about a frame a second): the time beyond these steps is dropped instead, so the
+/// simulation runs slower than real time and the window stays responsive.
+constexpr int MAXIMUM_CATCH_UP_STEPS = 2;
+
 /// The corners of a frustum of a square pyramid (a plinth): a base of half side 0.5, a top of half side 0.25, 0.6 high.
 consteval auto
 plinth_corners() -> std::array<Vector3, 8>
@@ -292,11 +298,18 @@ Scene::advance(double seconds)
     // The step begun by the last call, then the steps due beyond one at once, then the next one on the world's thread.
     finish();
     m_accumulator += std::min(seconds, LONGEST_FRAME);
-    while (m_accumulator >= 2.0 * STEP)
+    for (int caught_up = 0; m_accumulator >= 2.0 * STEP && caught_up < MAXIMUM_CATCH_UP_STEPS; ++caught_up)
     {
         m_world->step(STEP);
         capture();
         m_accumulator -= STEP;
+    }
+    if (m_accumulator >= 2.0 * STEP)
+    {
+        // The time owed beyond the steps a frame catches up is dropped (one step and the fraction kept).
+        const double kept = STEP + std::fmod(m_accumulator, static_cast<double>(STEP));
+        m_dropped_steps += static_cast<std::uint64_t>(std::floor((m_accumulator - kept) / STEP + 0.5));
+        m_accumulator = kept;
     }
     if (m_accumulator >= STEP)
     {

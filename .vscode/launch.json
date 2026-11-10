@@ -2,6 +2,9 @@
     // Debug configurations for the gfx tests and the windowed example: Debug build (build/debug), gdb from MSYS2 UCRT64.
     // Both build first and stop in the debugger at the first failed assertion (GTEST_BREAK_ON_FAILURE);
     // when that happens, select the test's own frame in the CALL STACK view.
+    // Every configuration sets _NO_DEBUG_HEAP=1: a process started by a debugger otherwise gets Windows' debug heap, which
+    // makes every allocation far slower (the validation layer's SPIR-V validation of the GPU physics backend's shaders took
+    // 40 s instead of 0.3 s when the physics sandbox created a GPU world).
     "version": "0.2.0",
     "configurations": [
         {
@@ -15,7 +18,8 @@
             "args": ["--gtest_filter=${input:googleTestFilter}"],
             "cwd": "${workspaceFolder}/build/debug",
             "environment": [
-                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" }
+                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" },
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
             ],
             "stopAtEntry": false,
             "externalConsole": false,
@@ -41,7 +45,8 @@
             "args": ["${cmake.testArgs}"],
             "cwd": "${cmake.testWorkingDirectory}",
             "environment": [
-                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" }
+                { "name": "GTEST_BREAK_ON_FAILURE", "value": "1" },
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
             ],
             "stopAtEntry": false,
             "externalConsole": false,
@@ -66,7 +71,8 @@
             "args": ["--backend", "${input:platformBackend}", "--validation"],
             "cwd": "${workspaceFolder}/build/debug",
             "environment": [
-                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" }
+                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" },
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
             ],
             "stopAtEntry": false,
             "externalConsole": false,
@@ -93,7 +99,8 @@
             "args": ["--backend", "${input:platformBackend}", "--validation", "--layout", "editor_layout.json"],
             "cwd": "${workspaceFolder}/build/debug",
             "environment": [
-                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" }
+                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" },
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
             ],
             "stopAtEntry": false,
             "externalConsole": false,
@@ -119,7 +126,33 @@
             "args": ["--backend", "${input:platformBackend}", "--physics", "${input:physicsBackend}", "--preset", "${input:sandboxPreset}", "--validation"],
             "cwd": "${workspaceFolder}/build/debug",
             "environment": [
-                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" }
+                { "name": "VK_ADD_LAYER_PATH", "value": "C:/msys64/ucrt64/bin" },
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Debug"
+        },
+        {
+            // The physics sandbox without the Vulkan validation layers: the GPU physics backend at full speed (the layers
+            // check each of the hundreds of commands a GPU step records: 60 ms a step in Debug instead of 2–5 ms).
+            "name": "gfx: Physics sandbox (no validation)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/debug/examples/physics_sandbox/gfx_physics_sandbox.exe",
+            "args": ["--backend", "${input:platformBackend}", "--physics", "${input:physicsBackend}", "--preset", "${input:sandboxPreset}"],
+            "cwd": "${workspaceFolder}/build/debug",
+            "environment": [
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
             ],
             "stopAtEntry": false,
             "externalConsole": false,
@@ -143,6 +176,9 @@
             "program": "${workspaceFolder}/build/debug/examples/physics/gfx_physics_example.exe",
             "args": ["--backend", "${input:physicsBackend}", "--steps", "240", "--threads", "4"],
             "cwd": "${workspaceFolder}/build/debug",
+            "environment": [
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
+            ],
             "stopAtEntry": false,
             "externalConsole": false,
             "MIMode": "gdb",

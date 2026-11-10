@@ -3,7 +3,9 @@
 Status: **answers given 2026-11-08: every question of §D as recommended.** **PF0 accepted** with its 5 deviations (§B "PF0 as
 built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). **PF2 accepted** with its 6
 deviations (§B "PF2 as built"). **PF3 accepted** with its 8 deviations (§B "PF3 as built"); the GPU defect it found is fixed and accepted (docs/gpu-xpbd-design.md §B
-"Fix after G10"; the baseline recorded again). **PF4 built** (§B "PF4 as built", 5 deviations), awaiting validation. The numbers of §0.1 were
+"Fix after G10"; the baseline recorded again). **PF4 accepted** with its 5 deviations ("Accept, start PF5"; committed 51f4972). **PF5 accepted** with its 7 deviations (§B "PF5 as built"; "Do
+everything as recommended", 2026-11-10): the velocity-iteration default stays 8. Next, at the user's request, the optimizations
+PF5 measured and did not build (§B "PF5b"), then PF6. The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -799,6 +801,148 @@ test). An earlier Release attempt lost three: its build stopped on `gfx_physics_
 the target built cleanly alone, then the whole build), leaving two `_NOT_BUILT` placeholders, and `PhysicsSandbox.Tour` timed
 out while the NVIDIA GPU refused new devices (`VK_ERROR_INITIALIZATION_FAILED` in the benchmark run right after); both GPUs
 answered again later and the full run passed.
+
+### PF5 as built (2026-11-10)
+
+Every change was traced before and after: the benchmark's Chrome traces, summed per GPU scope and per step (a scratchpad
+script). The starting point, PF4's code with the baseline recorded again on 2026-11-10 ("PF4 accepted"), had three
+measured costs left. **Heavy nodes**: one invocation looping over a body's thousands of contacts (a 1 000 kg box under the
+cloth) held whole passes. In `mixed`, the Jacobi gather took 19.1 ms of a 50.0 ms step and the coloring 7.3 ms. **Empty
+passes**: at least 8 colors recorded in scenes using 1–3, so 654–760 dispatches and as many barriers a step. **Inflated
+boxes**: the broad phase's boxes grew by the fastest body's motion, so `chain`'s trees found 832 000 pairs a step (up to
+1.8 million), all filtered out.
+
+**The flags** (four new `GpuOptimization` bits, all in `DEFAULT_GPU_OPTIMIZATIONS`; `NONE` is still the baseline):
+- **`CHUNKED_GATHER`**: after a step that had an overflow set, `jacobi_gather.comp` builds lists of the overflow set's
+  graph entries once per step, after the coloring. Mode 3 flags them, a compaction keeps them in graph order, mode 4 copies
+  their values and keys, the ranges pass gives each node its range, mode 5 counts the chunks of nodes with more than
+  `GPU_XPBD_GATHER_CHUNK` (32) entries, a scan places them, mode 6 writes the chunk descriptors and an indirect dispatch
+  covers them. Before each node pass (positions, velocities, shares), mode 7 sums each chunk. A light node then reads its
+  own entries (the graph's sums, in the graph's order: the same bits) and a heavy node sums its chunks in order (the same
+  sum every run, associated by chunks). `GpuSolverParameters` grew by 11 words, `GpuSolverCounts` by `overflow_entries` and
+  `gather_chunks`; the chunk size is specialization constant 68. `mixed`'s gather went from 19.1 to 1.2 ms, the lattice's
+  from 3.0 to 0.75 ms.
+- **`NODE_MAXIMA_COLORING`**: `color.comp`'s rounds compare each uncolored constraint with its moving bodies' maxima
+  instead of scanning their constraints. Per body there are three rotating sets of the uncolored constraints' priority
+  maximum and index maximum, plus the colors taken, all atomic and independent of order. Mode 0 also writes each
+  constraint's moving sides and priority (`coloring_nodes`) and clears its sides' words; mode 4 takes the first round's
+  priorities. Per round, mode 5 (ties) puts the index of a constraint whose priority is a side's maximum, and mode 6
+  (choices) colors a constraint that holds both maxima of each side with the smallest color its sides have not taken. The
+  others raise the next round's priorities, and each clears the round after next. **The same colors** as the scan:
+  holding each side's maximum is exactly beating every uncolored neighbor (a test compares the bits). The colors stay in
+  the first buffer. The coloring went from 7.3 to 0.4 ms in `mixed` and from 4.1 to 0.8 ms in the lattice.
+- **`RECORDED_PASSES_BY_USE`**: the solver records joint passes for the colors joints used in the previous step plus two,
+  and contact passes for the colors contacts used plus two (new counts `joint_colors` and `contact_colors`). This replaces
+  the colors either kind used plus two, with at least `GPU_XPBD_INITIAL_COLORS`. The overflow set's passes, gathers and
+  share counts are recorded only after a step that had one. A step that needs more is replayed (`overflowed()`), so the
+  bits are the same. `many_boxes`, `two_worlds`, the cloth and `chain` lost 308–400 of their 654–772 dispatches a step,
+  the lattice 703 of 1 320, and as many barriers. The pyramid and `mixed`, which use many colors and an overflow set,
+  lost none.
+- **`REACH_BOXES`**: a new pass (`pairs_filter.comp` mode 2) grows each instance's box by its own reach, the term
+  `within_reach()` already used, plus half the world's speculative distance and a rounding guard. The trees are built
+  over these boxes. A new `GpuBvh::build(boxes, placement, count)` places the leaves by the common boxes (the Morton codes),
+  so the binary hierarchy is the one the common boxes give. Two reach boxes overlap whenever `within_reach()` keeps their
+  pair, so the same pairs are kept. The four-wide layout opens children by surface area, though, so pairs may be found in
+  another order: other bits, the same pairs. `chain`'s broad phase went from 1.65 to 0.58 ms.
+
+**Measured, not built** (deviations, below): fusion, the refit cadence, the coloring warm start, subgroup passes, vector
+loads, sleep tuning, single dispatches, recording reuse and compact readback.
+
+**The Pareto front** (§A10 item 14):
+- **New benchmark options**: `--sub-steps`, `--position-iterations` and `--velocity-iterations` (written into the
+  settings, so such runs never compare with the baseline), and `--check-every N`, which checks the scenes every N measured
+  steps outside the timed steps and keeps the worst measure.
+- **Checks report a number**: `SceneCheck::error`. The cloths' stretch is now measured (`SceneSpring`: the stretch
+  constraints' rest lengths).
+- **`benchmarks/physics/pareto.py`** (standard library only) runs the benchmark over a grid and writes `pareto.md`: every
+  setting's mean step and worst error, the front marked, the fastest setting at least as accurate as the defaults named.
+
+Grid: substeps {2, 4, 8} × position iterations {1, 2, 3} × velocity iterations {1, 2, 4, 8}, GPU backend, 300 steps after
+10, checked every 10 steps:
+
+| Scene (worst error) | 4/3/8 (defaults) | 4/3/4 | 4/3/2 | 4/3/1 | Notes |
+|---|---|---|---|---|---|
+| pyramid (top box moved) | 51.9 ms, 0.110 m | 38.9 ms, 0.115 m | 32.0 ms, 0.130 m | 28.9 ms, 0.140 m | the defaults are the most accurate point of the front; 8 substeps are never more accurate |
+| mixed (cloth stretch) | 19.9 ms, 49.7 % | 16.3 ms, 51.2 % | 13.3 ms, 50.4 % | 12.5 ms, 47.9 % | the defaults are dominated; the stretch is local (a cloth's corners caught on box edges) and noisy |
+| cloth (resting) | 15.1 ms | 12.9 ms | 12.2 ms | 11.5 ms | the cloth lies flat from the start: no stretch to measure |
+| chain (rod stretch) | 4.7 ms, 30.4 % (fails) | 4.5 ms, 30.4 % | 4.4 ms, 30.4 % | 4.2 ms, 30.4 % | velocity iterations change nothing (joints have no velocity pass); only 8 substeps stay under 30 % (8/3/1: 8.8 %, 5.2 ms) |
+
+Velocity iterations cost the most and buy the least: going from 8 to 1 makes the pyramid 1.8× faster and `mixed` 1.6× faster,
+for 27 % more drift on the pyramid and none on the cloth. **The defaults stay 4/3/8** (the user, as recommended): the table
+is for applications that trade accuracy for time through `SolverDescription`.
+
+**Found on the way.**
+1. **The chain's rods stretch most early in the swing**: the benchmark checks once, after the last step, and saw
+   1.2–16 %. Checked every 10 steps, the worst is 21.9 % with 100 warm-up steps and 30.4 % with 10, which fails the
+   check's 30 % at 4 substeps whatever the iterations.
+2. **A false alarm with a lesson**: a test reverted after a deliberate mutation failed again, because PowerShell's
+   `Copy-Item` keeps the source's modification time and ninja did not rebuild the restored file (the mutation was still
+   compiled in). Restore files with a tool that gives them a new time, or touch them.
+3. **The GPU tests' discovery timed out, and the Release build stopped**: listing `gfx_physics_gpu_xpbd_tests` took 62–72 s
+   in every build, past the 60 s discovery limit. Each of its 16 GPU suites' parameter generators made a Vulkan instance
+   to list the GPUs, and on this laptop each one waits for the discrete GPU to wake (seen in `vkCreateInstance`, in the
+   driver's Optimus path). This is also why the discovery had stalled once in PF4's Release run. Now
+   `gfx::tests::usable_physical_devices()` (tests/graphics/vulkan/vulkan_test.hpp) enumerates once per executable, and every
+   GPU test file calls it: 22.6 s.
+4. **The Debug configuration lost the GPU backend and the profiler again**: `build/debug` had been configured through a
+   CMake preset, so `build.py` deleted the cache and CMake's re-run dropped both `-D` options (a known gotcha). The suite
+   then ran 1 094 tests; a second `build.py` restored both, and the full suite ran 1 542.
+
+**Deviations (for validation).**
+1. **Four flags not in §A10's list**, built because the traces named their costs: `CHUNKED_GATHER`,
+   `NODE_MAXIMA_COLORING`, `RECORDED_PASSES_BY_USE` and `REACH_BOXES`. `REACH_BOXES` gives other bits than the baseline (the
+   same pairs in another order); the other three give the baseline's bits, except that a node with more than 32
+   overflow constraints sums them by chunks.
+2. **`KERNEL_FUSION` not built**: the barriers that mattered were the empty color passes, removed by
+   `RECORDED_PASSES_BY_USE`. What fusion would still join (body and particle prediction, body and particle velocity
+   update) is 8 barriers a step out of 350–1 600.
+3. **`BVH_REFIT` not built**: a tree build is 0.07–0.42 ms a step in these scenes, and a refit changes the tree (other
+   bits).
+4. **`COLORING_CACHE` not built**: the coloring is now 0.2–1.7 ms. 64 rounds instead of 24 colored more constraints and
+   improved quality (lattice rod 9.4 → 5.4 %, pyramid top box −0.094 → −0.069 m) but cost +3.6 ms on the pyramid and
+   +3 ms on the lattice, so 24 rounds stay.
+5. **`SUBGROUP_VARIANTS`, `VECTOR_LOADS`, `PERSISTENT_KERNELS` not built**: no measured pass is bound by them. What is
+   left is the velocity iterations' contact passes (the Pareto question) and the dispatches' fixed cost.
+   `PERSISTENT_KERNELS` was to be off by default anyway.
+6. **`SLEEP_TUNING` and `COMPACT_READBACK` not built**: the benchmark runs with sleep off, so neither is measurable; both
+   need a sleeping scene first.
+7. **`REUSE_RECORDING` not built**: recording is 0.4–0.9 ms of CPU a step. Reusing it needs every component's `record_*`
+   split into host writes and commands, and the GPU timer replaying its per-frame query bookkeeping.
+
+**Tests** (each one fails with its mechanism deliberately broken, checked):
+- `GpuXpbdRigidTest.HeavyNodesGatherInChunksAsTheGraphGathers`: a plate carrying 100 balls moves as with the graph's
+  gather (within 0.1 mm over 1 s), gives the same bits again, counts chunks, and gives the scan coloring's bits.
+- `PassesRecordedForWhatTheLastStepUsedGiveTheSameBits`: 24 contacts on one plate, then 11 more landing, so an overflow
+  set appears without a new color; plus a chain of joints. It fails when the overflow set does not replay.
+- `ReachBoxesFindThePairsTheFilterKeeps`: a grid of resting boxes crossed by a 40 m/s ball keeps the same pairs every
+  step, ends within 0.1 mm, and the trees find under a quarter of the pairs.
+- `GpuXpbdTest.AWorldUsesAtMostTheStorageBuffersItAsksFor`: a world using every part of the backend registers 168
+  storage buffers, against the 192 `capabilities()` requires free. No test checked this before, and the new arrays add 14.
+- Each runs × 4 (both GPUs × both solver modes), the last × 2: 14 tests.
+
+**Results**: Debug 1542 of 1542 (1 169 s), Release 1540 of 1540 (1 171 s; then, rebuilt, the 2 storage-buffer tests and
+the sandbox's 4 CTest runs), run from PowerShell with `--timeout 900`. After the enumeration change, the Debug sandbox
+tests pass. `PhysicsSandbox.GPU_XPBD` timed out twice at its then 300 s (presentation throttled), then passed in 51 s.
+
+**Measured** (profile build, power scheme "Silent", 1 000 steps after 100; mean ms per step; the GPU's change is its median
+against the baseline recorded from PF4's code on 2026-11-10):
+
+| Scene | Box3D | GPU | Speed-up | GPU against PF4 (p50) | GPU busy |
+|---|---|---|---|---|---|
+| many_boxes | 15.08 | 13.16 | 1.15× | −4.5 % | 5.7 |
+| pyramid | 88.02 | 50.51 | 1.74× | −1.7 % | 35.8 |
+| cloth | 81.51 | 15.36 | 5.31× | −2.6 % | 11.1 |
+| chain | 4.93 | 3.92 | 1.26× | −35.0 % | 2.2 |
+| mixed | 42.35 | 21.58 | 1.96× | −57.3 % | 14.5 |
+| stress_constraints | 68.89 (Box3D fails its check) | 8.92 | 7.72× | −46.6 % | 5.1 |
+| two_worlds | 13.92 | 13.26 | 1.05× | −8.8 % | 6.4 |
+
+**The target (1.25×) is met on the pyramid, the cloth, `chain`, `mixed` and the lattice.** It is missed on `two_worlds`
+(1.05×) and, in this run, `many_boxes`. Box3D's median for `many_boxes` moved 28 % against the baseline (19.9 → 14.2 ms);
+the GPU's moved 4.5 %. Earlier runs today gave 1.5–1.7× there. In both missed scenes, about half of each world's step is
+CPU work around the GPU's 3 ms: recording, reading back, contacts and events, publishing. That is what `REUSE_RECORDING`
+and a GPU event path would cut; fewer velocity iterations (the Pareto question) would cut the GPU's share. The benchmark's
+gate passed (exit 0).
 
 ---
 

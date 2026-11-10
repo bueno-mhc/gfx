@@ -59,6 +59,15 @@ struct SceneRod
     float length = 0.0F;
 };
 
+/// @brief A cloth's stretch constraint: its soft body (in SceneObjects::soft_bodies), its particles, its rest length.
+struct SceneSpring
+{
+    std::uint32_t soft_body = 0;
+    std::uint32_t first = 0;
+    std::uint32_t second = 0;
+    float length = 0.0F;
+};
+
 /// @brief What a scene made in one world, and what its check needs.
 struct SceneObjects
 {
@@ -69,6 +78,7 @@ struct SceneObjects
     std::vector<std::uint32_t> boxes_on_floor{};   ///< Boxes resting on the floor (their half height alongside).
     std::vector<float> box_half_heights{};
     std::vector<SceneRod> rods{};
+    std::vector<SceneSpring> springs{};            ///< The cloths' stretch constraints (their stretch is measured).
     float rod_tolerance = 0.05F;                   ///< The relative error a rod may show.
     std::optional<std::uint32_t> top_box{};        ///< A stack's top box and its starting height.
     float top_height = 0.0F;
@@ -103,6 +113,7 @@ struct SceneCheck
 {
     std::string problem{};
     std::string measure{};
+    double error = 0.0; ///< The measure's number: a stack's sinking (m), a rod's or a cloth's stretch (fraction), a box's rest (m).
 };
 
 /// @brief Checks @p objects after the last completed step of their world.
@@ -183,8 +194,22 @@ add_cloth(PhysicsWorld& world,
           float height)
 {
     const float half = static_cast<float>(side - 1) * spacing * 0.5F;
-    objects.soft_bodies.push_back(world.create_soft_body(cloth_preset(
-        {.columns = side, .rows = side, .spacing = spacing, .origin = {.x = x - half, .y = height, .z = z - half}, .row_direction = {.z = 1.0F}})));
+    const SoftBodyDescription description =
+        cloth_preset({.columns = side, .rows = side, .spacing = spacing, .origin = {.x = x - half, .y = height, .z = z - half}, .row_direction = {.z = 1.0F}});
+    const auto soft_body = static_cast<std::uint32_t>(objects.soft_bodies.size());
+    for (const SoftBodyConstraint& constraint : description.constraints)
+    {
+        if (constraint.kind == SoftBodyConstraintKind::STRETCH)
+        {
+            const std::uint32_t first = constraint.particles[0];
+            const std::uint32_t second = constraint.particles[1];
+            objects.springs.push_back({.soft_body = soft_body,
+                                       .first = first,
+                                       .second = second,
+                                       .length = constraint.rest_value.value_or(length(description.particles[first].position - description.particles[second].position))});
+        }
+    }
+    objects.soft_bodies.push_back(world.create_soft_body(description));
     objects.particles += side * side;
     objects.soft_start_height = std::max(objects.soft_start_height, height);
 }
@@ -443,6 +468,7 @@ check_scene(const SceneObjects& objects) -> SceneCheck
             fail(std::format("the top box sank from {:.2f} to {:.2f} m: the pyramid fell", objects.top_height, height));
         }
         check.measure = std::format("top box {:+.3f} m", height - objects.top_height);
+        check.error = std::abs(height - objects.top_height);
     }
 
     // Rods at their lengths.
@@ -461,6 +487,7 @@ check_scene(const SceneObjects& objects) -> SceneCheck
     if (worst != nullptr)
     {
         check.measure = std::format("max rod error {:.2f} %", 100.0F * stretch);
+        check.error = stretch;
         if (!(stretch <= objects.rod_tolerance))
         {
             const std::string ends = worst->second ? std::format("bodies {} and {}", worst->first, *worst->second)
@@ -470,10 +497,11 @@ check_scene(const SceneObjects& objects) -> SceneCheck
         }
     }
 
-    // Particles above the floor and below where they started (no explosion).
+    // Particles above the floor and below where they started (no explosion); the cloths' largest stretch (measured).
+    std::vector<std::vector<Vector3>> soft_positions;
     for (const std::unique_ptr<SoftBody>& soft_body : objects.soft_bodies)
     {
-        std::vector<Vector3> particles(soft_body->particle_count());
+        std::vector<Vector3>& particles = soft_positions.emplace_back(soft_body->particle_count());
         (void)soft_body->positions(particles);
         float lowest = std::numeric_limits<float>::infinity();
         float highest = -std::numeric_limits<float>::infinity();
@@ -497,9 +525,21 @@ check_scene(const SceneObjects& objects) -> SceneCheck
         }
         check.measure = std::format("particles from {:.3f} to {:.3f} m", lowest, highest);
     }
+    if (!objects.springs.empty())
+    {
+        float cloth_stretch = 0.0F;
+        for (const SceneSpring& spring : objects.springs)
+        {
+            const std::vector<Vector3>& particles = soft_positions[spring.soft_body];
+            cloth_stretch = std::max(cloth_stretch, std::abs(length(particles[spring.first] - particles[spring.second]) / spring.length - 1.0F));
+        }
+        check.measure += std::format(", stretch {:.2f} %", 100.0F * cloth_stretch);
+        check.error = cloth_stretch;
+    }
     if (check.measure.empty() && !objects.boxes_on_floor.empty())
     {
         check.measure = std::format("boxes within {:.4f} m of rest", worst_rest);
+        check.error = worst_rest;
     }
     return check;
 }

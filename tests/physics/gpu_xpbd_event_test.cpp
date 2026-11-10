@@ -24,21 +24,7 @@ constexpr float STEP = 1.0F / 60.0F;
 auto
 physical_devices() -> std::vector<std::size_t>
 {
-    std::vector<std::size_t> devices;
-    if (!gfx::backend_availability(gfx::BackendKind::VULKAN).available)
-    {
-        return devices;
-    }
-    const std::unique_ptr<gfx::Instance> instance =
-        gfx::create_instance(gfx::BackendKind::VULKAN, {.application_name = "gfx GPU physics tests (enumeration)"});
-    for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
-    {
-        if (instance->physical_device(index).missing_core_features().empty())
-        {
-            devices.push_back(index);
-        }
-    }
-    return devices;
+    return gfx::tests::usable_physical_devices();
 }
 
 auto

@@ -10,24 +10,11 @@ import gfx.physics.gpu_xpbd;
 namespace gfx::tests
 {
 
-/// @brief Every physical device of the machine that runs gfx.
+/// @brief Every physical device of the machine that runs gfx (enumerated once per executable).
 inline auto
 gpu_physical_devices() -> std::vector<std::size_t>
 {
-    std::vector<std::size_t> devices;
-    if (!backend_availability(BackendKind::VULKAN).available)
-    {
-        return devices;
-    }
-    const std::unique_ptr<Instance> instance = create_instance(BackendKind::VULKAN, {.application_name = "gfx GPU tests (enumeration)"});
-    for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
-    {
-        if (instance->physical_device(index).missing_core_features().empty())
-        {
-            devices.push_back(index);
-        }
-    }
-    return devices;
+    return usable_physical_devices();
 }
 
 /// @brief A word that marks what a pass must not write.

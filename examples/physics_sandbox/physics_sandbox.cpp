@@ -15,8 +15,8 @@
 // joints, bodies colored by sleep or island).
 //
 // Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference|gpu_xpbd] [--preset <name>] [--views <list>]
-//                            [--device <index>] [--threads <count>] [--frames <count>] [--script | --tour] [--validation]
-//                            [--capture <file.ppm>] [--capture-frame <index>]
+//                            [--device <index>] [--threads <count>] [--frames <count>] [--real-time] [--script | --tour] [--validation]
+//                            [--capture <file.ppm>] [--capture-frame <index>] [--trace <file.json>]
 //   --physics B    simulates with backend B (gpu_xpbd: the GPU backend, on the sandbox's own device)
 //   --preset P     starts with scene P (showcase, stacks, dominoes, chains, cloth, soft_volumes, friction, bouncing,
 //                  triggers)
@@ -24,13 +24,21 @@
 //                  joints, sleep, islands; the last two color the bodies)
 //   --frames N     closes after N frames, one physics step per frame (the same frames on any machine); the window then
 //                  does not take the focus
+//   --real-time    with --frames: the frames advance by the real time they take, as interactive runs do (steps due
+//                  beyond one run at once, two at most; the rest is dropped and counted)
 //   --script       drives the sandbox by a script instead of the mouse and keyboard (a grab and a drag, a shot, a spawn,
 //                  a removal, a flight; then pausing, a single step, slow motion, gravity, the solver, the broad phase
 //                  and the integrator, every view), then checks what happened: the exit code is 1 if a check fails
 //   --tour         builds every preset on every physics backend in turn and checks each scene
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
 //   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM)
+//   --trace F      prints how long loading took (the window, the device, the renderer, each scene: its world and its
+//                  bodies), records every frame with the profiler (the main thread's phases, the world's thread, the
+//                  GPU backend's GPU scopes) and writes them to F as a Chrome trace at the end (builds with the profiler)
+#include <gfx/profiler.hpp>
+
 import std;
+import gfx.profiler;            // --trace: the frames recorded
 import gfx.platform.graphics;   // gfx (graphics), gfx.platform (windows and input), WindowSwapchain
 import gfx.ui;                  // the panels
 import gfx.ui.platform;         // the UI's input and services from the window
@@ -137,10 +145,70 @@ struct Options
     std::optional<std::uint64_t> frames{};
     bool script = false;
     bool tour = false;
+    bool real_time = false;
     ViewSettings views{};
     bool validation = false;
     std::optional<std::string> capture{};
     std::optional<std::uint64_t> capture_frame{};
+    std::optional<std::string> trace{};
+};
+
+/// --trace: how long the loading took, phase by phase (printed as they end).
+class LoadClock
+{
+public:
+    explicit LoadClock(bool enabled) noexcept
+        : m_enabled{enabled}
+    {
+    }
+
+    /// Prints the time since the last mark (and since the start), naming what took it.
+    void mark(std::string_view what)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (m_enabled)
+        {
+            std::println("load: {:<40} {:8.1f} ms (since the start {:8.1f} ms)", what, std::chrono::duration<double, std::milli>(now - m_last).count(),
+                         std::chrono::duration<double, std::milli>(now - m_start).count());
+        }
+        m_last = now;
+    }
+
+private:
+    bool m_enabled = false;
+    std::chrono::steady_clock::time_point m_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point m_last = m_start;
+};
+
+/// --trace: a profiler frame for the scope of a sandbox frame (whatever way the frame ends).
+class TracedFrame
+{
+public:
+    TracedFrame(gfx::profiler::Profiler* recorder,
+                gfx::profiler::SessionHandle session)
+        : m_recorder{recorder}
+        , m_session{session}
+    {
+        if (m_recorder != nullptr)
+        {
+            m_recorder->begin_frame(m_session);
+        }
+    }
+
+    TracedFrame(const TracedFrame&) = delete;
+    auto operator=(const TracedFrame&) -> TracedFrame& = delete;
+
+    ~TracedFrame()
+    {
+        if (m_recorder != nullptr)
+        {
+            (void)m_recorder->end_frame(m_session);
+        }
+    }
+
+private:
+    gfx::profiler::Profiler* m_recorder = nullptr;
+    gfx::profiler::SessionHandle m_session{};
 };
 
 /// The physics backends built (the GPU backend when the machine has a GPU it runs on).
@@ -270,6 +338,10 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.tour = true;
         }
+        else if (argument == "--real-time")
+        {
+            options.real_time = true;
+        }
         else if (argument == "--device" && has_value)
         {
             options.physical_device = std::stoull(arguments[++index]);
@@ -298,10 +370,14 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.capture_frame = std::stoull(arguments[++index]);
         }
+        else if (argument == "--trace" && has_value)
+        {
+            options.trace = arguments[++index];
+        }
         else
         {
             std::println(std::cerr, "usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference|gpu_xpbd] [--preset <name>] [--views <list>] [--device <index>] "
-                                    "[--threads <count>] [--frames <count>] [--script | --tour] [--validation] [--capture <file.ppm>] [--capture-frame <index>]");
+                                    "[--threads <count>] [--frames <count>] [--real-time] [--script | --tour] [--validation] [--capture <file.ppm>] [--capture-frame <index>] [--trace <file.json>]");
             std::print(std::cerr, "presets:");
             for (std::size_t preset = 0; preset < PRESET_COUNT; ++preset)
             {
@@ -861,6 +937,7 @@ run(const Options& options) -> int
         std::println(std::cerr, "the {} physics backend is unavailable: {}", options.physics, physics_availability.reason);
         return 1;
     }
+    LoadClock load{options.trace.has_value()};
     const std::unique_ptr<platform::Platform> host = platform::create_platform(options.backend.value_or(backends.front()), {.application_name = TITLE});
     platform::WindowDescription window_description;
     window_description.title = TITLE;
@@ -872,6 +949,7 @@ run(const Options& options) -> int
         window_description.flags &= ~platform::WindowFlag::FOCUS_ON_SHOW; // automated runs leave the focus where it is
     }
     const std::unique_ptr<platform::Window> window = host->create_window(window_description);
+    load.mark("the platform and the window");
 
     // ---------------------------------------------------------------------------------- the GPU
 
@@ -888,6 +966,7 @@ run(const Options& options) -> int
     static constexpr std::array QUEUES{gfx::QueueRequest{.type = gfx::QueueType::GRAPHICS, .count = 1, .priority = 1.0F},
                                        gfx::QueueRequest{.type = gfx::QueueType::COMPUTE, .count = 1, .priority = 1.0F}};
     const std::unique_ptr<gfx::Device> device = physical_device.create_device({.queues = QUEUES, .debug_name = "sandbox device"});
+    load.mark("the instance and the device");
     gfx::Queue& queue = device->queue(gfx::QueueType::GRAPHICS);
 
     // The swapchain (copyable images when a capture is asked), 4x multisampling when the device has it.
@@ -977,8 +1056,11 @@ run(const Options& options) -> int
         interaction.reset();
         scene.reset();
         renderer.clear_meshes();
+        load.mark("the scene before");
         scene = std::make_unique<Scene>(backend, scheduler, make_world);
+        load.mark(std::format("{}'s world", backend));
         PresetResult built = build_preset(next, *scene);
+        load.mark(std::format("{}'s bodies", preset_information(next).name));
         interaction = std::make_unique<Interaction>(*scene);
         control.adopt(*scene);
         control.apply(*scene, settings);
@@ -998,7 +1080,23 @@ run(const Options& options) -> int
         }
         return built;
     };
+    load.mark("the renderer and the UI");
     const PresetResult first = build(options.preset, options.physics);
+
+    // --trace: every frame recorded from here (the world's thread and the GPU backend's GPU scopes too).
+    std::unique_ptr<gfx::profiler::Profiler> trace_recorder;
+    gfx::profiler::SessionHandle trace_session{};
+    if (options.trace)
+    {
+        if constexpr (!gfx::profiler::PROFILER_ENABLED)
+        {
+            std::println(std::cerr, "--trace needs a build with the profiler (GFX_PROFILER on): only the load times are printed");
+        }
+        trace_recorder = gfx::profiler::create_profiler({.ring_capacity = 1U << 20U});
+        gfx::profiler::set_current_profiler(trace_recorder.get());
+        gfx::profiler::set_thread_name("sandbox main");
+        trace_session = trace_recorder->create_session({.name = "physics sandbox"});
+    }
     std::optional<Script> script{};
     std::optional<ControlScript> control_script{};
     if (options.script)
@@ -1044,6 +1142,9 @@ run(const Options& options) -> int
     double ui_time = 0.0;
     while (running && (!options.frames || presented < *options.frames))
     {
+        const TracedFrame traced{trace_recorder.get(), trace_session};
+        PROFILE_NAMED_SCOPE(input_scope, "Sandbox: events and input");
+
         // Events, then a frame of actions.
         const platform::EventSpan events = window->is_minimized() ? host->wait_events_timeout(50ms) : host->poll_events();
         ui_input.begin_frame();
@@ -1066,7 +1167,7 @@ run(const Options& options) -> int
         const auto now = std::chrono::steady_clock::now();
         frame_seconds = std::chrono::duration<double>(now - previous_time).count();
         previous_time = now;
-        const double advanced = options.frames ? static_cast<double>(STEP) : frame_seconds;
+        const double advanced = options.frames && !options.real_time ? static_cast<double>(STEP) : frame_seconds;
         ui_time += advanced;
 
         // A new scene: asked by the panel or R (not while a script or the tour drives the sandbox), or the tour's next stop
@@ -1108,7 +1209,12 @@ run(const Options& options) -> int
             view_camera->set_aspect_ratio(static_cast<float>(extent.width) / static_cast<float>(extent.height));
         }
         const std::uint64_t steps_before = scene->step_count();
-        scene->finish();
+        input_scope.end();
+        {
+            PROFILE_SCOPE("Sandbox: finish the step");
+            scene->finish();
+        }
+        PROFILE_NAMED_SCOPE(world_scope, "Sandbox: interaction, controls and views");
         interaction->update(commands, *view_camera, extent);
         if (script)
         {
@@ -1125,6 +1231,8 @@ run(const Options& options) -> int
             control_script->observe(frame_index, *scene, settings, control, debug, renderer.statistics());
         }
         scene->clear_events();
+        world_scope.end();
+        PROFILE_NAMED_SCOPE(advance_scope, "Sandbox: advance (steps due, the next begun)");
         if (!settings.paused)
         {
             settings.step_once = false;
@@ -1153,8 +1261,13 @@ run(const Options& options) -> int
             ++plotted_step;
         }
 
+        advance_scope.end();
+
         // An image to draw into (none while the window is minimized).
+        PROFILE_NAMED_SCOPE(acquire_scope, "Sandbox: acquire an image");
         const std::optional<platform::SwapchainFrame> image = presentation.acquire();
+        acquire_scope.end();
+        PROFILE_NAMED_SCOPE(draw_scope, "Sandbox: UI, drawing and submission");
         if (!image)
         {
             continue;
@@ -1251,8 +1364,16 @@ run(const Options& options) -> int
         const std::array timeline_signals{timeline.frame_signal()};
         const std::array batches{gfx::SubmitDescription{.command_buffers = command_buffers, .waits = waits, .signals = signals, .timeline_signals = timeline_signals}};
         queue.submit(batches);
-        static_cast<void>(presentation.present(queue, *image));
+        draw_scope.end();
+        {
+            PROFILE_SCOPE("Sandbox: present");
+            static_cast<void>(presentation.present(queue, *image));
+        }
         ++presented;
+        if (presented == 1)
+        {
+            load.mark("the first frame");
+        }
         if (readback != nullptr)
         {
             device->wait_idle();
@@ -1267,6 +1388,18 @@ run(const Options& options) -> int
     scene->finish();
     device->wait_idle();
     const physics::StepStatistics last = scene->statistics();
+    if (trace_recorder != nullptr)
+    {
+        scene->finish(); // the world's thread records no more
+        const gfx::profiler::Trace trace = trace_recorder->finalize_session(trace_session);
+        gfx::profiler::set_current_profiler(nullptr);
+        gfx::profiler::export_trace(trace, gfx::profiler::TraceFormat::CHROME_JSON, *options.trace);
+        std::println("{} frames traced into {}", trace.frames().size(), *options.trace);
+    }
+    if (scene->dropped_steps() > 0)
+    {
+        std::println("{} steps of real time dropped (frames could not catch up with them)", scene->dropped_steps());
+    }
     std::println("{} frames presented, {} steps, {} bodies ({} awake), {} contact points, {} validation errors", presented, scene->step_count(),
                  last.rigid_bodies, last.awake_bodies, last.contacts, validation_errors.count());
 

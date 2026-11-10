@@ -224,8 +224,16 @@ public:
     }
 
     /// @brief Advances by @p seconds of real time: completes the step begun by the last call, runs the steps due beyond
-    ///        one at once, and begins the next one on the world's thread (it runs while the frame is drawn).
+    ///        one at once (two at most: the time owed beyond them is dropped, so slow steps slow the simulation down instead
+    ///        of each frame owing more steps than the last), and begins the next one on the world's thread (it runs while
+    ///        the frame is drawn).
     void advance(double seconds);
+
+    /// @brief Steps of real time dropped because frames could not catch up with them.
+    [[nodiscard]] auto dropped_steps() const noexcept -> std::uint64_t
+    {
+        return m_dropped_steps;
+    }
 
     /// @brief Waits for a step in flight and takes its poses and events; the world then answers queries.
     void finish();
@@ -283,6 +291,7 @@ private:
     std::vector<gfx::physics::ContactEvent> m_contacts{};
     std::uint32_t m_spawned = 0;
     double m_accumulator = 0.0;
+    std::uint64_t m_dropped_steps = 0;
     float m_alpha = 0.0F;
 };
 

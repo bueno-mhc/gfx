@@ -11,7 +11,10 @@
 // over the step, plus the world's speculative distance. Else a few fast particles (a cloth's edges whipping past a sphere)
 // gave thousands of others margins they never use: millions of candidates. A flag per slot (the compaction keeps the
 // flagged ones, in order); with mode 1, the kept pairs' instances are written at their compacted places instead
-// (pairs_gather).
+// (pairs_gather). With mode 2 (one invocation per instance, before the trees: GpuOptimization::REACH_BOXES), each
+// instance's box grown by its own reach and half the world's speculative distance (and a guard against rounding) is
+// written for the trees: two such boxes overlap whenever within_reach() keeps their pair, so the trees find the pairs the
+// filter keeps without the others.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -140,6 +143,23 @@ bool keeps(uvec2 instances)
 void main()
 {
     const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 2U)
+    {
+        if (index >= SOLVER.moving_count + SOLVER.static_count)
+        {
+            return;
+        }
+        vec3 minimum;
+        vec3 maximum;
+        tight_box(index, minimum, maximum);
+        const Collider collider = load_collider(instance_collider(index));
+        const vec3 largest = max(abs(minimum), abs(maximum));
+        const float margin = reach(collider.body, minimum, maximum) + 0.5 * SOLVER.world_speculative_distance;
+        const float grown = margin + 1.0e-6 * (1.0 + max(max(largest.x, largest.y), largest.z) + margin);
+        gpu_vectors[SOLVER.reach_boxes].values[2U * index] = vec4(minimum - vec3(grown), 0.0);
+        gpu_vectors[SOLVER.reach_boxes].values[2U * index + 1U] = vec4(maximum + vec3(grown), 0.0);
+        return;
+    }
     if (push.mode == 0U)
     {
         if (index >= SOLVER.within_capacity + SOLVER.between_capacity)

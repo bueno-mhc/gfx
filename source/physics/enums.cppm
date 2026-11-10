@@ -123,6 +123,24 @@ enum class GpuOptimization : std::uint32_t
                                    ///< what their layout holds (else last step's is kept, as it is on the GPU).
     SHARED_PIPELINES    = 1U << 1, ///< The compute pipelines made once per device and shared by its worlds, through a
                                    ///< pipeline cache read from and written to GpuXpbdDescription::pipeline_cache_path.
+    CHUNKED_GATHER      = 1U << 2, ///< The Jacobi gathers read lists of the overflow set's entries made once per step, a
+                                   ///< heavy node's in chunks of GPU_XPBD_GATHER_CHUNK summed in parallel (after a step
+                                   ///< that had an overflow set): the same bits for nodes of at most one chunk.
+    NODE_MAXIMA_COLORING = 1U << 3, ///< The coloring's rounds compare each uncolored constraint with its bodies' maxima
+                                   ///< (atomic maxima of the uncolored constraints' priorities, then indices, and the
+                                   ///< colors taken, per body) instead of scanning its bodies' constraints: the same colors,
+                                   ///< in passes no body's constraint count lengthens.
+    RECORDED_PASSES_BY_USE = 1U << 4, ///< The solver's passes recorded for what the previous step used: the colors
+                                   ///< of each kind of constraint (joints, contacts) and two more, instead of the colors
+                                   ///< either used and two more, at least GPU_XPBD_INITIAL_COLORS; the overflow set's
+                                   ///< passes and gathers only after a step that had one. Fewer empty dispatches and
+                                   ///< barriers; a step that needs more replays, as before (the same bits).
+    REACH_BOXES         = 1U << 5, ///< The broad phase's trees bound each collider by its box grown by its own reach in the
+                                   ///< step (its speed, its turn, gravity's pull) and half the world's speculative distance,
+                                   ///< not by the step's speculative distance (the farthest any body gets): the pairs the
+                                   ///< filter keeps are the same, the trees stop finding the others (one fast body no longer
+                                   ///< makes every box overlap its neighbors'). The trees' leaves are placed as before; the
+                                   ///< order the pairs are found in may differ (other bits, the same pairs).
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -680,7 +698,13 @@ inline constexpr std::uint32_t GPU_XPBD_TIMED_SCOPES = 2048;
 ///        checks (the conformance suite, the determinism tests, the benchmark). A cast: the bitmask operators are
 ///        declared after the enumerations' traits.
 inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
-    static_cast<GpuOptimization>(std::to_underlying(GpuOptimization::INCREMENTAL_LAYOUTS) | std::to_underlying(GpuOptimization::SHARED_PIPELINES));
+    static_cast<GpuOptimization>(std::to_underlying(GpuOptimization::INCREMENTAL_LAYOUTS) | std::to_underlying(GpuOptimization::SHARED_PIPELINES) |
+                                 std::to_underlying(GpuOptimization::CHUNKED_GATHER) | std::to_underlying(GpuOptimization::NODE_MAXIMA_COLORING) |
+                                 std::to_underlying(GpuOptimization::RECORDED_PASSES_BY_USE) | std::to_underlying(GpuOptimization::REACH_BOXES));
+
+/// @brief Overflow entries a chunk of the GPU backend's Jacobi gather holds (GpuOptimization::CHUNKED_GATHER): a node with
+///        more is gathered chunk by chunk, the chunks summed in parallel.
+inline constexpr std::uint32_t GPU_XPBD_GATHER_CHUNK = 32;
 
 /// @brief Colliders a query of the GPU backend (QueryEngine::BACKEND) tests at most (more: the abstraction answers).
 inline constexpr std::uint32_t GPU_XPBD_QUERY_PAIRS = 4096;
@@ -864,6 +888,10 @@ struct EnumerationTraits<physics::GpuOptimization>
     static constexpr std::array NAMES{
         EnumeratorName{physics::GpuOptimization::INCREMENTAL_LAYOUTS, "INCREMENTAL_LAYOUTS"},
         EnumeratorName{physics::GpuOptimization::SHARED_PIPELINES, "SHARED_PIPELINES"},
+        EnumeratorName{physics::GpuOptimization::CHUNKED_GATHER, "CHUNKED_GATHER"},
+        EnumeratorName{physics::GpuOptimization::NODE_MAXIMA_COLORING, "NODE_MAXIMA_COLORING"},
+        EnumeratorName{physics::GpuOptimization::RECORDED_PASSES_BY_USE, "RECORDED_PASSES_BY_USE"},
+        EnumeratorName{physics::GpuOptimization::REACH_BOXES, "REACH_BOXES"},
     };
 };
 

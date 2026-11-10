@@ -96,7 +96,7 @@ struct GpuBodyReadback
 /// kinds of triangle meshes, height fields and compounds, the triangle pairs' algorithm, the static hierarchies' stack, the
 /// compounds descended at once, the triangles' edge-on tolerance; the solver's sleeping flag and colors; the joint part
 /// kinds, the absent body (the world), the joint flags; the pin part, the soft-body constraint kinds; the touching slop.
-inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 68> SPECIALIZATION_CONSTANTS{{
+inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 69> SPECIALIZATION_CONSTANTS{{
     {0, GPU_XPBD_WORKGROUP_SIZE},
     {1, std::to_underlying(GpuBodyFlag::SIMULATED)},
     {2, std::to_underlying(GpuBodyFlag::DYNAMIC)},
@@ -165,6 +165,7 @@ inline constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 68> SPECIAL
     {65, std::to_underlying(SoftBodyConstraintKind::DIHEDRAL)},
     {66, std::to_underlying(SoftBodyConstraintKind::TETHER)},
     {67, std::bit_cast<std::uint32_t>(LINEAR_SLOP)},
+    {68, GPU_XPBD_GATHER_CHUNK},
 }};
 static_assert(MAXIMUM_EPA_VERTICES <= 256 && MAXIMUM_FACE_VERTICES <= 32,
               "the GPU's EPA packs a face's corners in 8 bits each; contact features keep 5 bits of a face's vertices");

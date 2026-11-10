@@ -65,6 +65,32 @@ use_configured_validation_layers()
 #endif
 }
 
+/// @brief The physical devices of the machine that have gfx's core features, enumerated once per test executable: the
+///        parameter generators of every GPU test suite ask for them while the tests are listed, and a Vulkan instance per
+///        suite made listing gfx_physics_gpu_xpbd_tests (16 suites) take 62–72 s on a laptop whose discrete GPU wakes for
+///        each instance — past the 60 s test discovery allows, which stopped the build.
+inline auto
+usable_physical_devices() -> const std::vector<std::size_t>&
+{
+    static const std::vector<std::size_t> devices = [] {
+        std::vector<std::size_t> found;
+        if (!backend_availability(BackendKind::VULKAN).available)
+        {
+            return found;
+        }
+        const std::unique_ptr<Instance> instance = create_instance(BackendKind::VULKAN, {.application_name = "gfx tests (enumeration)"});
+        for (std::size_t index = 0; index < instance->physical_device_count(); ++index)
+        {
+            if (instance->physical_device(index).missing_core_features().empty())
+            {
+                found.push_back(index);
+            }
+        }
+        return found;
+    }();
+    return devices;
+}
+
 /// @brief Whether the tests should enable the validation layers.
 inline auto
 validation_requested() -> bool

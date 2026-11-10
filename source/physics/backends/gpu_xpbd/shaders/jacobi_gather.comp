@@ -7,79 +7,134 @@
 // computed with its part and stores its correction scaled back (split_node() in solver.glsl), and the node takes their
 // sum: the sum of the impulses its constraints gave it, as its partners took theirs. Momentum is kept whatever
 // the weights (a contact that touches unforeseen corrects with a larger part, as Jacobi steps do). In its graph order,
-// without floating-point atomics: the same sum every run. Mode 0: positions, the joints' and the contacts' (the center
-// moves, the orientation turns, the substep's displacement and rotation take them); mode 1: velocities, the contacts' only
-// (joints have no velocity pass); mode 2 (after the coloring): the sums of the shares, positions' and velocities', for
-// split_node(). Particles gather theirs too (moved, not turned).
+// without floating-point atomics: the same sum every run.
+//
+// Node passes (one invocation per node): mode 0 positions, the joints' and the contacts' (the center moves, the
+// orientation turns, the substep's displacement and rotation take them); mode 1 velocities, the contacts' only (joints have
+// no velocity pass); mode 2 (after the coloring) the sums of the shares, positions' and velocities', for split_node().
+// Particles gather theirs too (moved, not turned).
+//
+// With the overflow lists (GpuOptimization::CHUNKED_GATHER, SOLVER.gather_lists), made once per step after the coloring:
+// mode 3 flags the graph's overflow entries; mode 4 copies the compacted ones' values and keys (in graph order); mode 5
+// counts each node's chunks (GATHER_CHUNK entries each) when it has more overflow entries than one chunk; mode 6 writes
+// the chunks' descriptors (node, first entry, entries); mode 7 (argument: the node mode) sums each chunk's entries before
+// the node pass. A node pass then reads a light node's overflow entries only (the same sums as the graph's, in the same
+// order) and a heavy node's chunk sums in order: the same sum every run, associated by chunks (a node with thousands of
+// contacts — a box under a cloth — no longer holds the whole pass for its single invocation).
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
-void main()
+layout(constant_id = 68) const uint GATHER_CHUNK = 32U;
+
+const uint NO_GRAPH_KEY = 0xFFFFFFFFU;
+
+// Whether the graph entry `value` (its constraint × 2 + the node's side) names a constraint of the overflow set.
+bool overflow_entry(uint value)
 {
-    const uint body = gl_GlobalInvocationID.x;
+    return (gpu_words[SOLVER.color_keys].words[value >> 1U] >> 1U) == OVERFLOW_COLOR;
+}
+
+// Adds what the overflow entry `value` gives its node in `mode` to the sums: positions (0: joints and contacts) and
+// velocities (1: contacts) the stored corrections; shares (2) the node's share of its joints (x) and touching contacts
+// (x and y), `own` its inverse mass. Returns whether it counted.
+bool add_entry(uint value, uint mode, float own, inout vec3 linear, inout vec3 angular)
+{
+    const uint constraint = value >> 1U;
+    const bool joint = constraint < SOLVER.joint_count;
+    if (mode == 1U && joint)
+    {
+        return false;
+    }
+    if (mode == 2U)
+    {
+        if (!joint && (gpu_word_vectors[SOLVER.contacts].values[contact_base(constraint - SOLVER.joint_count)].w & CONTACT_TOUCHING) == 0U)
+        {
+            return false;
+        }
+        const Constraint sides = load_constraint(constraint);
+        const uint partner = (value & 1U) == 0U ? sides.second : sides.first;
+        const float share = own > 0.0 ? constraint_share(own, scalar_inverse_mass(load_body(partner))) : 0.0;
+        linear += joint ? vec3(share, 0.0, 0.0) : vec3(share, share, 0.0);
+        return true;
+    }
+    const uint side = value & 1U;
+    linear += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side].xyz;
+    angular += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side + 1U].xyz;
+    return true;
+}
+
+// The node pass.
+void gather_node(uint body)
+{
     if (body >= SOLVER.node_count || !body_is_dynamic_awake(body_flags_of(body)))
     {
         return;
     }
-    if (push.mode == 2U)
+    const uint mode = push.mode;
+    const float own = mode == 2U ? scalar_inverse_mass(load_body(body)) : 0.0;
+    vec3 linear = vec3(0.0);
+    vec3 angular = vec3(0.0);
+    bool corrected = false;
+    if (SOLVER.gather_lists != 0U)
     {
-        // The node's shares of the overflow constraints acting on it, summed: joints and touching contacts (positions),
-        // touching contacts (velocities).
-        vec2 shares = vec2(0.0);
-        const float own = scalar_inverse_mass(load_body(body));
-        const uint last = gpu_words[SOLVER.body_end].words[body];
-        for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < last; ++entry)
+        const uint first = gpu_words[SOLVER.overflow_begin].words[body];
+        const uint count = gpu_words[SOLVER.overflow_end].words[body] - first;
+        if (count > GATHER_CHUNK)
+        {
+            // A heavy node: its chunks' sums, in order (the first one taken as it is).
+            const uint first_chunk = gpu_words[SOLVER.chunk_first].words[body];
+            const uint chunks = (count + GATHER_CHUNK - 1U) / GATHER_CHUNK;
+            for (uint chunk = first_chunk; chunk < first_chunk + chunks; ++chunk)
+            {
+                const vec4 partial_linear = gpu_vectors[SOLVER.partials].values[2U * chunk];
+                if (partial_linear.w == 0.0)
+                {
+                    continue;
+                }
+                const vec3 partial_angular = gpu_vectors[SOLVER.partials].values[2U * chunk + 1U].xyz;
+                linear = corrected ? linear + partial_linear.xyz : partial_linear.xyz;
+                angular = corrected ? angular + partial_angular : partial_angular;
+                corrected = true;
+            }
+        }
+        else
+        {
+            for (uint entry = first; entry < first + count; ++entry)
+            {
+                corrected = add_entry(gpu_words[SOLVER.overflow_values].words[entry], mode, own, linear, angular) || corrected;
+            }
+        }
+    }
+    else
+    {
+        const uint end = gpu_words[SOLVER.body_end].words[body];
+        for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < end; ++entry)
         {
             const uint value = gpu_words[SOLVER.graph_sorted_values].words[entry];
-            const uint constraint = value >> 1U;
-            const uint key = gpu_words[SOLVER.color_keys].words[constraint];
-            if ((key >> 1U) != OVERFLOW_COLOR)
+            if (overflow_entry(value))
             {
-                continue;
+                corrected = add_entry(value, mode, own, linear, angular) || corrected;
             }
-            const bool joint = (key & 1U) == 0U;
-            if (!joint && (gpu_word_vectors[SOLVER.contacts].values[contact_base(constraint - SOLVER.joint_count)].w & CONTACT_TOUCHING) == 0U)
-            {
-                continue;
-            }
-            const Constraint sides = load_constraint(constraint);
-            const uint partner = (value & 1U) == 0U ? sides.second : sides.first;
-            const float share = own > 0.0 ? constraint_share(own, scalar_inverse_mass(load_body(partner))) : 0.0;
-            shares += joint ? vec2(share, 0.0) : vec2(share);
         }
-        gpu_words[SOLVER.overflow_counts].words[2U * body] = floatBitsToUint(shares.x);
-        gpu_words[SOLVER.overflow_counts].words[2U * body + 1U] = floatBitsToUint(shares.y);
-        return;
     }
-    vec3 first_sum = vec3(0.0);
-    vec3 second_sum = vec3(0.0);
-    bool corrected = false;
-    const uint end = gpu_words[SOLVER.body_end].words[body];
-    for (uint entry = gpu_words[SOLVER.body_begin].words[body]; entry < end; ++entry)
+    if (mode == 2U)
     {
-        const uint value = gpu_words[SOLVER.graph_sorted_values].words[entry];
-        const uint constraint = value >> 1U;
-        const uint key = gpu_words[SOLVER.color_keys].words[constraint];
-        if ((key >> 1U) != OVERFLOW_COLOR || (push.mode == 1U && (key & 1U) == 0U))
-        {
-            continue;
-        }
-        const uint side = value & 1U;
-        first_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side].xyz;
-        second_sum += gpu_vectors[SOLVER.corrections].values[4U * constraint + 2U * side + 1U].xyz;
-        corrected = true;
+        // The node's shares of the overflow constraints acting on it: joints and touching contacts (positions), touching
+        // contacts (velocities).
+        gpu_words[SOLVER.overflow_counts].words[2U * body] = floatBitsToUint(linear.x);
+        gpu_words[SOLVER.overflow_counts].words[2U * body + 1U] = floatBitsToUint(linear.y);
+        return;
     }
     if (!corrected)
     {
         return;
     }
+
     // The corrections were weighted by the node's parts (split_node()): their sum.
-    const vec3 linear = first_sum;
-    const vec3 angular = second_sum;
     if (is_particle(body))
     {
         const uint particle = particle_of(body);
-        if (push.mode == 0U)
+        if (mode == 0U)
         {
             gpu_vectors[PARAMETERS.particle_positions].values[particle].xyz += linear;
             gpu_vectors[PARAMETERS.particle_displacements].values[particle].xyz += linear;
@@ -88,7 +143,7 @@ void main()
         gpu_vectors[PARAMETERS.particle_velocities].values[particle].xyz += linear;
         return;
     }
-    if (push.mode == 0U)
+    if (mode == 0U)
     {
         vec4 center = gpu_vectors[PARAMETERS.body_centers].values[body];
         center.xyz += linear;
@@ -100,4 +155,91 @@ void main()
     }
     gpu_vectors[PARAMETERS.body_linear_velocities].values[body].xyz += linear;
     gpu_vectors[PARAMETERS.body_angular_velocities].values[body].xyz += angular;
+}
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    switch (push.mode)
+    {
+        case 0U:
+        case 1U:
+        case 2U:
+            gather_node(index);
+            return;
+        case 3U:
+        {
+            // The graph's overflow entries flagged (entries of no body and constraints with a color: 0).
+            if (index < count_word(COUNT_GRAPH_ENTRIES))
+            {
+                const bool overflow = gpu_words[SOLVER.graph_sorted_keys].words[index] != NO_GRAPH_KEY &&
+                                      overflow_entry(gpu_words[SOLVER.graph_sorted_values].words[index]);
+                gpu_words[SOLVER.overflow_flags].words[index] = overflow ? 1U : 0U;
+            }
+            return;
+        }
+        case 4U:
+        {
+            // The compacted entries' values and keys, in graph order.
+            if (index < count_word(COUNT_OVERFLOW_ENTRIES))
+            {
+                const uint position = gpu_words[SOLVER.overflow_positions].words[index];
+                gpu_words[SOLVER.overflow_values].words[index] = gpu_words[SOLVER.graph_sorted_values].words[position];
+                gpu_words[SOLVER.overflow_keys].words[index] = gpu_words[SOLVER.graph_sorted_keys].words[position];
+            }
+            return;
+        }
+        case 5U:
+        {
+            // Each node's chunks: none when one chunk holds its overflow entries (the node pass reads them).
+            if (index < SOLVER.node_count)
+            {
+                const uint count = gpu_words[SOLVER.overflow_end].words[index] - gpu_words[SOLVER.overflow_begin].words[index];
+                gpu_words[SOLVER.chunk_counts].words[index] = count > GATHER_CHUNK ? (count + GATHER_CHUNK - 1U) / GATHER_CHUNK : 0U;
+            }
+            return;
+        }
+        case 6U:
+        {
+            // A heavy node's chunks: node, first entry, entries.
+            if (index < SOLVER.node_count)
+            {
+                const uint first = gpu_words[SOLVER.overflow_begin].words[index];
+                const uint count = gpu_words[SOLVER.overflow_end].words[index] - first;
+                if (count > GATHER_CHUNK)
+                {
+                    const uint first_chunk = gpu_words[SOLVER.chunk_first].words[index];
+                    const uint chunks = (count + GATHER_CHUNK - 1U) / GATHER_CHUNK;
+                    for (uint chunk = 0U; chunk < chunks; ++chunk)
+                    {
+                        const uint start = chunk * GATHER_CHUNK;
+                        gpu_word_vectors[SOLVER.chunk_descriptors].values[first_chunk + chunk] =
+                            uvec4(index, first + start, min(GATHER_CHUNK, count - start), 0U);
+                    }
+                }
+            }
+            return;
+        }
+        default:
+        {
+            // A chunk's sums (argument: the node mode), and whether any entry counted (w).
+            if (index >= count_word(COUNT_GATHER_CHUNKS))
+            {
+                return;
+            }
+            const uvec4 descriptor = gpu_word_vectors[SOLVER.chunk_descriptors].values[index];
+            const uint mode = push.argument;
+            const float own = mode == 2U ? scalar_inverse_mass(load_body(descriptor.x)) : 0.0;
+            vec3 linear = vec3(0.0);
+            vec3 angular = vec3(0.0);
+            bool counted = false;
+            for (uint entry = descriptor.y; entry < descriptor.y + descriptor.z; ++entry)
+            {
+                counted = add_entry(gpu_words[SOLVER.overflow_values].words[entry], mode, own, linear, angular) || counted;
+            }
+            gpu_vectors[SOLVER.partials].values[2U * index] = vec4(linear, counted ? 1.0 : 0.0);
+            gpu_vectors[SOLVER.partials].values[2U * index + 1U] = vec4(angular, 0.0);
+            return;
+        }
+    }
 }

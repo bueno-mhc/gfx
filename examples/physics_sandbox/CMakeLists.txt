@@ -91,9 +91,13 @@ if(GFX_BUILD_TESTS)
             if(GFX_PHYSICS_BACKEND_GPU_XPBD AND NOT TEST PhysicsSandbox.GPU_XPBD)
                 add_test(NAME PhysicsSandbox.GPU_XPBD
                          COMMAND gfx_physics_sandbox --backend ${_gfx_backend_name} --physics gpu_xpbd ${_gfx_sandbox_arguments})
+                # The GPU backend under the validation layers: 60–80 ms a frame in Debug (the layers check each of a step's
+                # hundreds of commands), 51 s for the script; twice its presents fell to one a second midway (the window's
+                # presentation throttled), past 300 s.
                 set_tests_properties(PhysicsSandbox.GPU_XPBD PROPERTIES
                     ENVIRONMENT "${_gfx_sandbox_environment}"
-                    LABELS example)
+                    LABELS example
+                    TIMEOUT 900)
                 gfx_use_gpu_in_tests(PhysicsSandbox.GPU_XPBD)
             endif()
         endif()

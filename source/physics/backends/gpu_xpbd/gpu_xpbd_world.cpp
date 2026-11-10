@@ -1528,6 +1528,7 @@ GpuXpbdBackend::simulate(float seconds,
         PROFILE_COUNTER("GPU XPBD: constraints", counts.constraints);
         PROFILE_COUNTER("GPU XPBD: colors", counts.colors);
         PROFILE_COUNTER("GPU XPBD: overflow constraints", counts.overflow_constraints);
+        PROFILE_COUNTER("GPU XPBD: gather chunks", counts.gather_chunks);
         PROFILE_COUNTER("GPU XPBD: touching contacts", counts.reported);
         PROFILE_COUNTER("GPU XPBD: touching points", counts.touching_points);
         PROFILE_COUNTER("GPU XPBD: trigger overlaps", counts.trigger_overlaps);

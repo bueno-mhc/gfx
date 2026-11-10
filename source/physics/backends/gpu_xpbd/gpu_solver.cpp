@@ -78,6 +78,10 @@ enum CountWord : std::uint32_t
     TRIGGER_CANDIDATES,
     TRIGGER_SLOTS,
     TRIGGER_OVERLAPS,
+    OVERFLOW_ENTRIES,
+    GATHER_CHUNKS,
+    JOINT_COLORS,
+    CONTACT_COLORS,
 };
 
 /// Bytes of the indirect dispatch arguments of a color key.
@@ -151,6 +155,31 @@ struct GpuConstraintSolver::State
     {
     }
 
+    /// The colors whose joint passes and contact passes are recorded (RECORDED_PASSES_BY_USE: each kind's own).
+    [[nodiscard]] auto joint_colors() const noexcept -> std::uint32_t
+    {
+        if (!coloring() || joint_count == 0)
+        {
+            return 0;
+        }
+        return has_all(settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE) ? recorded_joint_colors : recorded_colors;
+    }
+
+    [[nodiscard]] auto contact_colors() const noexcept -> std::uint32_t
+    {
+        if (!coloring())
+        {
+            return 0;
+        }
+        return has_all(settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE) ? recorded_contact_colors : recorded_colors;
+    }
+
+    /// Whether the overflow set's passes and gathers are recorded (always in the Jacobi mode).
+    [[nodiscard]] auto overflow_recorded() const noexcept -> bool
+    {
+        return !coloring() || overflow_passes || !has_all(settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE);
+    }
+
     [[nodiscard]] auto coloring() const noexcept -> bool
     {
         return settings.solver_mode == GpuSolverMode::GRAPH_COLORING;
@@ -201,6 +230,21 @@ struct GpuConstraintSolver::State
         {
             recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_COMPUTE, 1}});
         }
+    }
+
+    /// With the overflow lists: the heavy nodes' chunks summed for the node pass of @p node_mode (0 positions, 1
+    /// velocities, 2 shares), dispatched by the arguments the lists' building wrote.
+    void gather_chunks(ComputeRecorder& recorder,
+                       std::uint32_t node_mode) const
+    {
+        if (!gather_lists)
+        {
+            return;
+        }
+        recorder.bind_pipeline(jacobi_gather->handle());
+        recorder.push_constants(SolverPush{.parameters = step_parameters, .solver = solver_parameters.index(), .argument = node_mode, .mode = 7});
+        recorder.dispatch_indirect(chunk_arguments.buffer().handle(), 0);
+        recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_COMPUTE, 1}});
     }
 
     /// The ranges of a sorted key list: @p maximum ranges cleared, then marked over the entries @p count_word counts.
@@ -276,6 +320,11 @@ struct GpuConstraintSolver::State
     std::uint32_t manifold_capacity = 0;
     std::uint32_t previous_capacity = 0;
     std::uint32_t recorded_colors = GPU_XPBD_INITIAL_COLORS;
+    std::uint32_t recorded_joint_colors = GPU_XPBD_INITIAL_COLORS;   ///< RECORDED_PASSES_BY_USE: the joints' colors recorded.
+    std::uint32_t recorded_contact_colors = GPU_XPBD_INITIAL_COLORS; ///< RECORDED_PASSES_BY_USE: the contacts' colors recorded.
+    std::uint32_t previous_overflow = 0; ///< The overflow set's constraints in the last completed step.
+    bool overflow_passes = true;         ///< The overflow set's passes and gathers are recorded (RECORDED_PASSES_BY_USE: after a step that had one).
+    bool gather_lists = false;           ///< This step's gathers read the overflow lists (CHUNKED_GATHER).
     std::uint32_t island_rounds = 8;
     std::uint32_t parity = 0;
     std::uint32_t step_parameters = 0;
@@ -313,6 +362,9 @@ struct GpuConstraintSolver::State
     GpuArray body_end{"GPU physics: body graph ends", sizeof(std::uint32_t)};
     GpuArray colors_first{"GPU physics: colors", sizeof(std::uint32_t)};
     GpuArray colors_second{"GPU physics: colors", sizeof(std::uint32_t)};
+    GpuArray coloring_nodes{"GPU physics: coloring nodes", sizeof(GpuVector)};
+    GpuArray reach_boxes{"GPU physics: reach boxes", 2 * sizeof(GpuVector)};
+    GpuArray node_maxima{"GPU physics: coloring maxima", 8 * sizeof(std::uint32_t)};
     GpuArray color_keys{"GPU physics: color keys", sizeof(std::uint32_t)};
     GpuArray color_values{"GPU physics: color values", sizeof(std::uint32_t)};
     GpuArray color_sorted_keys{"GPU physics: color sorted keys", sizeof(std::uint32_t)};
@@ -330,6 +382,17 @@ struct GpuConstraintSolver::State
     GpuArray joint_results{"GPU physics: joint results", 2 * sizeof(GpuVector)};
     GpuArray joined_pairs{"GPU physics: joined bodies", 2 * sizeof(std::uint32_t)};
     GpuArray overflow_counts{"GPU physics: overflow counts", 2 * sizeof(std::uint32_t)};
+    GpuArray overflow_flags{"GPU physics: overflow entry flags", sizeof(std::uint32_t)};
+    GpuArray overflow_positions{"GPU physics: overflow entry positions", sizeof(std::uint32_t)};
+    GpuArray overflow_keys{"GPU physics: overflow entry keys", sizeof(std::uint32_t)};
+    GpuArray overflow_values{"GPU physics: overflow entry values", sizeof(std::uint32_t)};
+    GpuArray overflow_begin{"GPU physics: overflow begins", sizeof(std::uint32_t)};
+    GpuArray overflow_end{"GPU physics: overflow ends", sizeof(std::uint32_t)};
+    GpuArray chunk_counts{"GPU physics: gather chunk counts", sizeof(std::uint32_t)};
+    GpuArray chunk_first{"GPU physics: gather first chunks", sizeof(std::uint32_t)};
+    GpuArray chunk_descriptors{"GPU physics: gather chunks", 4 * sizeof(std::uint32_t)};
+    GpuArray partials{"GPU physics: gather chunk sums", 2 * sizeof(GpuVector)};
+    GpuArray chunk_arguments{"GPU physics: gather chunk dispatch", DISPATCH_ARGUMENTS_BYTES, BufferUsage::INDIRECT};
     GpuArray report_flags{"GPU physics: reported contacts' flags", sizeof(std::uint32_t)};
     GpuArray report_indices{"GPU physics: reported contacts", sizeof(std::uint32_t)};
     GpuArray reports{"GPU physics: contact reports", sizeof(GpuContactReport)};
@@ -458,6 +521,10 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     const std::uint32_t previous = 1 - state.parity;
     grow(state.colliders, static_cast<std::uint32_t>(state.collider_data.size()));
     grow(state.collider_list, instances);
+    if (has_all(state.settings.optimizations, GpuOptimization::REACH_BOXES))
+    {
+        grow(state.reach_boxes, instances);
+    }
     grow(state.instances, instances + 1);
     grow(state.boxes, instances);
     for (GpuArray* array : {&state.raw_pairs, &state.pair_flags, &state.pair_indices})
@@ -497,7 +564,29 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     }
     grow(state.body_begin, node_count);
     grow(state.body_end, node_count);
+    if (has_all(state.settings.optimizations, GpuOptimization::NODE_MAXIMA_COLORING))
+    {
+        grow(state.coloring_nodes, constraints);
+        grow(state.node_maxima, node_count);
+    }
     grow(state.overflow_counts, node_count);
+    if (has_all(state.settings.optimizations, GpuOptimization::CHUNKED_GATHER))
+    {
+        // The overflow lists: an entry per graph entry at most; chunks only for nodes of more than one (at most twice the
+        // entries over the chunk size).
+        for (GpuArray* array : {&state.overflow_flags, &state.overflow_positions, &state.overflow_keys, &state.overflow_values})
+        {
+            grow(*array, 2 * constraints);
+        }
+        for (GpuArray* array : {&state.overflow_begin, &state.overflow_end, &state.chunk_counts, &state.chunk_first})
+        {
+            grow(*array, node_count);
+        }
+        const std::uint32_t chunks = 2 * (2 * constraints) / GPU_XPBD_GATHER_CHUNK + 1;
+        grow(state.chunk_descriptors, chunks);
+        grow(state.partials, chunks);
+        grow(state.chunk_arguments, 1);
+    }
     for (GpuArray* array : {&state.labels, &state.island_flags, &state.island_timers})
     {
         grow(*array, body_count);
@@ -583,6 +672,12 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     const std::uint32_t instances = state.moving + state.statics;
     const std::uint32_t posed = instances + state.triggers;
     state.step_parameters = step.step_parameters;
+    state.gather_lists = has_all(state.settings.optimizations, GpuOptimization::CHUNKED_GATHER) && state.previous_overflow > 0;
+    // The overflow lists' arrays exist only with CHUNKED_GATHER (else their slots name nothing: the shaders do not read them).
+    const bool lists = has_all(state.settings.optimizations, GpuOptimization::CHUNKED_GATHER);
+    const auto listed = [lists](const GpuArray& array) noexcept { return lists ? array.index() : 0U; };
+    const bool maxima = has_all(state.settings.optimizations, GpuOptimization::NODE_MAXIMA_COLORING);
+    const bool reach = has_all(state.settings.optimizations, GpuOptimization::REACH_BOXES);
     const GpuSolverParameters parameters{
         .speculative_distance = step.speculative_distance,
         .contact_hertz = step.solver.contact_hertz,
@@ -661,6 +756,21 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         .trigger_manifolds = state.trigger_manifolds.index(),
         .trigger_results = state.trigger_results.index(),
         .tables = state.narrow_phase.table_index(),
+        .overflow_flags = listed(state.overflow_flags),
+        .overflow_positions = listed(state.overflow_positions),
+        .overflow_keys = listed(state.overflow_keys),
+        .overflow_values = listed(state.overflow_values),
+        .overflow_begin = listed(state.overflow_begin),
+        .overflow_end = listed(state.overflow_end),
+        .chunk_counts = listed(state.chunk_counts),
+        .chunk_first = listed(state.chunk_first),
+        .chunk_descriptors = listed(state.chunk_descriptors),
+        .partials = listed(state.partials),
+        .gather_lists = state.gather_lists ? 1U : 0U,
+        .coloring_nodes = maxima ? state.coloring_nodes.index() : 0U,
+        .node_maxima = maxima ? state.node_maxima.index() : 0U,
+        .maxima_coloring = maxima ? 1U : 0U,
+        .reach_boxes = reach ? state.reach_boxes.index() : 0U,
     };
     state.parameters = parameters;
     state.collision = step.collision;
@@ -680,19 +790,26 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
             state.pass(recorder, *state.collider_poses, 0, 0, posed);
         }
         state.narrow_phase.bounds(recorder, span_of(state.instances.buffer()), span_of(state.boxes.buffer()), {.maximum = instances}, step.speculative_distance);
+        if (reach)
+        {
+            // The trees' boxes: each grown by its own reach (REACH_BOXES); the leaves placed by the common boxes.
+            PROFILE_GPU_SCOPE("reach boxes", recorder, state.passes);
+            state.pass(recorder, *state.pairs_filter, 0, 2, instances);
+        }
     }
+    const GpuArray& tree_boxes = reach ? state.reach_boxes : state.boxes;
     if (state.static_dirty)
     {
         state.static_built = false;
         if (state.statics > 0)
         {
-            state.static_tree.build(recorder, span_of(state.boxes.buffer(), state.moving), {.maximum = state.statics});
+            state.static_tree.build(recorder, span_of(tree_boxes.buffer(), state.moving), span_of(state.boxes.buffer(), state.moving), {.maximum = state.statics});
             state.static_built = true;
         }
     }
     if (state.moving > 0)
     {
-        state.moving_tree.build(recorder, span_of(state.boxes.buffer()), {.maximum = state.moving});
+        state.moving_tree.build(recorder, span_of(tree_boxes.buffer()), span_of(state.boxes.buffer()), {.maximum = state.moving});
         if (state.moving > 1)
         {
             state.moving_tree.find_pairs(recorder, span_of(state.raw_pairs.buffer()), state.count(WITHIN_PAIRS), state.within_capacity);
@@ -780,14 +897,52 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         PROFILE_GPU_SCOPE("color", recorder, state.passes);
         state.pass(recorder, *state.coloring_pass, coloring ? 0U : 1U, 0, constraints);
         const std::uint32_t rounds = coloring ? GPU_XPBD_COLORING_ROUNDS : 0;
-        for (std::uint32_t round = 0; round < rounds; ++round)
+        if (has_all(state.settings.optimizations, GpuOptimization::NODE_MAXIMA_COLORING))
         {
-            state.pass(recorder, *state.coloring_pass, round, 1, constraints);
+            // The bodies' maxima (NODE_MAXIMA_COLORING): the first round's priorities, then per round the ties' indices
+            // and the choices (which also take the next round's priorities); the colors stay in the first buffer.
+            if (rounds > 0)
+            {
+                state.pass(recorder, *state.coloring_pass, 0, 4, constraints);
+            }
+            for (std::uint32_t round = 0; round < rounds; ++round)
+            {
+                state.pass(recorder, *state.coloring_pass, round, 5, constraints);
+                state.pass(recorder, *state.coloring_pass, round, 6, constraints);
+            }
+            state.pass(recorder, *state.coloring_pass, 0, 2, constraints);
         }
-        state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
+        else
+        {
+            for (std::uint32_t round = 0; round < rounds; ++round)
+            {
+                state.pass(recorder, *state.coloring_pass, round, 1, constraints);
+            }
+            state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
+        }
     }
+    if (state.gather_lists)
+    {
+        // The overflow lists (CHUNKED_GATHER): the graph's overflow entries compacted in order, each node's range of
+        // them, the heavy nodes' chunks and their dispatch.
+        PROFILE_GPU_SCOPE("overflow lists", recorder, state.passes);
+        const std::uint32_t entries = 2 * constraints;
+        state.pass(recorder, *state.jacobi_gather, 0, 3, entries);
+        state.primitives.compact(recorder, span_of(state.overflow_flags.buffer()), {}, span_of(state.overflow_positions.buffer()), state.count(OVERFLOW_ENTRIES),
+                                 {.maximum = entries, .word = state.count(GRAPH_ENTRIES)});
+        state.pass(recorder, *state.jacobi_gather, 0, 4, entries);
+        state.ranges(recorder, state.overflow_keys, state.overflow_begin, state.overflow_end, step.node_count, entries, OVERFLOW_ENTRIES);
+        state.pass(recorder, *state.jacobi_gather, 0, 5, step.node_count);
+        state.primitives.exclusive_scan(recorder, span_of(state.chunk_counts.buffer()), span_of(state.chunk_first.buffer()), {.maximum = step.node_count},
+                                        state.count(GATHER_CHUNKS));
+        state.pass(recorder, *state.jacobi_gather, 0, 6, step.node_count);
+        state.primitives.dispatch_arguments(recorder, {.maximum = state.chunk_descriptors.capacity(), .word = state.count(GATHER_CHUNKS)},
+                                            span_of(state.chunk_arguments.buffer()));
+    }
+    if (state.overflow_recorded())
     {
         PROFILE_GPU_SCOPE("jacobi_gather (counts)", recorder, state.passes);
+        state.gather_chunks(recorder, 2);
         state.pass(recorder, *state.jacobi_gather, 0, 2, step.node_count);
     }
     state.primitives.sort(recorder, span_of(state.color_keys.buffer()), span_of(state.color_values.buffer()), span_of(state.color_sorted_keys.buffer()),
@@ -809,15 +964,24 @@ GpuConstraintSolver::record_positions(ComputeRecorder& recorder,
     const State& state = *m_state;
     PROFILE_GPU_SCOPE("position iteration", recorder, state.passes);
     const std::uint32_t reset = first ? 1U : 0U;
-    const std::uint32_t colors = state.coloring() ? state.recorded_colors : 0;
+    const std::uint32_t joint_colors = state.joint_colors();
+    const std::uint32_t contact_colors = state.contact_colors();
     const bool joints = state.joint_count > 0;
-    for (std::uint32_t color = 0; color < colors; ++color)
+    for (std::uint32_t color = 0; color < std::max(joint_colors, contact_colors); ++color)
     {
-        if (joints)
+        const bool contacts = color < contact_colors;
+        if (color < joint_colors)
         {
-            state.color_pass(recorder, *state.joint_solve, joint_key(color), reset, false);
+            state.color_pass(recorder, *state.joint_solve, joint_key(color), reset, !contacts);
         }
-        state.color_pass(recorder, *state.contact_solve, contact_key(color), reset);
+        if (contacts)
+        {
+            state.color_pass(recorder, *state.contact_solve, contact_key(color), reset);
+        }
+    }
+    if (!state.overflow_recorded())
+    {
+        return;
     }
     if (joints)
     {
@@ -825,6 +989,7 @@ GpuConstraintSolver::record_positions(ComputeRecorder& recorder,
     }
     state.color_pass(recorder, *state.contact_solve, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
     PROFILE_GPU_SCOPE("jacobi_gather", recorder, state.passes);
+    state.gather_chunks(recorder, 0);
     state.pass(recorder, *state.jacobi_gather, 0, 0, state.node_count);
 }
 
@@ -836,13 +1001,18 @@ GpuConstraintSolver::record_velocities(ComputeRecorder& recorder,
     const State& state = *m_state;
     PROFILE_GPU_SCOPE("velocity iteration", recorder, state.passes);
     const std::uint32_t reset = first ? 1U : 0U;
-    const std::uint32_t colors = state.coloring() ? state.recorded_colors : 0;
+    const std::uint32_t colors = state.contact_colors();
     for (std::uint32_t color = 0; color < colors; ++color)
     {
         state.color_pass(recorder, *state.contact_velocity, contact_key(color), reset);
     }
+    if (!state.overflow_recorded())
+    {
+        return;
+    }
     state.color_pass(recorder, *state.contact_velocity, contact_key(MAXIMUM_GPU_XPBD_COLORS), reset | 2U);
     PROFILE_GPU_SCOPE("jacobi_gather", recorder, state.passes);
+    state.gather_chunks(recorder, 1);
     state.pass(recorder, *state.jacobi_gather, 0, 1, state.node_count);
 }
 
@@ -1056,7 +1226,18 @@ GpuConstraintSolver::overflowed(const GpuSolverCounts& counts) -> bool
         room(counts.trigger_candidates, state.trigger_pair_capacity);
         room(counts.trigger_slots, state.trigger_manifold_capacity);
     }
-    if (state.coloring() && counts.colors > state.recorded_colors)
+    if (state.coloring() && has_all(state.settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE))
+    {
+        if (counts.joint_colors > state.recorded_joint_colors || counts.contact_colors > state.recorded_contact_colors ||
+            (counts.overflow_constraints > 0 && !state.overflow_passes))
+        {
+            state.recorded_joint_colors = std::max(state.recorded_joint_colors, counts.joint_colors);
+            state.recorded_contact_colors = std::max(state.recorded_contact_colors, counts.contact_colors);
+            state.overflow_passes = state.overflow_passes || counts.overflow_constraints > 0;
+            grew = true;
+        }
+    }
+    else if (state.coloring() && counts.colors > state.recorded_colors)
     {
         state.recorded_colors = counts.colors;
         grew = true;
@@ -1079,6 +1260,10 @@ GpuConstraintSolver::complete_step(const GpuSolverCounts& counts)
     state.previous_capacity = state.manifold_capacity;
     state.static_dirty = false;
     state.recorded_colors = std::clamp(counts.colors + 2, GPU_XPBD_INITIAL_COLORS, MAXIMUM_GPU_XPBD_COLORS);
+    state.recorded_joint_colors = std::min(counts.joint_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
+    state.recorded_contact_colors = std::min(counts.contact_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
+    state.overflow_passes = counts.overflow_constraints > 0;
+    state.previous_overflow = counts.overflow_constraints;
 }
 
 } // namespace gfx::physics::gpu_xpbd

@@ -325,3 +325,44 @@ other). `Scene` takes a `WorldFactory` (the program's; the factory's `create_phy
 view draws the GPU's two collider trees, read back between steps. The control script's check of refused components compares
 the integrator with the world's own (the GPU's is XPBD). CTest `PhysicsSandbox.GPU_XPBD` runs the script on the first
 platform backend; the tour visits every preset on the three backends.
+
+### Follow-up: slow GPU frames and long loads (2026-11-10, after profiler phase PF5)
+
+Asked by the user: the sandbox is slow with GPU XPBD and loads much more slowly than before. Measured with a new `--trace
+<file.json>` option: the load phases printed as they end, and every frame recorded by the profiler as a Chrome trace (main
+thread phases, the world's thread, the GPU backend's GPU scopes). Also new: `--real-time`, which makes `--frames` runs
+advance by real time as interactive runs do.
+
+**The causes** (the GPU backend itself steps the showcase as fast as Box3D: 300 frames in 2.8 s optimized, 5.3 s in
+Debug, against Box3D's 4.4 s; its world loads in 0.08–0.35 s):
+1. **The validation layers.** VS Code's "gfx: Physics sandbox" configuration passes `--validation`. The layers check each
+   command a GPU step records (350–1 600 with barriers), its descriptors at submission, and they slow the render thread
+   recording beside it. In Debug, a step took 61 ms, 48.5 of them recording and 8.5 submitting, against about 2 ms of GPU
+   work. 300 frames took 20.8 s optimized and 23.5 s in Debug, against 2.8 s and 5.3 s without the layers. Box3D records
+   no GPU commands.
+2. **A death spiral in the frame loop.** `Scene::advance()` ran every step due beyond one in the frame. Once a step costs
+   more real time than it simulates, each frame owes more steps than the last, up to `LONGEST_FRAME` (0.25 s, 15 steps).
+   At 60 ms a step that is about a frame a second.
+3. **The load: Windows' debug heap under a debugger.** A process started by gdb gets the debug heap, which makes every
+   allocation far slower. The validation layer validates the SPIR-V of the GPU world's shader modules when the world is
+   created, and that allocates heavily: **40 s** under gdb, 0.3 s without, every time (the layer's cache does not keep
+   these results). It grew with the backend's shaders over the GPU phases. `_NO_DEBUG_HEAP=1` brings it to 0.32 s under gdb.
+   Turning the layer's shader checks off does too (`VK_KHRONOS_VALIDATION_CHECK_SHADERS=false`: 0.68 s), at the cost of
+   the checks.
+4. **The first launch after a link** took 26 s longer than the next one (30.5 s against 4.8 s, the same Box3D run). The
+   Debug executable is 484 MB; a check of the new file is the likely cause (not confirmed).
+
+**Fixed:**
+- `.vscode/launch.json`: every configuration sets `_NO_DEBUG_HEAP=1` (cause 3).
+- `Scene::advance()` runs at most `MAXIMUM_CATCH_UP_STEPS` (2) steps at once beyond the one it begins and drops the time
+  owed beyond them, counted by `Scene::dropped_steps()` and printed at exit (cause 2). The simulation then runs slower than
+  real time when steps are slow, instead of the window freezing. In real time with validation in Debug, GPU frames now
+  take 137 ms (median) with about 3 steps each, and 601 steps of time were dropped in 120 frames. Without the layers,
+  frames take 4.1 ms, as Box3D's do (4.2 ms). `--frames` runs, the script and the tour step once per frame and are
+  unchanged.
+- CTest `PhysicsSandbox.GPU_XPBD` gets `TIMEOUT 900` (as the tour has): it takes 51 s in Debug with the layers, and twice in
+  a row its presents fell to one a second from about 25 s in (the window's presentation throttled: no wait in the
+  sandbox's present path, and long runs of both backends without the script never slowed), which went past 300 s.
+
+**Cause 1, decided by the user (as recommended):** the validated configuration stays, and a second one, "gfx: Physics
+sandbox (no validation)", runs without the layers (the GPU backend at full speed).

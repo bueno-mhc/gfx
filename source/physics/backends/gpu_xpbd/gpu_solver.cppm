@@ -112,9 +112,25 @@ struct GpuSolverParameters
     std::uint32_t trigger_ranges = 0;     ///< their manifolds' ranges,
     std::uint32_t trigger_manifolds = 0;  ///< their manifolds,
     std::uint32_t trigger_results = 0;    ///< the overlaps (GpuTriggerOverlap);
-    std::uint32_t tables = 0;             ///< the narrow phase's shape table (the contacts' margins).
+    std::uint32_t tables = 0;             ///< the narrow phase's shape table (the contacts' margins);
+    std::uint32_t overflow_flags = 0;     ///< CHUNKED_GATHER: the graph's entries of the overflow set flagged,
+    std::uint32_t overflow_positions = 0; ///< their positions, compacted,
+    std::uint32_t overflow_keys = 0;      ///< their keys (nodes),
+    std::uint32_t overflow_values = 0;    ///< their values (constraint × 2 + side),
+    std::uint32_t overflow_begin = 0;     ///< per node: its first overflow entry,
+    std::uint32_t overflow_end = 0;       ///< and one past its last,
+    std::uint32_t chunk_counts = 0;       ///< per node: its chunks (heavy nodes only),
+    std::uint32_t chunk_first = 0;        ///< per node: its first chunk,
+    std::uint32_t chunk_descriptors = 0;  ///< per chunk: node, first entry, entries,
+    std::uint32_t partials = 0;           ///< per chunk: its sums (two vectors),
+    std::uint32_t gather_lists = 0;       ///< 1: the gathers read the lists (else the graph);
+    // The coloring by the bodies' maxima (GpuOptimization::NODE_MAXIMA_COLORING):
+    std::uint32_t coloring_nodes = 0;     ///< per constraint: its moving sides (or NO_BODY) and its priority (a uvec4),
+    std::uint32_t node_maxima = 0;        ///< per node: priority maxima of three rounds, index maxima of three, colors taken (8 words),
+    std::uint32_t maxima_coloring = 0;    ///< 1: the rounds compare with the maxima (else they scan the graph);
+    std::uint32_t reach_boxes = 0;        ///< REACH_BOXES: the instances' boxes grown by their own reach (the trees' boxes).
 };
-static_assert(sizeof(GpuSolverParameters) == 308 && offsetof(GpuSolverParameters, tables) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
+static_assert(sizeof(GpuSolverParameters) == 368 && offsetof(GpuSolverParameters, reach_boxes) == 364 && offsetof(GpuSolverParameters, maxima_coloring) == 360 && offsetof(GpuSolverParameters, gather_lists) == 348 && offsetof(GpuSolverParameters, tables) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
               offsetof(GpuSolverParameters, corrections) == 184 && offsetof(GpuSolverParameters, joint_count) == 188 &&
               offsetof(GpuSolverParameters, joined_pairs) == 216 && offsetof(GpuSolverParameters, overflow_counts) == 224 &&
               offsetof(GpuSolverParameters, boxes) == 232);
@@ -141,8 +157,12 @@ struct GpuSolverCounts
     std::uint32_t trigger_candidates = 0;   ///< Of them, kept.
     std::uint32_t trigger_slots = 0;        ///< Manifold slots the kept pairs needed.
     std::uint32_t trigger_overlaps = 0;     ///< Pairs overlapping.
+    std::uint32_t overflow_entries = 0;     ///< CHUNKED_GATHER: the graph's entries of the overflow set.
+    std::uint32_t gather_chunks = 0;        ///< CHUNKED_GATHER: the heavy nodes' chunks.
+    std::uint32_t joint_colors = 0;         ///< Colors the coloring gave joints.
+    std::uint32_t contact_colors = 0;       ///< Colors the coloring gave contacts.
 };
-static_assert(sizeof(GpuSolverCounts) == 76);
+static_assert(sizeof(GpuSolverCounts) == 92);
 
 /// A trigger overlapping a collider after a step (triggers_filter.comp).
 struct GpuTriggerOverlap

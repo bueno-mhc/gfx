@@ -139,6 +139,16 @@ public:
                GpuSpan boxes,
                const GpuCount& count);
 
+    /// @brief Records the build of a tree whose leaves are placed by the boxes of @p placement (their centers in the box
+    ///        around them give the leaves' order: the hierarchy) and bounded by the boxes of @p boxes (the nodes' boxes):
+    ///        the same hierarchy as a build over @p placement, with other boxes (a broad phase's boxes grown by each
+    ///        primitive's own margin, placed as the boxes grown by a common one).
+    /// @throws InvalidUsageError if the count's maximum is above reserved().
+    void build(ComputeRecorder& recorder,
+               GpuSpan boxes,
+               GpuSpan placement,
+               const GpuCount& count);
+
     /// @brief Records a refit: the same leaves, in the same order, given the boxes of @p boxes (moved boxes of the same
     ///        primitives); the boxes of the nodes, their annotations and the four-wide nodes follow.
     /// @throws InvalidUsageError if nothing was built yet.
