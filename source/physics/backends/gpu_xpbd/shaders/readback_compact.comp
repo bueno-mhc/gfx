@@ -1,0 +1,55 @@
+#version 460
+// The bodies a step reads back (GpuOptimization::COMPACT_READBACK): only those whose state may have changed, so a world
+// whose bodies mostly sleep reads back a few of them instead of every one. Modes:
+//   0 (bodies)  flags a body that moved — awake and simulated, dynamic or kinematic — or whose flags changed since the step
+//               began (it fell asleep, or was woken);
+//   1 (patches) flags each body this step patched (created, destroyed, edited: its flags or pose may come from the CPU);
+//   2 (listed)  writes a flagged body's center, orientation and velocities, then (slot, flags), at its compacted place
+//               (five vectors; the count of listed bodies is the compaction's word).
+#extension GL_GOOGLE_include_directive : require
+#define GPU_XPBD_SOLVER_PUSH
+#include "step.glsl"
+
+layout(push_constant) uniform Push
+{
+    uint parameters;  // bindless index of the step's parameters
+    uint mode;
+    uint start_flags; // the bodies' flags when the step began (after its patches)
+    uint listed;      // a word per body: 1 when read back
+    uint positions;   // the listed bodies' slots, compacted
+    uint count;       // the buffer holding their count (word 0)
+    uint bodies;      // five vectors per listed body
+} push;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (push.mode == 0U)
+    {
+        if (index < PARAMETERS.body_count)
+        {
+            const uint flags = gpu_words[PARAMETERS.body_flags].words[index];
+            const bool moved = body_moves(flags) || flags != gpu_words[push.start_flags].words[index];
+            gpu_words[push.listed].words[index] = moved ? 1U : 0U;
+        }
+        return;
+    }
+    if (push.mode == 1U)
+    {
+        if (index < PARAMETERS.patch_count)
+        {
+            gpu_words[push.listed].words[gpu_body_patches[PARAMETERS.body_patches].patches[index].slot] = 1U;
+        }
+        return;
+    }
+    if (index >= gpu_words[push.count].words[0])
+    {
+        return;
+    }
+    const uint slot = gpu_words[push.positions].words[index];
+    gpu_vectors[push.bodies].values[5U * index] = gpu_vectors[PARAMETERS.body_centers].values[slot];
+    gpu_vectors[push.bodies].values[5U * index + 1U] = gpu_vectors[PARAMETERS.body_orientations].values[slot];
+    gpu_vectors[push.bodies].values[5U * index + 2U] = gpu_vectors[PARAMETERS.body_linear_velocities].values[slot];
+    gpu_vectors[push.bodies].values[5U * index + 3U] = gpu_vectors[PARAMETERS.body_angular_velocities].values[slot];
+    gpu_word_vectors[push.bodies].values[5U * index + 4U] = uvec4(slot, gpu_words[PARAMETERS.body_flags].words[slot], 0U, 0U);
+}

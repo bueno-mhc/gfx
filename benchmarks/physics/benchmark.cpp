@@ -17,11 +17,20 @@
 //                       [--output <directory>] [--check-baseline <directory>] [--record-baseline <directory>]
 //                       [--confirmations 2] [--sleep] [--note <text>] [--only-when-asked]
 //                       [--sub-steps 4] [--position-iterations 3] [--velocity-iterations 8] [--check-every 0]
+//                       [--gpu-optimizations "INCREMENTAL_LAYOUTS | ..." | NONE] [--categories "PHYSICS | GPU | ..."]
+//                       [--sleep-thresholds <m/s>,<rad/s>,<s>]
 //
 // The solver options replace the worlds' defaults (SolverDescription) and are part of the settings a baseline holds for:
 // benchmarks/physics/pareto.py runs the scenes over a grid of them (the substep/iteration Pareto front). --check-every N
 // also checks the scenes after every N measured steps (outside the timed steps and the profiler's frames) and reports the
 // worst measure seen (a swinging chain stretches most at the bottom of its swing, not when the run ends).
+// --gpu-optimizations sets the GPU backend's GpuOptimization flags (DEFAULT_GPU_OPTIMIZATIONS otherwise; part of the settings
+// too): a flag measured on and off back to back, the machine in one state (a laptop's clocks move by hours).
+// --sleep-thresholds turns sleep on with the given speeds and time (SleepDescription; the defaults with --sleep): the
+// scenes measured at rest, as applications run them (part of the settings).
+// --categories sets what the profiler records during the measured steps (every category otherwise): without GPU, the GPU
+// backend records no timestamp around its passes (what recording costs without the profiler's GPU scopes); the GPU busy,
+// overlap and idle columns are then empty.
 //
 // Exit codes: 0 every check passed; 1 a quality check failed, a run failed or a scene regressed; 2 bad arguments; 77 not
 // asked (--only-when-asked without GFX_RUN_BENCHMARKS=1 in the environment: CTest counts it as skipped).
@@ -118,6 +127,10 @@ struct Options
     physics::SolverDescription solver{};
     bool solver_given = false;    ///< Any solver option given (else the defaults, unnamed in the settings).
     std::uint32_t check_every = 0; ///< Measured steps between checks (0: only after the last).
+    std::optional<physics::GpuOptimization> gpu_optimizations{}; ///< The GPU backend's flags (the defaults otherwise).
+    profiler::ProfilerCategory categories = profiler::ALL_PROFILER_CATEGORIES; ///< What the profiler records.
+    physics::SleepDescription sleep_settings{};                                ///< The thresholds when sleep is on.
+    bool sleep_thresholds_given = false;                                       ///< --sleep-thresholds given.
 };
 
 /// The comma-separated items of @p text.
@@ -235,6 +248,40 @@ parse_options(std::span<char*> arguments) -> std::expected<Options, std::string>
         {
             options.only_when_asked = true;
         }
+        else if (argument == "--gpu-optimizations")
+        {
+            const std::optional<std::string_view> text = value();
+            valid = text.has_value();
+            if (valid)
+            {
+                options.gpu_optimizations = gfx::from_string<physics::GpuOptimization>(*text);
+                valid = options.gpu_optimizations.has_value();
+            }
+        }
+        else if (argument == "--sleep-thresholds")
+        {
+            const std::optional<std::string_view> text = value();
+            const std::vector<std::string_view> parts = text ? split(*text) : std::vector<std::string_view>{};
+            const auto parse = [](std::string_view part, float& target) {
+                const auto [end, error] = std::from_chars(part.data(), part.data() + part.size(), target);
+                return error == std::errc{} && end == part.data() + part.size() && target >= 0.0F;
+            };
+            valid = parts.size() == 3 && parse(parts[0], options.sleep_settings.linear_threshold) &&
+                    parse(parts[1], options.sleep_settings.angular_threshold) && parse(parts[2], options.sleep_settings.time);
+            options.sleep = true;
+            options.sleep_thresholds_given = true;
+        }
+        else if (argument == "--categories")
+        {
+            const std::optional<std::string_view> text = value();
+            valid = text.has_value();
+            if (valid)
+            {
+                const std::optional<profiler::ProfilerCategory> categories = gfx::from_string<profiler::ProfilerCategory>(*text);
+                valid = categories.has_value();
+                options.categories = categories.value_or(profiler::ALL_PROFILER_CATEGORIES);
+            }
+        }
         else if (argument == "--check-every")
         {
             valid = number(options.check_every);
@@ -330,6 +377,7 @@ struct GpuDevice
     gfx::PhysicalDevice* physical_device = nullptr;
     std::unique_ptr<gfx::Device> device{};
 #endif
+    physics::GpuOptimization optimizations = physics::DEFAULT_GPU_OPTIMIZATIONS; ///< The GPU backend's flags.
 };
 
 #if GFX_BENCHMARK_GPU_XPBD
@@ -423,7 +471,7 @@ make_world(Backend backend,
         case Backend::GPU_XPBD:
 #if GFX_BENCHMARK_GPU_XPBD
             make_gpu_device(gpu);
-            return physics::gpu_xpbd::create_physics_world(description, *gpu.device);
+            return physics::gpu_xpbd::create_physics_world(description, *gpu.device, {.optimizations = gpu.optimizations});
 #else
             break;
 #endif
@@ -450,7 +498,9 @@ measure(BenchmarkScene scene,
         std::vector<SceneObjects> objects;
         for (std::size_t world = 0; world < world_count; ++world)
         {
-            worlds.push_back(make_world(backend, {.task_scheduler = &scheduler, .solver = options.solver, .sleep = {.enabled = options.sleep}, .debug_name = name}, gpu));
+            physics::SleepDescription sleep = options.sleep_settings;
+            sleep.enabled = options.sleep;
+            worlds.push_back(make_world(backend, {.task_scheduler = &scheduler, .solver = options.solver, .sleep = sleep, .debug_name = name}, gpu));
             objects.push_back(gfx::benchmark::build_scene(scene, *worlds.back(), options.scale));
             measurement.bodies += objects.back().dynamic_bodies;
             measurement.joints += static_cast<std::uint32_t>(objects.back().joints.size());
@@ -475,7 +525,7 @@ measure(BenchmarkScene scene,
         const std::unique_ptr<profiler::Profiler> recorder = profiler::create_profiler({.ring_capacity = 1U << 20U});
         profiler::set_current_profiler(recorder.get());
         profiler::set_thread_name("benchmark");
-        const profiler::SessionHandle session = recorder->create_session({.name = name});
+        const profiler::SessionHandle session = recorder->create_session({.name = name, .categories = options.categories});
         std::vector<double> step_times;
         step_times.reserve(options.steps);
         double worst_error = -1.0;
@@ -622,6 +672,19 @@ settings_text(const Options& options,
     if (options.solver_given)
     {
         text += std::format(", solver {}/{}/{}", options.solver.sub_steps, options.solver.position_iterations, options.solver.velocity_iterations);
+    }
+    if (options.gpu_optimizations)
+    {
+        text += std::format(", GPU optimizations {}", *options.gpu_optimizations);
+    }
+    if (options.categories != profiler::ALL_PROFILER_CATEGORIES)
+    {
+        text += std::format(", profiled {}", options.categories);
+    }
+    if (options.sleep_thresholds_given)
+    {
+        text += std::format(", sleep under {} m/s and {} rad/s for {} s", options.sleep_settings.linear_threshold, options.sleep_settings.angular_threshold,
+                            options.sleep_settings.time);
     }
     return text;
 }
@@ -845,6 +908,7 @@ main(int argument_count,
     environment.date = std::format("{:%Y-%m-%d %H:%M} UTC", std::chrono::floor<std::chrono::minutes>(std::chrono::system_clock::now()));
     environment.build = std::format("{} build, profiler {}", gfx::DEBUG_BUILD ? "Debug" : "optimized", profiler::PROFILER_ENABLED ? "on" : "off");
     GpuDevice gpu{};
+    gpu.optimizations = options.gpu_optimizations.value_or(physics::DEFAULT_GPU_OPTIMIZATIONS);
     std::vector<Backend> backends;
     for (const Backend backend : options.backends)
     {

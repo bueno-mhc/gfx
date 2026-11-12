@@ -407,7 +407,9 @@ PipelineLibraryScope::end() noexcept
 }
 
 GpuPipelines::GpuPipelines(Device& device)
-    : m_patch_bodies{make_pipeline(device, shaders::patch_bodies_comp, m_modules)}
+    : m_device{&device}
+    , m_library{t_library != nullptr && &t_library->device() == &device ? t_library : nullptr}
+    , m_patch_bodies{make_pipeline(device, shaders::patch_bodies_comp, m_modules)}
     , m_integrate{make_pipeline(device, shaders::xpbd_integrate_comp, m_modules)}
     , m_update_velocities{make_pipeline(device, shaders::xpbd_velocity_update_comp, m_modules)}
 {
@@ -429,6 +431,28 @@ auto
 GpuPipelines::update_velocities() const noexcept -> ComputePipelineHandle
 {
     return m_update_velocities->handle();
+}
+
+auto
+GpuPipelines::readback_compact() -> ComputePipelineHandle
+{
+    if (m_readback_compact == nullptr)
+    {
+        m_readback_compact = m_library != nullptr ? m_library->pipeline(shaders::readback_compact_comp)
+                                                  : create_pipeline(*m_device, shaders::readback_compact_comp, m_modules, {});
+    }
+    return m_readback_compact->handle();
+}
+
+auto
+GpuPipelines::update_velocities_fused() -> ComputePipelineHandle
+{
+    if (m_update_velocities_fused == nullptr)
+    {
+        m_update_velocities_fused = m_library != nullptr ? m_library->pipeline(shaders::velocity_update_fused_comp)
+                                                         : create_pipeline(*m_device, shaders::velocity_update_fused_comp, m_modules, {});
+    }
+    return m_update_velocities_fused->handle();
 }
 
 } // namespace gfx::physics::gpu_xpbd

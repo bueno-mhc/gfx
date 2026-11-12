@@ -97,6 +97,20 @@ struct VolumePresetDescription
     float particle_radius = 0.0F;    ///< For collisions; 0: half the shortest edge.
 };
 
+/// @brief A tetrahedral mesh from the text of TetGen's files — what tools/tetrahedralize.py writes for any closed triangle
+///        mesh (OBJ, STL, PLY, OFF), and TetGen itself: @p node ("<vertices> 3 <attributes> <markers>", then a row
+///        "<index> <x> <y> <z> ..." per vertex) and @p element ("<tetrahedra> 4 <attributes>", then a row
+///        "<index> <a> <b> <c> <d> ..." per tetrahedron). '#' starts a comment; indices count from 0 or 1 (the first vertex's
+///        index says which); attributes and markers are ignored; each tetrahedron is oriented positively (two corners
+///        swapped when given the other way).
+/// @throws PhysicsError naming the file and the row when a file is malformed or an index is out of range.
+[[nodiscard]] auto read_tetgen_mesh(std::string_view node,
+                                    std::string_view element) -> TetrahedralMesh;
+
+/// @brief The boundary of @p mesh: the faces that belong to one tetrahedron only, wound outward (counterclockwise seen from
+///        outside) — the surface to draw of a volume made by volume_preset(), its vertices the particles'.
+[[nodiscard]] auto tetrahedral_mesh_surface(const TetrahedralMesh& mesh) -> std::vector<std::array<std::uint32_t, 3>>;
+
 /// @brief A volume: a particle per vertex, STRETCH along every edge (once), VOLUME for every tetrahedron.
 /// @throws PhysicsError if the mesh's indices are out of range, a tetrahedron is flat, or @p description is invalid.
 [[nodiscard]] auto volume_preset(const TetrahedralMesh& mesh,

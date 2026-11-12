@@ -287,6 +287,180 @@ tetrahedral_box(const TetrahedralBoxDescription& description) -> TetrahedralMesh
 }
 
 auto
+read_tetgen_mesh(std::string_view node,
+                 std::string_view element) -> TetrahedralMesh
+{
+    constexpr std::string_view OPERATION = "read_tetgen_mesh";
+
+    // A file's rows of numbers (comments and blank lines dropped).
+    const auto rows = [](std::string_view text) {
+        std::vector<std::vector<std::string_view>> found;
+        for (const auto line : std::views::split(text, '\n'))
+        {
+            std::string_view row{line.begin(), line.end()};
+            row = row.substr(0, row.find('#'));
+            std::vector<std::string_view> words;
+            for (const auto word : std::views::split(row, ' '))
+            {
+                std::string_view value{word.begin(), word.end()};
+                while (!value.empty() && (value.back() == '\r' || value.back() == '\t'))
+                {
+                    value.remove_suffix(1);
+                }
+                while (!value.empty() && value.front() == '\t')
+                {
+                    value.remove_prefix(1);
+                }
+                if (!value.empty())
+                {
+                    words.push_back(value);
+                }
+            }
+            if (!words.empty())
+            {
+                found.push_back(std::move(words));
+            }
+        }
+        return found;
+    };
+    const auto number = [&](std::string_view file, std::size_t row, std::string_view word, auto& value) {
+        const auto [end, error] = std::from_chars(word.data(), word.data() + word.size(), value);
+        if (error != std::errc{} || end != word.data() + word.size())
+        {
+            reject_preset(OPERATION, std::format("row {} of the {} file holds '{}', not a number", row + 1, file, word),
+                          "give TetGen's .node and .ele files (tools/tetrahedralize.py writes them)");
+        }
+    };
+
+    const std::vector<std::vector<std::string_view>> node_rows = rows(node);
+    const std::vector<std::vector<std::string_view>> element_rows = rows(element);
+    if (node_rows.empty() || element_rows.empty())
+    {
+        reject_preset(OPERATION, node_rows.empty() ? "the .node file is empty" : "the .ele file is empty", "give TetGen's .node and .ele files");
+    }
+    std::uint32_t vertex_count = 0;
+    std::uint32_t tetrahedron_count = 0;
+    std::uint32_t corners = 0;
+    number(".node", 0, node_rows[0][0], vertex_count);
+    number(".ele", 0, element_rows[0][0], tetrahedron_count);
+    if (element_rows[0].size() >= 2)
+    {
+        number(".ele", 0, element_rows[0][1], corners);
+    }
+    if (corners != 4)
+    {
+        reject_preset(OPERATION, std::format("the .ele file's tetrahedra have {} corners", corners), "give linear tetrahedra (4 corners; not TetGen's -o2)");
+    }
+    if (node_rows.size() < std::size_t{vertex_count} + 1 || element_rows.size() < std::size_t{tetrahedron_count} + 1)
+    {
+        reject_preset(OPERATION,
+                      std::format("the files name {} vertices and {} tetrahedra but hold {} and {} rows", vertex_count, tetrahedron_count,
+                                  node_rows.size() - 1, element_rows.size() - 1),
+                      "give complete files");
+    }
+
+    // Vertices; the first one's index says whether indices count from 0 or 1.
+    TetrahedralMesh mesh;
+    mesh.positions.reserve(vertex_count);
+    std::uint32_t first_index = 0;
+    for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex)
+    {
+        const std::vector<std::string_view>& row = node_rows[std::size_t{vertex} + 1];
+        if (row.size() < 4)
+        {
+            reject_preset(OPERATION, std::format("row {} of the .node file has {} values (an index and three coordinates needed)", vertex + 2, row.size()),
+                          "give TetGen's .node file");
+        }
+        std::uint32_t index = 0;
+        number(".node", vertex + 1, row[0], index);
+        if (vertex == 0)
+        {
+            first_index = index;
+        }
+        Vector3 position{};
+        number(".node", vertex + 1, row[1], position.x);
+        number(".node", vertex + 1, row[2], position.y);
+        number(".node", vertex + 1, row[3], position.z);
+        mesh.positions.push_back(position);
+    }
+
+    // Tetrahedra, oriented positively.
+    mesh.tetrahedra.reserve(tetrahedron_count);
+    for (std::uint32_t tetrahedron = 0; tetrahedron < tetrahedron_count; ++tetrahedron)
+    {
+        const std::vector<std::string_view>& row = element_rows[std::size_t{tetrahedron} + 1];
+        if (row.size() < 5)
+        {
+            reject_preset(OPERATION, std::format("row {} of the .ele file has {} values (an index and four corners needed)", tetrahedron + 2, row.size()),
+                          "give TetGen's .ele file");
+        }
+        std::array<std::uint32_t, 4> indices{};
+        for (std::size_t corner = 0; corner < 4; ++corner)
+        {
+            std::uint32_t value = 0;
+            number(".ele", tetrahedron + 1, row[corner + 1], value);
+            if (value < first_index || value - first_index >= vertex_count)
+            {
+                reject_preset(OPERATION, std::format("tetrahedron {} names vertex {} (the vertices count {} from {})", tetrahedron, value, vertex_count, first_index),
+                              "give a .ele file of the .node file");
+            }
+            indices[corner] = value - first_index;
+        }
+        if (xpbd::six_volume(mesh.positions[indices[0]], mesh.positions[indices[1]], mesh.positions[indices[2]], mesh.positions[indices[3]]) < 0.0F)
+        {
+            std::swap(indices[1], indices[2]);
+        }
+        mesh.tetrahedra.push_back(indices);
+    }
+    return mesh;
+}
+
+auto
+tetrahedral_mesh_surface(const TetrahedralMesh& mesh) -> std::vector<std::array<std::uint32_t, 3>>
+{
+    // Each tetrahedron's faces, wound outward (for a positive tetrahedron: the corner left out sees each one clockwise);
+    // sorted by their corners, those found once are the boundary.
+    struct Face
+    {
+        std::array<std::uint32_t, 3> key{};
+        std::array<std::uint32_t, 3> wound{};
+    };
+    std::vector<Face> faces;
+    faces.reserve(mesh.tetrahedra.size() * 4);
+    for (const std::array<std::uint32_t, 4>& tetrahedron : mesh.tetrahedra)
+    {
+        const auto [a, b, c, d] = tetrahedron;
+        const bool positive = xpbd::six_volume(mesh.positions[a], mesh.positions[b], mesh.positions[c], mesh.positions[d]) >= 0.0F;
+        for (std::array<std::uint32_t, 3> wound : {std::array{b, c, d}, std::array{a, d, c}, std::array{a, b, d}, std::array{a, c, b}})
+        {
+            if (!positive)
+            {
+                std::swap(wound[1], wound[2]);
+            }
+            std::array<std::uint32_t, 3> key = wound;
+            std::ranges::sort(key);
+            faces.push_back({.key = key, .wound = wound});
+        }
+    }
+    std::ranges::sort(faces, {}, &Face::key);
+    std::vector<std::array<std::uint32_t, 3>> surface;
+    for (std::size_t index = 0; index < faces.size();)
+    {
+        std::size_t end = index + 1;
+        while (end < faces.size() && faces[end].key == faces[index].key)
+        {
+            ++end;
+        }
+        if (end - index == 1)
+        {
+            surface.push_back(faces[index].wound);
+        }
+        index = end;
+    }
+    return surface;
+}
+
+auto
 volume_preset(const TetrahedralMesh& mesh,
               const VolumePresetDescription& description) -> SoftBodyDescription
 {

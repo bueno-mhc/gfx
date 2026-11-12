@@ -79,6 +79,18 @@ struct GpuBodyPatch
 };
 static_assert(sizeof(GpuBodyPatch) == 176 && offsetof(GpuBodyPatch, center) == 16 && offsetof(GpuBodyPatch, torque) == 160);
 
+/// The push constants of the readback compaction (readback_compact.comp).
+struct ReadbackPush
+{
+    std::uint32_t parameters = 0;  ///< The step's parameters.
+    std::uint32_t mode = 0;        ///< 0 flag the bodies, 1 flag the patched ones, 2 write the listed ones.
+    std::uint32_t start_flags = 0; ///< The flags when the step began.
+    std::uint32_t listed = 0;      ///< A word per body.
+    std::uint32_t positions = 0;   ///< The listed bodies' slots.
+    std::uint32_t count = 0;       ///< Their count (word 0).
+    std::uint32_t bodies = 0;      ///< Five vectors per listed body.
+};
+
 /// What the step reads back of a body (one array each, in this order in the readback buffer).
 struct GpuBodyReadback
 {
@@ -430,12 +442,20 @@ public:
     [[nodiscard]] auto patch_bodies() const noexcept -> ComputePipelineHandle;
     [[nodiscard]] auto integrate() const noexcept -> ComputePipelineHandle;
     [[nodiscard]] auto update_velocities() const noexcept -> ComputePipelineHandle;
+    /// The pipelines of passes only some worlds run (COMPACT_READBACK, KERNEL_FUSION): made at their first use (through
+    /// the device's library when the constructor had one), so the others never make them.
+    [[nodiscard]] auto readback_compact() -> ComputePipelineHandle;
+    [[nodiscard]] auto update_velocities_fused() -> ComputePipelineHandle;
 
 private:
+    Device* m_device;
+    GpuPipelineLibrary* m_library; ///< The library open when it was made (it outlives this), else null.
     std::vector<std::unique_ptr<ShaderModule>> m_modules{};
     std::shared_ptr<ComputePipeline> m_patch_bodies{};
     std::shared_ptr<ComputePipeline> m_integrate{};
     std::shared_ptr<ComputePipeline> m_update_velocities{};
+    std::shared_ptr<ComputePipeline> m_readback_compact{};
+    std::shared_ptr<ComputePipeline> m_update_velocities_fused{};
 };
 
 // ===================================================================================================== barriers

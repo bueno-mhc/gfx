@@ -30,6 +30,28 @@ namespace gfx::physics::gpu_xpbd
 namespace
 {
 
+/// Places a loop over the contacts in the pairs' order fetches ahead: each reads a report (three cache lines) and a key at
+/// a place of memory unrelated to the last one's, which the processor's own prefetching cannot guess (the pyramid's 125 000
+/// contacts: 165 ns each read straight from memory).
+constexpr std::uint32_t PREFETCH_DISTANCE = 8;
+
+/// Asks the processor to fetch @p bytes from @p address into its caches (a hint: nothing on compilers without one).
+void
+prefetch(const void* address,
+         std::size_t bytes) noexcept
+{
+#if defined(__GNUC__) || defined(__clang__)
+    const auto* first = static_cast<const char*>(address);
+    for (std::size_t offset = 0; offset < bytes; offset += 64)
+    {
+        __builtin_prefetch(first + offset);
+    }
+#else
+    (void)address;
+    (void)bytes;
+#endif
+}
+
 /// The order of touching pairs and of contacts: by their colliders' handles.
 [[nodiscard]] auto
 pair_less(ColliderHandle first,
@@ -110,6 +132,39 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
         return body_slot < m_body_rests.size() && m_body_rests[body_slot] != 0;
     };
 
+    // Last step's pairs this step did not report are carried over when the GPU skipped them: their bodies all rested after
+    // the last step (their contacts were kept) and still rest, their colliders exist.
+    const auto carried = [&](const TouchingPair& was) {
+        return was.resting && find(pending, was.first) != nullptr && find(pending, was.second) != nullptr && rests(was.first_body) && rests(was.second_body);
+    };
+
+    // Nothing reported and every pair of the last step carried over: the same pairs and contacts as the last step, no
+    // event. The framework hands back the list published two steps ago (the lists are swapped at each publish): after two
+    // such steps in a row it already holds them, and nothing is copied (a resting world's 200 000 points took 3.8 ms).
+    if (count == 0 && std::ranges::all_of(m_was_touching, carried))
+    {
+        ++m_unchanged_contact_steps;
+        if (m_unchanged_contact_steps < 2 || pending.contacts.size() != m_was_touching_contact_count)
+        {
+            // The pairs' contacts (a destroyed collider's pairs are gone from the list, not from their contacts).
+            PROFILE_SCOPE("GPU XPBD: publish the contacts");
+            pending.contacts.clear();
+            m_was_touching_points = 0;
+            for (const TouchingPair& pair : m_was_touching)
+            {
+                const auto from = m_was_touching_contacts.begin() + static_cast<std::ptrdiff_t>(pair.first_contact);
+                pending.contacts.insert(pending.contacts.end(), from, from + static_cast<std::ptrdiff_t>(pair.contact_count));
+                for (std::uint32_t contact = 0; contact < pair.contact_count; ++contact)
+                {
+                    m_was_touching_points += m_was_touching_contacts[pair.first_contact + contact].manifold.point_count;
+                }
+            }
+            m_was_touching_contact_count = static_cast<std::uint32_t>(pending.contacts.size());
+        }
+        return m_was_touching_points;
+    }
+    m_unchanged_contact_steps = 0;
+
     // A report's first words: first_collider, second_collider, reserved, approach_speed, then the manifold's first,
     // second, point_count, algorithm, sub_shape_first, sub_shape_second (GpuContactReport, GpuManifold). Each report's
     // key at its index (in parallel); those of colliders gone have no pair (a null first handle) and are left out.
@@ -168,6 +223,10 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
     m_touching.clear();
     for (std::size_t index = 0; index < m_report_order.size();)
     {
+        if (index + PREFETCH_DISTANCE < m_report_order.size())
+        {
+            prefetch(&m_report_keys[m_report_order[index + PREFETCH_DISTANCE].key], sizeof(ReportKey));
+        }
         std::size_t end = index + 1;
         while (end < m_report_order.size() && m_report_order[end].pair == m_report_order[index].pair)
         {
@@ -195,13 +254,9 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
         index = end;
     }
 
-    // Last step's pairs this step did not report are carried over when the GPU skipped them: their bodies all rested after
-    // the last step (their contacts were kept) and still rest, their colliders exist. Whether any is decides where the
-    // contacts are converted (this step's and last step's pairs walked side by side).
+    // Whether any of last step's pairs is carried over decides where the contacts are converted (this step's and last
+    // step's pairs walked side by side).
     const std::size_t current = m_touching.size();
-    const auto carried = [&](const TouchingPair& was) {
-        return was.resting && find(pending, was.first) != nullptr && find(pending, was.second) != nullptr && rests(was.first_body) && rests(was.second_body);
-    };
     bool any_carried = false;
     {
         std::size_t now_index = 0;
@@ -226,6 +281,13 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
     const auto convert = [&](std::uint32_t begin, std::uint32_t end) {
         for (std::uint32_t place = begin; place < end; ++place)
         {
+            // A key's index is its report's (make_keys): the report and the key PREFETCH_DISTANCE places ahead fetched.
+            if (place + PREFETCH_DISTANCE < end)
+            {
+                const std::uint32_t ahead = m_report_order[place + PREFETCH_DISTANCE].key;
+                prefetch(bytes.data() + std::size_t{ahead} * sizeof(GpuContactReport), sizeof(GpuContactReport));
+                prefetch(&m_report_keys[ahead], sizeof(ReportKey));
+            }
             const ReportKey& key = m_report_keys[m_report_order[place].key];
             const ContactManifold manifold = to_contact_manifold(report_at(key.report).manifold);
             converted[place] = {.collider = key.first, .other = key.second, .other_body = key.second_body, .manifold = key.flip ? flipped(manifold) : manifold};
@@ -335,6 +397,8 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
     // What the next step keeps of these pairs: the contacts of those whose bodies all rest now (the GPU skips them).
     PROFILE_SCOPE("GPU XPBD: keep the resting pairs");
     m_was_touching_contacts.clear();
+    m_was_touching_contact_count = 0;
+    m_was_touching_points = 0;
     for (TouchingPair& pair : m_touching)
     {
         pair.resting = rests(pair.first_body) && rests(pair.second_body);
@@ -343,6 +407,11 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
             const auto first = static_cast<std::uint32_t>(m_was_touching_contacts.size());
             const auto from = pending.contacts.begin() + static_cast<std::ptrdiff_t>(pair.first_contact);
             m_was_touching_contacts.insert(m_was_touching_contacts.end(), from, from + static_cast<std::ptrdiff_t>(pair.contact_count));
+            for (std::uint32_t contact = 0; contact < pair.contact_count; ++contact)
+            {
+                m_was_touching_points += m_was_touching_contacts[first + contact].manifold.point_count;
+            }
+            m_was_touching_contact_count += pair.contact_count;
             pair.first_contact = first;
         }
     }
@@ -373,6 +442,7 @@ GpuXpbdBackend::forget_collider(ColliderHandle collider,
         }
     }
     std::erase_if(m_was_touching, [collider](const TouchingPair& pair) { return pair.first == collider || pair.second == collider; });
+    m_unchanged_contact_steps = 0; // the published list changes
 
     // The triggers it was in see it leave.
     for (TriggerEntry& trigger : m_triggers)

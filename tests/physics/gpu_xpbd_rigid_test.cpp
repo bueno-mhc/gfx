@@ -701,6 +701,244 @@ TEST_P(GpuXpbdRigidTest, TheSameStepsGiveTheSameBits)
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
+/// The step's events, as text (kinds, handles, values' bits).
+auto
+event_text(const PhysicsWorld& world) -> std::string
+{
+    std::string text;
+    const PhysicsEvents events = world.events();
+    for (const SleepEvent& event : events.sleeps)
+    {
+        text += std::format("sleep {} {}; ", std::to_underlying(event.kind), event.body);
+    }
+    for (const ContactEvent& event : events.contacts)
+    {
+        text += std::format("contact {} {} {} {:a} {:a} {:a}; ", std::to_underlying(event.kind), event.first, event.second, event.point.x, event.point.y,
+                            event.approach_speed);
+    }
+    return text;
+}
+
+TEST_P(GpuXpbdRigidTest, CompactReadbackGivesTheSameBitsAndEvents)
+{
+    // COMPACT_READBACK: 4 224 boxes on the floor (a world large enough to list its bodies: GPU_XPBD_COMPACT_READBACK_BODIES)
+    // fall asleep while a ball keeps bouncing beside them; then a plank is made just above them and lands on them all at
+    // once: about 4 224 bodies wake in one step, after steps listing one or two (more than the step's copy holds: the rest
+    // copied after it, as are the contacts' reports; then every body is read back while most of them move). Every step's
+    // states and events are those of reading back every body.
+    constexpr int BOXES = 66 * 64;
+    static_assert(BOXES >= static_cast<int>(GPU_XPBD_COMPACT_READBACK_BODIES));
+    const auto run = [&](GpuOptimization optimizations) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        std::vector<RigidBody*> bodies;
+        const std::shared_ptr<const Shape> box = box_shape({.x = 0.15F, .y = 0.15F, .z = 0.15F});
+        for (int index = 0; index < BOXES; ++index)
+        {
+            bodies.push_back(&world.add({.pose = {.position = {.x = 0.4F * static_cast<float>(index % 66) - 13.0F, .y = 0.15F, .z = 0.4F * static_cast<float>(index / 66) - 12.6F}}},
+                                        {.shape = box}));
+        }
+        bodies.push_back(&world.add({.pose = {.position = {.x = 16.0F, .y = 2.0F}}, .linear_velocity = {.y = -3.0F}},
+                                    {.shape = make_shape(SphereShape{.radius = 0.2F}), .material = {.restitution = 0.9F}}));
+        std::vector<std::vector<std::byte>> states;
+        std::string events;
+        std::uint32_t most_woken = 0;
+        const auto step_once = [&] {
+            world.world->step(STEP);
+            states.push_back(state_bytes(bodies));
+            events += std::format("[{}] {}", states.size(), event_text(*world.world));
+            std::uint32_t woken = 0;
+            for (const SleepEvent& event : world.world->events().sleeps)
+            {
+                woken += event.kind == SleepEventKind::WOKE_UP ? 1U : 0U;
+            }
+            most_woken = std::max(most_woken, woken);
+        };
+        // Until the boxes sleep (the same step in both runs: the same bits), 10 steps more (the step they fell asleep in
+        // listed them all: its successor copies as many), then the plank, then 30 steps.
+        const auto boxes_asleep = [&] { return std::ranges::none_of(bodies.begin(), bodies.begin() + BOXES, [](const RigidBody* body) { return body->state().awake; }); };
+        for (int step = 0; step < 180 && !boxes_asleep(); ++step)
+        {
+            step_once();
+        }
+        const bool slept = boxes_asleep();
+        for (int step = 0; step < 10; ++step)
+        {
+            step_once();
+        }
+        bodies.push_back(&world.add({.pose = {.position = {.y = 0.36F}}, .linear_velocity = {.y = -1.0F}},
+                                    {.shape = box_shape({.x = 13.4F, .y = 0.05F, .z = 13.0F})}));
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "compact readback"});
+        for (int step = 0; step < 30; ++step)
+        {
+            recorder->begin_frame(session);
+            step_once();
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        int read_again = 0;
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceScope& scope : frame.scopes)
+            {
+                read_again += trace.sites()[scope.site].name == "GPU XPBD: read the bodies again" ? 1 : 0;
+            }
+        }
+        return std::tuple{states, events, slept, most_woken, read_again};
+    };
+    const auto [compact_states, compact_events, compact_slept, compact_woken, compact_read_again] = run(DEFAULT_GPU_OPTIMIZATIONS);
+    const auto [full_states, full_events, full_slept, full_woken, full_read_again] =
+        run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::COMPACT_READBACK));
+    ASSERT_EQ(compact_states.size(), full_states.size());
+    for (std::size_t step = 0; step < compact_states.size(); ++step)
+    {
+        ASSERT_EQ(compact_states[step], full_states[step]) << "step " << step;
+    }
+    EXPECT_EQ(compact_events, full_events);
+    EXPECT_TRUE(compact_slept) << "the boxes fell asleep";
+    EXPECT_GT(compact_woken, static_cast<std::uint32_t>(BOXES - 100)) << "the plank woke them at once";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_GE(compact_read_again, 1) << "more bodies were listed than the step copied: the rest read after it";
+        EXPECT_EQ(full_read_again, 0);
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, RestingWorldsStepWithoutTheGpu)
+{
+    // RESTING_STEPS: 30 boxes on the floor fall asleep; then steps change nothing (the same bits, the same contacts; no GPU
+    // step: their scope counted in builds with the profiler) until an edge box is pushed outward: it slides about 0.4 m and
+    // comes to rest again. It ends where it ends when every step runs on the GPU (within 1 cm: its contacts' warm start
+    // comes from the last step that ran).
+    const auto run = [&](GpuOptimization optimizations, double& resting_steps) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        std::vector<RigidBody*> boxes;
+        const std::shared_ptr<const Shape> box = box_shape({.x = 0.2F, .y = 0.2F, .z = 0.2F});
+        for (int index = 0; index < 30; ++index)
+        {
+            boxes.push_back(&world.add({.pose = {.position = {.x = 0.6F * static_cast<float>(index % 10), .y = 0.2F, .z = 0.6F * static_cast<float>(index / 10)}}},
+                                       {.shape = box}));
+        }
+        world.run(1.2F);
+        for (const RigidBody* body : boxes)
+        {
+            EXPECT_FALSE(body->state().awake) << "the boxes rest";
+        }
+        const std::vector<std::byte> rested = state_bytes(boxes);
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "resting steps"});
+        for (int step = 0; step < 30; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceScope& scope : frame.scopes)
+            {
+                resting_steps += trace.sites()[scope.site].name == "GPU XPBD: a resting step" ? 1.0 : 0.0;
+            }
+        }
+        EXPECT_EQ(state_bytes(boxes), rested) << "a resting world stays as it is";
+        std::array<ContactInfo, 8> contacts{};
+        const QueryResult<std::span<ContactInfo>> found = world.world->contacts_of(boxes[12]->handle(), contacts);
+        EXPECT_TRUE(found.has_value() && !found->empty()) << "a resting box still touches the floor";
+        boxes[9]->apply_linear_impulse({.x = 150.0F});
+        world.run(2.0F);
+        EXPECT_FALSE(boxes[9]->state().awake) << "the pushed box rests again";
+        return boxes[9]->state().pose.position;
+    };
+    double resting_steps = 0.0;
+    double resting_steps_without = 0.0;
+    const Vector3 resting = run(DEFAULT_GPU_OPTIMIZATIONS, resting_steps);
+    const Vector3 every = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::RESTING_STEPS), resting_steps_without);
+    EXPECT_GT(resting.x, 5.6F) << "the pushed box slid";
+    EXPECT_LT(gfx::length(resting - every), 0.01F) << "the pushed box ends where it ends with every step on the GPU";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_EQ(resting_steps, 30.0) << "the resting world's steps ran without the GPU";
+        EXPECT_EQ(resting_steps_without, 0.0);
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, RefitTreesKeepEveryContact)
+{
+    // BVH_REFIT: 64 balls dropped in a jittered grid pile up on the floor (the moving tree refit between builds every
+    // GPU_XPBD_REFIT_STEPS steps): no ball sinks into another or into the floor more than with a tree built every step
+    // allows (a refit that missed pairs lets balls pass through each other); refits and builds counted (traced builds).
+    const auto run = [&](GpuOptimization optimizations, double& refits, double& builds) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        std::mt19937 generator{5};
+        std::uniform_real_distribution<float> jitter{-0.05F, 0.05F};
+        std::vector<RigidBody*> balls;
+        const std::shared_ptr<const Shape> ball = make_shape(SphereShape{.radius = 0.15F});
+        for (int index = 0; index < 64; ++index)
+        {
+            const Vector3 position{.x = 0.35F * static_cast<float>(index % 4) + jitter(generator), .y = 1.0F + 0.35F * static_cast<float>(index / 16),
+                                   .z = 0.35F * static_cast<float>((index / 4) % 4) + jitter(generator)};
+            balls.push_back(&world.add({.pose = {.position = position}}, {.shape = ball}));
+        }
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "refit"});
+        for (int step = 0; step < 90; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                if (trace.sites()[sample.site].name == "GPU XPBD: moving tree refit")
+                {
+                    (sample.number() > 0.0 ? refits : builds) += 1.0;
+                }
+            }
+        }
+        float deepest = 0.0F;
+        for (std::size_t first = 0; first < balls.size(); ++first)
+        {
+            const Vector3 position = balls[first]->state().pose.position;
+            EXPECT_TRUE(finite(balls[first]->state()));
+            deepest = std::max(deepest, 0.15F - position.y);
+            for (std::size_t second = first + 1; second < balls.size(); ++second)
+            {
+                deepest = std::max(deepest, 0.3F - gfx::length(position - balls[second]->state().pose.position));
+            }
+        }
+        return deepest;
+    };
+    double refits = 0.0;
+    double builds = 0.0;
+    double unused_refits = 0.0;
+    double unused_builds = 0.0;
+    const float refit_depth = run(DEFAULT_GPU_OPTIMIZATIONS, refits, builds);
+    const float built_depth = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::BVH_REFIT), unused_refits, unused_builds);
+    EXPECT_LT(refit_depth, std::max(0.02F, 2.0F * built_depth)) << "the refit trees found every contact (built every step: " << built_depth << " m)";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_GE(refits, 80.0) << "the tree was refit between builds";
+        EXPECT_GE(builds, 3.0) << "and built every GPU_XPBD_REFIT_STEPS steps";
+        EXPECT_EQ(unused_refits, 0.0);
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdRigidTest, LargePilesOverflowTheFirstBuffersAndAreReplayed)
 {
     // 400 bodies dropped at once in a 6 m cube (their contacts far beyond what the first step reserves): after 3 s every

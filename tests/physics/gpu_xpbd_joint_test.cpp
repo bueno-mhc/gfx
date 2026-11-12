@@ -551,9 +551,15 @@ TEST_P(GpuXpbdJointTest, TheSameStepsGiveTheSameBits)
 
 TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
 {
-    // The default optimizations against none (the baseline) on a scene whose layouts change while it runs — a joint
-    // disabled, a collider's material changed, a body and a collider made, a joint breaking during a step — between steps
-    // whose edits keep them (forces, impulses, velocities): the same states bit for bit every 15 steps, the same events.
+    // The default optimizations that keep the bits (all but REACH_BOXES and BVH_REFIT, which find the same pairs in another
+    // order, and RESTING_STEPS, whose woken contacts warm-start from an earlier step) against none (the baseline) on a
+    // scene whose layouts change while it runs — a joint disabled, a collider's material changed, a body and a collider
+    // made, a joint breaking during a step — between steps whose edits keep them (forces, impulses, velocities): the same
+    // states bit for bit every 15 steps, the same events.
+    constexpr GpuOptimization SAME_BITS =
+        static_cast<GpuOptimization>(std::to_underlying(DEFAULT_GPU_OPTIMIZATIONS) &
+                                     ~(std::to_underlying(GpuOptimization::REACH_BOXES) | std::to_underlying(GpuOptimization::BVH_REFIT) |
+                                       std::to_underlying(GpuOptimization::RESTING_STEPS)));
     const auto build = [](Scene& world) {
         world.floor();
         std::vector<RigidBody*> bodies;
@@ -595,7 +601,7 @@ TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
             default: break;
         }
     };
-    Scene optimized = scene();
+    Scene optimized = scene({}, SAME_BITS);
     std::vector<RigidBody*> optimized_bodies = build(optimized);
     Scene baseline = scene({}, GpuOptimization::NONE);
     std::vector<RigidBody*> baseline_bodies = build(baseline);

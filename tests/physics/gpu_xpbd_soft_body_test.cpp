@@ -172,9 +172,10 @@ protected:
         return std::get<1>(GetParam());
     }
 
-    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {}) -> Scene
+    [[nodiscard]] auto scene(const PhysicsWorldDescription& description = {},
+                             GpuOptimization optimizations = DEFAULT_GPU_OPTIMIZATIONS) -> Scene
     {
-        return Scene{gpu::create_physics_world(description, *m_device, {.solver_mode = mode()})};
+        return Scene{gpu::create_physics_world(description, *m_device, {.solver_mode = mode(), .optimizations = optimizations})};
     }
 };
 
@@ -594,6 +595,83 @@ TEST_P(GpuXpbdSoftBodyTest, TheSameStepsGiveTheSameBits)
     const std::vector<Vector3> second = run();
     ASSERT_EQ(first.size(), second.size());
     EXPECT_EQ(std::memcmp(first.data(), second.data(), first.size() * sizeof(Vector3)), 0);
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdSoftBodyTest, FusedVelocityUpdatesGiveTheSameBits)
+{
+    // KERNEL_FUSION: a cloth falling onto a box beside a falling box, the bodies' and particles' velocity updates in one
+    // dispatch: the same particles and bodies, bit for bit, as in two.
+    const auto run = [this](GpuOptimization optimizations) {
+        Scene world = scene({}, optimizations);
+        world.floor();
+        world.add_static(box_shape({.x = 0.3F, .y = 0.3F, .z = 0.3F}), {.position = {.y = 0.3F}});
+        RigidBody& falling = world.add({.pose = {.position = {.x = 1, .y = 1}}}, {.shape = box_shape({.x = 0.1F, .y = 0.1F, .z = 0.1F})});
+        SoftBody& cloth = world.soft(cloth_preset({.columns = 20, .rows = 20, .spacing = 0.04F, .origin = {.x = -0.38F, .y = 1, .z = -0.38F}, .row_direction = {.z = 1}}));
+        world.run(60);
+        std::vector<Vector3> positions = positions_of(cloth);
+        positions.push_back(falling.state().pose.position);
+        positions.push_back(falling.state().linear_velocity);
+        return positions;
+    };
+    const std::vector<Vector3> fused = run(DEFAULT_GPU_OPTIMIZATIONS);
+    const std::vector<Vector3> separate =
+        run(static_cast<GpuOptimization>(std::to_underlying(DEFAULT_GPU_OPTIMIZATIONS) & ~std::to_underlying(GpuOptimization::KERNEL_FUSION)));
+    ASSERT_EQ(fused.size(), separate.size());
+    EXPECT_EQ(std::memcmp(fused.data(), separate.data(), fused.size() * sizeof(Vector3)), 0);
+    EXPECT_LT(fused[fused.size() - 2].y, 0.5F) << "the box fell";
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+/// The volume a closed surface encloses (the divergence theorem).
+[[nodiscard]] auto
+surface_volume(std::span<const Vector3> positions,
+               std::span<const std::array<std::uint32_t, 3>> surface) -> float
+{
+    float total = 0.0F;
+    for (const auto& [a, b, c] : surface)
+    {
+        total += gfx::dot(positions[a], gfx::cross(positions[b], positions[c])) / 6.0F;
+    }
+    return total;
+}
+
+TEST_P(GpuXpbdSoftBodyTest, AToolTetrahedralizedTorusIsAVolumeOnTheGpu)
+{
+    // tools/tetrahedralize.py's torus (written by CTest's fixture gfx_tetrahedral_meshes) as a GPU XPBD volume: dropped from
+    // 1 m onto the floor, after 1.5 s every particle is finite and above the floor, the torus came down, and its volume is
+    // within 5 % of its rest (the volume constraints held).
+    const std::filesystem::path directory{GFX_TEST_TETRAHEDRAL_DIRECTORY};
+    const auto read_text = [](const std::filesystem::path& path) {
+        std::ifstream stream{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+    };
+    const std::string node = read_text(directory / "torus.node");
+    const std::string element = read_text(directory / "torus.ele");
+    if (node.empty() || element.empty())
+    {
+        GTEST_SKIP() << "no tetrahedralized torus in " << directory.generic_string() << " (CTest's fixture gfx_tetrahedral_meshes writes it: Python 3)";
+    }
+    TetrahedralMesh mesh = read_tetgen_mesh(node, element);
+    const std::vector<std::array<std::uint32_t, 3>> boundary = tetrahedral_mesh_surface(mesh);
+    const float rest = surface_volume(mesh.positions, boundary);
+    for (Vector3& position : mesh.positions)
+    {
+        position.y += 1.0F;
+    }
+    Scene world = scene();
+    world.floor();
+    SoftBody& torus = world.soft(volume_preset(mesh, {.density = 300.0F}));
+    world.run(90);
+    std::vector<Vector3> positions(torus.particle_count());
+    (void)torus.positions(positions);
+    for (const Vector3 position : positions)
+    {
+        ASSERT_TRUE(std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z));
+        EXPECT_GT(position.y, -0.03F) << "a particle went through the floor";
+    }
+    EXPECT_LT(std::ranges::max(positions, {}, &Vector3::y).y, 0.8F) << "the torus fell";
+    EXPECT_NEAR(surface_volume(positions, boundary), rest, 0.05F * rest) << "the volume is kept";
     EXPECT_TRUE(take_validation_messages().empty());
 }
 

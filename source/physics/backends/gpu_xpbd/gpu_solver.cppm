@@ -316,6 +316,13 @@ public:
     /// The narrow phase (its shape table).
     [[nodiscard]] auto narrow_phase() noexcept -> GpuNarrowPhase&;
 
+    /// The scans, sorts and compactions its passes record with, reserved for every node at least (the backend's passes
+    /// share them).
+    [[nodiscard]] auto primitives() noexcept -> GpuPrimitives&;
+
+    /// Whether the step last recorded refits the moving tree (BVH_REFIT) rather than building it.
+    [[nodiscard]] auto refitting() const noexcept -> bool;
+
     /// Times its passes (and its primitives', trees' and narrow phase's) through @p timer.
     void set_timer(profiler::GpuTimer* timer) noexcept;
 

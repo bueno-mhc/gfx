@@ -1176,6 +1176,36 @@ Original hard requirements (from the user's initial specification):
   GPU frames 4.1 ms median = Box3D's. CTest PhysicsSandbox.GPU_XPBD TIMEOUT 900 (51 s in Debug; presents once throttled to 1 Hz midway).
   Decided (as recommended): a second launch configuration "gfx: Physics sandbox (no validation)". Gotchas: gdb cannot attach (error 5) to a process started with Start-Process -WindowStyle Normal
   here; `ctest --timeout` does not override a test's TIMEOUT property; bash heredocs do not exist in PowerShell.
+- **PF5b as built (2026-11-11; uncommitted, awaiting validation)** — docs/profiler-performance-design.md §B "PF5b as built". User
+  2026-11-10: the optimizations PF5 left + a mesh tetrahedralizer; 2026-11-11: "the performance has degraded … guarantee that no
+  performance penalty is observed, specially in the sandbox mode". Flags (all default): **COMPACT_READBACK** 1<<6 (readback_compact.comp
+  list/patched/gather; 16 B header + 80 B per listed body; copies sized by the last step + ¼ + patches + 256, "read the bodies/reports
+  again"; **only for worlds ≥ GPU_XPBD_COMPACT_READBACK_BODIES 4096 bodies of which ≤ half changed last step** (the full path counts them
+  into m_last_listed); reports copied by count always), **RESTING_STEPS** 1<<7 (no awake body, no edit, no particle/trigger/layout change →
+  no GPU; contacts fast path; apply() visits m_touched_bodies), **BVH_REFIT** 1<<8 (GPU_XPBD_REFIT_STEPS 30; set_colliders compares the
+  moving list), **KERNEL_FUSION** 1<<9 (velocity_update_fused.comp, velocity_update.glsl), **PARTIAL_SUBMISSIONS** 1<<10 (parts of
+  ≥ GPU_XPBD_PART_DISPATCHES 64 dispatches submitted after the detection / each substep; m_part_command_buffers; run_commands(m_step_commands);
+  m_step_statistics). Not flags: prefetch 8 ahead in read_contacts; **framework update_bounds() keeps boxes of colliders whose world pose is
+  bit-identical** (`bounds_poses` by collider slot; configuration_changed forces); counters bodies listed/copied, moving tree refit.
+  Benchmark `--gpu-optimizations`, `--categories`, `--sleep-thresholds`; sandbox `--gpu-optimizations`. tools/tetrahedralize.py +
+  read_tetgen_mesh()/tetrahedral_mesh_surface() + CTest fixtures (Tetrahedralize.*). **Regression found by comparing with PF5's commit and
+  fixed**: read_back() stored a shared atomic<bool> per awake body from 16 threads (cache-line ping-pong: 13–23 % slower with PF5's flags
+  only on many_boxes/two_worlds/chain) → per-range gather. **Method** (scratchpad scripts): PF5's commit built in a detached worktree
+  `build/head` (FETCHCONTENT_SOURCE_DIR_* from build/profile/_deps; first cmake --build of a fresh tree fails, the second succeeds),
+  ab_head.ps1 / ab_variants.ps1 (PF5's flags only isolates non-flag changes) / ab_sandbox.ps1 / ab_sandbox_variants.ps1, runs alternated
+  per scene, medians. Measured (profile, mean ms, PF5 → now): many_boxes 12.64 → 11.42, pyramid 51.2 → 50.3, cloth 15.0 → 14.5, chain
+  3.90 → 3.44, mixed 20.8 → 19.0, stress 8.43 → 7.56, two_worlds 13.1 → 11.8; at scale 0.02 −17..−28 %; sandbox world step faster in every
+  preset (bouncing 1.48 → 1.35 over 5 rounds, cloth 2.99 → 2.54); with `--sleep` many_boxes 12.4 → 0.91, pyramid 14.0 → 0.88,
+  two_worlds 11.9 → 1.12. Pipelines of optional passes (readback_compact, velocity_update_fused) made at first use (GpuPipelines keeps
+  the library open at its construction). **Debug + validation sandbox: 46–80 ms a step before and after** (the layer: ~255 dispatches +
+  ~262 barriers a step for a small world; each pipeline used once in a command buffer is checked in full — the broad phase 16–20 ms for
+  ~9 dispatches — while reused pipelines cost ~70 µs a command); current code = PF5 when built alike (worktree: friction 46.1–47.8 vs
+  46.2–47.1); **two builds of identical sources differ 5–8 % per preset in either direction there** (build/debug's binary: friction
+  slower, bouncing faster, also after a clean rebuild, also run from the other folder) — compare Debug binaries built in one place
+  only. **Gotchas**: build/debug had been
+  reconfigured without GPU_XPBD and the profiler (cache `g++.exe`; the Debug sandbox could not run the GPU backend): build.py's first run
+  reset the cache and dropped the -D options, the second applied them (run build.py twice; check the cache); sandbox noise ±10 % a run in
+  small worlds (≥ 5 rounds); Out-File -Encoding utf8 writes a BOM (use ascii); `--trace` adds the profiler's GPU pass timestamps.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1719,13 +1749,15 @@ gfx/
 | PF | **Profiler + GPU XPBD performance overhaul** (user prompt 2026-11-08: a reusable CPU/GPU profiler (SPSC rings, QueryPool timestamps, sessions, Chrome JSON + binary traces, percentiles, compile-out, ≤ 200 ns/scope) and the GPU backend at least as fast as Box3D, ≥ 1.25× from 10k bodies / 100k constraints, 17 gated optimizations, 6-scene benchmark harness, PERFORMANCE.md) | **design proposed** ([docs/profiler-performance-design.md](../docs/profiler-performance-design.md): §0.1 baseline measured, §0.2 26 rows, §A decisions, §B phases PF0–PF6, §C API, §D 16 questions); **all answered as recommended (2026-11-08)**; **PF0 (profiler core: gfx::profiler, macros header, sessions, traces, reports, Chrome JSON + binary/zstd, option GFX_PROFILER, preset `profile`) accepted with its 5 deviations, committed (73cae0d)**; **PF1 (GPU timing: calibrated timestamps in graphics, GPU sources/scopes in traces and reports, gfx::profiler_graphics GpuTimer, GPU macros) accepted with its 6 deviations ("Accept, start PF2"), committed (b4f12eb)**; **PF2 (instrumentation: framework, Box3D, reference, CPU soft bodies, the GPU backend's phases and passes on a GpuTimer, stage coverage, traces of the §0.1 scenes) accepted with its 6 deviations ("Accept, start PF3"), committed (5c185c8)**; **PF3 (benchmark harness: gfx_physics_benchmark, 7 scenes with quality checks, generated benchmark_report.md, per-machine baseline + 5 % gate on gfx's backends with confirmations; found a GPU defect in `mixed`) accepted with its 8 deviations ("Accept, fix the defect"), committed (2f79abf)**; **fix of the GPU `mixed` defect (mass splitting weighted by the constraints' shares) accepted and committed at the user's request (1597066)**; **PF4 (the CPU side: framework query tree/parallel loops/swaps, GPU contacts sorted and converted in place, denormal-free motion, INCREMENTAL_LAYOUTS + SHARED_PIPELINES flags, zero steady-state allocations; COMPACT_READBACK and REUSE_RECORDING moved to PF5) accepted with its 5 deviations ("Accept, start PF5", 2026-11-10), committed (51f4972)**; **PF5 (the GPU side: CHUNKED_GATHER, NODE_MAXIMA_COLORING, RECORDED_PASSES_BY_USE, REACH_BOXES, Pareto tooling; 7 deviations)
 accepted ("Do everything as recommended", 2026-11-10: velocity iterations stay 8) and committed by Claude at the user's request**;
 **sandbox follow-up (slow GPU frames, long loads) done: catch-up cap, `_NO_DEBUG_HEAP`, a launch configuration without validation**;
-**next (user, 2026-11-10): PF5b = the optimizations PF5 measured and did not build — benchmark with sleep (SLEEP_TUNING,
-COMPACT_READBACK), REUSE_RECORDING (command-buffer refactor if needed), KERNEL_FUSION, BVH_REFIT, etc. — plus a Python script
-tetrahedralizing any mesh for XPBD soft bodies; then PF6 documentation** |
+**PF5b (COMPACT_READBACK adaptive, RESTING_STEPS, BVH_REFIT, KERNEL_FUSION, PARTIAL_SUBMISSIONS; framework keeps unmoved
+colliders' boxes; tools/tetrahedralize.py; checked against PF5's commit built beside it: no scene or sandbox preset slower; a
+read-back regression found that way and fixed) built, awaiting validation**; then PF6 documentation |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1542**, 2026-11-10 (profiler PF5: + 12 flag tests (gather/coloring, passes by use, reach boxes × 4),
+Test count at last report: **1571**, 2026-11-11 (profiler PF5b: + 5 Tetrahedralize.*, + 4 TetrahedralMeshTest, + 20 GPU (compact
+readback, resting steps, refit, fused velocity updates, tetrahedralized torus × 4); Debug 1571/1571 (606 s; the 2 stage-coverage tests
+fixed then rerun), Release 1571/1571 (506 s); run from PowerShell with `--timeout 900`). Before: **1542**, 2026-11-10 (profiler PF5: + 12 flag tests (gather/coloring, passes by use, reach boxes × 4),
 + 2 storage-buffer tests; Debug 1542/1542 in 1169 s, Release 1540/1540 in 1171 s then the 2 new ones; run from PowerShell with
 `--timeout 900`). Before: **1528**, 2026-11-10 (profiler PF4: + 2 GpuXpbdAllocationTest, + 4 TheOptimizationsGiveTheBaselinesBits,
 + 2 WorldsOfADeviceSharePipelinesThroughACacheFile, + 1 ScopesBegunInTheSameClockTickKeepTheOrderTheyRan; Debug 1528/1528 in 1210 s,

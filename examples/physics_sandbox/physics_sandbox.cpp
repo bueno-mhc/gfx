@@ -17,6 +17,7 @@
 // Usage: gfx_physics_sandbox [--backend sdl3|glfw] [--physics box3d|reference|gpu_xpbd] [--preset <name>] [--views <list>]
 //                            [--device <index>] [--threads <count>] [--frames <count>] [--real-time] [--script | --tour] [--validation]
 //                            [--capture <file.ppm>] [--capture-frame <index>] [--trace <file.json>]
+//                            [--gpu-optimizations "INCREMENTAL_LAYOUTS | ..." | NONE]
 //   --physics B    simulates with backend B (gpu_xpbd: the GPU backend, on the sandbox's own device)
 //   --preset P     starts with scene P (showcase, stacks, dominoes, chains, cloth, soft_volumes, friction, bouncing,
 //                  triggers)
@@ -32,6 +33,8 @@
 //   --tour         builds every preset on every physics backend in turn and checks each scene
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
 //   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM)
+//   --gpu-optimizations L  the GPU backend's GpuOptimization flags (DEFAULT_GPU_OPTIMIZATIONS otherwise): a flag compared
+//                  on and off in the sandbox's own conditions (a small world beside the frames)
 //   --trace F      prints how long loading took (the window, the device, the renderer, each scene: its world and its
 //                  bodies), records every frame with the profiler (the main thread's phases, the world's thread, the
 //                  GPU backend's GPU scopes) and writes them to F as a Chrome trace at the end (builds with the profiler)
@@ -151,6 +154,7 @@ struct Options
     std::optional<std::string> capture{};
     std::optional<std::uint64_t> capture_frame{};
     std::optional<std::string> trace{};
+    std::optional<std::string> gpu_optimizations{}; ///< --gpu-optimizations, parsed where the GPU backend is built.
 };
 
 /// --trace: how long the loading took, phase by phase (printed as they end).
@@ -369,6 +373,10 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         else if (argument == "--capture-frame" && has_value)
         {
             options.capture_frame = std::stoull(arguments[++index]);
+        }
+        else if (argument == "--gpu-optimizations" && has_value)
+        {
+            options.gpu_optimizations = arguments[++index];
         }
         else if (argument == "--trace" && has_value)
         {
@@ -1034,11 +1042,24 @@ run(const Options& options) -> int
 
     // The GPU backend's worlds on the sandbox's device (its steps on the compute queue, beside the frames); the others
     // through the factory.
-    const WorldFactory make_world = [&device](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
+#if GFX_SANDBOX_GPU_XPBD
+    physics::GpuOptimization gpu_optimizations = physics::DEFAULT_GPU_OPTIMIZATIONS;
+    if (options.gpu_optimizations)
+    {
+        const std::optional<physics::GpuOptimization> parsed = gfx::from_string<physics::GpuOptimization>(*options.gpu_optimizations);
+        if (!parsed)
+        {
+            std::println(std::cerr, "unknown GPU optimizations '{}' (GpuOptimization names joined by ' | ', or NONE)", *options.gpu_optimizations);
+            return 2;
+        }
+        gpu_optimizations = *parsed;
+    }
+#endif
+    const WorldFactory make_world = [&](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
 #if GFX_SANDBOX_GPU_XPBD
         if (backend == physics::PhysicsBackendKind::GPU_XPBD)
         {
-            return physics::gpu_xpbd::create_physics_world(description, *device);
+            return physics::gpu_xpbd::create_physics_world(description, *device, {.optimizations = gpu_optimizations});
         }
 #else
         static_cast<void>(device);

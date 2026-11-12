@@ -43,8 +43,41 @@ gfx_add_test(gfx_physics_dynamics_tests
         integrator_test.cpp
         soft_body_test.cpp
         solver_test.cpp
+        tetrahedral_mesh_test.cpp
     MODULES physics_test_support.cppm
     LIBRARIES gfx::physics)
+
+# tools/tetrahedralize.py on the test meshes (meshes/make_test_meshes.py writes a torus OBJ, a binary STL sphere, an ASCII
+# PLY box and two overlapping boxes in OFF), each result checked by the script itself (--check: positive volumes, every
+# vertex used, a closed boundary, the volume within 10 %); then the torus simulated as an XPBD volume
+# (TetrahedralMeshTest.AToolTetrahedralizedTorus..., which skips without the files). Needs Python 3 (the standard library).
+set(_gfx_tetrahedral_directory "${CMAKE_CURRENT_BINARY_DIR}/tetrahedral_meshes")
+target_compile_definitions(gfx_physics_dynamics_tests PRIVATE GFX_TEST_TETRAHEDRAL_DIRECTORY="${_gfx_tetrahedral_directory}")
+find_package(Python3 3.10 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME Tetrahedralize.TestMeshes
+             COMMAND Python3::Interpreter -I "${CMAKE_CURRENT_SOURCE_DIR}/meshes/make_test_meshes.py" "${_gfx_tetrahedral_directory}")
+    set_tests_properties(Tetrahedralize.TestMeshes PROPERTIES FIXTURES_SETUP gfx_test_meshes LABELS tools)
+    foreach(_gfx_mesh IN ITEMS torus.obj sphere.stl box.ply two_boxes.off)
+        get_filename_component(_gfx_mesh_name "${_gfx_mesh}" NAME_WE)
+        add_test(NAME Tetrahedralize.${_gfx_mesh_name}
+                 COMMAND Python3::Interpreter -I "${PROJECT_SOURCE_DIR}/tools/tetrahedralize.py" "${_gfx_tetrahedral_directory}/${_gfx_mesh}"
+                         --output "${_gfx_tetrahedral_directory}/${_gfx_mesh_name}" --check)
+        set_tests_properties(Tetrahedralize.${_gfx_mesh_name} PROPERTIES
+            FIXTURES_REQUIRED gfx_test_meshes
+            FIXTURES_SETUP gfx_tetrahedral_meshes
+            LABELS tools)
+    endforeach()
+    # The discovered torus test needs the fixture (set when CTest reads the discovered tests).
+    set(_gfx_tetrahedral_properties "${CMAKE_CURRENT_BINARY_DIR}/gfx_physics_dynamics_tests_tetrahedral.cmake")
+    file(WRITE "${_gfx_tetrahedral_properties}"
+        "foreach(test IN LISTS gfx_physics_dynamics_tests_TESTS)\n"
+        "    if(test MATCHES [==[TetrahedralMeshTest\\.AToolTetrahedralized]==])\n"
+        "        set_tests_properties(\"\${test}\" PROPERTIES FIXTURES_REQUIRED gfx_tetrahedral_meshes)\n"
+        "    endif()\n"
+        "endforeach()\n")
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${_gfx_tetrahedral_properties}")
+endif()
 
 # The Box3D backend: what its factory makes, and a light rope holding a heavy Box3D body (its shared scenarios are the
 # conformance suite's, below).
@@ -82,7 +115,19 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
     if(GFX_VULKAN_VALIDATION_LAYER_DIRECTORY)
         set(_gfx_physics_layer_directory "${GFX_VULKAN_VALIDATION_LAYER_DIRECTORY}")
     endif()
-    target_compile_definitions(gfx_physics_gpu_xpbd_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}")
+    target_compile_definitions(gfx_physics_gpu_xpbd_tests PRIVATE GFX_TEST_VULKAN_LAYER_DIRECTORY="${_gfx_physics_layer_directory}"
+                                                                  GFX_TEST_TETRAHEDRAL_DIRECTORY="${_gfx_tetrahedral_directory}")
+    if(Python3_Interpreter_FOUND)
+        # The tetrahedralized torus on the GPU needs the fixture too.
+        set(_gfx_gpu_tetrahedral_properties "${CMAKE_CURRENT_BINARY_DIR}/gfx_physics_gpu_xpbd_tests_tetrahedral.cmake")
+        file(WRITE "${_gfx_gpu_tetrahedral_properties}"
+            "foreach(test IN LISTS gfx_physics_gpu_xpbd_tests_TESTS)\n"
+            "    if(test MATCHES [==[AToolTetrahedralized]==])\n"
+            "        set_tests_properties(\"\${test}\" PROPERTIES FIXTURES_REQUIRED gfx_tetrahedral_meshes)\n"
+            "    endif()\n"
+            "endforeach()\n")
+        set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${_gfx_gpu_tetrahedral_properties}")
+    endif()
     target_include_directories(gfx_physics_gpu_xpbd_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/graphics/vulkan)
 
     # The GPU backend's steps allocate nothing after warm-up steps (its own executable: it replaces operator new).

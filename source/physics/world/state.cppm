@@ -190,6 +190,7 @@ struct SteppedWorld::Implementation
     std::unique_ptr<Integrator> soft_body_integrator{};
     std::vector<std::unique_ptr<SoftBodyModel>> soft_body_models{}; ///< By soft body slot (made at the first step that steps them).
     std::vector<Transform> body_start_poses{};                      ///< By body slot: where the backend's step started.
+    std::vector<Transform> bounds_poses{};                          ///< By collider slot: the world pose its box was made at.
     std::vector<CoupledBody> coupled_bodies{};                      ///< By body slot.
     std::vector<CoupledCollider> coupled_colliders{};
     std::vector<SimulatedSoftBody> simulated_soft_bodies{};

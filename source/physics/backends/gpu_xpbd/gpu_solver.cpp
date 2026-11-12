@@ -323,6 +323,9 @@ struct GpuConstraintSolver::State
     std::uint32_t recorded_joint_colors = GPU_XPBD_INITIAL_COLORS;   ///< RECORDED_PASSES_BY_USE: the joints' colors recorded.
     std::uint32_t recorded_contact_colors = GPU_XPBD_INITIAL_COLORS; ///< RECORDED_PASSES_BY_USE: the contacts' colors recorded.
     std::uint32_t previous_overflow = 0; ///< The overflow set's constraints in the last completed step.
+    bool tree_refittable = false;        ///< BVH_REFIT: the moving tree was built over the moving colliders of now.
+    std::uint32_t tree_age = 0;          ///< BVH_REFIT: steps since it was built.
+    bool refitting = false;              ///< BVH_REFIT: this step refits it.
     bool overflow_passes = true;         ///< The overflow set's passes and gathers are recorded (RECORDED_PASSES_BY_USE: after a step that had one).
     bool gather_lists = false;           ///< This step's gathers read the overflow lists (CHUNKED_GATHER).
     std::uint32_t island_rounds = 8;
@@ -424,6 +427,18 @@ GpuConstraintSolver::narrow_phase() noexcept -> GpuNarrowPhase&
     return m_state->narrow_phase;
 }
 
+auto
+GpuConstraintSolver::primitives() noexcept -> GpuPrimitives&
+{
+    return m_state->primitives;
+}
+
+auto
+GpuConstraintSolver::refitting() const noexcept -> bool
+{
+    return m_state->refitting;
+}
+
 void
 GpuConstraintSolver::set_timer(profiler::GpuTimer* timer) noexcept
 {
@@ -445,6 +460,11 @@ GpuConstraintSolver::set_colliders(std::span<const GpuCollider> colliders,
                                    bool static_changed)
 {
     State& state = *m_state;
+    // BVH_REFIT: the moving tree stays refittable while its leaves (the moving colliders, in order) are the same.
+    if (state.moving != moving.size() || !std::ranges::equal(std::span{state.lists}.first(std::min<std::size_t>(state.moving, state.lists.size())), moving))
+    {
+        state.tree_refittable = false;
+    }
     state.collider_data.assign(colliders.begin(), colliders.end());
     state.lists.assign(moving.begin(), moving.end());
     state.lists.insert(state.lists.end(), statics.begin(), statics.end());
@@ -807,9 +827,18 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
             state.static_built = true;
         }
     }
+    state.refitting = has_all(state.settings.optimizations, GpuOptimization::BVH_REFIT) && state.tree_refittable && state.tree_age < GPU_XPBD_REFIT_STEPS;
     if (state.moving > 0)
     {
-        state.moving_tree.build(recorder, span_of(tree_boxes.buffer()), span_of(state.boxes.buffer()), {.maximum = state.moving});
+        if (state.refitting)
+        {
+            // BVH_REFIT: the same leaves, their boxes of this step.
+            state.moving_tree.refit(recorder, span_of(tree_boxes.buffer()));
+        }
+        else
+        {
+            state.moving_tree.build(recorder, span_of(tree_boxes.buffer()), span_of(state.boxes.buffer()), {.maximum = state.moving});
+        }
         if (state.moving > 1)
         {
             state.moving_tree.find_pairs(recorder, span_of(state.raw_pairs.buffer()), state.count(WITHIN_PAIRS), state.within_capacity);
@@ -1263,6 +1292,15 @@ GpuConstraintSolver::complete_step(const GpuSolverCounts& counts)
     state.recorded_joint_colors = std::min(counts.joint_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
     state.recorded_contact_colors = std::min(counts.contact_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
     state.overflow_passes = counts.overflow_constraints > 0;
+    if (state.refitting)
+    {
+        ++state.tree_age;
+    }
+    else
+    {
+        state.tree_age = 1;
+        state.tree_refittable = state.moving > 0;
+    }
     state.previous_overflow = counts.overflow_constraints;
 }
 

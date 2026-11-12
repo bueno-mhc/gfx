@@ -124,6 +124,10 @@ off_diagonal(const Matrix3& matrix) noexcept -> GpuVector
     return {matrix.columns[1].x, matrix.columns[2].x, matrix.columns[2].y, 0.0F};
 }
 
+/// COMPACT_READBACK: the listed bodies' count heads the readback (a vector's room), then five vectors per listed body.
+constexpr std::uint64_t COMPACT_READBACK_HEADER = sizeof(GpuVector);
+constexpr std::uint64_t COMPACT_READBACK_BODY = 5 * sizeof(GpuVector);
+
 /// A vector of the readback at @p index of the array starting at @p offset.
 [[nodiscard]] auto
 read_vector(std::span<const std::byte> bytes,
@@ -784,7 +788,14 @@ GpuXpbdBackend::body_entry(RigidBodyHandle body) -> BodyEntry&
     {
         m_bodies.resize(index + 1);
     }
-    return m_bodies[index];
+    BodyEntry& entry = m_bodies[index];
+    if (!entry.touched)
+    {
+        // Named by this step's edits (an edit that resets the entry may name it twice: the list is made unique).
+        entry.touched = true;
+        m_touched_bodies.push_back(index);
+    }
+    return entry;
 }
 
 auto
@@ -881,6 +892,7 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
 {
     // What changed first, then the forces and impulses about the centers the patches will have.
     PROFILE_SCOPE("GPU XPBD: apply the edits");
+    m_edited = m_edited || !edits.empty();
     const ChangeMarker marker{.backend = *this, .pending = pending};
     const bool incremental = has_all(m_capabilities.optimizations, GpuOptimization::INCREMENTAL_LAYOUTS);
     for (const WorldEdit& edit : edits)
@@ -895,22 +907,32 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
         std::visit(collector, edit);
     }
 
-    // The patches of the bodies the edits changed, in slot order (the same edits make the same command buffer).
+    // The patches of the bodies the edits changed, in slot order (the same edits make the same command buffer): the slots
+    // the edits named, not every body.
     const auto body_count = static_cast<std::uint32_t>(pending.rigid_bodies.size());
     if (m_bodies.size() < body_count)
     {
         m_bodies.resize(body_count);
     }
     m_body_patches.clear();
-    for (std::uint32_t slot = 0; slot < body_count; ++slot)
+    std::ranges::sort(m_touched_bodies);
+    const auto [last, end] = std::ranges::unique(m_touched_bodies);
+    m_touched_bodies.erase(last, end);
+    for (const std::uint32_t slot : m_touched_bodies)
     {
-        const BodyEntry& entry = m_bodies[slot];
+        BodyEntry& entry = m_bodies[slot];
+        entry.touched = false;
+        if (slot >= body_count)
+        {
+            continue;
+        }
         if (entry.created || entry.destroyed || entry.pose_set || entry.velocity_set || entry.reconfigured || entry.woken || entry.awake_set || entry.pushed)
         {
             RigidBodyRecord& record = pending.rigid_bodies[slot];
             m_body_patches.push_back(make_patch(slot, record.handle ? &record : nullptr, pending));
         }
     }
+    m_touched_bodies.clear();
 }
 
 auto
@@ -1448,6 +1470,19 @@ GpuXpbdBackend::simulate(float seconds,
         return;
     }
 
+    // RESTING_STEPS: a world at rest — nothing moved in the last step, no edit since, no particle, no trigger — steps
+    // without the GPU: every body stays asleep, every pair is carried over, no event (what a step on the GPU would give).
+    const bool edited = std::exchange(m_edited, false);
+    if (has_all(m_capabilities.optimizations, GpuOptimization::RESTING_STEPS) && m_rested && !edited && !m_layouts_dirty && m_body_count == body_count &&
+        m_particle_count == 0 && !soft_bodies && std::ranges::none_of(m_triggers, [](const TriggerEntry& trigger) { return trigger.handle.is_valid(); }))
+    {
+        PROFILE_SCOPE("GPU XPBD: a resting step");
+        pending.statistics.pairs = 0;
+        pending.statistics.contacts = read_contacts(pending, 0);
+        pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, Clock::now());
+        return;
+    }
+
     // Graphics failures (a lost device, memory exhausted when a buffer grows) become a PhysicsError naming the stage,
     // the graphics error nested.
     const std::uint32_t substeps = std::max(pending.configuration.solver.sub_steps, 1U);
@@ -1483,11 +1518,11 @@ GpuXpbdBackend::simulate(float seconds,
                 PROFILE_SCOPE("GPU XPBD: record the step");
                 record_step(body_count, pending, seconds, attempt > 0);
             }
-            PROFILE_COUNTER("GPU XPBD: dispatches", m_command_buffer->statistics().dispatches);
-            PROFILE_COUNTER("GPU XPBD: barriers", m_command_buffer->statistics().barriers);
-            PROFILE_COUNTER("GPU XPBD: transfers", m_command_buffer->statistics().transfers);
+            PROFILE_COUNTER("GPU XPBD: dispatches", m_step_statistics.dispatches);
+            PROFILE_COUNTER("GPU XPBD: barriers", m_step_statistics.barriers);
+            PROFILE_COUNTER("GPU XPBD: transfers", m_step_statistics.transfers);
             stage = "running the step on the GPU";
-            run_commands();
+            run_commands(m_step_commands);
             m_gpu_timer.finish_frame();
             counts = read_counts();
             if (!m_solver.overflowed(counts))
@@ -1529,6 +1564,7 @@ GpuXpbdBackend::simulate(float seconds,
         PROFILE_COUNTER("GPU XPBD: colors", counts.colors);
         PROFILE_COUNTER("GPU XPBD: overflow constraints", counts.overflow_constraints);
         PROFILE_COUNTER("GPU XPBD: gather chunks", counts.gather_chunks);
+        PROFILE_COUNTER("GPU XPBD: moving tree refit", m_solver.refitting() ? 1 : 0);
         PROFILE_COUNTER("GPU XPBD: touching contacts", counts.reported);
         PROFILE_COUNTER("GPU XPBD: touching points", counts.touching_points);
         PROFILE_COUNTER("GPU XPBD: trigger overlaps", counts.trigger_overlaps);
@@ -1551,10 +1587,56 @@ GpuXpbdBackend::simulate(float seconds,
             }
             run_commands();
         }
+        else if (counts.reported > m_report_copied)
+        {
+            // COMPACT_READBACK: more reports than the step copied (the last step's count and a margin): the rest copied.
+            PROFILE_SCOPE("GPU XPBD: read the reports again");
+            stage = "reading the contacts back";
+            m_command_pool->reset();
+            {
+                ComputeRecorder recorder{*m_command_buffer};
+                const std::uint64_t first = std::uint64_t{m_report_copied} * sizeof(GpuContactReport);
+                const std::array regions{BufferCopyRegion{.source_offset = first,
+                                                          .destination_offset = first,
+                                                          .size = std::uint64_t{counts.reported - m_report_copied} * sizeof(GpuContactReport)}};
+                recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), regions);
+                recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+            }
+            run_commands();
+        }
+        if (m_compact_readback && body_count > 0)
+        {
+            // COMPACT_READBACK: more bodies listed than the step copied: the rest copied.
+            std::uint32_t listed = 0;
+            std::memcpy(&listed, m_readback.bytes().data(), sizeof(listed));
+            listed = std::min(listed, body_count);
+            if (listed > m_compact_capacity)
+            {
+                PROFILE_SCOPE("GPU XPBD: read the bodies again");
+                stage = "reading the step back";
+                m_command_pool->reset();
+                {
+                    ComputeRecorder recorder{*m_command_buffer};
+                    const std::uint64_t first = std::uint64_t{m_compact_capacity} * COMPACT_READBACK_BODY;
+                    const std::array regions{BufferCopyRegion{.source_offset = first,
+                                                              .destination_offset = COMPACT_READBACK_HEADER + first,
+                                                              .size = std::uint64_t{listed - m_compact_capacity} * COMPACT_READBACK_BODY}};
+                    recorder.copy_buffer(m_readback_bodies.buffer().handle(), m_readback.buffer().handle(), regions);
+                    recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+                }
+                run_commands();
+            }
+        }
+        m_last_reported = counts.reported;
         stage = "reading the step back";
         {
             PROFILE_SCOPE("GPU XPBD: read the bodies back");
             read_back(pending);
+        }
+        if (m_compact_readback)
+        {
+            PROFILE_COUNTER("GPU XPBD: bodies listed", m_last_listed);
+            PROFILE_COUNTER("GPU XPBD: bodies copied", m_compact_capacity);
         }
         std::uint32_t kept_points = 0;
         {
@@ -1596,14 +1678,40 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     m_patches.reserve(m_device, std::max<std::size_t>(patch_count, 1) * sizeof(GpuBodyPatch), m_retired);
     const std::uint32_t joint_count = m_solver.joint_count();
     const std::uint32_t particle_count = m_soft_bodies.particle_count();
-    m_readback.reserve(m_device,
-                       std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t)) + sizeof(GpuSolverCounts) +
-                           (std::uint64_t{joint_count} + particle_count) * 2 * sizeof(GpuVector),
-                       m_retired);
+    // COMPACT_READBACK only where it pays: a large world of which the last step changed at most half (listing the bodies
+    // costs passes over all of them; reading every body back costs none).
+    m_compact_readback = has_all(m_capabilities.optimizations, GpuOptimization::COMPACT_READBACK) && body_count >= GPU_XPBD_COMPACT_READBACK_BODIES &&
+                         2 * (std::uint64_t{m_last_listed} + patch_count) <= body_count;
+    const std::uint64_t body_bytes = m_compact_readback ? COMPACT_READBACK_HEADER + std::uint64_t{body_count} * COMPACT_READBACK_BODY
+                                                        : std::uint64_t{body_count} * (sizeof(GpuBodyReadback) + sizeof(std::uint32_t));
+    m_readback.reserve(m_device, body_bytes + sizeof(GpuSolverCounts) + (std::uint64_t{joint_count} + particle_count) * 2 * sizeof(GpuVector), m_retired);
     m_report_readback.reserve(m_device, std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport), m_retired);
 
+    // PARTIAL_SUBMISSIONS: the commands in parts, each submitted once it holds GPU_XPBD_PART_DISPATCHES dispatches and a
+    // stage ends (the GPU runs it while the next is recorded); the last one is submitted by run_commands(). One recorder
+    // at a time, the reference below naming each part's (the same storage: transparently replaced).
     m_command_pool->reset();
-    ComputeRecorder recorder{*m_command_buffer};
+    std::optional<ComputeRecorder> part{std::in_place, *m_command_buffer};
+    ComputeRecorder& recorder = *part;
+    CommandBuffer* part_commands = m_command_buffer.get();
+    std::size_t parts = 0;
+    m_step_statistics = {};
+    const bool partial = has_all(m_capabilities.optimizations, GpuOptimization::PARTIAL_SUBMISSIONS);
+    const auto end_part = [&] {
+        if (!partial || part_commands->statistics().dispatches < GPU_XPBD_PART_DISPATCHES)
+        {
+            return;
+        }
+        m_step_statistics += part_commands->statistics();
+        part.reset();
+        submit_part(*part_commands);
+        if (parts == m_part_command_buffers.size())
+        {
+            m_part_command_buffers.push_back(m_command_pool->allocate(CommandBufferLevel::PRIMARY, std::format("GPU physics step, part {}", parts + 2)));
+        }
+        part_commands = m_part_command_buffers[parts++].get();
+        part.emplace(*part_commands);
+    };
     m_gpu_timer.begin_frame(recorder);
 
     // The arrays hold every slot (grown ones keep the slots the GPU had); the contacts' arrays and uploads.
@@ -1618,6 +1726,14 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
         for (GpuArray& backup : m_backups)
         {
             (void)backup.reserve(m_device, recorder, body_count, kept, m_retired);
+        }
+        if (m_compact_readback)
+        {
+            for (GpuArray* array : {&m_readback_listed, &m_readback_positions, &m_readback_bodies})
+            {
+                (void)array->reserve(m_device, recorder, std::max(body_count, 1U), 0, m_retired);
+            }
+            (void)m_readback_count.reserve(m_device, recorder, 1, 0, m_retired);
         }
         m_body_count = body_count;
         m_solver.record_uploads(recorder, body_count, body_count + particle_count, m_retired);
@@ -1731,6 +1847,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                            .timer = &m_phases};
     m_solver.record_detection(recorder, step);
     detection_scope.end();
+    end_part();
     PROFILE_NAMED_SCOPE(substeps_scope, "GPU XPBD: record the substeps");
     const std::uint32_t position_iterations = std::max(solver.position_iterations, 1U);
     const std::uint32_t iterations = std::max(position_iterations, m_soft_bodies.iterations());
@@ -1762,17 +1879,27 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
                 m_solver.record_positions(recorder, iteration == 0);
             }
         }
+        if (particles && has_all(m_capabilities.optimizations, GpuOptimization::KERNEL_FUSION))
         {
-            PROFILE_GPU_SCOPE("xpbd_velocity_update", recorder, m_passes);
-            pass(m_pipelines.update_velocities(), body_count);
+            // KERNEL_FUSION: the bodies' and the particles' velocity updates, independent, in one dispatch.
+            PROFILE_GPU_SCOPE("velocity_update_fused", recorder, m_passes);
+            pass(m_pipelines.update_velocities_fused(), body_count + particle_count);
         }
-        soft(true);
-        m_soft_bodies.record_velocity_update(recorder, parameters_index);
-        soft(false);
+        else
+        {
+            {
+                PROFILE_GPU_SCOPE("xpbd_velocity_update", recorder, m_passes);
+                pass(m_pipelines.update_velocities(), body_count);
+            }
+            soft(true);
+            m_soft_bodies.record_velocity_update(recorder, parameters_index);
+            soft(false);
+        }
         for (std::uint32_t iteration = 0; iteration < std::max(solver.velocity_iterations, 1U); ++iteration)
         {
             m_solver.record_velocities(recorder, iteration == 0);
         }
+        end_part();
     }
     substeps_scope.end();
     PROFILE_SCOPE("GPU XPBD: record the events and readback");
@@ -1782,29 +1909,92 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     m_solver.record_reports(recorder);
     m_solver.record_triggers(recorder);
 
-    // The results into the readback buffer: the bodies' arrays, their flags, the solver's counts, the joints' results.
+    // COMPACT_READBACK: the bodies whose state may have changed (awake or kinematic now, woken, fallen asleep, patched),
+    // listed in slot order and gathered; the step copies the last step's count and a margin of them, the reports the last
+    // step wrote and a margin (what more there is, copied after the step).
+    if (m_compact_readback)
+    {
+        m_compact_capacity = std::min(body_count, m_last_listed + m_last_listed / 4 + patch_count + 256);
+        m_report_copied = std::min(m_solver.report_capacity(), m_last_reported + m_last_reported / 4 + 256);
+        if (body_count > 0)
+        {
+            PROFILE_GPU_SCOPE("readback list", recorder, m_passes);
+            const ReadbackPush listing{.parameters = parameters_index,
+                                       .mode = 0,
+                                       .start_flags = m_backups[4].index(),
+                                       .listed = m_readback_listed.index(),
+                                       .positions = m_readback_positions.index(),
+                                       .count = m_readback_count.index(),
+                                       .bodies = m_readback_bodies.index()};
+            const auto readback_pass = [&](std::uint32_t mode, std::uint32_t count) {
+                ReadbackPush push = listing;
+                push.mode = mode;
+                recorder.bind_pipeline(m_pipelines.readback_compact());
+                recorder.push_constants(push);
+                recorder.dispatch(workgroups(count));
+                recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_COMPUTE, 1}});
+            };
+            readback_pass(0, body_count);
+            if (patch_count > 0)
+            {
+                readback_pass(1, patch_count);
+            }
+            m_solver.primitives().compact(recorder, span_of(m_readback_listed.buffer()), {}, span_of(m_readback_positions.buffer()), span_of(m_readback_count.buffer()),
+                                          {.maximum = body_count});
+            readback_pass(2, body_count);
+        }
+    }
+    else
+    {
+        m_compact_capacity = body_count;
+        m_report_copied = m_solver.report_capacity();
+    }
+
+    // The results into the readback buffer: the bodies (their arrays and flags, or the listed ones), the solver's counts,
+    // the joints' results, the particles.
     {
         PROFILE_GPU_SCOPE("readback copies", recorder, m_passes);
         recorder.barrier({.memory_barriers = std::span{&COMPUTE_TO_TRANSFER, 1}});
         std::uint64_t offset = 0;
-        for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
+        if (m_compact_readback)
         {
-            if (vectors > 0)
+            if (body_count > 0)
             {
-                const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
-                recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+                const std::array count_region{BufferCopyRegion{.source_offset = 0, .destination_offset = 0, .size = sizeof(std::uint32_t)}};
+                recorder.copy_buffer(m_readback_count.buffer().handle(), m_readback.buffer().handle(), count_region);
+                if (m_compact_capacity > 0)
+                {
+                    const std::array body_region{BufferCopyRegion{.source_offset = 0,
+                                                                  .destination_offset = COMPACT_READBACK_HEADER,
+                                                                  .size = std::uint64_t{m_compact_capacity} * COMPACT_READBACK_BODY}};
+                    recorder.copy_buffer(m_readback_bodies.buffer().handle(), m_readback.buffer().handle(), body_region);
+                }
             }
-            offset += vectors;
+            offset = body_bytes;
         }
-        if (words > 0)
+        else
         {
-            const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
-            recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
+            for (const GpuArray* array : {&m_centers, &m_orientations, &m_linear_velocities, &m_angular_velocities})
+            {
+                if (vectors > 0)
+                {
+                    const std::array regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = vectors}};
+                    recorder.copy_buffer(array->buffer().handle(), m_readback.buffer().handle(), regions);
+                }
+                offset += vectors;
+            }
+            if (words > 0)
+            {
+                const std::array flag_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = words}};
+                recorder.copy_buffer(m_flags.buffer().handle(), m_readback.buffer().handle(), flag_regions);
+            }
+            offset += words;
         }
-        offset += words;
+        m_readback_counts_offset = offset;
         const std::array count_regions{BufferCopyRegion{.source_offset = 0, .destination_offset = offset, .size = sizeof(GpuSolverCounts)}};
         recorder.copy_buffer(m_solver.counts_buffer().handle(), m_readback.buffer().handle(), count_regions);
         offset += sizeof(GpuSolverCounts);
+        m_readback_joints_offset = offset;
         if (joint_count > 0)
         {
             const std::array joint_regions{
@@ -1812,6 +2002,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
             recorder.copy_buffer(m_solver.joint_results_buffer().handle(), m_readback.buffer().handle(), joint_regions);
         }
         offset += std::uint64_t{joint_count} * 2 * sizeof(GpuVector);
+        m_readback_particles_offset = offset;
         for (const GpuArray* array : {&m_soft_bodies.positions(), &m_soft_bodies.velocities()})
         {
             if (particle_count > 0)
@@ -1822,8 +2013,11 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
             }
             offset += std::uint64_t{particle_count} * sizeof(GpuVector);
         }
-        const std::array report_regions{BufferCopyRegion{.size = std::uint64_t{m_solver.report_capacity()} * sizeof(GpuContactReport)}};
-        recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), report_regions);
+        if (m_report_copied > 0)
+        {
+            const std::array report_regions{BufferCopyRegion{.size = std::uint64_t{m_report_copied} * sizeof(GpuContactReport)}};
+            recorder.copy_buffer(m_solver.reports_buffer().handle(), m_report_readback.buffer().handle(), report_regions);
+        }
         if (m_solver.trigger_capacity() > 0)
         {
             const std::uint64_t trigger_bytes = std::uint64_t{m_solver.trigger_capacity()} * sizeof(GpuTriggerOverlap);
@@ -1834,6 +2028,8 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     }
     m_phases.end(recorder);
     recorder.barrier({.memory_barriers = std::span{&TRANSFER_TO_HOST, 1}});
+    m_step_statistics += part_commands->statistics();
+    m_step_commands = part_commands;
 }
 
 auto
@@ -1842,8 +2038,7 @@ GpuXpbdBackend::read_counts() -> GpuSolverCounts
     m_readback.buffer().invalidate_mapped_range();
     const std::span<const std::byte> bytes = m_readback.bytes();
     GpuSolverCounts counts{};
-    const std::size_t offset = std::size_t{m_body_count} * (4 * sizeof(GpuVector) + sizeof(std::uint32_t));
-    std::memcpy(&counts, bytes.data() + offset, sizeof(counts));
+    std::memcpy(&counts, bytes.data() + m_readback_counts_offset, sizeof(counts));
     return counts;
 }
 
@@ -1856,59 +2051,146 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
     const std::span<const std::byte> bytes = m_readback.bytes();
     const std::size_t vectors = std::size_t{m_body_count} * sizeof(GpuVector);
     m_body_rests.resize(m_body_count);
-    m_body_sleep_changed.assign(m_body_count, 0);
     std::atomic<bool> sleep_changed{false};
-    const auto read_bodies = [&](std::uint32_t begin, std::uint32_t end) {
-        for (std::uint32_t slot = begin; slot < end; ++slot)
-        {
-            RigidBodyRecord& record = pending.rigid_bodies[slot];
-            if (!record.handle || record.configuration.kind == BodyKind::STATIC)
-            {
-                m_body_rests[slot] = record.handle ? 1 : 0;
-                continue;
-            }
-            std::uint32_t flags = 0;
-            std::memcpy(&flags, bytes.data() + 4 * vectors + slot * sizeof(std::uint32_t), sizeof(flags));
-            const bool awake = (flags & std::to_underlying(GpuBodyFlag::AWAKE)) != 0;
+    std::atomic<bool> moving{false};
+    std::atomic<std::uint32_t> changing{0};
 
-            // The GPU's values, exactly, in the mirror; the frame's pose and velocities in the record.
-            BodyEntry& entry = m_bodies[slot];
-            entry.center = vector3(read_vector(bytes, 0, slot));
-            entry.orientation = quaternion(read_vector(bytes, vectors, slot));
-            entry.linear_velocity = vector3(read_vector(bytes, 2 * vectors, slot));
-            entry.angular_velocity = vector3(read_vector(bytes, 3 * vectors, slot));
-            RigidBodyState& state = record.state;
-            state.pose.orientation = entry.orientation;
-            state.pose.position = entry.center - rotate(entry.orientation, effective_mass(record).center_of_mass);
-            state.linear_velocity = entry.linear_velocity + cross(entry.angular_velocity, state.pose.position - entry.center);
-            state.angular_velocity = entry.angular_velocity;
-            if (record.configuration.kind == BodyKind::DYNAMIC && awake != state.awake)
-            {
-                state.awake = awake;
-                m_body_sleep_changed[slot] = 1;
-                sleep_changed.store(true, std::memory_order_relaxed);
-            }
-            m_body_rests[slot] = record.configuration.kind == BodyKind::DYNAMIC && !state.awake ? 1 : 0;
+    // A body as the GPU left it: its values, exactly, in the mirror; the frame's pose and velocities in the record. Returns
+    // BODY_CHANGED when it woke up or fell asleep, BODY_AWAKE when it is awake: each range of bodies gathers them and stores
+    // the shared values once (stored per body from every thread, their cache line went from core to core: 50 000 awake
+    // bodies took a millisecond more).
+    constexpr std::uint32_t BODY_CHANGED = 1;
+    constexpr std::uint32_t BODY_AWAKE = 2;
+    const auto read_body = [&](std::uint32_t slot,
+                               std::uint32_t flags,
+                               const GpuVector& center,
+                               const GpuVector& orientation,
+                               const GpuVector& linear,
+                               const GpuVector& angular) -> std::uint32_t {
+        RigidBodyRecord& record = pending.rigid_bodies[slot];
+        if (!record.handle || record.configuration.kind == BodyKind::STATIC)
+        {
+            m_body_rests[slot] = record.handle ? 1 : 0;
+            return 0;
         }
-    };
-    for_each_range(m_scheduler, m_body_count, FRAMEWORK_PARALLEL_RANGE, read_bodies);
-
-    // Sleep changes reported in slot order.
-    if (sleep_changed.load(std::memory_order_relaxed))
-    {
-        for (std::uint32_t slot = 0; slot < m_body_count; ++slot)
+        const bool awake = (flags & std::to_underlying(GpuBodyFlag::AWAKE)) != 0;
+        BodyEntry& entry = m_bodies[slot];
+        entry.center = vector3(center);
+        entry.orientation = quaternion(orientation);
+        entry.linear_velocity = vector3(linear);
+        entry.angular_velocity = vector3(angular);
+        RigidBodyState& state = record.state;
+        state.pose.orientation = entry.orientation;
+        state.pose.position = entry.center - rotate(entry.orientation, effective_mass(record).center_of_mass);
+        state.linear_velocity = entry.linear_velocity + cross(entry.angular_velocity, state.pose.position - entry.center);
+        state.angular_velocity = entry.angular_velocity;
+        bool changed = false;
+        if (record.configuration.kind == BodyKind::DYNAMIC && awake != state.awake)
         {
-            if (m_body_sleep_changed[slot] != 0)
+            state.awake = awake;
+            changed = true;
+        }
+        m_body_rests[slot] = record.configuration.kind == BodyKind::DYNAMIC && !state.awake ? 1 : 0;
+        return (changed ? BODY_CHANGED : 0U) | (awake ? BODY_AWAKE : 0U);
+    };
+    // A range's findings into the shared values (once a range).
+    const auto gather = [&](std::uint32_t seen,
+                            std::uint32_t counted) {
+        if ((seen & BODY_CHANGED) != 0)
+        {
+            sleep_changed.store(true, std::memory_order_relaxed);
+        }
+        if ((seen & BODY_AWAKE) != 0)
+        {
+            moving.store(true, std::memory_order_relaxed);
+        }
+        changing.fetch_add(counted, std::memory_order_relaxed);
+    };
+    if (m_compact_readback)
+    {
+        // The listed bodies only (the others did not move, their flags did not change: their records and rest stand).
+        std::uint32_t listed = 0;
+        if (m_body_count > 0)
+        {
+            std::memcpy(&listed, bytes.data(), sizeof(listed));
+        }
+        listed = std::min(listed, m_body_count);
+        m_last_listed = listed;
+        m_body_sleep_changed.assign(listed, 0);
+        const auto read_listed = [&](std::uint32_t begin, std::uint32_t end) {
+            std::uint32_t seen = 0;
+            for (std::uint32_t index = begin; index < end; ++index)
             {
-                const RigidBodyRecord& record = pending.rigid_bodies[slot];
-                pending.sleep_events.push_back({.kind = record.state.awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+                const std::size_t base = COMPACT_READBACK_HEADER + std::size_t{index} * COMPACT_READBACK_BODY;
+                std::array<std::uint32_t, 2> words{};
+                std::memcpy(words.data(), bytes.data() + base + 4 * sizeof(GpuVector), sizeof(words));
+                if (words[0] < m_body_count && words[0] < pending.rigid_bodies.size())
+                {
+                    const std::uint32_t body = read_body(words[0], words[1], read_vector(bytes, base, 0), read_vector(bytes, base, 1),
+                                                         read_vector(bytes, base, 2), read_vector(bytes, base, 3));
+                    m_body_sleep_changed[index] = (body & BODY_CHANGED) != 0 ? 1 : 0;
+                    seen |= body;
+                }
+            }
+            gather(seen, 0);
+        };
+        for_each_range(m_scheduler, listed, FRAMEWORK_PARALLEL_RANGE, read_listed);
+        if (sleep_changed.load(std::memory_order_relaxed))
+        {
+            // In slot order (the list is).
+            for (std::uint32_t index = 0; index < listed; ++index)
+            {
+                if (m_body_sleep_changed[index] != 0)
+                {
+                    std::array<std::uint32_t, 1> slot{};
+                    std::memcpy(slot.data(), bytes.data() + COMPACT_READBACK_HEADER + std::size_t{index} * COMPACT_READBACK_BODY + 4 * sizeof(GpuVector),
+                                sizeof(slot));
+                    const RigidBodyRecord& record = pending.rigid_bodies[slot[0]];
+                    pending.sleep_events.push_back({.kind = record.state.awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+                }
+            }
+        }
+    }
+    else
+    {
+        m_body_sleep_changed.assign(m_body_count, 0);
+        const auto read_bodies = [&](std::uint32_t begin, std::uint32_t end) {
+            std::uint32_t seen = 0;
+            std::uint32_t counted = 0;
+            for (std::uint32_t slot = begin; slot < end; ++slot)
+            {
+                std::uint32_t flags = 0;
+                std::memcpy(&flags, bytes.data() + 4 * vectors + slot * sizeof(std::uint32_t), sizeof(flags));
+                const std::uint32_t body = read_body(slot, flags, read_vector(bytes, 0, slot), read_vector(bytes, vectors, slot), read_vector(bytes, 2 * vectors, slot),
+                                                     read_vector(bytes, 3 * vectors, slot));
+                m_body_sleep_changed[slot] = (body & BODY_CHANGED) != 0 ? 1 : 0;
+                counted += body != 0 ? 1U : 0U;
+                seen |= body;
+            }
+            gather(seen, counted);
+        };
+        for_each_range(m_scheduler, m_body_count, FRAMEWORK_PARALLEL_RANGE, read_bodies);
+        m_last_listed = changing.load(std::memory_order_relaxed);
+
+        // Sleep changes reported in slot order.
+        if (sleep_changed.load(std::memory_order_relaxed))
+        {
+            for (std::uint32_t slot = 0; slot < m_body_count; ++slot)
+            {
+                if (m_body_sleep_changed[slot] != 0)
+                {
+                    const RigidBodyRecord& record = pending.rigid_bodies[slot];
+                    pending.sleep_events.push_back({.kind = record.state.awake ? SleepEventKind::WOKE_UP : SleepEventKind::FELL_ASLEEP, .body = record.handle});
+                }
             }
         }
     }
 
+    m_rested = !moving.load(std::memory_order_relaxed);
+
     // The joints solved in the step: their force and torque (the step's averages); those that broke are disabled and
     // reported (in slot order).
-    const std::size_t results = 4 * vectors + std::size_t{m_body_count} * sizeof(std::uint32_t) + sizeof(GpuSolverCounts);
+    const std::size_t results = m_readback_joints_offset;
     const std::uint32_t joint_count = std::min(m_solver.joint_count(), static_cast<std::uint32_t>(pending.joints.size()));
     for (std::uint32_t joint_slot = 0; joint_slot < joint_count; ++joint_slot)
     {
@@ -1934,7 +2216,7 @@ GpuXpbdBackend::read_back(WorldSnapshot& pending)
     }
 
     // The particles' positions and velocities, after the joints' results.
-    const std::size_t particles = results + std::size_t{m_solver.joint_count()} * 2 * sizeof(GpuVector);
+    const std::size_t particles = m_readback_particles_offset;
     const std::size_t particle_vectors = std::size_t{m_soft_bodies.particle_count()} * sizeof(GpuVector);
     for (std::uint32_t soft_slot = 0; soft_slot < m_soft_body_entries.size() && soft_slot < pending.soft_bodies.size(); ++soft_slot)
     {

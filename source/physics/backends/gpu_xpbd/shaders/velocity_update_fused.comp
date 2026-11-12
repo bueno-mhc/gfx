@@ -1,0 +1,20 @@
+#version 460
+// The velocity update of a substep for the bodies, then the particles, in one dispatch (GpuOptimization::KERNEL_FUSION: the
+// two are independent): invocations below the body count update bodies, the rest particles (velocity_update.glsl).
+#extension GL_GOOGLE_include_directive : require
+#include "step.glsl"
+#include "particles.glsl"
+#include "velocity_update.glsl"
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    if (index < PARAMETERS.body_count)
+    {
+        update_body_velocity(index);
+    }
+    else
+    {
+        update_particle_velocity(index - PARAMETERS.body_count);
+    }
+}

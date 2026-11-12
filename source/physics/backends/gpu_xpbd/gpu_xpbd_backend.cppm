@@ -76,6 +76,7 @@ struct BodyEntry
     bool woken = false;         ///< Something woke it.
     bool awake_set = false;     ///< Its awake state was set (from the record).
     bool pushed = false;        ///< Forces, torques or impulses.
+    bool touched = false;       ///< In the slots this step's edits named (GpuXpbdBackend::m_touched_bodies).
     Vector3 force{};            ///< For the next step (world space, at the center).
     Vector3 torque{};           ///< For the next step.
     Vector3 linear_impulse{};   ///< To apply at the next step (at the center).
@@ -399,6 +400,10 @@ private:
     /// Submits the recorded command buffer (@p commands: the step's by default) and waits for it.
     void run_commands(CommandBuffer* commands = nullptr);
 
+    /// PARTIAL_SUBMISSIONS: submits @p commands, a part of the step, without waiting (the step's last part signals and
+    /// is waited for by run_commands()).
+    void submit_part(CommandBuffer& commands);
+
     /// Runs @p query on the GPU (its buffers' indices filled here; @p shape: a cast's or overlap's convex shape): true when
     /// it answered (its results then in m_query_results), false when the abstraction answers (before the first step, a
     /// hull the shape table lacks, more than a query holds), the failure of @p operation when the GPU failed (UNSUPPORTED:
@@ -431,6 +436,9 @@ private:
     Queue* m_queue = nullptr;
     std::unique_ptr<CommandPool> m_command_pool{};
     std::unique_ptr<CommandBuffer> m_command_buffer{};
+    std::vector<std::unique_ptr<CommandBuffer>> m_part_command_buffers{}; ///< PARTIAL_SUBMISSIONS: the parts after the first.
+    CommandBuffer* m_step_commands = nullptr;                             ///< The step's last part (run_commands() submits it).
+    CommandStatistics m_step_statistics{};                                ///< The step's parts' commands.
     std::unique_ptr<TimelineSemaphore> m_timeline{};
     std::uint64_t m_submitted = 0;
     std::shared_ptr<GpuPipelineLibrary> m_pipeline_library{}; ///< The device's (SHARED_PIPELINES), else null.
@@ -543,7 +551,30 @@ private:
     std::vector<ReportOrder> m_report_order{};         ///< The keys, sorted.
     std::vector<ReportOrder> m_report_order_scratch{}; ///< (The radix sort's other half.)
     std::vector<std::uint8_t> m_body_rests{};          ///< By body slot after read_back(): static, or dynamic and asleep.
-    std::vector<std::uint8_t> m_body_sleep_changed{};  ///< By body slot during read_back(): woke up or fell asleep.
+    std::vector<std::uint8_t> m_body_sleep_changed{};  ///< By body slot (by listed body with COMPACT_READBACK) during read_back(): woke up or fell asleep.
+    std::uint32_t m_unchanged_contact_steps = 0;       ///< Steps in a row whose pairs and contacts were the last step's (none reported, all carried over).
+    bool m_rested = false;                             ///< After read_back(): no body moves (every dynamic one asleep, no kinematic one awake).
+    bool m_edited = false;                             ///< apply() had edits since the last step.
+    std::uint32_t m_was_touching_contact_count = 0;    ///< Contacts of last step's pairs (all carried over: the published list's size).
+    std::uint32_t m_was_touching_points = 0;           ///< Their points.
+
+    // The slots this step's edits named (sorted when the patches are made: slot order).
+    std::vector<std::uint32_t> m_touched_bodies{};
+
+    // COMPACT_READBACK: the bodies whose state may have changed, listed and gathered on the GPU (five vectors each); how many
+    // the step's copy holds (the last step's count and a margin; the rest copied after it) and the readback's layout.
+    GpuArray m_readback_listed{"read-back flags", sizeof(std::uint32_t)};
+    GpuArray m_readback_positions{"read-back slots", sizeof(std::uint32_t)};
+    GpuArray m_readback_count{"read-back count", sizeof(std::uint32_t)};
+    GpuArray m_readback_bodies{"read-back bodies", 5 * sizeof(GpuVector)};
+    bool m_compact_readback = false;               ///< This step's bodies are read back compacted.
+    std::uint32_t m_compact_capacity = 0;          ///< Listed bodies the step's copy holds.
+    std::uint32_t m_last_listed = 0;               ///< Bodies the last step listed.
+    std::uint32_t m_report_copied = 0;             ///< Contact reports the step's copy holds.
+    std::uint32_t m_last_reported = 0;             ///< Reports the last step wrote.
+    std::size_t m_readback_counts_offset = 0;      ///< Where the readback holds the solver's counts,
+    std::size_t m_readback_joints_offset = 0;      ///< the joints' results,
+    std::size_t m_readback_particles_offset = 0;   ///< the particles' positions, then velocities.
 };
 
 } // namespace gfx::physics::gpu_xpbd

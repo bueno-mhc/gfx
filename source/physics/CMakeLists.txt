@@ -227,8 +227,10 @@ if(GFX_PHYSICS_BACKEND_GPU_XPBD)
         NAMESPACE gfx::physics::gpu_xpbd::shaders
         SHADERS
             backends/gpu_xpbd/shaders/patch_bodies.comp
+            backends/gpu_xpbd/shaders/readback_compact.comp
             backends/gpu_xpbd/shaders/xpbd_integrate.comp
             backends/gpu_xpbd/shaders/xpbd_velocity_update.comp
+            backends/gpu_xpbd/shaders/velocity_update_fused.comp
             backends/gpu_xpbd/shaders/scan_reduce.comp
             backends/gpu_xpbd/shaders/scan_reduce_subgroups.comp
             backends/gpu_xpbd/shaders/scan_downsweep.comp

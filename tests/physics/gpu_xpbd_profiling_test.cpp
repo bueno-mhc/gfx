@@ -45,10 +45,18 @@ protected:
         return m_instance->physical_device(GetParam());
     }
 
-    /// The profiled scene, its cloth large enough for the sorts of its particles to take radix passes.
+    /// The profiled scene, its cloth large enough for the sorts of its particles to take radix passes, and static bodies
+    /// (without colliders: nothing to collide, nothing to list) enough for the steps after the first to list the bodies
+    /// they read back (COMPACT_READBACK needs GPU_XPBD_COMPACT_READBACK_BODIES).
     [[nodiscard]] auto scene() -> gfx::tests::ProfiledScene
     {
-        return gfx::tests::make_profiled_scene(gpu::create_physics_world({}, *m_device), CLOTH_COLUMNS);
+        gfx::tests::ProfiledScene profiled = gfx::tests::make_profiled_scene(gpu::create_physics_world({}, *m_device), CLOTH_COLUMNS);
+        for (std::uint32_t index = 0; index < GPU_XPBD_COMPACT_READBACK_BODIES; ++index)
+        {
+            const gfx::Vector3 position{.x = 100.0F + static_cast<float>(index % 64), .z = static_cast<float>(index / 64)};
+            profiled.bodies.push_back(profiled.world->create_rigid_body({.kind = BodyKind::STATIC, .pose = {.position = position}}));
+        }
+        return profiled;
     }
 
     static constexpr std::uint32_t CLOTH_COLUMNS = 66;
@@ -83,7 +91,7 @@ TEST_P(GpuXpbdProfilingTest, TheTraceCoversEveryStage)
     EXPECT_GT(gpu_scopes, 100U);
 
     // The step's sizes, as counters.
-    EXPECT_EQ(gfx::tests::last_counter(trace, "GPU XPBD: bodies"), gfx::tests::PROFILED_SCENE_BODIES);
+    EXPECT_EQ(gfx::tests::last_counter(trace, "GPU XPBD: bodies"), gfx::tests::PROFILED_SCENE_BODIES + GPU_XPBD_COMPACT_READBACK_BODIES);
     EXPECT_EQ(gfx::tests::last_counter(trace, "GPU XPBD: particles"), CLOTH_COLUMNS * CLOTH_COLUMNS);
     EXPECT_EQ(gfx::tests::last_counter(trace, "GPU XPBD: joints"), 3.0);
     EXPECT_GT(gfx::tests::last_counter(trace, "GPU XPBD: dispatches").value_or(0.0), 100.0);
@@ -100,19 +108,21 @@ TEST_P(GpuXpbdProfilingTest, GpuScopesLieInsideTheirSubmissions)
     gfx::tests::ProfiledScene profiled = scene();
     const gfx::profiler::Trace trace = gfx::tests::trace_steps(profiled, 3, "GPU XPBD");
 
-    // Each submission's window on the CPU: from its submit's beginning to the end of the wait after it.
+    // Each waited-for run's window on the CPU: from the beginning of its first submission (a step's parts are submitted as
+    // they are recorded, PARTIAL_SUBMISSIONS, the last one then waited for) to the end of the wait.
     const std::optional<std::uint32_t> submit_site = trace.find_site("GPU XPBD: submit");
+    const std::optional<std::uint32_t> part_site = trace.find_site("GPU XPBD: submit a part");
     const std::optional<std::uint32_t> wait_site = trace.find_site("GPU XPBD: wait for the GPU");
     ASSERT_TRUE(submit_site && wait_site);
-    std::vector<std::int64_t> submits;
+    std::vector<std::int64_t> submissions;
     std::vector<std::int64_t> waits;
     for (const gfx::profiler::TraceFrame& frame : trace.frames())
     {
         for (const gfx::profiler::TraceScope& scope : frame.scopes)
         {
-            if (scope.site == *submit_site)
+            if (scope.site == *submit_site || (part_site && scope.site == *part_site))
             {
-                submits.push_back(scope.begin);
+                submissions.push_back(scope.begin);
             }
             if (scope.site == *wait_site)
             {
@@ -120,10 +130,17 @@ TEST_P(GpuXpbdProfilingTest, GpuScopesLieInsideTheirSubmissions)
             }
         }
     }
-    std::ranges::sort(submits);
+    std::ranges::sort(submissions);
     std::ranges::sort(waits);
-    ASSERT_EQ(submits.size(), waits.size());
-    ASSERT_FALSE(submits.empty());
+    ASSERT_FALSE(waits.empty());
+    std::vector<std::int64_t> submits;
+    for (std::size_t wait = 0; wait < waits.size(); ++wait)
+    {
+        const std::int64_t after = wait == 0 ? std::numeric_limits<std::int64_t>::min() : waits[wait - 1];
+        const auto first = std::ranges::upper_bound(submissions, after);
+        ASSERT_TRUE(first != submissions.end() && *first <= waits[wait]) << "a submission before each wait";
+        submits.push_back(*first);
+    }
 
     // Every timed GPU scope inside one of them, within the alignment's deviation (and 50 µs of rounding).
     ASSERT_EQ(trace.gpu_tracks().size(), 1U);

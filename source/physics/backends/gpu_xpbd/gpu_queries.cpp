@@ -160,6 +160,15 @@ GpuXpbdBackend::run_commands(CommandBuffer* commands)
     }
 }
 
+void
+GpuXpbdBackend::submit_part(CommandBuffer& commands)
+{
+    const std::array command_buffers{commands.handle()};
+    const std::array batches{SubmitDescription{.command_buffers = command_buffers}};
+    PROFILE_SCOPE("GPU XPBD: submit a part");
+    m_queue->submit(batches);
+}
+
 auto
 GpuXpbdBackend::run_query(GpuQuery query,
                           const Shape* shape,

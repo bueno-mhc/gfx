@@ -944,6 +944,177 @@ CPU work around the GPU's 3 ms: recording, reading back, contacts and events, pu
 and a GPU event path would cut; fewer velocity iterations (the Pareto question) would cut the GPU's share. The benchmark's
 gate passed (exit 0).
 
+### PF5b as built (2026-11-11)
+
+Asked after PF5 was accepted (user, 2026-11-10): build what PF5 measured and left — benchmark with sleep and the compact
+readback, the kernel fusion, the BVH refit, the larger refactor of the command buffer if necessary — plus a Python script
+tetrahedralizing any mesh for XPBD soft bodies. Then (user, 2026-11-11): "the performance has degraded … guarantee that no
+performance penalty is observed, specially in the sandbox mode". Every flag below is in `DEFAULT_GPU_OPTIMIZATIONS`; each
+test fails with its mechanism broken (checked: a mutation built, the test run, the mutation reverted with a tool that writes
+a new time).
+
+**How "no penalty" was checked.** PF5's commit (e7a0d80) was built beside the working tree (a detached worktree in
+`build/head`, its dependencies' sources from the profile build: no download) — the benchmark and the sandbox in a profile
+build, the sandbox in a Debug build — and every comparison runs the two alternately (PF5, now, PF5, now…), one process a
+scene, so that the laptop's clocks, which move by a factor of up to 5 over hours (the evening's runs: PF5's own code ran
+50 000 boxes in 31–35 ms, the next morning in 12.7 ms), hit both alike. The medians of 3 rounds (sandbox: 2–5 rounds) are
+compared. Scratchpad scripts: `ab_head.ps1`, `ab_variants.ps1` (each new flag off in turn, and PF5's flags only, which
+isolates what is not behind a flag), `ab_sandbox.ps1`, `ab_sandbox_variants.ps1`, `sandbox_frames.py` (a sandbox frame's
+main-thread work without acquiring and presenting, its phases, the world's step, from `--trace`).
+
+**Found by it: a regression outside the flags**, now fixed. With PF5's flags only, the working tree was 13–23 % slower than
+PF5 on 50 000 boxes, two worlds and the chains: `read_back()` (rewritten for the compact readback) stored a shared
+`std::atomic<bool>` for every awake body from every scheduler thread, so its cache line went from core to core. Each range
+of bodies now gathers what it saw and stores once.
+
+**The flags** (`GpuOptimization`, five new bits):
+- **`COMPACT_READBACK`** (1 << 6): the GPU lists the bodies whose state may have changed — awake or kinematic, their flags
+  changed since the step's start (woken, fallen asleep), or patched — compacts the list (`GpuPrimitives::compact`) and gathers
+  them into 80-byte records (`readback_compact.comp`, modes 0 list, 1 patched, 2 gather). The step copies a 16-byte header
+  (the count) and as many records as the last step listed, plus a quarter, the patches and 256; a step that listed more
+  copies the rest after it ("read the bodies again"). Only where it pays: worlds of at least
+  `GPU_XPBD_COMPACT_READBACK_BODIES` (4 096) bodies of which the last step changed at most half (reading every body back
+  counts them for that choice); listing costs passes over every body. The contact reports are copied by count in every
+  world (the last step's plus a quarter plus 256; "read the reports again").
+- **`RESTING_STEPS`** (1 << 7): a world at rest — no awake body after the last step, no edit since, no particle, no
+  trigger, no layout change — skips the GPU: the step changes nothing, every pair is carried over, no event. A woken body's
+  contacts warm-start from the last step that ran (other bits than running every step; the same for the same steps).
+  With it: the contacts' fast path (nothing reported, every pair carried: the framework hands back the list of two steps
+  ago, so after two unchanged steps nothing is copied), and `apply()` visits only the bodies the edits touched.
+- **`BVH_REFIT`** (1 << 8): the moving colliders' tree keeps its hierarchy while the moving list is the same one
+  (`set_colliders()` compares it) and is refit (`GpuBvh::refit`) for `GPU_XPBD_REFIT_STEPS` (30) steps, then built again
+  (the boxes grow looser as bodies move apart). Counter "GPU XPBD: moving tree refit" (1 or 0 a step). The same pairs, in
+  another order (other bits).
+- **`KERNEL_FUSION`** (1 << 9): with particles, a substep's velocity updates of the bodies and of the particles run as one
+  dispatch (`velocity_update_fused.comp`; both update functions now in `velocity_update.glsl`, shared by the three
+  shaders). The same bits.
+- **`PARTIAL_SUBMISSIONS`** (1 << 10): `record_step()` records into a sequence of command buffers and submits each part
+  once it holds `GPU_XPBD_PART_DISPATCHES` (64) dispatches and a stage ends (after the detection, after each substep): the
+  GPU runs a part while the next is recorded instead of waiting for the whole step's recording. Parts after the first come
+  from the step's pool (`m_part_command_buffers`, allocated once); the last part is the one `run_commands()` submits,
+  signals and waits for. Barriers order commands across submissions to one queue, so nothing else changed. One recorder
+  at a time: `std::optional<ComputeRecorder>` re-emplaced, the step's code naming it through one reference. The same
+  commands, the same bits. Measured worth it in small worlds too (2 % scenes: 5–24 % slower without it).
+
+**Not behind a flag**:
+- **Contacts read in the pairs' order** (`read_contacts()`): each report and key is fetched `PREFETCH_DISTANCE` (8) places
+  ahead (`__builtin_prefetch`; nothing on compilers without it). The conversion walks the reports in sorted order, a random
+  order in memory, and was bound by memory latency (165 ns a contact on one thread). Pyramid (125 000 contacts a step):
+  20–22 → 12–14 ms on one thread, 9.8–11.3 → 6.8–7.4 ms on 16.
+- **The framework keeps the boxes of colliders that did not move** (`SteppedWorld::Implementation::update_bounds()`,
+  `bounds_poses` by collider slot): a box is made again when its world pose differs bit for bit from the one it was made at,
+  or its configuration changed. Every backend; a resting world made all its boxes again each step.
+- **Pipelines of optional passes made at their first use** (`GpuPipelines::readback_compact()`, `update_velocities_fused()`):
+  worlds that never list their bodies or have no particles never make them.
+- **Counters** "GPU XPBD: bodies listed" / "bodies copied" (`COMPACT_READBACK`) and "moving tree refit".
+- **Benchmark options**: `--gpu-optimizations` (a flag measured on and off back to back), `--categories` (what the profiler
+  records: without `GPU`, no timestamps around the passes), `--sleep-thresholds <m/s>,<rad/s>,<s>` (sleep on). **Sandbox
+  option** `--gpu-optimizations` (the same, in the sandbox's conditions).
+
+**Not built, and why**:
+- **`REUSE_RECORDING`**: in the profile build, recording is 0.8–7.5 ms of CPU a step and `PARTIAL_SUBMISSIONS` now hides
+  it behind the GPU's work. Where it dominates is the Debug build with the validation layers (the sandbox's launch
+  configuration): a small world's step is 46–80 ms there, of which recording is ~37 ms and submitting ~8 ms for ~255
+  dispatches and ~262 barriers; the broad phase alone takes 16–20 ms for about 9 dispatches, because each pipeline used once
+  in a command buffer is checked in full (the substeps reuse a few pipelines hundreds of times: ~70 µs a command).
+  Replaying recorded substeps would cut the substeps' share, but they hold timestamps (the
+  phase timer marks the soft bodies' passes in every build; the profiler's pass scopes when it records) that a replay would
+  write into another frame's query slots, and knowing that a recording may be replayed needs the commands compared (a
+  `CommandBuffer` that fingerprints them): a follow-up of its own.
+- **`SLEEP_TUNING`**: not needed. With the defaults (0.05 m/s, 0.05 rad/s, 0.5 s) the resting scenes fall asleep within
+  the 100 warm-up steps, and with `RESTING_STEPS` and the framework keeping unmoved colliders' boxes a sleeping world costs
+  about 1 ms a step: `--sleep`, PF5 → now (mean ms, 2 rounds): many_boxes 12.38 → 0.91, pyramid 14.01 → 0.88, two_worlds
+  11.89 → 1.12; the scenes that never sleep 4–11 % faster as without sleep (cloth 13.93 → 13.41, chain 3.89 → 3.45, mixed
+  18.78 → 16.88, stress 8.29 → 7.44). `--sleep-thresholds` measures other values.
+
+**Tetrahedral meshes for soft bodies**: `tools/tetrahedralize.py` (standard library only; scipy's Delaunay used when
+installed) reads OBJ, STL (text or binary), PLY (ASCII or binary little-endian) and OFF; welds; samples the surface (thinned to
+`--surface-spacing`) and a jittered interior grid (`--resolution` cells along the longest side); Bowyer–Watson Delaunay with
+a stochastic walk, star-shaped cavity repair and a 1e-6 perturbation; keeps the tetrahedra whose centers are inside (a vote of
+three axes, each inside when the ray crossing parity is odd or the winding number is not zero: overlapping and badly wound
+meshes work); removes slivers on the boundary (`--minimum-quality`); writes TetGen `.node`/`.ele`/`.face`, JSON or a C++
+module (`--format`); `--check` compares the volume with a voxel reference of the input. C++: `read_tetgen_mesh(node, element)`
+(comments, 0- or 1-based indices, orientation fixed, every problem named) and `tetrahedral_mesh_surface(mesh)` (outward
+triangles) in `gfx.physics.dynamics`. CTest runs `tests/physics/meshes/make_test_meshes.py` (torus OBJ, binary STL sphere,
+ASCII PLY box, OFF of two overlapping boxes) and the tool on each with `--check` as fixtures for the tests that load them.
+
+**Tests**:
+- `GpuXpbdRigidTest.CompactReadbackGivesTheSameBitsAndEvents`: 4 224 boxes (a world large enough to list its bodies) fall
+  asleep beside a bouncing ball; ten steps later a plank lands on them all, waking them in one step after steps listing one
+  or two: more than the step copied, the rest read after it (counted in a trace). Every step's states and events equal those
+  of a full readback. Fails when the second copy is skipped. Its first version never needed the second copy: the step the
+  boxes fell asleep in listed them all, so the next step copied them all (found by counting the scope).
+- `RestingWorldsStepWithoutTheGpu`: 30 resting boxes keep their bits and contacts for 30 steps without the GPU; a pushed
+  box slides and rests again within 1 cm of where it ends with every step on the GPU.
+- `RefitTreesKeepEveryContact`: 64 balls dropped in a jittered grid pile up with refit trees (87 refits and 3 builds in 90
+  steps) no deeper than with trees built every step. Fails (balls 1.87 m into each other and the floor) when the refit is
+  skipped.
+- `GpuXpbdSoftBodyTest.FusedVelocityUpdatesGiveTheSameBits`: a cloth on a box beside a falling box, fused and not: the same
+  bits. Fails when the fused pass skips the particles.
+- `GpuXpbdJointTest.TheOptimizationsGiveTheBaselinesBits` now compares the default flags that keep the bits (all but
+  `REACH_BOXES`, `BVH_REFIT`, `RESTING_STEPS`) with none: `BVH_REFIT` changed the JACOBI mode's bits at step 44 (the
+  gather sums in pair order).
+- `GpuXpbdProfilingTest.GpuScopesLieInsideTheirSubmissions`: a step's window now starts at its first submission (a part).
+  The suite's world also holds `GPU_XPBD_COMPACT_READBACK_BODIES` static bodies without colliders, so that the steps after the
+  first list their bodies and `TheTraceCoversEveryStage` sees the compact readback's pass.
+- `TetrahedralMeshTest` (4: TetGen files read whatever their index base, malformed files refused naming the problem, the
+  boundary closed and wound outward, the tool's torus a volume keeping its shape on the reference backend) and
+  `GpuXpbdSoftBodyTest.AToolTetrahedralizedTorusIsAVolumeOnTheGpu`; `Tetrahedralize.{TestMeshes, torus, sphere, box,
+  two_boxes}`.
+
+**Results**: Debug 1571 of 1571 (606 s; the two `TheTraceCoversEveryStage` failed until the suite's world was made large
+enough for the compact readback, then its 32 tests again), Release 1571 of 1571 (506 s), run from PowerShell with
+`--timeout 900`.
+
+**Measured against PF5** (profile build, the GPU backend, mean ms per step, medians of 3 rounds run alternately; 300 steps
+after 60):
+
+| Scene | PF5 | now | change | at 2 % of the bodies: PF5 | now | change |
+|---|---|---|---|---|---|---|
+| many_boxes | 12.64 | 11.42 | −10 % | 2.17 | 1.55 | −28 % |
+| pyramid | 51.20 | 50.31 | −2 % | 10.39 | 8.14 | −22 % |
+| cloth | 15.03 | 14.50 | −4 % | 2.42 | 1.97 | −19 % |
+| chain | 3.90 | 3.44 | −12 % | 1.40 | 1.05 | −25 % |
+| mixed | 20.78 | 18.98 | −9 % | 9.42 | 7.18 | −24 % |
+| stress_constraints | 8.43 | 7.56 | −10 % | 3.39 | 2.82 | −17 % |
+| two_worlds | 13.08 | 11.75 | −10 % | 3.32 | 2.54 | −24 % |
+
+The same run again after the framework's box change (3 rounds): many_boxes 13.58 → 13.12, pyramid 48.96 → 47.31, cloth
+14.22 → 13.52, chain 3.91 → 3.49, mixed 19.64 → 17.78, stress 8.44 → 7.49, two_worlds 14.76 → 12.75 — faster in every round.
+
+**The sandbox** (profile build, `--physics gpu_xpbd --frames 480`, 3 rounds; the world's step on its thread and the main
+thread's work per frame without acquiring and presenting, ms, medians):
+
+| Preset | step PF5 | step now | change | frame work PF5 | now |
+|---|---|---|---|---|---|
+| showcase | 1.90 | 1.70 | −10 % | 0.94 | 0.80 |
+| stacks | 1.03 | 0.01 | resting: no GPU step | 0.58 | 0.54 |
+| dominoes | 2.51 | 2.55 | +2 % (noise: 2.73 → 2.32 in another 3-round run) | 0.53 | 0.56 |
+| chains | 3.23 | 2.97 | −8 % | 0.88 | 0.55 |
+| cloth | 2.94 | 2.83 | −4 % (5 rounds: 2.99 → 2.54) | 0.61 | 0.53 |
+| soft_volumes | 3.83 | 3.42 | −11 % | 1.97 | 1.90 |
+| friction | 1.39 | 1.37 | −1 % | 0.58 | 0.76 (one run's presentation stall) |
+| bouncing | 1.51 | 1.35 | −11 % (5 rounds: 1.48 → 1.35) | 0.54 | 0.53 |
+| triggers | 3.22 | 2.96 | −8 % | 1.41 | 0.89 |
+
+A run's mean frame work moves by a few frames that wait on presentation (the window is not in front); they come in both
+versions alike (3 runs each of 27): over all runs the p95 work is 1.75 ms now against 2.49 ms before.
+
+**The sandbox in Debug with the validation layers** (its launch configuration, `--frames 240`, the world's step in ms):
+measured first against PF5's commit built in the worktree, the current code from `build/debug` came out ~8 % slower on
+friction, bouncing and triggers, with every new flag off too, the same commands (255 dispatches, 262 barriers a step), the
+same simulation and the same 171 bindless buffers. The same code built in the worktree measures as PF5 does (friction
+46.1–47.8 ms against 46.2–47.1; the main thread's work 57.0–61.0 against 57.0–63.1), and the `build/debug` executable stays
+slower run from the worktree's folder: the gap belongs to that binary (same sources and flags, other paths and layout), not to
+the code. Rebuilt from clean, `build/debug`'s binary is again ~5 % slower on friction (51.0–52.0 ms against 47.9–49.7)
+but ~2 % faster on bouncing (48.9–49.9 against 49.0–53.9): two builds of identical sources differ by 5–8 % per preset
+there, in either direction. The resting preset `stacks` takes 0.03 ms a step instead of 50 (no GPU step), and the other
+presets match within the run-to-run noise (±10 % per run).
+
+Also found: `build/debug` had been configured again without `GFX_PHYSICS_BACKEND_GPU_XPBD` and without the profiler (its
+cache named the compiler `g++.exe`, build.py names it `g++.EXE`: the first build.py run resets the cache and drops the -D
+options, the second applies them), so the Debug sandbox could not run the GPU backend until build.py ran twice.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

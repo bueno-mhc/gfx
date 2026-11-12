@@ -141,6 +141,25 @@ enum class GpuOptimization : std::uint32_t
                                    ///< filter keeps are the same, the trees stop finding the others (one fast body no longer
                                    ///< makes every box overlap its neighbors'). The trees' leaves are placed as before; the
                                    ///< order the pairs are found in may differ (other bits, the same pairs).
+    COMPACT_READBACK    = 1U << 6, ///< A step reads back only the bodies whose state may have changed (awake or kinematic,
+                                   ///< woken, fallen asleep, patched), compacted on the GPU, and only the contact reports
+                                   ///< the step wrote (the last step's count and a margin, the rest copied after when more
+                                   ///< were written): a world whose bodies sleep reads back almost nothing. The same bits.
+    RESTING_STEPS       = 1U << 7, ///< A step of a world at rest — nothing moved in the last step (every dynamic body
+                                   ///< asleep, no kinematic body awake), no edit since, no particle, no trigger — runs
+                                   ///< nothing on the GPU: it would change nothing (every pair carried over, no event).
+                                   ///< When a body wakes, its contacts warm-start from the last step that ran (other
+                                   ///< bits than running every step on the GPU; the same for the same steps).
+    BVH_REFIT           = 1U << 8, ///< The moving colliders' tree keeps its hierarchy from step to step and only its boxes
+                                   ///< are computed again (a refit), while the moving colliders are the same ones: built
+                                   ///< again every GPU_XPBD_REFIT_STEPS steps (its boxes grow looser as bodies move apart).
+                                   ///< The pairs are the same; the order they are found in differs (other bits).
+    KERNEL_FUSION       = 1U << 9, ///< Passes that do not depend on each other run as one dispatch: a substep's velocity
+                                   ///< update of the bodies and of the particles (worlds with soft bodies). The same bits.
+    PARTIAL_SUBMISSIONS = 1U << 10, ///< The step's commands are submitted in parts as they are recorded (the detection,
+                                    ///< then the substeps, each part once it holds GPU_XPBD_PART_DISPATCHES dispatches):
+                                    ///< the GPU runs a part while the next is recorded, instead of waiting for the whole
+                                    ///< step's recording. The same commands, the same bits.
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -700,7 +719,22 @@ inline constexpr std::uint32_t GPU_XPBD_TIMED_SCOPES = 2048;
 inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
     static_cast<GpuOptimization>(std::to_underlying(GpuOptimization::INCREMENTAL_LAYOUTS) | std::to_underlying(GpuOptimization::SHARED_PIPELINES) |
                                  std::to_underlying(GpuOptimization::CHUNKED_GATHER) | std::to_underlying(GpuOptimization::NODE_MAXIMA_COLORING) |
-                                 std::to_underlying(GpuOptimization::RECORDED_PASSES_BY_USE) | std::to_underlying(GpuOptimization::REACH_BOXES));
+                                 std::to_underlying(GpuOptimization::RECORDED_PASSES_BY_USE) | std::to_underlying(GpuOptimization::REACH_BOXES) |
+                                 std::to_underlying(GpuOptimization::COMPACT_READBACK) | std::to_underlying(GpuOptimization::RESTING_STEPS) |
+                                 std::to_underlying(GpuOptimization::BVH_REFIT) | std::to_underlying(GpuOptimization::KERNEL_FUSION) |
+                                 std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS));
+
+/// @brief Steps the GPU backend refits its moving colliders' tree before building it again (GpuOptimization::BVH_REFIT).
+inline constexpr std::uint32_t GPU_XPBD_REFIT_STEPS = 30;
+
+/// @brief Bodies a world of the GPU backend holds at least before a step lists the bodies it reads back
+///        (GpuOptimization::COMPACT_READBACK; and only when at most half of them may have changed in the last step):
+///        listing them costs passes that reading every body back does not, a loss in smaller or busier worlds.
+inline constexpr std::uint32_t GPU_XPBD_COMPACT_READBACK_BODIES = 4096;
+
+/// @brief Dispatches a part of the GPU backend's step holds at least before it is submitted (GpuOptimization::
+///        PARTIAL_SUBMISSIONS): a submission costs tens of microseconds, about what recording this many passes does.
+inline constexpr std::uint32_t GPU_XPBD_PART_DISPATCHES = 64;
 
 /// @brief Overflow entries a chunk of the GPU backend's Jacobi gather holds (GpuOptimization::CHUNKED_GATHER): a node with
 ///        more is gathered chunk by chunk, the chunks summed in parallel.
@@ -892,6 +926,11 @@ struct EnumerationTraits<physics::GpuOptimization>
         EnumeratorName{physics::GpuOptimization::NODE_MAXIMA_COLORING, "NODE_MAXIMA_COLORING"},
         EnumeratorName{physics::GpuOptimization::RECORDED_PASSES_BY_USE, "RECORDED_PASSES_BY_USE"},
         EnumeratorName{physics::GpuOptimization::REACH_BOXES, "REACH_BOXES"},
+        EnumeratorName{physics::GpuOptimization::COMPACT_READBACK, "COMPACT_READBACK"},
+        EnumeratorName{physics::GpuOptimization::RESTING_STEPS, "RESTING_STEPS"},
+        EnumeratorName{physics::GpuOptimization::BVH_REFIT, "BVH_REFIT"},
+        EnumeratorName{physics::GpuOptimization::KERNEL_FUSION, "KERNEL_FUSION"},
+        EnumeratorName{physics::GpuOptimization::PARTIAL_SUBMISSIONS, "PARTIAL_SUBMISSIONS"},
     };
 };
 

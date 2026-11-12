@@ -2131,14 +2131,32 @@ SteppedWorld::Implementation::forget_soft_body_model(SoftBodyHandle soft_body) n
 void
 SteppedWorld::Implementation::update_bounds()
 {
+    // A collider's box is made again when its world pose differs, bit for bit, from the one its box was made at, or its
+    // configuration changed (new, or edited this step); the others keep theirs: a resting world's 50 000 boxes were made
+    // again every step (most of a step its backend skipped).
     PROFILE_SCOPE("World: update the bounds");
+    bounds_poses.resize(pending.colliders.size());
     for_each_range(scheduler, pending.colliders.size(), FRAMEWORK_PARALLEL_RANGE, [this](std::uint32_t begin, std::uint32_t end) {
         for (std::size_t index = begin; index < end; ++index)
         {
             ColliderRecord& collider = pending.colliders[index];
             if (collider.handle)
             {
-                collider.world_bounds = collider.configuration.shape->bounds(world_pose(pending, collider));
+                const Transform pose = world_pose(pending, collider);
+                Transform& made_at = bounds_poses[index];
+                const auto same_bits = [](const Transform& left, const Transform& right) noexcept {
+                    // Value by value (Transform has padding): equal bits, so -0 and +0 differ (a box made again: harmless).
+                    const std::array<float, 7> a{left.position.x, left.position.y, left.position.z, left.orientation.x, left.orientation.y, left.orientation.z,
+                                                 left.orientation.w};
+                    const std::array<float, 7> b{right.position.x, right.position.y, right.position.z, right.orientation.x, right.orientation.y,
+                                                 right.orientation.z, right.orientation.w};
+                    return std::bit_cast<std::array<std::uint32_t, 7>>(a) == std::bit_cast<std::array<std::uint32_t, 7>>(b);
+                };
+                if (collider.configuration_changed || !same_bits(pose, made_at))
+                {
+                    made_at = pose;
+                    collider.world_bounds = collider.configuration.shape->bounds(pose);
+                }
             }
         }
     });
