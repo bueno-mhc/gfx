@@ -5,8 +5,8 @@ built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as 
 deviations (§B "PF2 as built"). **PF3 accepted** with its 8 deviations (§B "PF3 as built"); the GPU defect it found is fixed and accepted (docs/gpu-xpbd-design.md §B
 "Fix after G10"; the baseline recorded again). **PF4 accepted** with its 5 deviations ("Accept, start PF5"; committed 51f4972). **PF5 accepted** with its 7 deviations (§B "PF5 as built"; "Do
 everything as recommended", 2026-11-10): the velocity-iteration default stays 8. **PF5b** (the optimizations PF5 measured and
-did not build) committed at the user's request (6a64914). **PF6 built** (§B "PF6 as built": the documentation, the physics
-comparison the user asked for, `gfx::SharedMutex`), awaiting validation. The numbers of §0.1 were
+did not build) committed at the user's request (6a64914). **PF6 accepted** with its 5 deviations (§B "PF6 as built": the
+documentation, the physics comparison the user asked for, `gfx::SharedMutex`). Every phase is built and accepted. The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:

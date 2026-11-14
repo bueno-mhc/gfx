@@ -1206,7 +1206,7 @@ Original hard requirements (from the user's initial specification):
   reconfigured without GPU_XPBD and the profiler (cache `g++.exe`; the Debug sandbox could not run the GPU backend): build.py's first run
   reset the cache and dropped the -D options, the second applied them (run build.py twice; check the cache); sandbox noise ±10 % a run in
   small worlds (≥ 5 rounds); Out-File -Encoding utf8 writes a BOM (use ascii); `--trace` adds the profiler's GPU pass timestamps.
-- **Profiler PF6 as built (2026-11-14; awaiting validation)** — docs/profiler-performance-design.md §B "PF6 as built" (5 deviations).
+- **Profiler PF6 as built (2026-11-14; accepted with its 5 deviations, committed by Claude at the user's request)** — docs/profiler-performance-design.md §B "PF6 as built" (5 deviations).
   User 2026-11-11: "Commit and continue to the next step" (PF5b committed 6a64914); 2026-11-14: "create a large enough scale example
   where I can compare the results using XPBD on the GPU and Box3D. Add a launch.json for it". **docs/PERFORMANCE.md** (new: machine,
   method, benchmark of 2026-11-14 sleep off/on, against PF3's baseline −38..−78 %, taxonomy before/after + per-scene costs from traces
@@ -1794,7 +1794,8 @@ accepted ("Do everything as recommended", 2026-11-10: velocity iterations stay 8
 colliders' boxes; tools/tetrahedralize.py; checked against PF5's commit built beside it: no scene or sandbox preset slower; a
 read-back regression found that way and fixed) committed at the user's request (6a64914)**; **PF6 (PERFORMANCE.md, README profiler +
 performance sections, architecture.md §10, the physics comparison `gfx_physics_comparison` + launch configuration, `gfx::SharedMutex`,
-`StepStatistics::wall_seconds`) built, awaiting validation** |
+`StepStatistics::wall_seconds`) accepted with its 5 deviations and committed at the user's request (2026-11-14)**. Every phase of
+the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
