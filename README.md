@@ -16,6 +16,8 @@ to present frames.
 | ui | `import gfx.ui;` | immediate-mode UI over retained state (widgets, tables, docking, navigation, accessibility), every text through SDF/MSDF atlases built at build time ([design](docs/ui-design.md)) |
 | physics | `import gfx.physics;` | physics worlds over Box3D, the abstraction's own replaceable components, or the GPU (XPBD on the graphics library's compute shaders): rigid bodies, joints, XPBD soft bodies, triggers, queries ([Physics](#physics), [on the GPU](#physics-on-the-gpu)) |
 | camera | `import gfx.camera;` | cameras independent of any renderer: projections for any clip conventions, frustums, screen rays, controllers ([Camera](#camera)) |
+| profiler | `import gfx.profiler;` and `<gfx/profiler.hpp>` | CPU scopes, counters and markers from any library, sessions, Chrome and binary traces, reports; compiled out when off ([Profiler](#profiler)) |
+| profiler bridge | `import gfx.profiler.graphics;` | GPU timing with the graphics library's query pools, on the CPU's timeline ([Profiler](#profiler)) |
 
 > **Status:** the graphics interface is complete: objects, typed recording, bindless resources,
 > parallel rendering passes, ray tracing, mesh shading, GPU-driven drawing, pipeline caches, frame
@@ -36,7 +38,9 @@ to present frames.
 > [physics worlds](#physics) on Box3D and on a reference backend of replaceable components, XPBD soft bodies
 > on both, and [cameras](#camera); a [GPU backend](#physics-on-the-gpu) simulates rigid and soft bodies with XPBD
 > entirely in compute shaders ([docs/gpu-xpbd-design.md](docs/gpu-xpbd-design.md)); one conformance suite runs
-> the same scenarios on the three, and the [physics example](#examples) checks a scene on each.
+> the same scenarios on the three, and the [physics example](#examples) checks a scene on each. The
+> [profiler](#profiler) times the CPU and GPU work of any library, and the [physics benchmark](#performance) measured
+> the GPU backend against Box3D through the optimizations it guided ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
 
 ```cpp
 import std;
@@ -1471,6 +1475,138 @@ gimbal lock; `set_orientation_from()` and `yaw_pitch_roll()` convert). Screen po
 origin at its top-left corner. Controllers (free fly, first person, orbit) clamp pitch and distance; an
 application's own camera (off-axis stereo, jittered projections) derives from `Camera` and is constructed directly.
 
+## Profiler
+
+`import gfx.profiler;` (target `gfx::profiler`, which depends on gfx::core only) and the macros of
+`<gfx/profiler.hpp>` time any code of any library: scopes, counters, memory sizes, markers and asynchronous spans.
+Each thread records into a lock-free ring of its own, about 50 ns a scope in an optimized build, and the profiler
+gathers the records into the frames of a session. A session's trace exports to Chrome's JSON format
+(chrome://tracing, ui.perfetto.dev) or to a compact binary format, compressed with zstd on request. It also makes a
+report: each stage's total, per-frame and per-call times with percentiles, each frame's CPU and GPU time, how much
+they overlapped, and the counters. With the option `GFX_PROFILER` off (the Release build), every macro expands to
+nothing: no code, no data, its arguments not evaluated (a test compares the object files with and without them).
+
+```cpp
+#include <gfx/profiler.hpp>   // the macros (before the imports)
+import std;
+import gfx.profiler;
+
+void simulate(int bodies)
+{
+    PROFILE_FUNCTION();                 // a scope named after the function
+    {
+        PROFILE_SCOPE("broad phase");   // a scope until the end of the block
+    }
+    PROFILE_COUNTER("bodies", bodies);  // a sample of a counter
+}
+
+int main()
+{
+    const std::unique_ptr<gfx::profiler::Profiler> profiler = gfx::profiler::create_profiler();
+    gfx::profiler::set_current_profiler(profiler.get());   // the macros record into it, from any thread
+    const gfx::profiler::SessionHandle session = profiler->create_session({.name = "simulation"});
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        profiler->begin_frame(session);
+        simulate(1000);
+        static_cast<void>(profiler->end_frame(session));
+    }
+    const gfx::profiler::Trace trace = profiler->finalize_session(session);
+    gfx::profiler::set_current_profiler(nullptr);
+
+    // A Chrome trace, and a report of the frames after the first 20 as Markdown tables.
+    gfx::profiler::export_trace(trace, gfx::profiler::TraceFormat::CHROME_JSON, "simulation.json");
+    std::println("{}", gfx::profiler::to_markdown(gfx::profiler::make_report(trace, {.skipped_frames = 20})));
+}
+```
+
+`import gfx.profiler.graphics;` (target `gfx::profiler_graphics`) times GPU work. A `GpuTimer` writes timestamps
+around scopes of commands with the graphics library's query pools, reads them back frames later and places them on the
+CPU's timeline, as a GPU track of the same frames. It calibrates the GPU's clock against the CPU's when the device can
+(`DeviceFeature::CALIBRATED_TIMESTAMPS`) and estimates it otherwise:
+
+```cpp
+#include <gfx/profiler.hpp>
+import std;
+import gfx;
+import gfx.profiler;
+import gfx.profiler.graphics;
+
+// Once: a timer for the compute queue's command buffers, joined to the current profiler (its scopes become a GPU track).
+auto make_timer(gfx::Device& device) -> std::unique_ptr<gfx::profiler::GpuTimer>
+{
+    auto timer = std::make_unique<gfx::profiler::GpuTimer>(device, gfx::profiler::GpuTimerDescription{.queue = gfx::QueueType::COMPUTE, .frames_in_flight = 2});
+    gfx::profiler::attach_to_current_profiler(*timer);
+    return timer;
+}
+
+// Each frame's commands, timed.
+void record(gfx::profiler::GpuTimer& timer, gfx::CommandBuffer& commands, gfx::ComputePipelineHandle blur)
+{
+    gfx::ComputeRecorder recorder{commands};
+    timer.begin_frame(recorder);                                  // before the frame's first scope
+    {
+        PROFILE_GPU_SCOPE("blur", recorder, timer);               // timestamps around the block's commands
+        recorder.bind_pipeline(blur);
+        recorder.dispatch(240, 135);
+    }
+    PROFILE_DISPATCH("sharpen", recorder, timer, 240, 135, 1);    // a dispatch between two timestamps
+}
+```
+
+The physics library is instrumented throughout: every stage of a step (the framework's; Box3D's, with Box3D's own
+profile as counters; the reference backend's; the soft-body solver's; every pass of the GPU backend), with counters
+(bodies, pairs, contact points, colors, dispatches, barriers). `python build.py --profile` builds the `profile`
+configuration (Release with the profiler on, in `build/profile`), the one to measure in; the physics sandbox writes a
+Chrome trace of its frames with `--trace <file.json>`, and the physics benchmark one of each run ([below](#performance)).
+
+## Performance
+
+The physics benchmark (`benchmarks/physics`, target `gfx_physics_benchmark`) steps seven scenes through
+`PhysicsWorld::step()` on Box3D (16 scheduler threads) and on the GPU backend. The scenes are 50 000 resting boxes, a
+pyramid of 29 370 boxes, a cloth of 99 856 particles, 100 chains of 200 rods, 10 000 boxes under a cloth of 50 176
+particles, a lattice of 1 000 balls joined by 100 000 rods, and two worlds of 25 000 boxes on one GPU. Each scene has a
+quality check that both backends must pass: the pyramid stands, the chains and the lattice hold together, the cloth lies
+where it should. Each run writes a Chrome trace and a generated report (`benchmark_report.md`: percentiles, CPU work, GPU
+busy, overlap and idle shares, Box3D's own time). On this laptop (Intel Core i9-14900HX, NVIDIA GeForce RTX 5060 Laptop
+GPU, Windows' "Silent" power scheme), the GPU backend steps every scene faster than Box3D:
+
+| Scene | Bodies, particles, joints | Box3D | GPU | Speed-up |
+|---|---|---|---|---|
+| 50 000 resting boxes | 50 000 boxes | 23.6 ms | 11.6 ms | 2.0× |
+| a pyramid | 29 370 boxes | 109.6 ms | 45.6 ms | 2.4× |
+| a cloth | 99 856 particles | 83.4 ms | 14.4 ms | 5.8× |
+| 100 chains | 20 000 bodies, 20 000 rods | 5.6 ms | 3.5 ms | 1.6× |
+| boxes under a cloth | 10 000 boxes, 50 176 particles | 44.2 ms | 18.7 ms | 2.4× |
+| a lattice | 1 000 balls, 100 100 rods | 75.9 ms (fails its check) | 7.7 ms | 9.9× |
+| two worlds | 2 × 25 000 boxes | 16.1 ms | 12.4 ms | 1.3× |
+
+Box3D's lattice comes apart: it fails its check, so that scene is not judged. With sleeping on (`--sleep`), resting
+worlds cost the GPU backend about 1 ms a step: 50 000 boxes 1.3 ms (Box3D 12.4 ms), the pyramid 1.0 ms (Box3D's
+pyramid never falls asleep: 101 ms), two worlds 1.6 ms (Box3D 10.4 ms). In worlds of a few thousand bodies in motion
+(piles, walls, chains), Box3D is faster per step: the GPU backend pays a fixed cost per pass, hundreds of dispatches a
+step, that small worlds do not amortize; from about 16 000 bodies it is ahead there too (the [comparison](#examples)
+shows both).
+
+The work behind those numbers is in [docs/PERFORMANCE.md](docs/PERFORMANCE.md): where each step's time went before
+and after, and each optimization with what it measured. Every GPU optimization is a bit of `GpuOptimization` in
+`GpuXpbdDescription::optimizations`; all are on by default, and `GpuOptimization::NONE` runs the backend as it was
+before them. Most give the same bits; tests check each against the baseline.
+
+```bash
+python build.py --profile
+build/profile/benchmarks/physics/gfx_physics_benchmark.exe --scenes pyramid,cloth --backends box3d,gpu_xpbd
+```
+
+`--scenes` and `--backends` pick what runs (every scene, Box3D and the GPU backend by default), `--steps` and
+`--warm-up` the steps measured and the steps before them (1 000 and 100), `--scale` multiplies every scene's counts,
+`--sleep` turns sleeping on, `--gpu-optimizations "A | B"` (or `NONE`) sets the GPU backend's flags, and
+`--sub-steps`, `--position-iterations` and `--velocity-iterations` the solver's; `--record-baseline <directory>` and
+`--check-baseline <directory>` keep a baseline per machine and fail on a median 5 % slower (measured again before failing).
+`benchmarks/physics/pareto.py` runs a grid of solver settings and reports the error each buys against its time.
+CTest runs a small smoke run by default and the whole benchmark only with `GFX_RUN_BENCHMARKS=1` in the environment.
+The [physics comparison](#examples) shows two backends stepping one large scene side by side.
+
 ## Examples
 
 `examples/windowed` is a complete program: a window (title, icon, size limits, resize handling), an
@@ -1576,6 +1712,30 @@ nothing under the floor or flying away).
 CTest runs the script with the validation layers on SDL3 with Box3D, on GLFW with the reference backend and on the
 first platform backend with the GPU backend, and the tour on the first platform backend.
 
+`examples/physics_sandbox` also builds the **physics comparison** (`gfx_physics_comparison`): one large scene built into two
+worlds of two backends — Box3D on the left, the GPU backend on the right by default — stepped and drawn side by side with one
+camera, each step's wall time measured and plotted, and a panel saying which backend steps how many times faster. Five scenes,
+each scaled by a size factor (1: about 2 000 bodies or 6 400 cloth particles; up to 64): a pyramid of boxes, a pile of boxes,
+balls and capsules poured into a bin, a brick wall hit by a wrecking ball, rows of swinging chains, a cloth falling onto a
+sphere and boxes. The worlds step in lockstep by default — one step each per frame, one after the other, so neither shares the
+processor with the other and both show the same simulated time; with `--real-time` each advances by the frame's real time, as
+an application would run it, and the slower one falls behind. Right drag turns the camera, middle drag pans, the wheel zooms;
+Space shoots a ball into both worlds, R builds the scene again, P pauses, N takes a single step; the panel switches the scene,
+its size, the stepping and sleeping.
+
+```bash
+python build.py --profile
+build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --scene pile --size 4 --no-sleep
+```
+
+`--scene pyramid|pile|wrecking|chains|cloth` and `--size <factor>` pick the scene, `--left` and `--right` the backends
+(`box3d`, `reference`, `gpu_xpbd`: on the program's own device), `--no-sleep` keeps resting bodies simulated (a world at rest
+costs the GPU backend almost nothing: compare scenes in motion), `--trace <file.json>` writes a Chrome trace of every frame
+(each world's step, its own scopes, the GPU's passes); `--backend`, `--device`, `--threads`, `--frames` and `--validation` work
+as for the sandbox. With `--frames`, it prints each world's mean, median and slowest step and their ratio. Measure in the
+`profile` build (the VS Code configuration "gfx: Physics comparison (Box3D vs GPU XPBD)" builds and runs it there): a Debug
+build's timings compare nothing. CTest runs a small pile for 120 frames with the validation layers.
+
 ## Requirements (Windows)
 
 | Tool | Version verified | Notes |
@@ -1653,12 +1813,17 @@ gfx/
 │                         phases, what each phase built), ui-atlas-format.md (the .uiatlas format),
 │                         physics-design.md (physics and camera: decisions, phases, what each built),
 │                         gpu-xpbd-design.md (the GPU physics backend: decisions, phases, what each built),
-│                         physics-sandbox-design.md (the physics sandbox)
+│                         physics-sandbox-design.md (the physics sandbox), profiler-performance-design.md (the
+│                         profiler and the performance work: decisions, phases), PERFORMANCE.md (the measurements)
+├── benchmarks/physics/   gfx_physics_benchmark: seven scenes on Box3D and the GPU backend, quality checks, reports,
+│                         a baseline per machine; pareto.py (solver settings against their error)
+├── tools/                tetrahedralize.py: any surface mesh to a tetrahedral mesh for XPBD soft bodies
 ├── examples/windowed/    a window, compile-time input contexts and Vulkan presentation
 ├── examples/ui_editor/   an editor-like UI (docking, menus, a table, a text panel) drawn by a render thread
 ├── examples/physics/     a headless physics scene on Box3D, the reference backend or the GPU backend, with two cameras, checked
 ├── examples/physics_sandbox/  every library in one window: a physics world (Box3D, the reference or the GPU backend)
-│                              drawn with Vulkan, nine scenes, interaction, live controls, debug views, a panel
+│                              drawn with Vulkan, nine scenes, interaction, live controls, debug views, a panel; and the
+│                              physics comparison: one large scene in two backends' worlds, side by side, timed
 ├── source/
 │   ├── core/             gfx.core — what the libraries share (`import gfx.core;`, re-exported by both)
 │   │   ├── enums.cppm               enumeration machinery (traits, verification, bitmask operators,
@@ -1672,6 +1837,8 @@ gfx/
 │   │   ├── native_window.cppm       NativeWindowHandle: OS window handles, from the platform library
 │   │   │                            to the graphics library
 │   │   ├── slot_table.cppm, handle_table.cppm   thread-safe handle-to-object tables for backends
+│   │   ├── shared_mutex.cppm, shared_mutex_native.cpp   gfx.core.shared_mutex: SharedMutex, a reader-writer
+│   │   │                            lock fast on every platform (Windows: slim reader/writer locks)
 │   │   └── include/gfx/             headers only where a module cannot serve (toolchain workarounds)
 │   ├── graphics/         the graphics library (`import gfx;`)
 │   │   ├── gfx.cppm      `import gfx;` umbrella (gfx.core included)
@@ -1710,6 +1877,9 @@ gfx/
 │   │   └── backend_factory.cppm/.cpp  create_platform(PlatformBackendKind)
 │   ├── platform_graphics/  gfx.platform.graphics: platform windows to graphics swapchains
 │   │                       (swapchain_description_for(), WindowSwapchain)
+│   ├── profiler/         gfx.profiler (core only): recording rings, sessions, traces, exporters (Chrome JSON, binary),
+│   │                     reports, GPU sources; include/gfx/profiler.hpp (the PROFILE_* macros)
+│   ├── profiler_graphics/  gfx.profiler.graphics: GpuTimer (timestamps through the graphics library's query pools)
 │   ├── ui/               the UI library (`import gfx.ui;`): enums.cppm, handles.cppm, errors.cppm
 │   │   ├── context/      gfx.ui.context: UiContext, UiFrame (windows, layout, widgets, tables, docking,
 │   │   │                 navigation, shortcuts), UiListClipper, the frame report, the accessibility tree;
@@ -1749,7 +1919,9 @@ gfx/
 │                         physics_factory (create_physics_world())
 └── tests/
     ├── toolchain/        toolchain conformance; defects/ proves each workaround is still needed
-    ├── core/             gfx.core (imports gfx.core only), its math and the slot table
+    ├── core/             gfx.core (imports gfx.core only), its math, the shared mutex and the slot table
+    ├── profiler/         the profiler: recording, sessions, traces read back, reports, determinism, overhead, the
+    │                     macros compiled out (object files compared), the GPU timer on every GPU
     ├── physics/          the physics library (primitives at compile time and against references, SIMD batches
     │                     against the scalar code, shapes and queries against exact answers, spatial structures
     │                     against brute force, integrators against analytic orbits, soft bodies with known

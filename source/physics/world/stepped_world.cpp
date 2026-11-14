@@ -1982,6 +1982,7 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
     statistics.joints = static_cast<std::uint32_t>(std::ranges::count_if(pending.joints, [](const JointRecord& record) { return record.handle.is_valid(); }));
     statistics.soft_bodies = static_cast<std::uint32_t>(std::ranges::count_if(pending.soft_bodies, [](const SoftBodyRecord& record) { return record.handle.is_valid(); }));
     stepping_edits.clear();
+    statistics.wall_seconds = std::chrono::duration<double>(Clock::now() - start).count();
 
     // The step's sizes.
     PROFILE_COUNTER("World: edits", statistics.edits);

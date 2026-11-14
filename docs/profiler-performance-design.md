@@ -4,8 +4,9 @@ Status: **answers given 2026-11-08: every question of §D as recommended.** **PF
 built"; committed 73cae0d). **PF1 accepted** with its 6 deviations (§B "PF1 as built"). **PF2 accepted** with its 6
 deviations (§B "PF2 as built"). **PF3 accepted** with its 8 deviations (§B "PF3 as built"); the GPU defect it found is fixed and accepted (docs/gpu-xpbd-design.md §B
 "Fix after G10"; the baseline recorded again). **PF4 accepted** with its 5 deviations ("Accept, start PF5"; committed 51f4972). **PF5 accepted** with its 7 deviations (§B "PF5 as built"; "Do
-everything as recommended", 2026-11-10): the velocity-iteration default stays 8. Next, at the user's request, the optimizations
-PF5 measured and did not build (§B "PF5b"), then PF6. The numbers of §0.1 were
+everything as recommended", 2026-11-10): the velocity-iteration default stays 8. **PF5b** (the optimizations PF5 measured and
+did not build) committed at the user's request (6a64914). **PF6 built** (§B "PF6 as built": the documentation, the physics
+comparison the user asked for, `gfx::SharedMutex`), awaiting validation. The numbers of §0.1 were
 measured with a temporary program (removed) and a temporary timing print in the GPU backend (reverted).
 
 The request (2026-11-08) asks for two things that drive each other:
@@ -1114,6 +1115,91 @@ presets match within the run-to-run noise (±10 % per run).
 Also found: `build/debug` had been configured again without `GFX_PHYSICS_BACKEND_GPU_XPBD` and without the profiler (its
 cache named the compiler `g++.exe`, build.py names it `g++.EXE`: the first build.py run resets the cache and drops the -D
 options, the second applies them), so the Debug sandbox could not run the GPU backend until build.py ran twice.
+
+### PF6 as built (2026-11-14)
+
+Asked (user, 2026-11-11): commit PF5b and go on to the next step (PF6); then (2026-11-14): "create a large enough scale
+example where I can compare the results using XPBD on the GPU and Box3D. Add a launch.json for it."
+
+**Documentation.**
+- **`docs/PERFORMANCE.md`** (new): the machine and the method; the benchmark's results of 2026-11-14 with sleep off and on
+  (the generated `benchmark_report.md` of both passes, `build/profile/pf6_benchmark*`); the GPU backend against PF3's
+  baseline (−38 to −78 %); the taxonomy of §A9 before (§0.1) and after (per-scene costs from the traces: a scratchpad script
+  `taxonomy.py` sums the scopes and counters); every flag with its phase, mechanism, measured effect and bits; what was
+  measured and not built, and why; the Pareto table; the comparison's scenes (below); follow-ups; how to reproduce.
+- **README**: two rows in the libraries table (profiler, profiler bridge), a status sentence, a "## Profiler" section (the
+  macros, a session, a Chrome trace and a Markdown report; `GpuTimer` with `PROFILE_GPU_SCOPE` and `PROFILE_DISPATCH`; how the
+  physics library is instrumented), a "## Performance" section (the benchmark's table, sleep, the command line, the options),
+  the comparison in Examples, the layout (benchmarks/, tools/, source/profiler*, shared_mutex, tests/profiler, the two new
+  documents). Both snippets were extracted into a temporary target (`gfx::profiler_graphics`, `-Werror`), built, the first
+  run (its report printed, `simulation.json` written), the target removed.
+- **architecture.md**: dated 2026-11-14; §1's diagram (profiler libraries, the benchmark, the comparison) and table (profiler,
+  profiler bridge, `gfx.core.shared_mutex`); §8 brought up to date (the step's command buffers submitted in parts, `PhaseTimer`
+  and `PassTimer` instead of `StepTimer`, `GpuPipelineLibrary`, a resting world without GPU work); **new §10 "The profiler and
+  the physics benchmark"** (10.1 targets and modules, 10.2 a frame recorded — a sequence diagram —, 10.3 the benchmark and the
+  comparison, 10.4 the optimizations in a GPU step); build and tests is now §11 (presets, options, targets, the profiler's and
+  the benchmark's tests). All 41 diagrams render in Mermaid 10.9.1 and 11.4.1 (§10.3's two unlinked subgraphs stacked into one
+  column 2 000 px tall in 11.4.1: an invisible link `benchmark_run ~~~ comparison_run` puts them side by side).
+
+**The physics comparison** (`examples/physics_sandbox/physics_comparison.cpp`, `gfx_physics_comparison`; module
+`physics_sandbox.large_scenes`): one scene built into two worlds — Box3D on the left, the GPU backend on its own device on the
+right by default (`--left`/`--right`: box3d, reference, gpu_xpbd) — stepped in lockstep (each frame the left world's step,
+then the right one's, each timed alone) or in real time (`--real-time`), drawn side by side by two `SceneRenderer`s into the
+halves of one image (a full clear for the divider, then each half's pass with its area: `SceneRenderer::render()` gained an
+area), one camera rig with each half's aspect, shots into both along the pointer's ray. A panel: scene, size, lockstep or
+real time, sleeping, paused, reset, each side's step (last, mean of the last 240, a plot), steps, awake bodies, contact points,
+the highest body, which backend is how many times faster; labels over each half. Five scenes scaled by a size factor (1:
+about 2 000 bodies; the panel offers 0.25–16): a pyramid of boxes, a pile of boxes, balls and capsules poured into a bin, a
+brick wall hit by a steel ball on a rope (continuous), rows of capsule chains on ball joints released level, a cloth falling
+onto a sphere and boxes; each on a floor sized to it. Options `--scene`, `--size`, `--no-sleep`, `--trace <file.json>`
+(every frame: each world's step, the worlds' and the GPU's scopes), `--frames` (then each side's mean, median and slowest
+step and their ratio are printed), `--validation` (exit 1 on an error), `--backend`, `--device`, `--threads`. VS Code:
+"gfx: Physics comparison (Box3D vs GPU XPBD)" (profile build, task "gfx: Build Profile (physics comparison)"; inputs
+`comparisonScene`, `comparisonSize`, default 8). CTest `PhysicsComparison.Pile` (size 0.25, 120 frames, validation).
+
+**Found by the comparison, fixed.**
+1. **MinGW's `std::shared_mutex` takes about 900 ns to lock** (winpthreads' read-write lock; shared or exclusive, uncontended;
+   `std::mutex` 8.5 ns, an SRW lock 10 ns). The framework's objects lock the published snapshot for every getter, so reading
+   the poses of 8 000 bodies took 8.4 ms a frame (1.05 µs a `RigidBody::state()`), and every framework query paid it too.
+   New module **`gfx.core.shared_mutex`**: `gfx::SharedMutex`, `std::shared_mutex`'s interface (works with `std::shared_lock`
+   and `std::unique_lock`), on Windows a slim reader/writer lock through a plain translation unit (`shared_mutex_native.cpp`
+   behind the std-free `shared_mutex_native.hpp`: `<windows.h>` cannot share a unit with modules), elsewhere
+   `std::shared_mutex`; `WorldShared::published_mutex` is one. 8 000 poses: 8.4 → 0.47 ms. Tests `SharedMutexTest` (3: locks
+   together and alone, writers alone across 8 threads, an uncontended lock under 100 ns in optimized builds — 9.6 ns — and,
+   on MinGW, a detector that passes while `std::shared_mutex` takes more than 200 ns: 907 ns).
+2. **`StepStatistics::wall_seconds`** (an addition to the physics interface): the wall time of `run_step()` (edits, the
+   backend's work and its waits, soft bodies, boxes; not the publishing). The GPU backend's `phase_seconds` are GPU
+   timestamps, which leave its CPU work out, so the comparison could not time the GPU world's step from them.
+3. In the program itself: contact events were never cleared (`Scene::clear_events()` each frame now), and drawing searched
+   the scene's bodies twice for every joint before checking it was a cable (220 ms a frame for the chains' 7 684 joints).
+
+**The CMake structure**: the sandbox's modules first went into a static library shared by both programs. The programs then
+got a mix of the libraries' BMIs compiled for their flags and not ("Disagreement of the location of the 'std' module", then
+"import 'std' has CRC mismatch": CMake synthesizes BMIs for consumers whose flags differ, and a program reaching the modules
+through a library of modules was given the real ones for its direct imports), the defect the tests' shared support modules
+met (they too are compiled into each executable). Each program now compiles the modules it uses itself (renderer, scene,
+presets, interaction; the sandbox's controls; the comparison's large scenes), with its own shaders and font modules.
+
+**Measured** (profile build; the benchmark on 2026-11-14, 1 000 steps after 100; the comparison 300 frames, size 16 120):
+every benchmark scene faster on the GPU (1.30–9.87× sleep off, 2.01–106.5× sleep on). The comparison's scenes in motion: the
+GPU backend is slower per step at a few thousand bodies (the pile 0.28× at 2 000, a wall 0.22× at 1 500, chains 0.53× at 960
+links; a step's hundreds of dispatches, each with its barrier, cost a few microseconds whatever the work: at 8 000 bodies of the
+pile the 32 velocity iterations take 6.2 of the GPU's 9.6 ms) and faster from about 16 000 (size 16: the pyramid 1.85×, the
+pile 1.54×, chains 1.25×, the wall 1.19×; cloths 2.5–4× at any size). Our Box3D wrapper's contact capture takes 7.8 ms of
+Box3D's 11.4 ms step at 8 000 bodies (`b3World_Step` 4.2 ms): a follow-up (PERFORMANCE.md §7).
+
+**Deviations (for validation).**
+1. **The physics interface gained `StepStatistics::wall_seconds`** (needed to time a GPU world's step from outside).
+2. **A library change in a documentation phase**: `gfx::SharedMutex` in core, used by the physics framework.
+3. **The sandbox's modules compiled twice**, once per program (a shared library of modules does not build, above).
+4. **The comparison's sizes go to 16 in the panel and the launch configuration** (default 8): at the sizes first planned
+   (up to 8), piles, walls and chains in motion favored Box3D, and the crossover is between 8 and 16.
+5. **The README's performance table is one run's** (2026-11-14); PERFORMANCE.md says by how much runs vary.
+
+**Results**: Debug 1575 of 1575 (858 s; + 3 `SharedMutexTest`, + `PhysicsComparison.Pile`), Release 1575 of 1575 (518 s), run
+from PowerShell with `--timeout 900`. The first Debug build stopped on two "cc1plus.exe: out of memory" (parallel compiles on
+16 GB) and had lost the GPU backend and the profiler again (its cache named the compiler `g++.exe`); the second `build.py` run
+built everything with both.
 
 ---
 

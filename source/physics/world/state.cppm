@@ -9,6 +9,7 @@ import std;
 import gfx.core.errors;
 import gfx.core.handles;
 import gfx.core.math;
+import gfx.core.shared_mutex;
 import gfx.physics.enums;
 import gfx.physics.errors;
 import gfx.physics.handles;
@@ -97,7 +98,7 @@ public:
     // ------------------------------------------------------------------------------------------------ published (under published_mutex)
 
     /// Shared by getters, exclusive while a step is published.
-    mutable std::shared_mutex published_mutex{};
+    mutable SharedMutex published_mutex{};
 
     /// The results of the last completed step.
     WorldSnapshot published{};

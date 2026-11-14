@@ -1176,7 +1176,7 @@ Original hard requirements (from the user's initial specification):
   GPU frames 4.1 ms median = Box3D's. CTest PhysicsSandbox.GPU_XPBD TIMEOUT 900 (51 s in Debug; presents once throttled to 1 Hz midway).
   Decided (as recommended): a second launch configuration "gfx: Physics sandbox (no validation)". Gotchas: gdb cannot attach (error 5) to a process started with Start-Process -WindowStyle Normal
   here; `ctest --timeout` does not override a test's TIMEOUT property; bash heredocs do not exist in PowerShell.
-- **PF5b as built (2026-11-11; uncommitted, awaiting validation)** — docs/profiler-performance-design.md §B "PF5b as built". User
+- **PF5b as built (2026-11-11; committed by Claude at the user's request, 6a64914)** — docs/profiler-performance-design.md §B "PF5b as built". User
   2026-11-10: the optimizations PF5 left + a mesh tetrahedralizer; 2026-11-11: "the performance has degraded … guarantee that no
   performance penalty is observed, specially in the sandbox mode". Flags (all default): **COMPACT_READBACK** 1<<6 (readback_compact.comp
   list/patched/gather; 16 B header + 80 B per listed body; copies sized by the last step + ¼ + patches + 256, "read the bodies/reports
@@ -1206,6 +1206,38 @@ Original hard requirements (from the user's initial specification):
   reconfigured without GPU_XPBD and the profiler (cache `g++.exe`; the Debug sandbox could not run the GPU backend): build.py's first run
   reset the cache and dropped the -D options, the second applied them (run build.py twice; check the cache); sandbox noise ±10 % a run in
   small worlds (≥ 5 rounds); Out-File -Encoding utf8 writes a BOM (use ascii); `--trace` adds the profiler's GPU pass timestamps.
+- **Profiler PF6 as built (2026-11-14; awaiting validation)** — docs/profiler-performance-design.md §B "PF6 as built" (5 deviations).
+  User 2026-11-11: "Commit and continue to the next step" (PF5b committed 6a64914); 2026-11-14: "create a large enough scale example
+  where I can compare the results using XPBD on the GPU and Box3D. Add a launch.json for it". **docs/PERFORMANCE.md** (new: machine,
+  method, benchmark of 2026-11-14 sleep off/on, against PF3's baseline −38..−78 %, taxonomy before/after + per-scene costs from traces
+  (scratchpad taxonomy.py), flags table, not built and why, Pareto, the comparison's matrix §6, follow-ups, reproducing). README:
+  libraries rows profiler/profiler bridge, status, "## Profiler" (2 snippets compiled -Werror + run in a temporary
+  examples/readme_snippet_check target, removed), "## Performance" (table, sleep, options), the comparison in Examples, layout.
+  architecture.md: dated 2026-11-14, §1 diagram/table, §8 (parts, PhaseTimer/PassTimer, GpuPipelineLibrary, resting steps), **new §10
+  "The profiler and the physics benchmark"** (4 diagrams), **build §11**; 41 diagrams render in Mermaid 10.9.1 + 11.4.1 (scratchpad
+  mermaid_check/index.html, `?version=`&`only=`; **unlinked subgraphs in a flowchart LR stack into one column in 11.4.1: `a ~~~ b`
+  puts them side by side**). **Physics comparison** `gfx_physics_comparison` (examples/physics_sandbox/physics_comparison.cpp + module
+  physics_sandbox.large_scenes: PYRAMID, PILE, WRECKING, CHAINS, CLOTH scaled by size, floor sized to each (`add_large_floor`),
+  LARGE_SCENE_SIZES 0.25–16): lockstep (each frame left step then right step, finish each) or `--real-time`; two SceneRenderers into
+  the halves (`SceneRenderer::render(..., area)`), one CameraRig, shots into both; panel (scene, size, lockstep/real time, sleeping,
+  paused, reset, per side step/mean/plot/awake/contacts/highest, ratio); `--no-sleep`, `--trace`, `--frames` (prints mean/median/
+  slowest + ratio), `--validation`; launch "gfx: Physics comparison (Box3D vs GPU XPBD)" (profile build, task "gfx: Build Profile
+  (physics comparison)", inputs comparisonScene/comparisonSize default 8); CTest `PhysicsComparison.Pile`. **CMake**: a static library
+  of the sandbox's modules shared by both programs gave "Disagreement of the location of the 'std' module" / CRC mismatches (CMake
+  synthesizes BMIs per flags; a program importing through a module library got real BMIs for its direct imports) → each program
+  compiles its modules (foreach with per-program source lists, gfx_add_shaders/gfx_add_ui_atlas per program). **Interface**:
+  `StepStatistics::wall_seconds` (run_step's wall time; GPU phase_seconds are GPU timestamps). **Found by the comparison, fixed**:
+  MinGW `std::shared_mutex` ~900 ns per lock (§6 defect 17) → **`gfx.core.shared_mutex`** `gfx::SharedMutex` (SRW lock via plain TU
+  shared_mutex_native.cpp/.hpp; std::shared_mutex elsewhere) for WorldShared::published_mutex: 8 000 `RigidBody::state()` 8.4 → 0.47 ms;
+  program bugs (contact events never cleared; joints searched before the cable check: 220 ms/frame at 7 684 joints). `Scene::capture()`
+  has scopes "Scene: capture the poses/events". **Measured**: benchmark GPU 1.30–9.87× sleep off, 2.0–106.5× on; comparison: GPU slower
+  at a few thousand moving bodies (pile 0.28× at 2 000, wall 0.22×, chains 0.53×: fixed cost per pass — at 8 000 pile bodies the 32
+  velocity iterations take 6.2 of the GPU's 9.6 ms), faster from ~16 000 (size 16 no sleep: pyramid 1.85, pile 1.54, chains 1.25, wall
+  1.19; cloth 2.5–4× any size); the Box3D wrapper's contact capture 7.8 of Box3D's 11.4 ms at 8 000 bodies (follow-up). Frame pacing
+  moves step times (4 fps frames: GPU and CPU clocks drop; chains 10 → 5 ms once drawing was fixed). Gotchas: a parallel Debug build ran
+  out of memory twice (cc1plus "out of memory allocating"; rerun); build/debug lost GPU_XPBD + profiler again (cache g++.exe; run
+  build.py twice); PowerShell drops empty-string arguments (`""` to a script); a PowerShell session's cwd inside a folder blocks
+  deleting it.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1584,6 +1616,11 @@ Original hard requirements (from the user's initial specification):
    compiles; HEAD's gpu_events.cpp never spelled it). Workaround: gpu_events.cpp names no `std::vector` (its radix sort is a
    template). **No detector yet** (not minimized; defects 10 and 13 may share its root cause).
 
+17. **MinGW: `std::shared_mutex` takes about 900 ns to lock and unlock**, shared or exclusive, uncontended (libstdc++ on winpthreads'
+   pthread_rwlock; `std::mutex` 8.5 ns, an SRW lock 10 ns; measured 2026-11-14). Workaround: `gfx::SharedMutex` (`gfx.core.shared_mutex`,
+   SRW lock on Windows). Detector: `SharedMutexTest.UncontendedLocksTakeNanoseconds` (optimized builds, MinGW: passes while
+   `std::shared_mutex` takes more than 200 ns; also requires SharedMutex under 100 ns).
+
 ## 7. Repository layout (current)
 
 ```
@@ -1602,16 +1639,20 @@ gfx/
 │           §6 UI library since U10, §7 physics and camera since PH8), ui-design.md (UI decisions, phases, "Ux as built"),
 │           ui-atlas-format.md, physics-design.md (physics + camera decisions, phases, "PHx as built"),
 │           physics-sandbox-design.md (interactive sandbox: answers, plan S1–S6, "Sx as built"; architecture.md §9 since G10),
-│           gpu-xpbd-design.md (GPU XPBD backend: decisions, phases G0–G10, "Gx as built"; architecture.md §8 since G10)
+│           gpu-xpbd-design.md (GPU XPBD backend: decisions, phases G0–G10, "Gx as built"; architecture.md §8 since G10),
+│           profiler-performance-design.md (profiler + performance: decisions, PF0–PF6 "as built"; architecture.md §10 since PF6,
+│           build §11), PERFORMANCE.md (measurements, flags, comparison matrix, follow-ups)
 ├── examples/windowed/  gfx_windowed_example (P6)
 ├── examples/ui_editor/ gfx_ui_editor_example (U10: render thread, docking editor, allocation check)
 ├── examples/physics/   gfx_physics_example (PH8: headless scene on Box3D or the reference backend, two cameras, checks)
 ├── examples/physics_sandbox/ gfx_physics_sandbox (sandbox S2: renderer.cppm/.cpp, scene.cppm/.cpp, physics_sandbox.cpp, shaders/;
-│                       S3 interaction.cppm/.cpp; S4 presets.cppm/.cpp; S5 controls.cppm/.cpp)
+│                       S3 interaction.cppm/.cpp; S4 presets.cppm/.cpp; S5 controls.cppm/.cpp) and gfx_physics_comparison (PF6:
+│                       physics_comparison.cpp, large_scenes.cppm/.cpp); each program compiles the shared modules itself
 ├── source/ CMakeLists.txt (add_subdirectory core, graphics)
 │   ├── core/      gfx.core: core.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, types.cppm,
 │   │              native_window.cppm, slot_table.cppm, handle_table.cppm, include/gfx/windows_headers.hpp,
-│   │              math.cppm (gfx.core.math, PH0) + math_kernels.hpp/.cpp (SIMDe plain TU)
+│   │              math.cppm (gfx.core.math, PH0) + math_kernels.hpp/.cpp (SIMDe plain TU),
+│   │              shared_mutex.cppm (gfx.core.shared_mutex, PF6) + shared_mutex_native.hpp/.cpp (SRW lock plain TU)
 │   ├── graphics/  gfx: gfx.cppm, enums.cppm, errors.cppm/.cpp, handles.cppm, backend_factory.cppm/.cpp,
 │   │              interface/ (gfx.interface partitions), shaders/ (shader_tools.cppm,
 │   │              spirv_reflection.cpp, shader_compiler.cpp), backends/{vulkan, null, d3d12, metal}/
@@ -1751,11 +1792,16 @@ accepted ("Do everything as recommended", 2026-11-10: velocity iterations stay 8
 **sandbox follow-up (slow GPU frames, long loads) done: catch-up cap, `_NO_DEBUG_HEAP`, a launch configuration without validation**;
 **PF5b (COMPACT_READBACK adaptive, RESTING_STEPS, BVH_REFIT, KERNEL_FUSION, PARTIAL_SUBMISSIONS; framework keeps unmoved
 colliders' boxes; tools/tetrahedralize.py; checked against PF5's commit built beside it: no scene or sandbox preset slower; a
-read-back regression found that way and fixed) built, awaiting validation**; then PF6 documentation |
+read-back regression found that way and fixed) committed at the user's request (6a64914)**; **PF6 (PERFORMANCE.md, README profiler +
+performance sections, architecture.md §10, the physics comparison `gfx_physics_comparison` + launch configuration, `gfx::SharedMutex`,
+`StepStatistics::wall_seconds`) built, awaiting validation** |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1571**, 2026-11-11 (profiler PF5b: + 5 Tetrahedralize.*, + 4 TetrahedralMeshTest, + 20 GPU (compact
+Test count at last report: **1575**, 2026-11-14 (profiler PF6: + 3 SharedMutexTest, + 1 PhysicsComparison.Pile; Debug 1575/1575
+(858 s, 8 skips), Release 1575/1575 (518 s, 46 skips: the profiler's tests with GFX_PROFILER off, Debug-only compiler/hot reload,
+opt-in clipboard/RenderDoc/benchmark); run from PowerShell with `--timeout 900`; check `ctest -N` = 1575). Before: **1571**,
+2026-11-11 (profiler PF5b: + 5 Tetrahedralize.*, + 4 TetrahedralMeshTest, + 20 GPU (compact
 readback, resting steps, refit, fused velocity updates, tetrahedralized torus × 4); Debug 1571/1571 (606 s; the 2 stage-coverage tests
 fixed then rerun), Release 1571/1571 (506 s); run from PowerShell with `--timeout 900`). Before: **1542**, 2026-11-10 (profiler PF5: + 12 flag tests (gather/coloring, passes by use, reach boxes × 4),
 + 2 storage-buffer tests; Debug 1542/1542 in 1169 s, Release 1540/1540 in 1171 s then the 2 new ones; run from PowerShell with

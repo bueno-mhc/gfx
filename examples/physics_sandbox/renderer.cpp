@@ -395,7 +395,8 @@ void
 SceneRenderer::render(gfx::GraphicsRecorder& recorder,
                       gfx::ImageViewHandle target,
                       gfx::Extent extent,
-                      const SceneView& view)
+                      const SceneView& view,
+                      const gfx::Rectangle& area)
 {
     State& state = *m_state;
     SceneRendererStatistics& statistics = state.statistics;
@@ -543,16 +544,21 @@ SceneRenderer::render(gfx::GraphicsRecorder& recorder,
                                                 .clear_color = view.background,
                                                 .resolve_view = multisampled ? target : gfx::ImageViewHandle{},
                                                 .resolve_mode = multisampled ? gfx::ResolveMode::AVERAGE : gfx::ResolveMode::NONE}};
+    // The part of the image drawn (cleared, viewport, scissor, resolved): the whole of it unless an area is given.
+    const gfx::Rectangle region = area.width == 0 || area.height == 0 ? gfx::Rectangle{.width = extent.width, .height = extent.height} : area;
     gfx::RenderingScope scope = recorder.begin_rendering({
-        .area = {.width = extent.width, .height = extent.height},
+        .area = region,
         .color_attachments = color,
         .depth_stencil_attachment = gfx::DepthStencilAttachment{.view = state.depth_view->handle(),
                                                                 .depth_store = gfx::StoreOperation::DONT_CARE,
                                                                 .clear_depth = 0.0F},
         .debug_name = "sandbox scene",
     });
-    scope.set_viewport({.width = static_cast<float>(extent.width), .height = static_cast<float>(extent.height)});
-    scope.set_scissor({.width = extent.width, .height = extent.height});
+    scope.set_viewport({.x = static_cast<float>(region.x),
+                        .y = static_cast<float>(region.y),
+                        .width = static_cast<float>(region.width),
+                        .height = static_cast<float>(region.height)});
+    scope.set_scissor(region);
 
     // One instanced draw per mesh, then each surface; with the wireframe, all of them again as lines over the solids.
     const std::array<float, 16> view_projection = matrix_floats(view.view_projection);

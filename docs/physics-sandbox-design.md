@@ -366,3 +366,20 @@ Debug, against Box3D's 4.4 s; its world loads in 0.08–0.35 s):
 
 **Cause 1, decided by the user (as recommended):** the validated configuration stays, and a second one, "gfx: Physics
 sandbox (no validation)", runs without the layers (the GPU backend at full speed).
+
+### Follow-up: the physics comparison (2026-11-14, profiler phase PF6)
+
+A second program built from the sandbox's modules: `gfx_physics_comparison` (`physics_comparison.cpp`, module
+`physics_sandbox.large_scenes`) steps one large scene in a Box3D world and a GPU world in lockstep and draws them side by side
+with one camera, each step timed (the record: [profiler-performance-design.md](profiler-performance-design.md) §B "PF6 as
+built"; its results: [PERFORMANCE.md](PERFORMANCE.md) §6). For the sandbox:
+
+- **The modules are compiled into each program** (renderer, scene, presets, interaction; the controls in the sandbox only):
+  a static library of them shared by both programs made CMake give the programs a mix of BMIs compiled for their flags and
+  not ("import 'std' has CRC mismatch").
+- **Reading the bodies' poses got 18× faster**: `Scene::capture()` calls `RigidBody::state()` for every body after each step,
+  and each call locked the world's `std::shared_mutex` (900 ns on MinGW); the framework now uses `gfx::SharedMutex` (an SRW
+  lock on Windows): 8 000 bodies 8.4 → 0.47 ms a step. The sandbox's presets have at most a few hundred bodies, so their
+  frames change little; a sandbox scene of thousands of bodies is now drawable.
+- `Scene::capture()` has profiler scopes ("Scene: capture the poses", "Scene: capture the events") for `--trace`.
+- `SceneRenderer::render()` takes an area (a part of the image; the whole of it by default).

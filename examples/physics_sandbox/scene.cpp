@@ -1,9 +1,14 @@
 // The sandbox's scene: the world, fixed steps on the world's thread with interpolated poses, spawning, shooting and
 // removing bodies, the showcase.
+module;
+
+#include <gfx/profiler.hpp> // the profiler's macros (--trace)
+
 module physics_sandbox.scene;
 
 import std;
 import gfx.physics;
+import gfx.profiler;
 import physics_sandbox.renderer; // INSTANCE_GRID
 
 namespace physics_sandbox
@@ -368,6 +373,7 @@ void
 Scene::capture()
 {
     // The bodies' poses and the soft bodies' particles, the last two of each.
+    PROFILE_NAMED_SCOPE(poses_scope, "Scene: capture the poses");
     for (SceneBody& body : m_bodies)
     {
         const RigidBodyState state = body.body->state();
@@ -382,7 +388,10 @@ Scene::capture()
         static_cast<void>(soft_body.body->positions(soft_body.current));
     }
 
+    poses_scope.end();
+
     // The contacts kept until clear_events(); what entered and left the triggers.
+    PROFILE_SCOPE("Scene: capture the events");
     const PhysicsEvents events = m_world->events();
     m_contacts.insert(m_contacts.end(), events.contacts.begin(), events.contacts.end());
     for (const TriggerEvent& event : events.triggers)

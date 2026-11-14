@@ -95,11 +95,13 @@ public:
 
     /// @brief Records the scene's pass into @p target (a view of an image of @p extent, in COLOR_ATTACHMENT_WRITE state,
     ///        left there): cleared, the instances (and their edges with SceneView::wireframe), the lines; with
-    ///        multisampling, resolved into it.
+    ///        multisampling, resolved into it. Only @p area of the image is drawn (its whole extent when @p area is
+    ///        empty): two renderers draw two scenes side by side, a barrier between their passes.
     void render(gfx::GraphicsRecorder& recorder,
                 gfx::ImageViewHandle target,
                 gfx::Extent extent,
-                const SceneView& view);
+                const SceneView& view,
+                const gfx::Rectangle& area = {});
 
     /// @brief Forgets every mesh (the next frame makes them again); call when no frame in flight draws them (after
     ///        Device::wait_idle()), e.g. when a scene is replaced.

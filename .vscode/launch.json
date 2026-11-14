@@ -168,6 +168,36 @@
             "preLaunchTask": "gfx: Build Debug"
         },
         {
+            // The physics comparison (examples/physics_sandbox/physics_comparison.cpp): one large scene in a Box3D world
+            // (left) and a GPU XPBD world (right), stepped in lockstep — one step each per frame, one after the other —
+            // and drawn side by side with one camera, each step's wall time plotted. Right drag turns, middle drag pans,
+            // the wheel zooms, Space shoots into both, R rebuilds, P pauses; the panel switches the scene, its size and the
+            // stepping (lockstep or real time) and sleeping (off: a scene at rest still measures each backend's work).
+            // Runs the optimized build with the profiler (build/profile): a Debug build's timings compare nothing. Asks
+            // for the scene and its size (1: about 2 000 bodies; 8 by default: about 16 000).
+            "name": "gfx: Physics comparison (Box3D vs GPU XPBD)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/profile/examples/physics_sandbox/gfx_physics_comparison.exe",
+            "args": ["--backend", "${input:platformBackend}", "--scene", "${input:comparisonScene}", "--size", "${input:comparisonSize}"],
+            "cwd": "${workspaceFolder}/build/profile",
+            "environment": [
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Profile (physics comparison)"
+        },
+        {
             // The physics example (examples/physics): a headless scene stepped for four seconds, then checked
             // (each check printed; the exit code is 1 when one fails). Asks for the physics backend.
             "name": "gfx: Physics example",
@@ -207,6 +237,20 @@
             "description": "Physics backend of the example",
             "options": ["box3d", "reference", "gpu_xpbd"],
             "default": "box3d"
+        },
+        {
+            "id": "comparisonScene",
+            "type": "pickString",
+            "description": "Scene the physics comparison starts with (the panel switches scenes)",
+            "options": ["pyramid", "pile", "wrecking", "chains", "cloth"],
+            "default": "pyramid"
+        },
+        {
+            "id": "comparisonSize",
+            "type": "pickString",
+            "description": "Size of the comparison's scene: a factor of every count (1: about 2 000 bodies, 6 400 cloth particles; 8: about 16 000 bodies, where the GPU backend starts to pull ahead on piles and pyramids)",
+            "options": ["0.25", "0.5", "1", "2", "4", "8", "16"],
+            "default": "8"
         },
         {
             "id": "sandboxPreset",

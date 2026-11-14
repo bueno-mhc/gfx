@@ -30,6 +30,15 @@
             "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${workspaceFolder}"] }
         },
         {
+            // The physics comparison in the optimized build with the profiler (build/profile; configured by build.py
+            // when it does not exist yet).
+            "label": "gfx: Build Profile (physics comparison)",
+            "type": "process",
+            "command": "python",
+            "args": ["${workspaceFolder}/build.py", "--profile", "--target", "gfx_physics_comparison"],
+            "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${workspaceFolder}"] }
+        },
+        {
             "label": "gfx: Rebuild Debug (clean first)",
             "type": "process",
             "command": "cmake",

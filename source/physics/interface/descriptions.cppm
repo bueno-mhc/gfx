@@ -565,6 +565,11 @@ struct StepStatistics
     std::uint32_t pairs = 0;                                         ///< Candidate pairs.
     std::uint32_t contacts = 0;                                      ///< Contact points.
     std::uint32_t edits = 0;                                         ///< Edits applied at its start.
+    double wall_seconds = 0.0;                                       ///< Wall time of the whole step: the edits, the
+                                                                     ///< backend's work (on the CPU, and waiting for a
+                                                                     ///< GPU), the soft bodies and the boxes; not the
+                                                                     ///< publishing (phase_seconds may time a GPU's
+                                                                     ///< phases on the GPU, which leaves its CPU work out).
 };
 
 } // namespace gfx::physics

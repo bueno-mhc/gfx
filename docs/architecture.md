@@ -1,21 +1,21 @@
 # gfx — architecture overview (the code as built)
 
-This document describes the code as it is built, on 2026-11-08: the libraries, their modules, the
+This document describes the code as it is built, on 2026-11-14: the libraries, their modules, the
 objects and how they relate, the paths a frame, an event and a physics step take, the threads, the GPU physics
-backend, the physics sandbox that puts every library in one window, and how everything is built and tested. The
-decisions behind the platform, UI, physics and camera libraries, the GPU backend and the sandbox, with the
-alternatives considered, are in [platform-design.md](platform-design.md), [ui-design.md](ui-design.md),
-[physics-design.md](physics-design.md), [gpu-xpbd-design.md](gpu-xpbd-design.md) and
-[physics-sandbox-design.md](physics-sandbox-design.md) (the last four also record what each phase built);
-the atlas file format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the
-[README](../README.md).
+backend, the physics sandbox that puts every library in one window, the profiler and the physics benchmark, and how
+everything is built and tested. The decisions behind the platform, UI, physics and camera libraries, the GPU backend,
+the sandbox and the profiler, with the alternatives considered, are in [platform-design.md](platform-design.md),
+[ui-design.md](ui-design.md), [physics-design.md](physics-design.md), [gpu-xpbd-design.md](gpu-xpbd-design.md),
+[physics-sandbox-design.md](physics-sandbox-design.md) and [profiler-performance-design.md](profiler-performance-design.md)
+(the last five also record what each phase built); the measurements are in [PERFORMANCE.md](PERFORMANCE.md); the atlas
+file format is in [ui-atlas-format.md](ui-atlas-format.md); how to use the libraries is in the [README](../README.md).
 
 Diagrams are [Mermaid](https://mermaid.js.org/) (GitHub renders them). Arrows read "uses" or "depends
 on" unless a diagram says otherwise.
 
 ## 1. Libraries, modules and dependencies
 
-Eleven libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
+Thirteen libraries (and a build-time tool), each a CMake target whose public API is a set of C++ modules.
 Backends are modules of a **private** file set: only the factory of their library imports them, so no
 consumer can name a backend type or include a native header through gfx.
 
@@ -25,8 +25,13 @@ flowchart TB
         example["gfx_windowed_example<br/>examples/windowed"]
         editor["gfx_ui_editor_example<br/>examples/ui_editor"]
         physics_example["gfx_physics_example<br/>examples/physics"]
-        sandbox["gfx_physics_sandbox<br/>examples/physics_sandbox (§9)"]
+        sandbox["gfx_physics_sandbox, gfx_physics_comparison<br/>examples/physics_sandbox (§9, §10.3)"]
+        benchmark["gfx_physics_benchmark<br/>benchmarks/physics (§10.3)"]
         tests["tests/*"]
+    end
+    subgraph profiler_libs["gfx::profiler, gfx::profiler_graphics (§10)"]
+        profiler["gfx.profiler<br/>scopes, counters, sessions, traces, reports"]
+        profiler_gpu["gfx.profiler.graphics<br/>GpuTimer"]
     end
     subgraph ui_platform_lib["gfx::ui_platform"]
         ui_platform["gfx.ui.platform<br/>UiPlatformInput, UiWindowServices,<br/>navigation context, UiAccessibilityAdapter"]
@@ -59,7 +64,7 @@ flowchart TB
     end
     subgraph core_lib["gfx::core"]
         core["gfx.core<br/>enums machinery, errors, handles,<br/>identifiers, types, native_window"]
-        tables["gfx.core.slot_table, gfx.core.handle_table<br/>(backend utilities)"]
+        tables["gfx.core.slot_table, gfx.core.handle_table<br/>(backend utilities), gfx.core.shared_mutex"]
     end
     example --> bridge
     example --> ui_platform
@@ -77,7 +82,14 @@ flowchart TB
     physics_backends --> third_box3d["Box3D (static)"]
     physics_modules -.->|factory imports| gpu_physics
     sandbox --> gpu_physics
+    benchmark --> physics_modules
+    benchmark --> gpu_physics
     gpu_physics --> gfx_module
+    physics_modules --> profiler
+    gpu_physics --> profiler_gpu
+    profiler_gpu --> profiler
+    profiler_gpu --> gfx_module
+    profiler --> core
     core --> third_math["cglm, SIMDe<br/>(gfx.core.math at run time)"]
     ui_platform --> ui
     ui_platform --> platform_module
@@ -105,7 +117,7 @@ flowchart TB
 
 | Library | Source | Modules (public) | Namespace |
 |---|---|---|---|
-| core | `source/core/` | `gfx.core` = `gfx.core.enums`, `.errors`, `.handles`, `.types`, `.native_window`; plus `gfx.core.slot_table`, `gfx.core.handle_table` for backends | `gfx` |
+| core | `source/core/` | `gfx.core` = `gfx.core.enums`, `.errors`, `.handles`, `.types`, `.native_window`; plus `gfx.core.slot_table`, `gfx.core.handle_table` for backends, `gfx.core.math`, `gfx.core.shared_mutex` | `gfx` |
 | graphics | `source/graphics/` | `gfx` = `gfx.enums`, `gfx.errors`, `gfx.handles`, `gfx.interface` (one partition per object or concept), `gfx.backend_factory`, `gfx.shader_tools` | `gfx` |
 | platform | `source/platform/` | `gfx.platform` = `gfx.platform.enums`, `.handles`, `.interface` (partitions), `.input` (partitions), `.backend_factory` | `gfx::platform` |
 | bridge | `source/platform_graphics/` | `gfx.platform.graphics` (re-exports `gfx` and `gfx.platform`) | `gfx::platform` |
@@ -117,6 +129,8 @@ flowchart TB
 | physics components | `source/physics/` | `gfx.physics.shapes`, `.narrow_phase`, `.tasks`, `.spatial`, `.interface`, `.dynamics`, `.world` (each with partitions) | `gfx::physics` |
 | physics | `source/physics/` | `gfx.physics` (re-exports the interface and the world framework), `gfx.physics.factory` | `gfx::physics` |
 | GPU physics backend | `source/physics/backends/gpu_xpbd/` | `gfx.physics.gpu_xpbd` (partitions `:settings`, `:primitives`, `:bvh`, `:narrow_phase`); built with `GFX_PHYSICS_BACKEND_GPU_XPBD` | `gfx::physics::gpu_xpbd` |
+| profiler | `source/profiler/` | `gfx.profiler` (partitions), `gfx.profiler.enums`, `.handles`, `.errors`; the macros of `<gfx/profiler.hpp>` | `gfx::profiler` |
+| profiler bridge | `source/profiler_graphics/` | `gfx.profiler.graphics` (`GpuTimer`) | `gfx::profiler` |
 
 Rules every library follows:
 
@@ -930,7 +944,7 @@ flowchart TB
 ```
 
 - **`gfx::physics_common`**: one enumerations file for physics and camera, 17 handle kinds (core's `Handle<Tag>`,
-  explicitly instantiated once: a toolchain workaround, §10), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
+  explicitly instantiated once: a toolchain workaround, §11), `PhysicsError` (capability gaps throw core's `BackendCapabilityError`),
   `QueryResult<T> = std::expected<T, QueryFailure>`, and primitives whose tests are constexpr, with SIMD batches
   (frustum culling of boxes and spheres) giving the same bits as the scalar code.
 - **`gfx::camera`** depends on the primitives only; **`gfx::physics_components`** never on the camera.
@@ -1217,8 +1231,8 @@ Two worlds share nothing (no global state) and step on two threads at once.
 ## 8. The GPU physics backend
 
 `PhysicsBackendKind::GPU_XPBD` simulates a world with extended position-based dynamics in compute shaders of the graphics
-library: every phase of a step runs on the GPU, and the CPU only turns edits into patches, records one command buffer,
-waits for it and reads the results back. It is a `SteppedWorldBackend` like Box3D and the reference backend, so its worlds
+library: every phase of a step runs on the GPU, and the CPU only turns edits into patches, records the step's command
+buffers (each part submitted as soon as it is recorded), waits for them and reads the results back. It is a `SteppedWorldBackend` like Box3D and the reference backend, so its worlds
 are `SteppedWorld`s: the same handles, edits, snapshots, threads and abstraction queries (§7.2, §7.3). It is the only part
 of the physics library that depends on graphics, in a target of its own built with `GFX_PHYSICS_BACKEND_GPU_XPBD`. The
 decisions behind it, its phases and what each built are in [gpu-xpbd-design.md](gpu-xpbd-design.md).
@@ -1231,7 +1245,7 @@ flowchart TB
         direction TB
         entry["gfx.physics.gpu_xpbd<br/>capabilities(), to_string(), unavailable_reason(),<br/>create_physics_world(description, device, settings)"]
         exported["exported partitions<br/>:settings, :primitives (GpuPrimitives),<br/>:bvh (GpuBvh), :narrow_phase (GpuNarrowPhase)"]
-        internal["internal partitions<br/>:probing, :resources (GpuArray, GpuPipelines, StepTimer),<br/>:solver (GpuConstraintSolver), :soft_bodies,<br/>:backend (GpuXpbdBackend, GpuBroadPhase)"]
+        internal["internal partitions<br/>:probing, :resources (GpuArray, GpuPipelines,<br/>GpuPipelineLibrary, PhaseTimer, PassTimer),<br/>:solver (GpuConstraintSolver), :soft_bodies,<br/>:backend (GpuXpbdBackend, GpuBroadPhase)"]
         shaders["47 compute shaders<br/>(GLSL compiled to SPIR-V at build time, embedded)"]
     end
     entry --> internal
@@ -1330,8 +1344,11 @@ sequenceDiagram
     T->>B: apply(edits, pending)
     B->>B: edits into patches of bodies, colliders, joints, particles
     T->>B: simulate(seconds, pending)
-    B->>B: colliders, joints, soft bodies laid out (uploaded when their bytes changed)
-    B->>G: one command buffer: uploads, patches, backups, detection, substeps, results, readback copies
+    alt a world at rest, nothing edited (RESTING_STEPS)
+        B->>B: no GPU work: the last step's results stand
+    end
+    B->>B: colliders, joints, soft bodies laid out after edits that change them (uploaded when their bytes changed)
+    B->>G: command buffers, each part submitted as recorded: uploads, patches, backups, detection, substeps, results, readback copies
     G-->>B: timeline semaphore reaches the step
     B->>B: read the counts
     alt more pairs, manifolds or colors than the buffers held
@@ -1552,20 +1569,151 @@ The sandbox found three defects of the libraries this way, each fixed with a reg
 turned with spinning spheres and hits resolved within one step (the reference backend), and shallow overlaps of a large
 box taken for GJK slivers (bodies pushed through the floor).
 
-## 10. Build and tests
+## 10. The profiler and the physics benchmark
+
+`gfx::profiler` times what any library does on the CPU, `gfx::profiler_graphics` adds what a GPU does, and the physics
+benchmark used both to measure the GPU backend against Box3D while it was optimized. The measurements and each
+optimization's effect are in [PERFORMANCE.md](PERFORMANCE.md); the decisions and each phase's record in
+[profiler-performance-design.md](profiler-performance-design.md).
+
+### 10.1 Targets and modules
 
 ```mermaid
 flowchart TB
-    presets["CMakePresets.json<br/>debug / release (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_PHYSICS, GFX_PHYSICS_BACKEND_BOX3D,<br/>GFX_PHYSICS_BACKEND_GPU_XPBD,<br/>GFX_SIMD_INSTRUCTION_SET, GFX_BUILD_EXAMPLES, GFX_BUILD_TESTS"]
+    subgraph profiler_target["gfx::profiler (core only)"]
+        direction TB
+        macros["include/gfx/profiler.hpp<br/>PROFILE_SCOPE, PROFILE_COUNTER, PROFILE_GPU_SCOPE, ...<br/>(nothing when GFX_PROFILER is off)"]
+        profiler_module["gfx.profiler<br/>:site (ProfileSite, ProfileScope, record_*),<br/>:session (Profiler, sessions, frames),<br/>:gpu (GpuTimingSource), :trace, :report, :exporters"]
+        profiler_state["internal :state<br/>ProfileRecord (32 bytes), RecordRing (SPSC),<br/>ThreadContext, SessionData"]
+    end
+    subgraph profiler_bridge["gfx::profiler_graphics"]
+        gpu_timer["gfx.profiler.graphics<br/>GpuTimer: timestamps in query pools,<br/>read back frames later, calibrated clocks"]
+    end
+    macros --> profiler_module
+    profiler_module --> profiler_state
+    profiler_module --> core_modules["gfx.core"]
+    profiler_module --> zstd_library["zstd (binary traces)"]
+    gpu_timer --> profiler_module
+    gpu_timer --> graphics_module["gfx<br/>QueryPool, calibrate_timestamps()"]
+    physics_framework["gfx.physics.world, the Box3D and reference backends,<br/>the soft-body solver"] --> profiler_module
+    gpu_backend["gfx.physics.gpu_xpbd<br/>PhaseTimer, PassTimer"] --> gpu_timer
+    benchmark_program["gfx_physics_benchmark<br/>benchmarks/physics"] --> profiler_module
+    comparison_program["gfx_physics_comparison, gfx_physics_sandbox<br/>(--trace)"] --> profiler_module
+```
+
+- **Any library may record**: the profiler depends on core only, so the physics, camera and UI libraries, which must not
+  depend on graphics, use it; only GPU timing needs the bridge. Modules cannot export macros: the `PROFILE_*` macros live in
+  one small header, and expand to `gfx.profiler`'s objects, or to nothing (arguments not evaluated) when `GFX_PROFILER` is off.
+- **A recording costs about 50 ns a scope and 25 ns a counter** in an optimized build: a site's name, file and line are
+  constants of the call site (`ProfileSite`), and a thread writes 32-byte records into a ring only it writes.
+
+### 10.2 A frame recorded
+
+```mermaid
+sequenceDiagram
+    participant A as a thread (any library)
+    participant R as its ring (SPSC)
+    participant P as Profiler
+    participant T as GpuTimer
+    participant G as GPU
+    A->>P: begin_frame(session) (the frame's owner)
+    A->>R: scope begun, counters, markers, scope ended (records)
+    T->>G: timestamps around commands (query pool slots of this frame)
+    A->>P: end_frame(session)
+    P->>R: drain every thread's ring, in registration order
+    P->>T: collect the scopes resolved since (a frame in flight later)
+    T->>G: read the slots of a finished frame
+    T-->>P: GPU scopes on the CPU's clock (calibrated, else estimated)
+    P->>P: each GPU scope filed into the first frame ending after it began
+    A->>P: finalize_session(session)
+    P-->>A: Trace: frames, threads, GPU tracks, counters
+```
+
+A `Trace` exports to Chrome's JSON format (one track per thread and GPU queue) or a binary format (zstd on request), and
+`make_report()` turns it into each stage's totals and percentiles, each frame's CPU and GPU time, their overlap and the GPU's
+idle share. The canonical form of a trace (without times) is the same for the same work, so tests compare structures byte
+for byte.
+
+### 10.3 The benchmark and the comparison
+
+```mermaid
+flowchart LR
+    subgraph benchmark_run["the benchmark"]
+        direction TB
+        scenes["7 scenes, one function each<br/>(scenes.cppm)"] --> worlds["a Box3D world (16 threads),<br/>a GPU world (its own device)"]
+        worlds --> warm_up["100 steps of warm-up"]
+        warm_up --> measured["1 000 steps through step(),<br/>one profiler frame each"]
+        measured --> checks["quality check<br/>(stack, rods, cloth, rest)"]
+        checks --> outputs["Chrome trace, report rows,<br/>benchmark_report.md"]
+        outputs --> gate["baseline per machine:<br/>a median 5 % slower fails,<br/>measured again first"]
+    end
+    subgraph comparison_run["the comparison"]
+        direction TB
+        large["one large scene<br/>(large_scenes.cppm)"] --> two_worlds_built["built into two worlds"]
+        two_worlds_built --> lockstep["each frame: the left world's step,<br/>then the right one's"]
+        lockstep --> halves["each world drawn into its half,<br/>one camera"]
+        halves --> panel["step times plotted,<br/>which is faster by how much"]
+    end
+    benchmark_run ~~~ comparison_run
+```
+
+The benchmark compares what an application gets: `step()`'s wall clock, both backends paying the framework, Box3D's own
+time (`b3World_GetProfile`) reported beside it. The comparison (`examples/physics_sandbox/physics_comparison.cpp`) shows the
+same thing on scenes in motion one can watch and act on; it shares the sandbox's renderer, scenes and camera rig, each
+program compiling those modules itself.
+
+### 10.4 The optimizations in a GPU step
+
+```mermaid
+flowchart LR
+    subgraph creation_stage["world creation"]
+        shared_pipelines["SHARED_PIPELINES<br/>pipelines once per device,<br/>a cache file"]
+    end
+    subgraph begin_stage["step begins"]
+        direction TB
+        resting["RESTING_STEPS<br/>a world at rest: no GPU work"] --> layouts["INCREMENTAL_LAYOUTS<br/>layouts kept unless edited"]
+    end
+    subgraph detect_stage["detection"]
+        direction TB
+        reach["REACH_BOXES<br/>boxes grown by each<br/>collider's own reach"] --> refit["BVH_REFIT<br/>the moving tree refit<br/>for 30 steps"]
+        refit --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
+    end
+    subgraph substep_stage["substeps"]
+        direction TB
+        by_use["RECORDED_PASSES_BY_USE<br/>passes for the colors used"] --> chunks["CHUNKED_GATHER<br/>heavy bodies gathered<br/>in chunks"]
+        chunks --> fusion["KERNEL_FUSION<br/>bodies' and particles'<br/>velocity updates together"]
+    end
+    subgraph result_stage["results"]
+        compact["COMPACT_READBACK<br/>only the bodies that changed"]
+    end
+    parts["PARTIAL_SUBMISSIONS<br/>each part submitted<br/>as it is recorded"]
+    creation_stage --> begin_stage --> detect_stage --> substep_stage --> result_stage
+    detect_stage -.-> parts
+    substep_stage -.-> parts
+```
+
+Each is a bit of `GpuOptimization` (`GpuXpbdDescription::optimizations`, all on by default; `NONE` is the backend before
+them). Most give the same bits as the baseline (tests compare them); `REACH_BOXES` and `BVH_REFIT` find the same pairs in
+another order, `RESTING_STEPS` gives the same bits for the same steps. Beside the flags, the framework (lazy query tree with
+fat leaves, parallel bounds and copies, swapped events, unmoved colliders' boxes kept, `gfx::SharedMutex` for the published
+snapshot) and the GPU backend's CPU side (contacts sorted by 64-bit keys and converted in place, parallel readback, no
+denormal floats) changed for every world.
+
+## 11. Build and tests
+
+```mermaid
+flowchart TB
+    presets["CMakePresets.json<br/>debug / release / profile (Ninja, MSYS2 GCC 16)"] --> configure["CMakeLists.txt<br/>options GFX_BACKEND_*, GFX_PLATFORM_BACKEND_*,<br/>GFX_BUILD_PLATFORM, GFX_BUILD_UI, GFX_BUILD_UI_ATLAS_TOOLS,<br/>GFX_BUILD_PHYSICS, GFX_PHYSICS_BACKEND_BOX3D,<br/>GFX_PHYSICS_BACKEND_GPU_XPBD, GFX_PROFILER,<br/>GFX_SIMD_INSTRUCTION_SET, GFX_BUILD_EXAMPLES,<br/>GFX_BUILD_BENCHMARKS, GFX_BUILD_TESTS"]
     configure --> modules["cmake/: import std gate, toolchain checks,<br/>project options and toolchain workarounds,<br/>dependencies (find_package, else FetchContent),<br/>gfx_add_shaders(), gfx_add_ui_atlas(), gfx_require_decoupled(),<br/>test helpers"]
-    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, gfx_physics_common, gfx_camera,<br/>gfx_physics_components, gfx_physics,<br/>gfx_physics_gpu_xpbd, examples, tests"]
-    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, decoupling checks,<br/>atlas tool runs, example runs"]
+    modules --> targets["gfx_core, gfx, gfx_platform, gfx_platform_graphics,<br/>gfx_ui, gfx_ui_platform, gfx_ui_atlas_tools,<br/>gfx_ui_atlas_builder, gfx_physics_common, gfx_camera,<br/>gfx_physics_components, gfx_physics,<br/>gfx_physics_gpu_xpbd, gfx_profiler, gfx_profiler_graphics,<br/>examples, benchmarks, tests"]
+    targets --> ctest["CTest: one test per GoogleTest case<br/>(POST_BUILD discovery), compilation-failure tests,<br/>naming check, decoupling checks, compile-out check,<br/>atlas tool runs, example and benchmark runs"]
 ```
 
 | Suite | What it covers |
 |---|---|
 | `tests/toolchain` | C++23 and `import std` conformance; **defect detectors** that pass while a GCC 16 / MinGW defect exists (each workaround stays only as long as its defect) |
-| `tests/core` | enumeration machinery, errors, handles, identifiers, native window handles, slot tables |
+| `tests/core` | enumeration machinery, errors, handles, identifiers, native window handles, the math, the shared mutex (and how fast it is), slot tables |
+| `tests/profiler` | recording on many threads, sessions and frames, traces exported and read back (Chrome JSON, binary, zstd), reports, the same structure for the same work, the overhead per scope and counter (optimized builds), the macros compiled out (object files with and without them compared), the GPU timer on every GPU (scopes inside their submissions, calibrated clocks) |
 | `tests/graphics/*` | enumerations, errors, handles, the interfaces through a fake backend, shader layouts and validation, shader tools; `vulkan`: the Vulkan backend on every GPU of the machine with the validation layers (any message fails a test) |
 | `tests/platform` | the platform library through a fake platform: events, windows, the pump, watchers, threads, the input system (schemas, contexts, players, triggers, rebinding, saved bindings, `EventChannel`) |
 | `tests/platform/backends` | the contract every platform backend honors (one parameterized suite run on SDL3 and GLFW, real windows), then SDL3 (injected events, virtual gamepads) and GLFW (Win32 messages) |
@@ -1576,6 +1724,8 @@ flowchart TB
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
 | `PhysicsExample.*` | the physics example on Box3D, on the reference backend and on the GPU backend: four seconds of the scene on four threads, every check passing (label `example`) |
 | `PhysicsSandbox.*` | the physics sandbox's scripted runs, one with each physics backend, and its tour of every preset on every physics backend, with the validation layers (§9.4, label `example`) |
+| `PhysicsComparison.Pile` | the physics comparison on a small pile, 120 frames with Box3D and the GPU backend side by side, with the validation layers (label `example`) |
+| `PhysicsBenchmark.*` | a smoke run of the physics benchmark at 1 % of its scenes (label `example`); the whole benchmark only with `GFX_RUN_BENCHMARKS=1` (label `benchmark`) |
 | `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 
 Toolchain workarounds the build applies (each with a detector test): `--allow-multiple-definition`
@@ -1588,4 +1738,5 @@ AccessKit behind std-free headers; no block-scope using-declarations of another 
 that declares its tag; and, for CMake 4.4.0-rc2, a link job pool per test directory (test discovery scripts
 that name no target shared one listing file) and test lists emptied before each discovery (on Windows,
 `file(REMOVE)` of a file another process holds open fails silently, and the discovery appended its tests to the
-old list). Details are in `.claude/CLAUDE.md` §6.
+old list); `gfx::SharedMutex` instead of `std::shared_mutex`, which takes about 900 ns to lock on MinGW. Details are in
+`.claude/CLAUDE.md` §6.

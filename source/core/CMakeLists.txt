@@ -26,9 +26,12 @@ target_sources(gfx_core
             handle_table.cppm
             # Vectors, quaternions, matrices, transforms (constexpr; SIMD at run time); imported on its own.
             math.cppm
+            # A reader-writer lock that is fast on every platform (MinGW's std::shared_mutex is not); imported on its own.
+            shared_mutex.cppm
     PRIVATE
         errors.cpp
-        math_kernels.cpp)   # plain translation unit: SIMDe's headers cannot share one with import std
+        math_kernels.cpp        # plain translation unit: SIMDe's headers cannot share one with import std
+        shared_mutex_native.cpp) # plain translation unit: <windows.h> cannot share one with modules
 
 # cglm's static inline functions are called from the math module's exported inline functions: GCC accepts
 # that exposure of the global module fragment's translation-unit-local functions (warning
