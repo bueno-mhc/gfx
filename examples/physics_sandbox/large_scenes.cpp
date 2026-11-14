@@ -115,7 +115,7 @@ pyramid(Scene& scene,
         }
     }
     const float width = static_cast<float>(base) * PITCH;
-    return {.view = {.target = {.y = 0.25F * width}, .distance = 1.5F * width + 6.0F, .yaw = 0.6F, .pitch = -0.4F}, .bodies = made};
+    return {.view = {.target = {.y = 0.3F * width}, .distance = 1.9F * width + 8.0F, .yaw = 0.6F, .pitch = -0.35F}, .bodies = made};
 }
 
 auto
@@ -202,7 +202,7 @@ wrecking(Scene& scene,
                        collider(make_shape(SphereShape{.radius = radius}), 0.4F, 7800.0F), {.red = 60, .green = 62, .blue = 70})
             .body->handle();
     static_cast<void>(scene.add_joint(distance_joint({.first = ball, .second = {}, .anchor_first = {}, .anchor_second = pivot, .length = rope})));
-    return {.view = {.target = {.y = 0.4F * height}, .distance = 0.9F * length + 10.0F, .yaw = 0.9F, .pitch = -0.2F},
+    return {.view = {.target = {.y = 0.4F * height}, .distance = 1.05F * length + 12.0F, .yaw = 0.9F, .pitch = -0.2F},
             .bodies = made + 1,
             .joints = 1};
 }
@@ -236,7 +236,11 @@ chains(Scene& scene,
         }
     }
     const auto made = static_cast<std::uint32_t>(count * links);
-    return {.view = {.target = {.y = 0.5F * height}, .distance = 1.3F * length + 8.0F, .yaw = 0.45F, .pitch = -0.25F}, .bodies = made, .joints = made};
+    // The view of the chains as they hang (below their anchors, at x = -length / 2), seen across their rows.
+    return {.view = {.target = {.x = -0.5F * length, .y = 0.55F * height}, .distance = 1.5F * length + 0.8F * static_cast<float>(count) + 8.0F,
+                     .yaw = 0.75F, .pitch = -0.2F},
+            .bodies = made,
+            .joints = made};
 }
 
 auto

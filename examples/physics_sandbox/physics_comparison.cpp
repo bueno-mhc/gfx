@@ -12,7 +12,7 @@
 // Usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>]
 //                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd] [--real-time]
 //                               [--no-sleep] [--device <index>] [--threads <count>] [--frames <count>] [--validation]
-//                               [--trace <file.json>]
+//                               [--trace <file.json>] [--capture <file.ppm>] [--capture-frame <index>]
 //   --scene S      the scene (pyramid by default): a square pyramid of boxes, a pile poured into a bin, a brick wall hit
 //                  by a wrecking ball, rows of swinging chains, a large cloth
 //   --size F       scales every count of the scene (1 by default: about two thousand bodies, 6 400 cloth particles)
@@ -23,6 +23,8 @@
 //                  still measures each backend's work (with sleep, a world at rest costs almost nothing)
 //   --frames N     closes after N frames and prints how the steps compared; the window then does not take the focus
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
+//   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM): what the window
+//                  showed, both worlds and the panel
 //   --trace F      records every frame with the profiler (each world's step, the worlds' own scopes, the GPU backend's
 //                  GPU scopes) and writes them to F as a Chrome trace at the end (builds with the profiler)
 #include <gfx/profiler.hpp>   // the profiler's macros (before the imports)
@@ -88,6 +90,7 @@ constexpr float SHOT_SPEED = 60.0F;            ///< Meters per second.
 constexpr float INTERFACE_FONT_SIZE = 15.0F;   ///< UI units (points) per em.
 constexpr std::size_t PLOTTED_STEPS = 240;     ///< Step times plotted (and averaged).
 constexpr std::uint32_t DIVIDER = 2;           ///< Pixels between the halves.
+constexpr float PANEL_ROOM = 0.12F;            ///< How far below a scene's center the camera aims, in camera distances.
 
 /// How the worlds advance.
 enum class Stepping : std::uint8_t
@@ -111,6 +114,8 @@ struct Options
     std::optional<std::uint64_t> frames{};
     bool validation = false;
     std::optional<std::string> trace{};
+    std::optional<std::string> capture{};
+    std::optional<std::uint64_t> capture_frame{};
 };
 
 /// @p name in capitals (enumerator names).
@@ -206,6 +211,14 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.trace = arguments[++index];
         }
+        else if (argument == "--capture" && has_value)
+        {
+            options.capture = arguments[++index];
+        }
+        else if (argument == "--capture-frame" && has_value)
+        {
+            options.capture_frame = std::stoull(arguments[++index]);
+        }
         else if (argument == "--device" && has_value)
         {
             options.physical_device = std::stoul(arguments[++index]);
@@ -226,7 +239,8 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             std::println(std::cerr, "usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>] "
                                     "[--left <physics backend>] [--right <physics backend>] [--real-time] [--no-sleep] [--device <index>] "
-                                    "[--threads <count>] [--frames <count>] [--validation] [--trace <file.json>]");
+                                    "[--threads <count>] [--frames <count>] [--validation] [--trace <file.json>] [--capture <file.ppm>] "
+                                    "[--capture-frame <index>]");
             return std::nullopt;
         }
     }
@@ -267,6 +281,32 @@ public:
 private:
     std::atomic<std::uint32_t> m_count{0};
 };
+
+/// --capture: writes @p pixels (B8G8R8A8 or R8G8B8A8 words of @p extent) to @p path as a binary PPM.
+void
+write_capture(const std::string& path,
+              std::span<const std::uint32_t> pixels,
+              gfx::Extent extent,
+              bool blue_first)
+{
+    std::ofstream file{path, std::ios::binary};
+    file << "P6\n" << extent.width << ' ' << extent.height << "\n255\n";
+    std::vector<char> row(std::size_t{extent.width} * 3);
+    for (std::uint32_t y = 0; y < extent.height; ++y)
+    {
+        for (std::uint32_t x = 0; x < extent.width; ++x)
+        {
+            const std::uint32_t pixel = pixels[std::size_t{y} * extent.width + x];
+            const auto first = static_cast<char>(pixel & 0xFFU);
+            const auto second = static_cast<char>((pixel >> 8U) & 0xFFU);
+            const auto third = static_cast<char>((pixel >> 16U) & 0xFFU);
+            row[std::size_t{x} * 3] = blue_first ? third : first;
+            row[std::size_t{x} * 3 + 1] = second;
+            row[std::size_t{x} * 3 + 2] = blue_first ? first : third;
+        }
+        file.write(row.data(), static_cast<std::streamsize>(row.size()));
+    }
+}
 
 /// --trace: a profiler frame for the scope of a frame of the program (whatever way the frame ends).
 class TracedFrame
@@ -456,7 +496,9 @@ struct PanelRequest
     bool reset = false;
 };
 
-/// The panel: the scene, its size, the stepping, and how each side's steps compare.
+/// The panel, in the window's bottom-left corner over the near floor (the scenes stand in the middle of each half): the
+/// scene and its size, the stepping, sleeping, pausing, and how each world's steps compare. Compact, so that the left
+/// world stays in view; collapsible by its title bar.
 auto
 comparison_panel(gfx::ui::UiFrame& frame,
                  std::span<Side, 2> sides,
@@ -465,22 +507,32 @@ comparison_panel(gfx::ui::UiFrame& frame,
                  Stepping& stepping,
                  bool& sleeping,
                  bool& paused,
-                 double frame_seconds) -> PanelRequest
+                 double frame_seconds,
+                 float display_height) -> PanelRequest
 {
+    constexpr float MARGIN = 10.0F;      ///< UI units from the window's edges.
+    constexpr float COMBO_WIDTH = 110.0F;
+    constexpr float PLOT_WIDTH = 300.0F;
+    constexpr float PLOT_HEIGHT = 26.0F;
     PanelRequest request;
-    frame.set_next_window_position({.x = 12, .y = 40}, gfx::ui::UiCondition::FIRST_USE_EVER);
-    if (frame.begin_window("Comparison", gfx::ui::UiWindowFlag::ALWAYS_AUTO_RESIZE))
+    frame.set_next_window_position({.x = MARGIN, .y = display_height - MARGIN}, gfx::ui::UiCondition::ALWAYS, {.x = 0.0F, .y = 1.0F});
+    frame.set_next_window_background_alpha(0.8F);
+    if (frame.begin_window("Comparison", gfx::ui::UiWindowFlag::ALWAYS_AUTO_RESIZE | gfx::ui::UiWindowFlag::NO_SAVED_SETTINGS))
     {
+        // The scene and its size, on one line.
         std::array<std::string_view, LARGE_SCENE_COUNT> names{};
         for (std::size_t index = 0; index < names.size(); ++index)
         {
             names[index] = large_scene_information(static_cast<LargeScene>(index)).name;
         }
         std::size_t selected = std::to_underlying(scene);
-        if (frame.combo("scene", selected, names))
+        frame.set_next_item_width(COMBO_WIDTH);
+        if (frame.combo("##scene", selected, names))
         {
             request.scene = static_cast<LargeScene>(selected);
         }
+        frame.item_tooltip(large_scene_information(scene).description);
+        frame.same_line();
         std::array<std::string, LARGE_SCENE_SIZES.size()> size_names{};
         std::size_t size_index = LARGE_SCENE_SIZES.size();
         for (std::size_t index = 0; index < LARGE_SCENE_SIZES.size(); ++index)
@@ -490,59 +542,64 @@ comparison_panel(gfx::ui::UiFrame& frame,
         }
         if (size_index == LARGE_SCENE_SIZES.size())
         {
-            frame.text("size {} (command line)", size);
-            size_index = 0;
+            frame.text("size {}", size);
         }
-        else if (frame.combo("size", size_index, size_names))
+        else
         {
-            request.size = LARGE_SCENE_SIZES[size_index];
+            frame.set_next_item_width(COMBO_WIDTH);
+            if (frame.combo("##size", size_index, size_names))
+            {
+                request.size = LARGE_SCENE_SIZES[size_index];
+            }
         }
+        frame.same_line();
+        request.reset = frame.button("reset (R)");
+        const LargeSceneResult& built = sides[0].built;
+        frame.text_disabled("{} bodies, {} particles, {} joints in each world", built.bodies, built.particles, built.joints);
+
+        // How the worlds advance.
         if (frame.radio_button("lockstep", stepping == Stepping::LOCKSTEP))
         {
             stepping = Stepping::LOCKSTEP;
         }
+        frame.item_tooltip("each frame, one step of the left world, then one of the right world: both show the same time");
         frame.same_line();
         if (frame.radio_button("real time", stepping == Stepping::REAL_TIME))
         {
             stepping = Stepping::REAL_TIME;
         }
+        frame.item_tooltip("each world advances by the frame's real time, both at once: the slower one falls behind");
         frame.same_line();
         static_cast<void>(frame.checkbox("sleeping", sleeping));
+        frame.item_tooltip("off: resting bodies keep being simulated (a world at rest then still measures each backend's work)");
         frame.same_line();
         static_cast<void>(frame.checkbox("paused (P)", paused));
-        frame.same_line();
-        request.reset = frame.button("reset (R)");
-        frame.text_unformatted(large_scene_information(scene).description);
-        const LargeSceneResult& built = sides[0].built;
-        frame.text("{} bodies, {} particles, {} joints in each world", built.bodies, built.particles, built.joints);
         frame.separator();
 
-        // Each side: its backend, the last step and the latest steps' mean, their plot, the world's state.
+        // Each world: its last step, the mean of the latest ones, its state, and a plot of its steps.
         for (Side& side : sides)
         {
             const physics::StepStatistics step = side.scene->statistics();
-            frame.text("{}: step {:.2f} ms (mean of the last {}: {:.2f} ms)", backend_label(side.backend), step.wall_seconds * 1000.0,
-                       std::min<std::uint64_t>(side.timed_steps, PLOTTED_STEPS), side.recent_mean());
+            frame.text("{}: {:.2f} ms a step (mean {:.2f}), {} awake, {} contacts", backend_label(side.backend), step.wall_seconds * 1000.0,
+                       side.recent_mean(), step.awake_bodies, step.contacts);
             std::array<float, PLOTTED_STEPS> values{};
             side.plot(values);
             const std::string overlay = std::format("slowest {:.2f} ms", std::ranges::max(values));
-            frame.plot_lines(std::format("##{}", backend_label(side.backend)), values, {.overlay = overlay, .minimum = 0.0F, .size = {.x = 360, .y = 44}});
-            frame.text("  {} steps ({:.1f} s simulated), {} awake, {} contact points, highest body {:.2f} m", side.scene->step_count(),
-                       static_cast<double>(side.scene->step_count()) * STEP, step.awake_bodies, step.contacts, side.highest());
+            frame.plot_lines(std::format("##{}", backend_label(side.backend)), values, {.overlay = overlay, .minimum = 0.0F, .size = {.x = PLOT_WIDTH, .y = PLOT_HEIGHT}});
         }
-        frame.separator();
+
+        // Which is faster, the frame, the controls.
         const double left = sides[0].recent_mean();
         const double right = sides[1].recent_mean();
         if (left > 0.0 && right > 0.0)
         {
             const bool right_faster = right < left;
-            frame.text("{} steps {:.2f}x faster than {}", backend_label(right_faster ? sides[1].backend : sides[0].backend),
-                       right_faster ? left / right : right / left, backend_label(right_faster ? sides[0].backend : sides[1].backend));
+            frame.text("{} steps {:.2f}x faster ({:.1f} s simulated)", backend_label(right_faster ? sides[1].backend : sides[0].backend),
+                       right_faster ? left / right : right / left, static_cast<double>(sides[0].scene->step_count()) * STEP);
         }
-        frame.text("frame {:.1f} ms; {}", frame_seconds * 1000.0,
-                   stepping == Stepping::LOCKSTEP ? "a step each per frame, one world after the other" : "each world by the frame's time, both at once");
-        frame.text_unformatted("right drag: turn   middle drag: pan   wheel: zoom");
-        frame.text_unformatted("Space: shoot into both   N: a step while paused   Esc: quit");
+        frame.text_disabled("frame {:.1f} ms   (?) controls", frame_seconds * 1000.0);
+        frame.item_tooltip("right drag: turn   middle drag: pan   wheel: zoom\nSpace: shoot a ball into both worlds\n"
+                           "R: build the scene again   P: pause   N: one step while paused   Esc: quit");
     }
     frame.end_window();
     return request;
@@ -616,7 +673,16 @@ run(const Options& options) -> int
     const std::unique_ptr<gfx::Device> device = physical_device.create_device({.queues = QUEUES, .debug_name = "comparison device"});
     gfx::Queue& queue = device->queue(gfx::QueueType::GRAPHICS);
     const gfx::SurfaceSupport support = physical_device.surface_support(window->native_handle());
-    platform::WindowSwapchain presentation{*device, *window, {.format = choose_format(support), .usage = gfx::ImageUsage::COLOR_ATTACHMENT, .debug_name = "comparison swapchain"}};
+    const bool capturing = options.capture.has_value() && gfx::has_all(support.supported_usage, gfx::ImageUsage::TRANSFER_SOURCE);
+    if (options.capture && !capturing)
+    {
+        std::println(std::cerr, "the window's images cannot be copied: no capture");
+    }
+    platform::WindowSwapchain presentation{
+        *device, *window,
+        {.format = choose_format(support),
+         .usage = capturing ? gfx::ImageUsage::COLOR_ATTACHMENT | gfx::ImageUsage::TRANSFER_SOURCE : gfx::ImageUsage::COLOR_ATTACHMENT,
+         .debug_name = "comparison swapchain"}};
     const gfx::DeviceLimits& limits = physical_device.properties().limits;
     const gfx::SampleCount samples = gfx::has_all(limits.color_sample_counts, gfx::SampleCount::FOUR) && gfx::has_all(limits.depth_sample_counts, gfx::SampleCount::FOUR)
                                          ? gfx::SampleCount::FOUR
@@ -696,8 +762,9 @@ run(const Options& options) -> int
                          backend_label(side.backend), side.built.bodies, side.built.particles, side.built.joints,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
         }
+        // The camera aimed a little below the scene's center, so that each scene stands above the panel (bottom left).
         const PresetView& view = sides[0].built.view;
-        rig.aim(view.target, view.distance, view.yaw, view.pitch);
+        rig.aim(view.target - gfx::Vector3{.y = PANEL_ROOM * view.distance}, view.distance, view.yaw, view.pitch);
         scene = next;
         size = next_size;
     };
@@ -866,14 +933,18 @@ run(const Options& options) -> int
 
         // The UI: the panel and the labels.
         gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(ui_time));
-        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, paused, frame_seconds);
-        side_labels(ui_frame, sides, static_cast<float>(extent.width) / std::max(ui_input.pixels_per_unit(), 0.01F));
+        const float units_per_pixel = 1.0F / std::max(ui_input.pixels_per_unit(), 0.01F);
+        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, paused, frame_seconds,
+                                   static_cast<float>(extent.height) * units_per_pixel);
+        side_labels(ui_frame, sides, static_cast<float>(extent.width) * units_per_pixel);
         static_cast<void>(ui.end_frame());
         ui_wants_mouse = ui.wants_mouse();
         ui_wants_keyboard = ui.wants_keyboard();
         const gfx::ui::UiDrawData& ui_data = ui.draw_data();
 
         // Record: the image cleared (the divider), each side's pass into its half, the UI over both, the hand-over.
+        const bool capture_now = options.capture_frame ? presented == *options.capture_frame : options.frames && presented + 1 == *options.frames;
+        std::unique_ptr<gfx::Buffer> readback{};
         gfx::CommandBuffer& commands_buffer = command_pools.command_buffer();
         {
             gfx::GraphicsRecorder recorder{commands_buffer};
@@ -907,8 +978,28 @@ run(const Options& options) -> int
                     {.area = {.width = extent.width, .height = extent.height}, .color_attachments = attachments, .debug_name = "comparison interface"});
                 ui_renderer.record(scope, ui_data);
             }
-            const std::array to_present{gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_READ_WRITE, gfx::ResourceState::PRESENT)};
-            recorder.barrier({.image_barriers = to_present});
+            if (capture_now && capturing)
+            {
+                // The frame copied out for the capture (the last one unless --capture-frame names another).
+                readback = device->create_buffer({.size = std::uint64_t{extent.width} * extent.height * 4,
+                                                  .usage = gfx::BufferUsage::TRANSFER_DESTINATION,
+                                                  .location = gfx::MemoryLocation::HOST_READBACK,
+                                                  .debug_name = "comparison capture"});
+                const std::array to_copy{
+                    gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_READ_WRITE, gfx::ResourceState::TRANSFER_SOURCE)};
+                recorder.barrier({.image_barriers = to_copy});
+                const std::array regions{gfx::BufferImageCopyRegion{.image_extent = extent}};
+                recorder.copy_image_to_buffer(image->image.image, gfx::ImageLayout::TRANSFER_SOURCE, readback->handle(), regions);
+                const std::array to_present{gfx::image_barrier(image->image.image, gfx::ResourceState::TRANSFER_SOURCE, gfx::ResourceState::PRESENT)};
+                const std::array to_host{gfx::buffer_barrier(readback->handle(), gfx::ResourceState::TRANSFER_DESTINATION, gfx::ResourceState::HOST_READ)};
+                recorder.barrier({.buffer_barriers = to_host, .image_barriers = to_present});
+            }
+            else
+            {
+                const std::array to_present{
+                    gfx::image_barrier(image->image.image, gfx::ResourceState::COLOR_ATTACHMENT_READ_WRITE, gfx::ResourceState::PRESENT)};
+                recorder.barrier({.image_barriers = to_present});
+            }
         }
         const std::array command_buffers{commands_buffer.handle()};
         const std::array waits{gfx::SemaphoreWait{.semaphore = image->acquired}};
@@ -922,6 +1013,14 @@ run(const Options& options) -> int
             static_cast<void>(presentation.present(queue, *image));
         }
         ++presented;
+        if (readback != nullptr)
+        {
+            device->wait_idle();
+            readback->invalidate_mapped_range();
+            write_capture(*options.capture, readback->mapped_elements<std::uint32_t>(), extent,
+                          presentation.format() == gfx::Format::B8G8R8A8_SRGB || presentation.format() == gfx::Format::B8G8R8A8_UNORM);
+            std::println("captured frame {} into {}", presented - 1, *options.capture);
+        }
     }
 
     // The steps' summary: each side's wall times (after the first ten steps), and how they compare.

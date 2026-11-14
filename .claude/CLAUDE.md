@@ -1237,7 +1237,12 @@ Original hard requirements (from the user's initial specification):
   moves step times (4 fps frames: GPU and CPU clocks drop; chains 10 → 5 ms once drawing was fixed). Gotchas: a parallel Debug build ran
   out of memory twice (cc1plus "out of memory allocating"; rerun); build/debug lost GPU_XPBD + profiler again (cache g++.exe; run
   build.py twice); PowerShell drops empty-string arguments (`""` to a script); a PowerShell session's cwd inside a folder blocks
-  deleting it.
+  deleting it. **After acceptance (2026-11-14, user: "must be interactive, drawing things to the screen")**: verified by
+  captures (`--capture <file.ppm>` + `--capture-frame`, as the sandbox; scratchpad ppm_to_png.py with a divisor): every scene draws
+  in both halves; the panel (it covered the left half at 150 % display scaling) is now compact, anchored bottom-left, help in
+  tooltips; the camera aims PANEL_ROOM 0.12 × distance below a scene's center; chains/pyramid/wall views adjusted. **Found**: at
+  size 8 the GPU world's 90-row single-brick wall collapses by itself within 2.5 s (Box3D's stands): XPBD at 4 × 3 holds very
+  tall stacks less well (scene kept as is: a result to show).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
