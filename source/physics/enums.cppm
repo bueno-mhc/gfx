@@ -133,8 +133,10 @@ enum class GpuOptimization : std::uint32_t
     RECORDED_PASSES_BY_USE = 1U << 4, ///< The solver's passes recorded for what the previous step used: the colors
                                    ///< of each kind of constraint (joints, contacts) and two more, instead of the colors
                                    ///< either used and two more, at least GPU_XPBD_INITIAL_COLORS; the overflow set's
-                                   ///< passes and gathers only after a step that had one. Fewer empty dispatches and
-                                   ///< barriers; a step that needs more replays, as before (the same bits).
+                                   ///< passes and gathers only after a step that had one; the coloring's rounds those the
+                                   ///< previous step decided constraints in and two more, not GPU_XPBD_COLORING_ROUNDS.
+                                   ///< Fewer empty dispatches and barriers; a step that needs more replays, as before (the
+                                   ///< same bits).
     REACH_BOXES         = 1U << 5, ///< The broad phase's trees bound each collider by its box grown by its own reach in the
                                    ///< step (its speed, its turn, gravity's pull) and half the world's speculative distance,
                                    ///< not by the step's speculative distance (the farthest any body gets): the pairs the
@@ -166,6 +168,18 @@ enum class GpuOptimization : std::uint32_t
                                     ///< within the step's speculative distance, the farthest any body gets, so one fast body
                                     ///< made every nearby pair a constraint: the pair filter's reach test, on the points'
                                     ///< own gaps. Fewer constraints, colors and overflow constraints (other bits).
+    RELATIVE_SPEED_COLORING = 1U << 12, ///< Only the contacts that can meet at their points' relative speed (each point's gap
+                                        ///< closed by the relative velocity of its two points and gravity's pull within the
+                                        ///< step, or within LINEAR_SLOP) are colored; the others (which could meet only if a
+                                        ///< body were stopped by something else) are solved in the overflow set (Jacobi). Links
+                                        ///< of chains swinging side by side and bodies falling together no longer add colors:
+                                        ///< fewer passes a solver iteration (other bits).
+    OVERFLOW_NEW_COLORS = 1U << 13, ///< With RECORDED_PASSES_BY_USE, in a step that records the overflow set's passes (the
+                                    ///< previous step had an overflow set): the colors recorded are exactly those of each
+                                    ///< kind the previous step used (not two more), and a constraint the coloring gives a
+                                    ///< color beyond them joins the overflow set (Jacobi) instead of the step replaying.
+                                    ///< Other steps as without it. Two passes fewer a solver iteration where chains of
+                                    ///< joints or piles keep an overflow set (other bits in the steps whose colors grow).
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -728,7 +742,8 @@ inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
                                  std::to_underlying(GpuOptimization::RECORDED_PASSES_BY_USE) | std::to_underlying(GpuOptimization::REACH_BOXES) |
                                  std::to_underlying(GpuOptimization::COMPACT_READBACK) | std::to_underlying(GpuOptimization::RESTING_STEPS) |
                                  std::to_underlying(GpuOptimization::BVH_REFIT) | std::to_underlying(GpuOptimization::KERNEL_FUSION) |
-                                 std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS) | std::to_underlying(GpuOptimization::REACHABLE_CONTACTS));
+                                 std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS) | std::to_underlying(GpuOptimization::REACHABLE_CONTACTS) |
+                                 std::to_underlying(GpuOptimization::RELATIVE_SPEED_COLORING) | std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS));
 
 /// @brief Steps the GPU backend refits its moving colliders' tree before building it again (GpuOptimization::BVH_REFIT).
 inline constexpr std::uint32_t GPU_XPBD_REFIT_STEPS = 30;
@@ -741,6 +756,11 @@ inline constexpr std::uint32_t GPU_XPBD_COMPACT_READBACK_BODIES = 4096;
 /// @brief Dispatches a part of the GPU backend's step holds at least before it is submitted (GpuOptimization::
 ///        PARTIAL_SUBMISSIONS): a submission costs tens of microseconds, about what recording this many passes does.
 inline constexpr std::uint32_t GPU_XPBD_PART_DISPATCHES = 64;
+
+/// @brief Dispatches the first part of the GPU backend's step (the uploads and the broad phase) holds at least before it
+///        is submitted once the broad phase is recorded (GpuOptimization::PARTIAL_SUBMISSIONS): the GPU starts the step
+///        while the narrow phase and the constraints are recorded (0.16 ms of recording for a world of 7 684 links).
+inline constexpr std::uint32_t GPU_XPBD_FIRST_PART_DISPATCHES = 16;
 
 /// @brief Overflow entries a chunk of the GPU backend's Jacobi gather holds (GpuOptimization::CHUNKED_GATHER): a node with
 ///        more is gathered chunk by chunk, the chunks summed in parallel.
@@ -938,6 +958,8 @@ struct EnumerationTraits<physics::GpuOptimization>
         EnumeratorName{physics::GpuOptimization::KERNEL_FUSION, "KERNEL_FUSION"},
         EnumeratorName{physics::GpuOptimization::PARTIAL_SUBMISSIONS, "PARTIAL_SUBMISSIONS"},
         EnumeratorName{physics::GpuOptimization::REACHABLE_CONTACTS, "REACHABLE_CONTACTS"},
+        EnumeratorName{physics::GpuOptimization::RELATIVE_SPEED_COLORING, "RELATIVE_SPEED_COLORING"},
+        EnumeratorName{physics::GpuOptimization::OVERFLOW_NEW_COLORS, "OVERFLOW_NEW_COLORS"},
     };
 };
 

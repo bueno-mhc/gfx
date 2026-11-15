@@ -134,7 +134,7 @@ Every GPU optimization is a bit of `GpuOptimization` in `GpuXpbdDescription::opt
 | `SHARED_PIPELINES` | PF4 | pipelines made once per device through a `PipelineCache` read from and written to `pipeline_cache_path` | a world's creation 0.4–2.7 s → 0.09–0.32 s (this run's worlds) | the same |
 | `CHUNKED_GATHER` | PF5 | the Jacobi gather reads lists of the overflow set's entries made once per step; a body with more than 32 sums them in chunks in parallel | `mixed`'s gather 19.1 → 1.2 ms | the same (a heavy body's sum associated by chunks) |
 | `NODE_MAXIMA_COLORING` | PF5 | each coloring round compares a constraint with its bodies' atomic maxima instead of scanning their constraints | `mixed`'s coloring 7.3 → 0.4 ms | the same colors |
-| `RECORDED_PASSES_BY_USE` | PF5 | solver passes recorded for the colors each kind of constraint used in the previous step; overflow passes only after a step that had an overflow set; a replay otherwise | 308–703 fewer dispatches and barriers a step | the same |
+| `RECORDED_PASSES_BY_USE` | PF5 | solver passes recorded for the colors each kind of constraint used in the previous step; overflow passes only after a step that had an overflow set; the coloring's rounds those the previous step decided constraints in, and two more (since the chains' follow-up); a replay otherwise | 308–703 fewer dispatches and barriers a step; the chains' 24 rounds → 8 (32 passes) | the same |
 | `REACH_BOXES` | PF5 | the broad phase's boxes grown by each collider's own reach, not the fastest body's | `chain`'s 832 000 tree pairs a step gone; its broad phase 1.65 → 0.58 ms | the same pairs, another order |
 | `COMPACT_READBACK` | PF5b | the GPU lists and gathers the bodies that may have changed; only in worlds of 4 096 bodies or more of which at most half changed | the readback of resting worlds (with sleep) | the same |
 | `RESTING_STEPS` | PF5b | a world at rest (no awake body, no edit, no particle or trigger) steps without the GPU | with sleep: 50 000 boxes 12.4 → 0.9 ms, the pyramid 14.0 → 0.9 ms | the same for the same steps |
@@ -142,6 +142,8 @@ Every GPU optimization is a bit of `GpuOptimization` in `GpuXpbdDescription::opt
 | `KERNEL_FUSION` | PF5b | bodies' and particles' velocity updates in one dispatch | a dispatch and a barrier per substep with particles | the same |
 | `PARTIAL_SUBMISSIONS` | PF5b | the step submitted in parts of at least 64 dispatches as it is recorded | recording hidden behind the GPU's work; small worlds 5–24 % faster | the same |
 | `REACHABLE_CONTACTS` | after PF6 | a contact none of whose points can meet within the step is no constraint (the pair filter's reach test on the points' gaps) | rods beside a fast ball: 4× fewer constraints; the comparison's wall at size 8 with 4/3/1: 11.5 → 9.3 ms | other bits, the same motion |
+| `RELATIVE_SPEED_COLORING` | after PF6 (chains) | a contact that cannot meet at its points' relative speed is solved in the overflow set (Jacobi), not colored | the chains at size 8: 8.5 → 3 colors, 488 → 338 dispatches, the solver's GPU time 1.79 → 1.15 ms | other bits, the same motion |
+| `OVERFLOW_NEW_COLORS` | after PF6 (chains) | in a step that records the overflow set's passes anyway, the colors recorded are those the previous step used (no two spare ones) and a new color's constraints join the overflow set instead of a replay | two passes fewer a solver iteration where an overflow set stays (the chains: 3 colors recorded instead of 5) | other bits in the steps whose colors grow |
 
 Changes that are not flags (every backend, or the GPU backend's CPU side; kept because the conformance suite and the
 determinism tests pass unchanged):
@@ -155,7 +157,14 @@ determinism tests pass unchanged):
 - **The step's farthest motion without denormal floats** (4 ms → 0.26 ms a step over a resting cloth: their squares are
   computed about a hundred times slower).
 - **`read_back()` in parallel**, each range of bodies storing once (a shared atomic stored by every thread was a regression,
-  found by comparing with the previous commit, and fixed).
+  found by comparing with the previous commit, and fixed); the joints' results too (the chains' 7 684 joints took 0.1 ms on
+  one thread).
+- **Each body's motion kept** for the step's speculative margin (`BodyMotion`: its speeds and gravity scale, refreshed by the
+  read-back and by each edit that patches the body): the step no longer reads every body's record (0.13 → 0.01 ms for 7 684
+  bodies). The same arithmetic, the same bits; Debug builds compute it from the records too and throw a `PhysicsError` when the
+  two differ.
+- **The first part submitted once the broad phase is recorded** (`PARTIAL_SUBMISSIONS`, `GPU_XPBD_FIRST_PART_DISPATCHES` 16): the
+  GPU starts while the narrow phase and the constraints are recorded (0.35 → 0.08 ms before the GPU starts, size-8 chains).
 - **`gfx::SharedMutex`** (PF6): the framework's objects lock the published snapshot for every getter. MinGW's
   `std::shared_mutex` (winpthreads' read-write lock) takes about 900 ns to lock and unlock uncontended, so reading the poses
   of 8 000 bodies took 8.4 ms; `gfx::SharedMutex` (`gfx.core.shared_mutex`: a slim reader/writer lock on Windows, 10 ns)
@@ -285,12 +294,52 @@ Box3D's (1.2× to 4.7×; before: the wall 0.47×, the chains 0.52×). Still slow
 - **The wall at size 4** collapses by itself in the GPU world (as at size 8, its top falls to 13 m) and its falling bricks keep
   the step busy.
 
+### 6.2 The chains
+
+The chains stayed slower after §6.1: at size 8 a GPU step made 488 dispatches and 383 barriers, its 7 684 joints and 6 680
+speculative contacts (8 touching) spread over 8.5 colors, the coloring ran its 24 rounds (the chains decide in 6), and the CPU
+spent 0.47 ms before the GPU started (0.13–0.3 ms of it reading every body's record for the step's farthest motion) and 0.28 ms
+reading the step back. Changes (2026-11-15): `RELATIVE_SPEED_COLORING` and `OVERFLOW_NEW_COLORS` (§4), the coloring's rounds
+recorded by use (`RECORDED_PASSES_BY_USE`), each body's motion kept, the first part submitted once the broad phase is
+recorded, the joints read back in parallel (§4). The comparison's program before (the previous commit, built beside it) and
+after, alternated, 200 steps awake, median step in milliseconds (5 rounds for the chains, 3 for the others; runs where both
+worlds slowed down together left out):
+
+| Scene, size | Box3D | GPU before | GPU after | Box3D ÷ GPU before | after |
+|---|---|---|---|---|---|
+| chains, 1 | 0.64 | 1.38 | 1.20 | 0.47 | 0.53 |
+| chains, 4 | 1.20 | 2.58 | 1.70 | 0.50 | 0.71 |
+| chains, 8 | 2.09 | 3.15 | 2.24 | 0.67 | 0.88 |
+| pile, 1 | 2.52 | 3.83 | 3.71 | 0.65 | 0.68 |
+| pile, 8 | 23.95 | 10.33 | 9.71 | 2.31 | 2.43 |
+| wrecking, 1 | 1.49 | 3.49 | 2.86 | 0.46 | 0.50 |
+| wrecking, 8 | 11.14 | 9.54 | 8.54 | 1.17 | 1.30 |
+| pyramid, 1 | 3.58 | 4.24 | 3.94 | 0.82 | 0.91 |
+| pyramid, 8 | 40.65 | 12.93 | 12.18 | 3.16 | 3.37 |
+| cloth, 1 | 8.07 | 1.87 | 1.64 | 4.25 | 4.89 |
+| cloth, 8 | 20.53 | 4.52 | 4.21 | 4.68 | 4.88 |
+
+Every scene is faster; the chains 13–34 %, but still slower than Box3D's (0.53–0.88). What a size-8 chains step is now: about
+1.6 ms of GPU work (the solver 1.1, the contact cache's two sorts of 18 800 speculative manifolds 0.25, the broad phase 0.3)
+and about 0.45 ms of CPU around it (the first submission, the wait's wake-up, the read-back). At size 1 the GPU's 0.9 ms are
+about 180 dependent passes at 5–7 µs each: the comparison's paced frames leave the GPU at low clocks, where a pass costs more
+(the headless benchmark's medians are bimodal by GPU clock for the same settings: 1.70 or 2.0 ms for `many_boxes` at a tenth
+of its size).
+
+**Found on the way: the Jacobi mode diverged on chains.** Since the fix after G10 (mass splitting weighted by shares), two
+joints of equal masses on one link gave it shares of a half each, a sum of 1: the link was not split, both joints turned it by
+their whole error, and chains of capsules swinging in the Jacobi mode reached 59 m/s (Intel) or 677 m/s and then NaN within
+0.2 s (RTX 5060). Joints between rigid bodies now count a whole share each (equal splitting, Tonge et al. 2012); pins and
+contacts keep their shares. The coloring mode solves joints in the overflow set the same way.
+
 ## 7. Follow-ups
 
 1. **Small and mid-size worlds on the GPU**: fewer passes per step. The velocity iterations' count is the first lever (§5;
    the comparison uses 4/3/1, §6.1 — the library's defaults could follow). A single-dispatch solve of small colors or islands
-   within one workgroup (no inter-workgroup wait, so no deadlock) is the second. Chains of fast links need fewer speculative
-   contacts than the speeds-sum test keeps, without losing a link stopped by another.
+   within one workgroup (no inter-workgroup wait, so no deadlock) is the second. The chains (§6.2): the contact cache sorts
+   every speculative manifold twice a step (0.25 ms at size 8) although only contacts that pushed keep friction anchors — a
+   cache of the pushed contacts alone, sorted after the solve, would drop both sorts (other bits: a contact that never pushed
+   would no longer keep the anchors it was first found with).
 2. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
    Box3D's touching pairs.
 3. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of

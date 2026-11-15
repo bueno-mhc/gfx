@@ -1677,11 +1677,13 @@ flowchart LR
         direction TB
         reach["REACH_BOXES<br/>boxes grown by each<br/>collider's own reach"] --> refit["BVH_REFIT<br/>the moving tree refit<br/>for 30 steps"]
         refit --> reachable["REACHABLE_CONTACTS<br/>contacts that cannot meet<br/>in the step: no constraints"]
-        reachable --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
+        reachable --> relative["RELATIVE_SPEED_COLORING<br/>contacts that cannot meet at<br/>their relative speed: Jacobi"]
+        relative --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
     end
     subgraph substep_stage["substeps"]
         direction TB
-        by_use["RECORDED_PASSES_BY_USE<br/>passes for the colors used"] --> chunks["CHUNKED_GATHER<br/>heavy bodies gathered<br/>in chunks"]
+        by_use["RECORDED_PASSES_BY_USE<br/>passes for the colors<br/>and rounds used"] --> new_colors["OVERFLOW_NEW_COLORS<br/>a new color's constraints<br/>join the Jacobi set"]
+        new_colors --> chunks["CHUNKED_GATHER<br/>heavy bodies gathered<br/>in chunks"]
         chunks --> fusion["KERNEL_FUSION<br/>bodies' and particles'<br/>velocity updates together"]
     end
     subgraph result_stage["results"]
@@ -1696,10 +1698,12 @@ flowchart LR
 Each is a bit of `GpuOptimization` (`GpuXpbdDescription::optimizations`, all on by default; `NONE` is the backend before
 them). Most give the same bits as the baseline (tests compare them); `REACH_BOXES` and `BVH_REFIT` find the same pairs in
 another order, `RESTING_STEPS` gives the same bits for the same steps, `REACHABLE_CONTACTS` makes fewer constraints (the same
-motion). Beside the flags, the framework (lazy query tree with
+motion), `RELATIVE_SPEED_COLORING` and `OVERFLOW_NEW_COLORS` solve some constraints in the overflow set instead of a color of
+their own (fewer colors and passes; the same motion within the solver's tolerance). Beside the flags, the framework (lazy query tree with
 fat leaves, parallel bounds and copies, swapped events, unmoved colliders' boxes kept, `gfx::SharedMutex` for the published
-snapshot) and the GPU backend's CPU side (contacts sorted by 64-bit keys and converted in place, parallel readback, no
-denormal floats) changed for every world.
+snapshot) and the GPU backend's CPU side (contacts sorted by 64-bit keys and converted in place, parallel readback of bodies
+and joints, no denormal floats, each body's motion kept for the step's speculative margin, the first part submitted once the
+broad phase is recorded) changed for every world.
 
 ## 11. Build and tests
 

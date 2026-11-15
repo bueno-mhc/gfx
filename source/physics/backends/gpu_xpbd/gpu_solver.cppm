@@ -161,8 +161,10 @@ struct GpuSolverCounts
     std::uint32_t gather_chunks = 0;        ///< CHUNKED_GATHER: the heavy nodes' chunks.
     std::uint32_t joint_colors = 0;         ///< Colors the coloring gave joints.
     std::uint32_t contact_colors = 0;       ///< Colors the coloring gave contacts.
+    std::uint32_t coloring_rounds = 0;      ///< The rounds in which the coloring decided constraints (the last one's + 1).
+    std::uint32_t uncolored = 0;            ///< Constraints the recorded rounds left undecided (in the overflow set).
 };
-static_assert(sizeof(GpuSolverCounts) == 92);
+static_assert(sizeof(GpuSolverCounts) == 100);
 
 /// A trigger overlapping a collider after a step (triggers_filter.comp).
 struct GpuTriggerOverlap
@@ -239,6 +241,23 @@ struct GpuJointPart
 static_assert(sizeof(GpuJointPart) == 48 && offsetof(GpuJointPart, lower) == 16 && offsetof(GpuJointPart, upper) == 32);
 
 /// What one step's constraint work needs.
+/// Where the step's commands so far can go to the GPU while the rest is recorded (PARTIAL_SUBMISSIONS): a function and its
+/// context (no allocation), or none.
+struct PartBoundary
+{
+    void (*end_part)(const void* context) = nullptr; ///< Submits the part recorded so far and starts the next.
+    const void* context = nullptr;                   ///< Its argument.
+
+    /// Submits the part (when there is a function).
+    void operator()() const
+    {
+        if (end_part != nullptr)
+        {
+            end_part(context);
+        }
+    }
+};
+
 struct ContactStep
 {
     std::uint32_t step_parameters = 0;   ///< The step parameters' bindless index.
@@ -252,6 +271,8 @@ struct ContactStep
     bool lists_changed = false;          ///< The collider lists changed since the last completed step (instances name
                                          ///< other colliders: no contact keeps its previous anchors).
     PhaseTimer* timer = nullptr;         ///< Marks the broad phase, the narrow phase, the solver's set-up (when timed).
+    PartBoundary after_broad_phase{};    ///< Called once the broad phase is recorded: the GPU starts it while the narrow
+                                         ///< phase and the constraints are recorded.
 };
 
 /// What a query of the GPU reads of the solver's buffers (between steps).

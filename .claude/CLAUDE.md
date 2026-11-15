@@ -1243,7 +1243,7 @@ Original hard requirements (from the user's initial specification):
   tooltips; the camera aims PANEL_ROOM 0.12 × distance below a scene's center; chains/pyramid/wall views adjusted. **Found**: at
   size 8 the GPU world's 90-row single-brick wall collapses by itself within 2.5 s (Box3D's stands): XPBD at 4 × 3 holds very
   tall stacks less well (scene kept as is: a result to show). Committed by Claude at the user's request (3f2328a).
-- **Follow-up after PF6: the comparison's GPU world as fast as Box3D's (2026-11-14; awaiting validation)** — docs/profiler-
+- **Follow-up after PF6: the comparison's GPU world as fast as Box3D's (2026-11-14; committed by the user, a1a7a2e)** — docs/profiler-
   performance-design.md §B "Follow-up after PF6", PERFORMANCE.md §6.1. User: "the XPBD GPU should … have a higher frame rate …
   Profile and fix" (read as each world's step time: lockstep frames are shared). Profiled: velocity iterations (4 × 8) 60–70 % of the
   GPU's solver time (each a pass over every contact color + Jacobi set + gather); chains 7 439 speculative contacts (11 touching).
@@ -1255,6 +1255,28 @@ Original hard requirements (from the user's initial specification):
   rods, no gravity, fast ball: 4× fewer constraints; mutation-checked). Result size 8 (Box3D ÷ GPU): pile 2.3, wall 1.25, pyramid 3.2,
   cloth 4.7, **chains 0.68** (speeds-sum keeps fast links' contacts), size 1 0.47–0.83 (GPU floor 1.4–3.5 ms). Gotcha: the pair filter
   already drops pairs whose boxes are out of reach — the flag's test needs tilted shapes (boxes much larger than the shapes).
+- **Follow-up after PF6: the chains (2026-11-15; awaiting validation)** — docs/profiler-performance-design.md §B "Follow-up after
+  PF6: the chains", PERFORMANCE.md §6.2. User: "Work on the chains". **Defect found and fixed**: the Jacobi mode diverged on chains
+  (NaN on the RTX at step 11) since the fix after G10: two equal-mass joints on a link gave shares ½ + ½ = 1 → P = 1, unsplit;
+  `whole_share()` in solver.glsl: joints between rigid bodies count a whole share (equal splitting), pins (particle joints) and
+  contacts keep shares (jacobi_gather mode 2 + joint_solve). **`RELATIVE_SPEED_COLORING`** (1 << 12): contact_prepare mode bit 2 →
+  `CONTACT_DISTANT` (8) when no point can meet at its points' relative velocity + pull nor is within slop; color.comp mode 0 → overflow
+  color. **`OVERFLOW_NEW_COLORS`** (1 << 13, with RECORDED_PASSES_BY_USE): only in steps recording the overflow passes anyway: no spare
+  colors, a new color's constraints settled into the overflow set in color mode 2 (argument bit 0 buffer, bits 8–15/16–23 recorded
+  joint/contact colors, bit 24 on); else as before (a first version without spare colors everywhere replayed more). RECORDED_PASSES_BY_USE
+  also records **coloring rounds** used + 2 (GpuSolverCounts 100 B: coloring_rounds, uncolored; replay with 24 when undecided remain:
+  same bits). CPU: `BodyMotion` per slot (`keep_motion()` in apply after make_patch and in read_back; `step_motion()` reads it; Debug
+  cross-check `recorded_body_motion()` → PhysicsError), first part submitted after the broad phase (`ContactStep::after_broad_phase`
+  PartBoundary fn + context; `GPU_XPBD_FIRST_PART_DISPATCHES` 16), joints read back in parallel (`m_joint_broke`). Comparison
+  `--gpu-optimizations`. Tests (all mutation-checked): ChainsOfLinksSwingAtTheirSpeedInEitherMode, BodiesMovingTogetherAddNoColors,
+  NewColorsJoinTheOverflowSetInsteadOfSpareColors (chains + a six-rod hub needing new colors), PassesRecorded… (balls dropped 20 cm,
+  without OVERFLOW_NEW_COLORS). Measured (previous commit built in build/head, alternated): chains 1/4/8 GPU 1.38/2.58/3.15 →
+  1.20/1.70/2.24 ms vs Box3D 0.64/1.20/2.09 (0.53/0.71/0.88×); every other scene faster. Not reached: chains parity (next: contact
+  cache of pushed contacts only, 0.25 ms of sorts at size 8). **Measuring gotchas**: GPU clocks bimodal (the same benchmark settings
+  1.70 or 2.0 ms), some comparison runs slow both worlds 3–4× (throttling): alternate, ≥ 3 rounds, use counts (dispatches, colors,
+  rounds) to decide; PowerShell 5.1 `Get-Content -Raw` reads UTF-8 scripts as ANSI (mangled "×": patch_tool aborted mid-way; edit
+  scripts with Python/the Write tool only); `git stash` in a worktree lands in the shared stash list (build/head's PF5b patches
+  are now stash@{0}/{1}).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1816,7 +1838,9 @@ the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1579**, 2026-11-14 (follow-up after PF6, the comparison's GPU world: + 4
+Test count at last report: **1591**, 2026-11-15 (follow-up after PF6, the chains: + 4 ChainsOfLinksSwingAtTheirSpeedInEitherMode,
++ 4 BodiesMovingTogetherAddNoColors, + 4 NewColorsJoinTheOverflowSetInsteadOfSpareColors; Debug 1591/1591 (579 s), Release 1591/1591
+(547 s); run from PowerShell with `--timeout 900`). Before: **1579**, 2026-11-14 (follow-up after PF6, the comparison's GPU world: + 4
 ContactsThatCannotMeetWithinAStepAreNoConstraints; Debug 1576/1579 (1262 s), Release 1577/1579 (891 s): the sandbox's script runs
 (SDL3, GLFW; Debug also the tour) timed out under load and pass alone (39–393 s, window-paced) — their TIMEOUT is now 900). Before:
 **1575**, 2026-11-14 (profiler PF6: + 3 SharedMutexTest, + 1 PhysicsComparison.Pile; Debug 1575/1575

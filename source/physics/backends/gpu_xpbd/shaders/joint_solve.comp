@@ -314,9 +314,11 @@ void main()
     float second_weight = 1.0;
     if ((push.mode & 2U) != 0U)
     {
-        // Each side's part, against the other's unsplit inverse mass; their corrections weighted for the gather.
-        const float first_inverse_mass = scalar_inverse_mass(first);
-        const float second_inverse_mass = scalar_inverse_mass(second);
+        // Each side's part (a whole share of a joint between rigid bodies, the sides' shares of a pin: whole_share()),
+        // against the other's unsplit inverse mass; their corrections weighted for the gather.
+        const bool whole = whole_share(true, header.x, header.y);
+        const float first_inverse_mass = whole ? 0.0 : scalar_inverse_mass(first);
+        const float second_inverse_mass = whole ? 0.0 : scalar_inverse_mass(second);
         first_weight = split_node(first, header.x, second_inverse_mass, false);
         second_weight = split_node(second, header.y, first_inverse_mass, false);
     }

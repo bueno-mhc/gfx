@@ -1731,7 +1731,8 @@ build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --scene pile -
 `--scene pyramid|pile|wrecking|chains|cloth` and `--size <factor>` pick the scene, `--left` and `--right` the backends
 (`box3d`, `reference`, `gpu_xpbd`: on the program's own device), `--gpu-solver S/P/V` the GPU world's substeps, position and
 velocity iterations (4/3/1 by default: one velocity pass a substep, as XPBD prescribes; the library's defaults, 4/3/8, are the
-sequential-impulse solver's and cost the GPU backend most; the panel switches it), `--no-sleep` keeps resting bodies simulated
+sequential-impulse solver's and cost the GPU backend most; the panel switches it), `--gpu-optimizations "A | B" | NONE` the GPU
+world's `GpuOptimization` flags (one flag's effect is the difference of two runs), `--no-sleep` keeps resting bodies simulated
 (a world at rest costs the GPU backend almost nothing: compare scenes in motion), `--trace <file.json>` writes a Chrome trace of every frame
 (each world's step, its own scopes, the GPU's passes), `--capture <file.ppm>` writes the last frame as the window showed it
 (or the one `--capture-frame <index>` names); `--backend`, `--device`, `--threads`, `--frames` and `--validation` work

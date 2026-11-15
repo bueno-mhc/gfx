@@ -1246,6 +1246,77 @@ of 1 579 (891 s): the sandbox's script runs (`PhysicsSandbox.SDL3`, `.GLFW`; Deb
 full parallel load — they use Box3D and the reference backend, untouched — and pass alone (Release `GLFW` 224 s, Debug `SDL3` 40 s,
 `GLFW` 39 s, tour 393 s: paced by the window's presentation). Their limit is now 900 s, as the tour's and the GPU run's.
 
+### Follow-up after PF6: the chains (2026-11-15)
+
+Asked (user, 2026-11-15): "Work on the chains" — the scene the previous follow-up left slower than Box3D's (0.68× at size 8),
+with the worlds of about 2 000 bodies.
+
+**Profiled** (comparison traces at sizes 1 and 8; scratchpad gpu_frame_breakdown.py, gpu_start_delay.py, step_timeline.py): at
+size 8 a GPU step made 488 dispatches and 383 barriers; 7 684 joints and 6 680 speculative contacts (8 touching, the rest within
+the two points' speeds-sum reach of fast links) spread over 8.5 colors and a Jacobi set of 1 960; the coloring ran its 24
+rounds (the chains decide in 6); the CPU spent 0.47 ms before the GPU started (the step's farthest motion read every body's
+record: 0.13–0.3 ms) and 0.28 ms reading the step back (7 684 joints on one thread). At size 1 the GPU's 0.9 ms are about 180
+dependent passes.
+
+**Found and fixed: the Jacobi mode diverged on chains** (the conformance suite has no long chain). Since the fix after G10
+(mass splitting weighted by shares), two joints of equal masses on a link gave shares of a half each, a sum of 1: P = 1, the link
+not split, both joints turning it by their whole error. Eight chains of 12 capsule links swinging in the Jacobi mode, joints
+only: 36 m/s at step 8 (coloring mode 1.5 m/s); with their contacts 677 m/s then NaN at step 11 on the RTX 5060, 59 m/s on the
+Intel GPU; with every optimization off too. Fix: `whole_share()` (solver.glsl) — a joint between rigid bodies counts a whole
+share on each side (P = the count of its joints: equal splitting, Tonge et al. 2012), in `jacobi_gather` mode 2's sums and in
+`joint_solve`'s split; contacts and pins (a joint with a particle) keep their shares (a heavy body's pins hardly count, as its
+contacts with light particles). The chains then swing in the Jacobi mode as in the coloring mode (25.3 against 25.7 m/s at the
+tips). Test `GpuXpbdJointTest.ChainsOfLinksSwingAtTheirSpeedInEitherMode` (× 4; with the old rule the Jacobi runs reach 90 m/s
+and joints open by 19–28 cm — checked).
+
+**Changed:**
+1. **`GpuOptimization::RELATIVE_SPEED_COLORING`** (1 << 12, default): `contact_prepare` mode bit 2 flags `CONTACT_DISTANT` a contact
+   none of whose points can meet at the relative velocity of its two points (and gravity's pull) within the step nor is within
+   `LINEAR_SLOP`; the coloring's mode 0 gives it the overflow color (it meets only when a body is stopped by something else,
+   which the Jacobi pass still handles; it stays `CONTACT_TOUCHING` for the shares). Chains: 8.5 → 3 colors. Test
+   `GpuXpbdRigidTest.BodiesMovingTogetherAddNoColors` (× 4: 108 balls flying together at 20 m/s, 0 colors against ≥ 4 a step,
+   positions within 1 µm; fails with the bit never set — checked).
+2. **`GpuOptimization::OVERFLOW_NEW_COLORS`** (1 << 13, default, with `RECORDED_PASSES_BY_USE`): in a step that records the
+   overflow set's passes anyway, no spare colors (the colors the previous step used) and a constraint of a new color joins the
+   overflow set (the coloring's mode 2 argument carries the colors recorded per kind) instead of a replay; other steps as
+   before. A first version without spare colors in every step replayed more (16 against 14 in a pile) and was slower on the
+   benchmark's chain at half size. Test `GpuXpbdJointTest.NewColorsJoinTheOverflowSetInsteadOfSpareColors` (× 4: the chains,
+   fewer dispatches, no more replays, links within 2 cm; then a hub of six rods moving outward joins: three new colors, its
+   joints within 1 cm after the step — 5.7 cm when the new colors are dropped instead of joining the overflow set, and dispatches
+   equal with spare colors kept: both checked).
+3. **`RECORDED_PASSES_BY_USE` also records the coloring's rounds** the previous step decided constraints in, and two more
+   (`GpuSolverCounts` 100 bytes: `coloring_rounds`, the last deciding round + 1, from modes 1 and 6; `uncolored`, constraints the
+   recorded rounds left undecided, from mode 2); undecided ones replay with all 24 rounds (each round decides at least one while
+   some are left, so the rounds after the last deciding one change nothing: the same bits). Chains: 24 → 8 rounds; piles and
+   pyramids use 22–24. `PassesRecordedForWhatTheLastStepUsedGiveTheSameBits` now drops its 23 balls 20 cm (the rounds grow and
+   replay) and compares without `OVERFLOW_NEW_COLORS` on both sides (fails without the replay — checked).
+4. **Each body's motion kept** (`BodyMotion` per slot, `keep_motion()` from `apply()` after each patch and from `read_back()`):
+   `step_motion()` reads three floats a body instead of every record, the same arithmetic (the same bits); Debug builds compute
+   it from the records too (`recorded_body_motion()`) and throw a `PhysicsError` naming both values when they differ (fires at
+   the first step when `apply()` stops keeping it — checked). 0.13 → 0.01 ms (7 684 bodies).
+5. **The first part submitted once the broad phase is recorded** (`ContactStep::after_broad_phase`, a `PartBoundary` function and
+   context: no allocation; `GPU_XPBD_FIRST_PART_DISPATCHES` 16): 0.35 → 0.08 ms before the GPU starts (size-8 chains).
+6. **The joints' results read back in parallel** (broken ones then disabled and reported in slot order; scope "GPU XPBD: read the
+   joints back"); counter "GPU XPBD: coloring rounds".
+7. The comparison: `--gpu-optimizations "A | B" | NONE`.
+
+**Measured** (PERFORMANCE.md §6.2; the previous commit's comparison built in the scratch worktree build/head and alternated with
+this one, 200 steps awake): the chains 1.38 → 1.20 ms (size 1), 2.58 → 1.70 (4), 3.15 → 2.24 (8) — Box3D's 0.64, 1.20, 2.09:
+0.53×, 0.71×, 0.88× (were 0.47×, 0.50×, 0.67×); every other scene faster too (pile 8: 10.33 → 9.71, wall 8: 9.54 → 8.54, pyramid
+8: 12.93 → 12.18, cloth 8: 4.52 → 4.21; size 1 by 3–18 %). Timings are noisy: GPU clocks are bimodal (the same settings run at
+1.70 or 2.0 ms) and some runs slow both worlds 3–4× (left out); counts (dispatches, colors, rounds) decided each mechanism.
+
+**Deviations (for validation).**
+1. The joint splitting fix changes the Jacobi mode's bits in every jointed world (and the coloring mode's overflow joints).
+2. Two new default GPU optimizations that change bits (`RELATIVE_SPEED_COLORING`, `OVERFLOW_NEW_COLORS`).
+3. Not reached: the chains stay slower than Box3D at every size (0.53–0.88×); the next lever is the contact cache (PERFORMANCE.md
+   §7), the rest a pass-latency floor.
+4. The scratch worktree build/head was moved from PF5's commit to a1a7a2e; its two stashes of PF5b's A/B patches (now committed
+   in their final form) appear in the repository's stash list (`stash@{0}`, `stash@{1}`).
+
+**Results**: 1 591 tests (+ 4 `ChainsOfLinksSwingAtTheirSpeedInEitherMode`, + 4 `BodiesMovingTogetherAddNoColors`, + 4
+`NewColorsJoinTheOverflowSetInsteadOfSpareColors`): Debug 1 591 of 1 591 (579 s), Release 1 591 of 1 591 (547 s).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

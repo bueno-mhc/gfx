@@ -82,6 +82,8 @@ enum CountWord : std::uint32_t
     GATHER_CHUNKS,
     JOINT_COLORS,
     CONTACT_COLORS,
+    COLORING_ROUNDS,
+    UNCOLORED,
 };
 
 /// Bytes of the indirect dispatch arguments of a color key.
@@ -153,6 +155,25 @@ struct GpuConstraintSolver::State
         , contacts_report{make_pipeline(target, shaders::contacts_report_comp, modules)}
         , triggers_filter{make_pipeline(target, shaders::triggers_filter_comp, modules)}
     {
+    }
+
+    /// Whether the colors beyond those recorded join the overflow set (OVERFLOW_NEW_COLORS, with RECORDED_PASSES_BY_USE and
+    /// the coloring).
+    [[nodiscard]] auto overflows_new_colors() const noexcept -> bool
+    {
+        return coloring() && has_all(settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE) &&
+               has_all(settings.optimizations, GpuOptimization::OVERFLOW_NEW_COLORS);
+    }
+
+    /// The coloring's mode 2 argument: the buffer the rounds left the colors in (bit 0) and, with OVERFLOW_NEW_COLORS,
+    /// the colors recorded for joints (bits 8 to 15) and contacts (bits 16 to 23), bit 24 set.
+    [[nodiscard]] auto settle_argument(std::uint32_t buffer) const noexcept -> std::uint32_t
+    {
+        if (!overflows_new_colors())
+        {
+            return buffer;
+        }
+        return buffer | (joint_colors() << 8) | (contact_colors() << 16) | (1U << 24);
     }
 
     /// The colors whose joint passes and contact passes are recorded (RECORDED_PASSES_BY_USE: each kind's own).
@@ -322,6 +343,7 @@ struct GpuConstraintSolver::State
     std::uint32_t recorded_colors = GPU_XPBD_INITIAL_COLORS;
     std::uint32_t recorded_joint_colors = GPU_XPBD_INITIAL_COLORS;   ///< RECORDED_PASSES_BY_USE: the joints' colors recorded.
     std::uint32_t recorded_contact_colors = GPU_XPBD_INITIAL_COLORS; ///< RECORDED_PASSES_BY_USE: the contacts' colors recorded.
+    std::uint32_t recorded_rounds = GPU_XPBD_COLORING_ROUNDS;        ///< RECORDED_PASSES_BY_USE: the coloring rounds recorded.
     std::uint32_t previous_overflow = 0; ///< The overflow set's constraints in the last completed step.
     bool tree_refittable = false;        ///< BVH_REFIT: the moving tree was built over the moving colliders of now.
     std::uint32_t tree_age = 0;          ///< BVH_REFIT: steps since it was built.
@@ -851,6 +873,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     }
 
     broad_scope.end();
+    step.after_broad_phase();
 
     // The pairs worth a narrow phase, compacted in order; their manifolds; each point's predecessor.
     PROFILE_NAMED_SCOPE(narrow_scope, "GPU XPBD: record the narrow phase");
@@ -887,10 +910,12 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     PROFILE_NAMED_SCOPE(constraints_scope, "GPU XPBD: record the constraints, islands, graph and colors");
     {
         // Mode bit 0: no previous anchors (the instances name other colliders); bit 1: contacts that cannot meet within the
-        // step are no constraints (REACHABLE_CONTACTS).
+        // step are no constraints (REACHABLE_CONTACTS); bit 2: contacts that cannot meet at their relative speed are flagged
+        // for the overflow set (RELATIVE_SPEED_COLORING, with the coloring only).
         PROFILE_GPU_SCOPE("contact_prepare", recorder, state.passes);
         const bool reachable_only = has_all(state.settings.optimizations, GpuOptimization::REACHABLE_CONTACTS);
-        state.pass(recorder, *state.contact_prepare, 0, (keeps_anchors ? 0U : 1U) | (reachable_only ? 2U : 0U), slots);
+        const bool relative_coloring = state.coloring() && has_all(state.settings.optimizations, GpuOptimization::RELATIVE_SPEED_COLORING);
+        state.pass(recorder, *state.contact_prepare, 0, (keeps_anchors ? 0U : 1U) | (reachable_only ? 2U : 0U) | (relative_coloring ? 4U : 0U), slots);
     }
 
     // Islands over contacts and joints: labels hooked and compressed (the last round counts its changes), awake islands,
@@ -928,7 +953,10 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     {
         PROFILE_GPU_SCOPE("color", recorder, state.passes);
         state.pass(recorder, *state.coloring_pass, coloring ? 0U : 1U, 0, constraints);
-        const std::uint32_t rounds = coloring ? GPU_XPBD_COLORING_ROUNDS : 0;
+        // The rounds (RECORDED_PASSES_BY_USE: as many as the previous step decided constraints in, and two more; a
+        // replay with all of them when some were left undecided: the same colors).
+        const bool by_use = has_all(state.settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE);
+        const std::uint32_t rounds = coloring ? (by_use ? state.recorded_rounds : GPU_XPBD_COLORING_ROUNDS) : 0;
         if (has_all(state.settings.optimizations, GpuOptimization::NODE_MAXIMA_COLORING))
         {
             // The bodies' maxima (NODE_MAXIMA_COLORING): the first round's priorities, then per round the ties' indices
@@ -942,7 +970,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
                 state.pass(recorder, *state.coloring_pass, round, 5, constraints);
                 state.pass(recorder, *state.coloring_pass, round, 6, constraints);
             }
-            state.pass(recorder, *state.coloring_pass, 0, 2, constraints);
+            state.pass(recorder, *state.coloring_pass, state.settle_argument(0), 2, constraints);
         }
         else
         {
@@ -950,7 +978,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
             {
                 state.pass(recorder, *state.coloring_pass, round, 1, constraints);
             }
-            state.pass(recorder, *state.coloring_pass, rounds % 2, 2, constraints);
+            state.pass(recorder, *state.coloring_pass, state.settle_argument(rounds % 2), 2, constraints);
         }
     }
     if (state.gather_lists)
@@ -1260,12 +1288,23 @@ GpuConstraintSolver::overflowed(const GpuSolverCounts& counts) -> bool
     }
     if (state.coloring() && has_all(state.settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE))
     {
-        if (counts.joint_colors > state.recorded_joint_colors || counts.contact_colors > state.recorded_contact_colors ||
-            (counts.overflow_constraints > 0 && !state.overflow_passes))
+        // More colors than recorded replay, unless the overflow set's passes were recorded and they joined it
+        // (OVERFLOW_NEW_COLORS); an overflow set without its passes always does (with every color recorded then: the
+        // step as without the flag).
+        const bool overflow_without_passes = counts.overflow_constraints > 0 && !state.overflow_passes;
+        const bool colors_beyond = counts.joint_colors > state.recorded_joint_colors || counts.contact_colors > state.recorded_contact_colors;
+        if ((colors_beyond && (!state.overflows_new_colors() || overflow_without_passes)) || overflow_without_passes)
         {
             state.recorded_joint_colors = std::max(state.recorded_joint_colors, counts.joint_colors);
             state.recorded_contact_colors = std::max(state.recorded_contact_colors, counts.contact_colors);
             state.overflow_passes = state.overflow_passes || counts.overflow_constraints > 0;
+            grew = true;
+        }
+        if (counts.uncolored > 0 && state.recorded_rounds < GPU_XPBD_COLORING_ROUNDS)
+        {
+            // Constraints the recorded rounds left undecided: all the rounds (each round decides at least one while some
+            // are left, so the rounds after the last deciding one change nothing).
+            state.recorded_rounds = GPU_XPBD_COLORING_ROUNDS;
             grew = true;
         }
     }
@@ -1286,15 +1325,19 @@ void
 GpuConstraintSolver::complete_step(const GpuSolverCounts& counts)
 {
     // This step's manifolds and contacts are the next one's previous; colors recorded for what this step used (and two
-    // more: a pile growing by a color does not replay).
+    // more: a pile growing by a color does not replay), the coloring rounds it decided constraints in (and two more).
     State& state = *m_state;
     state.parity = 1 - state.parity;
     state.previous_capacity = state.manifold_capacity;
     state.static_dirty = false;
     state.recorded_colors = std::clamp(counts.colors + 2, GPU_XPBD_INITIAL_COLORS, MAXIMUM_GPU_XPBD_COLORS);
-    state.recorded_joint_colors = std::min(counts.joint_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
-    state.recorded_contact_colors = std::min(counts.contact_colors + 2, MAXIMUM_GPU_XPBD_COLORS);
+    // No spare colors when the next step records the overflow set's passes anyway (OVERFLOW_NEW_COLORS: a new color's
+    // constraints join it without a replay).
     state.overflow_passes = counts.overflow_constraints > 0;
+    const std::uint32_t headroom = state.overflows_new_colors() && state.overflow_passes ? 0U : 2U;
+    state.recorded_joint_colors = std::min(counts.joint_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
+    state.recorded_contact_colors = std::min(counts.contact_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
+    state.recorded_rounds = std::min(counts.coloring_rounds + 2, GPU_XPBD_COLORING_ROUNDS);
     if (state.refitting)
     {
         ++state.tree_age;

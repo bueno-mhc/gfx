@@ -2,13 +2,17 @@
 // Jones-Plassmann coloring of the constraints, joints and contacts together (two constraints conflict when they move a
 // common body). Modes:
 //   0 (constraints) the first colors: uncolored for constraints in use that move a body (the overflow set for all of
-//                   them in the Jacobi solver mode: argument 1), inactive for the others;
+//                   them in the Jacobi solver mode: argument 1, and for the contacts flagged CONTACT_DISTANT:
+//                   GpuOptimization::RELATIVE_SPEED_COLORING), inactive for the others;
 //   1 (constraints) a round, from one color buffer into the other (argument: the round; even rounds read the first): an
 //                   uncolored constraint whose priority beats every uncolored neighbor's (ties: the larger index) takes the
 //                   smallest color no colored neighbor has (the overflow set when all are taken). Decisions read the
 //                   previous round's colors only, so the result does not depend on the order invocations run in;
-//   2 (constraints) the sort keys: each constraint's color (still uncolored: the overflow set) × 2 + its kind, the
-//                   constraints as values, from the buffer argument names (0: the first);
+//   2 (constraints) the sort keys: each constraint's color (still uncolored, or beyond the colors recorded for its kind
+//                   with GpuOptimization::OVERFLOW_NEW_COLORS: the overflow set) × 2 + its kind, the constraints as
+//                   values, from the buffer argument bit 0 names (0: the first); the uncolored counted (the
+//                   rounds recorded left them undecided: GpuOptimization::RECORDED_PASSES_BY_USE records the rounds the
+//                   previous step decided constraints in, counted by modes 1 and 6, and two more);
 //   3 (keys)        the indirect dispatch arguments of each color key, the overflow set's included (argument: their
 //                   buffer).
 // With the bodies' maxima (GpuOptimization::NODE_MAXIMA_COLORING, SOLVER.maxima_coloring), the same colors without
@@ -122,6 +126,7 @@ void maxima_round(uint index)
     const uint smallest = used == 0xFFFFFFFFU ? OVERFLOW_COLOR : uint(findLSB(~used));
     const uint chosen = smallest < MAXIMUM_COLORS ? smallest : OVERFLOW_COLOR;
     gpu_words[SOLVER.colors_first].words[index] = chosen;
+    atomicMax(gpu_words[SOLVER.counts].words[COUNT_COLORING_ROUNDS], push.argument + 1U);
     if (chosen < MAXIMUM_COLORS)
     {
         for (uint side = 0U; side < 2U; ++side)
@@ -158,8 +163,11 @@ void main()
     {
         const Constraint loaded = load_constraint(index);
         const bool in_use = loaded.in_use && moves_a_body(loaded);
-        gpu_words[SOLVER.colors_first].words[index] = in_use ? (push.argument == 1U ? OVERFLOW_COLOR : UNCOLORED) : INACTIVE_COLOR;
-        if (SOLVER.maxima_coloring != 0U && in_use && push.argument == 0U)
+        const bool distant =
+            index >= SOLVER.joint_count && (gpu_word_vectors[SOLVER.contacts].values[contact_base(index - SOLVER.joint_count)].w & CONTACT_DISTANT) != 0U;
+        const bool overflow = push.argument == 1U || distant;
+        gpu_words[SOLVER.colors_first].words[index] = in_use ? (overflow ? OVERFLOW_COLOR : UNCOLORED) : INACTIVE_COLOR;
+        if (SOLVER.maxima_coloring != 0U && in_use && !overflow)
         {
             // The moving sides and the priority; the sides' maxima and colors taken cleared (only an uncolored
             // constraint's sides are read).
@@ -185,10 +193,22 @@ void main()
     }
     if (push.mode == 2U)
     {
-        const uint color = gpu_words[push.argument == 0U ? SOLVER.colors_first : SOLVER.colors_second].words[index];
-        const uint settled = color == UNCOLORED ? OVERFLOW_COLOR : color;
+        // Argument: bit 0 the buffer; with bit 24 (GpuOptimization::OVERFLOW_NEW_COLORS) the colors recorded for joints
+        // (bits 8 to 15) and contacts (16 to 23): a color beyond its kind's joins the overflow set.
+        const uint color = gpu_words[(push.argument & 1U) == 0U ? SOLVER.colors_first : SOLVER.colors_second].words[index];
+        uint settled = color == UNCOLORED ? OVERFLOW_COLOR : color;
+        if ((push.argument & (1U << 24U)) != 0U && settled < MAXIMUM_COLORS)
+        {
+            const uint recorded = index < SOLVER.joint_count ? (push.argument >> 8U) & 0xFFU : (push.argument >> 16U) & 0xFFU;
+            settled = settled < recorded ? settled : OVERFLOW_COLOR;
+        }
         gpu_words[SOLVER.color_keys].words[index] = color_key(settled, index);
         gpu_words[SOLVER.color_values].words[index] = index;
+        if (color == UNCOLORED)
+        {
+            // Left undecided by the recorded rounds (RECORDED_PASSES_BY_USE replays with all of them).
+            atomicAdd(gpu_words[SOLVER.counts].words[COUNT_UNCOLORED], 1U);
+        }
         if (settled == OVERFLOW_COLOR)
         {
             atomicAdd(gpu_words[SOLVER.counts].words[COUNT_OVERFLOW_CONSTRAINTS], 1U);
@@ -243,6 +263,7 @@ void main()
     const uint smallest = used == 0xFFFFFFFFU ? OVERFLOW_COLOR : uint(findLSB(~used));
     const uint chosen = smallest < MAXIMUM_COLORS ? smallest : OVERFLOW_COLOR;
     gpu_words[target].words[index] = chosen;
+    atomicMax(gpu_words[SOLVER.counts].words[COUNT_COLORING_ROUNDS], push.argument + 1U);
     if (chosen < MAXIMUM_COLORS)
     {
         count_color(index, chosen);

@@ -3,7 +3,8 @@
 // al. 2012) weighted by the constraints' shares: each awake dynamic node is split for each overflow constraint acting on
 // it — its joints and its touching contacts (CONTACT_TOUCHING: a contact keeping a gap through the step gives no
 // correction, and counting the speculative margin's candidates made a pile of 400 balls sink 13 cm) — by how much the
-// shares of all of them (its inverse mass over both sides', summed) exceed its whole correction; each constraint is
+// shares of all of them (its inverse mass over both sides', summed; a whole share for a joint between rigid bodies:
+// whole_share() in solver.glsl) exceed its whole correction; each constraint is
 // computed with its part and stores its correction scaled back (split_node() in solver.glsl), and the node takes their
 // sum: the sum of the impulses its constraints gave it, as its partners took theirs. Momentum is kept whatever
 // the weights (a contact that touches unforeseen corrects with a larger part, as Jacobi steps do). In its graph order,
@@ -53,7 +54,8 @@ bool add_entry(uint value, uint mode, float own, inout vec3 linear, inout vec3 a
         }
         const Constraint sides = load_constraint(constraint);
         const uint partner = (value & 1U) == 0U ? sides.second : sides.first;
-        const float share = own > 0.0 ? constraint_share(own, scalar_inverse_mass(load_body(partner))) : 0.0;
+        const uint node = (value & 1U) == 0U ? sides.first : sides.second;
+        const float share = own > 0.0 ? (whole_share(joint, node, partner) ? 1.0 : constraint_share(own, scalar_inverse_mass(load_body(partner)))) : 0.0;
         linear += joint ? vec3(share, 0.0, 0.0) : vec3(share, share, 0.0);
         return true;
     }

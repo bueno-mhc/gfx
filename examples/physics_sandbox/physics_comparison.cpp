@@ -11,8 +11,8 @@
 //
 // Usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>]
 //                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd] [--real-time]
-//                               [--no-sleep] [--gpu-solver S/P/V] [--device <index>] [--threads <count>] [--frames <count>]
-//                               [--validation]
+//                               [--no-sleep] [--gpu-solver S/P/V] [--gpu-optimizations "A | B" | NONE] [--device <index>]
+//                               [--threads <count>] [--frames <count>] [--validation]
 //                               [--trace <file.json>] [--capture <file.ppm>] [--capture-frame <index>]
 //   --scene S      the scene (pyramid by default): a square pyramid of boxes, a pile poured into a bin, a brick wall hit
 //                  by a wrecking ball, rows of swinging chains, a large cloth
@@ -24,6 +24,8 @@
 //                  default: one velocity pass a substep, as XPBD prescribes; the library's defaults, 4/3/8, are the
 //                  sequential-impulse solver's and cost the GPU backend most; the panel switches it). Box3D has no
 //                  iterations to set (it makes about two passes a substep)
+//   --gpu-optimizations L  the GPU world's GpuOptimization flags, names joined by ' | ' or NONE (the library's defaults
+//                  otherwise): one flag's effect is the difference of two runs
 //   --no-sleep     bodies never sleep (the panel switches it): resting bodies keep being simulated, so a scene at rest
 //                  still measures each backend's work (with sleep, a world at rest costs almost nothing)
 //   --frames N     closes after N frames and prints how the steps compared; the window then does not take the focus
@@ -139,6 +141,7 @@ struct Options
     Stepping stepping = Stepping::LOCKSTEP;
     bool sleep = true;
     SolverChoice gpu_solver = GPU_SOLVER_CHOICES[0];
+    physics::GpuOptimization gpu_optimizations = physics::DEFAULT_GPU_OPTIMIZATIONS;
     std::optional<std::size_t> physical_device{};
     std::uint32_t threads = std::max(1U, std::thread::hardware_concurrency() / 2U);
     std::optional<std::uint64_t> frames{};
@@ -266,6 +269,17 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
                 return std::nullopt;
             }
             options.gpu_solver = {.sub_steps = counts[0], .position_iterations = counts[1], .velocity_iterations = counts[2]};
+        }
+        else if (argument == "--gpu-optimizations" && has_value)
+        {
+            const std::string_view text = arguments[++index];
+            const std::optional<physics::GpuOptimization> parsed = gfx::from_string<physics::GpuOptimization>(text);
+            if (!parsed)
+            {
+                std::println(std::cerr, "unknown GPU optimizations '{}' (GpuOptimization names joined by ' | ', or NONE)", text);
+                return std::nullopt;
+            }
+            options.gpu_optimizations = *parsed;
         }
         else if (argument == "--trace" && has_value)
         {
@@ -808,14 +822,16 @@ run(const Options& options) -> int
          .clip = {.reversed_depth = true, .y_axis = camera::NormalizedDeviceYAxis::DOWN}});
     CameraRig rig{camera::OrbitControllerDescription{.distance = 30.0F, .maximum_distance = 500.0F}};
     physics::ThreadTaskScheduler scheduler{options.threads};
-    const WorldFactory make_world = [&device](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
+    const WorldFactory make_world = [&device, &options](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
 #if GFX_SANDBOX_GPU_XPBD
         if (backend == physics::PhysicsBackendKind::GPU_XPBD)
         {
-            return physics::gpu_xpbd::create_physics_world(description, *device, {.pipeline_cache_path = std::filesystem::path{PIPELINE_CACHE}});
+            return physics::gpu_xpbd::create_physics_world(
+                description, *device, {.optimizations = options.gpu_optimizations, .pipeline_cache_path = std::filesystem::path{PIPELINE_CACHE}});
         }
 #else
         static_cast<void>(device);
+        static_cast<void>(options);
 #endif
         return physics::create_physics_world(description, backend);
     };

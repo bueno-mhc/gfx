@@ -83,6 +83,15 @@ struct BodyEntry
     Vector3 angular_impulse{};  ///< To apply at the next step.
 };
 
+/// What step_motion() needs of a body (zero while it does not move: static, asleep, freed): its speeds and its gravity
+/// scale, kept by read_back() and apply() so that a step does not read every body's record (7 684 records took 0.13 ms).
+struct BodyMotion
+{
+    float linear = 0.0F;        ///< |v| of its center (negligible components as zero).
+    float angular = 0.0F;       ///< |ω| (negligible components as zero).
+    float gravity_scale = 0.0F; ///< |gravity scale| of a dynamic body, 0 for a kinematic one.
+};
+
 /// A pair of colliders touching after a step (the smaller handle first) and where its contacts are.
 struct TouchingPair
 {
@@ -375,9 +384,17 @@ private:
     /// The table index of the sphere of a particle of @p radius (added the first time).
     [[nodiscard]] auto particle_shape(float radius) -> std::uint32_t;
 
-    /// How far a body may move in a step of @p seconds at most (the boxes' and contacts' speculative margin).
+    /// How far a body may move in a step of @p seconds at most (the boxes' and contacts' speculative margin), from the
+    /// bodies' motions (m_body_motions) and the particles' records. Debug builds compute it from every record too and
+    /// throw a PhysicsError when the two differ (a motion not kept).
     [[nodiscard]] auto step_motion(const WorldSnapshot& pending,
-                                   float seconds) const noexcept -> float;
+                                   float seconds) const -> float;
+    /// The farthest motion of the bodies computed from their records (what m_body_motions keeps).
+    [[nodiscard]] auto recorded_body_motion(const WorldSnapshot& pending,
+                                            float seconds) const noexcept -> float;
+    /// Keeps the motion of the body in @p slot from its entry and @p record (null: freed).
+    void keep_motion(std::uint32_t slot,
+                     const RigidBodyRecord* record) noexcept;
     /// The patch of the body in @p slot from its record and entry (impulses applied, changes cleared).
     [[nodiscard]] auto make_patch(std::uint32_t slot,
                                   RigidBodyRecord* record,
@@ -551,7 +568,9 @@ private:
     std::vector<ReportOrder> m_report_order{};         ///< The keys, sorted.
     std::vector<ReportOrder> m_report_order_scratch{}; ///< (The radix sort's other half.)
     std::vector<std::uint8_t> m_body_rests{};          ///< By body slot after read_back(): static, or dynamic and asleep.
+    std::vector<BodyMotion> m_body_motions{};          ///< By body slot: what step_motion() reads (kept by read_back() and apply()).
     std::vector<std::uint8_t> m_body_sleep_changed{};  ///< By body slot (by listed body with COMPACT_READBACK) during read_back(): woke up or fell asleep.
+    std::vector<std::uint8_t> m_joint_broke{};         ///< By joint slot during read_back(): broke in the step (reported in slot order).
     std::uint32_t m_unchanged_contact_steps = 0;       ///< Steps in a row whose pairs and contacts were the last step's (none reported, all carried over).
     bool m_rested = false;                             ///< After read_back(): no body moves (every dynamic one asleep, no kinematic one awake).
     bool m_edited = false;                             ///< apply() had edits since the last step.

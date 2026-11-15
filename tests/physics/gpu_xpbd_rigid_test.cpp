@@ -568,11 +568,13 @@ without(GpuOptimization optimizations,
 
 TEST_P(GpuXpbdRigidTest, PassesRecordedForWhatTheLastStepUsedGiveTheSameBits)
 {
-    // RECORDED_PASSES_BY_USE: a plate carrying 23 balls (24 contacts on one body: the coloring's 24 rounds color them all,
-    // one a round — 24 contact colors, no overflow set: 26 colors recorded, no overflow passes), then 11 more landing on
-    // it (35 contacts: 24 colored, 11 in an overflow set, no new color: the step replayed for the overflow passes alone)
-    // give the bits of passes recorded for at least GPU_XPBD_INITIAL_COLORS colors and the overflow set every step; a
-    // chain of joints beside it has joint colors of its own.
+    // RECORDED_PASSES_BY_USE: 23 balls dropped 20 cm onto a plate (while they fall the chain's few coloring rounds are
+    // recorded; once they come within reach, 24 contacts on one body need the coloring's 24 rounds, one a round: the
+    // step replayed with all of them — 24 contact colors, no overflow set: 26 colors recorded, no overflow passes), then
+    // 11 more landing on it (35 contacts: 24 colored, 11 in an overflow set, no new color: the step replayed for the
+    // overflow passes alone) give the bits of passes recorded for at least GPU_XPBD_INITIAL_COLORS colors, all the rounds
+    // and the overflow set every step; a chain of joints beside it has joint colors of its own. Without
+    // OVERFLOW_NEW_COLORS on either side (it gives a new color's constraints to the overflow set: other bits).
     const auto run = [&](GpuOptimization optimizations) {
         Scene world = scene({}, optimizations);
         world.floor();
@@ -582,7 +584,7 @@ TEST_P(GpuXpbdRigidTest, PassesRecordedForWhatTheLastStepUsedGiveTheSameBits)
         for (int index = 0; index < 34; ++index)
         {
             const int place = index < 23 ? index : 50 + index;
-            const Vector3 position{.x = -0.99F + 0.22F * static_cast<float>(place % 10), .y = index < 23 ? 0.281F : 1.2F,
+            const Vector3 position{.x = -0.99F + 0.22F * static_cast<float>(place % 10), .y = index < 23 ? 0.481F : 1.2F,
                                    .z = -0.99F + 0.22F * static_cast<float>(place / 10)};
             bodies.push_back(&world.add({.pose = {.position = position}}, {.shape = ball}));
         }
@@ -603,8 +605,9 @@ TEST_P(GpuXpbdRigidTest, PassesRecordedForWhatTheLastStepUsedGiveTheSameBits)
         joints.clear();
         return bits;
     };
-    const std::vector<std::byte> by_use = run(DEFAULT_GPU_OPTIMIZATIONS);
-    const std::vector<std::byte> every = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::RECORDED_PASSES_BY_USE));
+    const GpuOptimization spare_colors = without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::OVERFLOW_NEW_COLORS);
+    const std::vector<std::byte> by_use = run(spare_colors);
+    const std::vector<std::byte> every = run(without(spare_colors, GpuOptimization::RECORDED_PASSES_BY_USE));
     EXPECT_EQ(by_use, every) << "passes recorded for what the last step used give the same bits";
     EXPECT_TRUE(take_validation_messages().empty());
 }
@@ -746,6 +749,81 @@ TEST_P(GpuXpbdRigidTest, ContactsThatCannotMeetWithinAStepAreNoConstraints)
     {
         EXPECT_LT(4.0 * reachable_constraints, every_constraint)
             << "the steps made " << reachable_constraints << " contact constraints, against " << every_constraint;
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, BodiesMovingTogetherAddNoColors)
+{
+    // RELATIVE_SPEED_COLORING: 108 balls 5 cm apart flying together at 20 m/s without gravity: each could meet its
+    // neighbors at the sum of their speeds (0.67 m a step), so their contacts are constraints, but at their relative
+    // speed (none) they cannot: with the flag they are solved in the overflow set and the steps take no colors (traced
+    // builds), and the balls fly on as with them colored (within a micrometer: no contact acts). In the Jacobi mode
+    // nothing is colored either way.
+    const auto run = [&](GpuOptimization optimizations, double& colors) {
+        Scene world = scene({.gravity = {}}, optimizations);
+        std::vector<RigidBody*> balls;
+        const std::shared_ptr<const Shape> ball = make_shape(SphereShape{.radius = 0.1F});
+        for (int layer = 0; layer < 3; ++layer)
+        {
+            for (int row = 0; row < 6; ++row)
+            {
+                for (int column = 0; column < 6; ++column)
+                {
+                    const Vector3 position{.x = 0.25F * static_cast<float>(column), .y = 2.0F + 0.25F * static_cast<float>(layer), .z = 0.25F * static_cast<float>(row)};
+                    balls.push_back(&world.add({.pose = {.position = position}, .linear_velocity = {.x = 20.0F}}, {.shape = ball}));
+                }
+            }
+        }
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "relative speed coloring"});
+        for (int step = 0; step < 30; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                colors += trace.sites()[sample.site].name == "GPU XPBD: colors" ? sample.number() : 0.0;
+            }
+        }
+        std::vector<RigidBodyState> states;
+        for (const RigidBody* body : balls)
+        {
+            states.push_back(body->state());
+        }
+        return states;
+    };
+    double relative_colors = 0.0;
+    double summed_colors = 0.0;
+    const std::vector<RigidBodyState> relative = run(DEFAULT_GPU_OPTIMIZATIONS, relative_colors);
+    const std::vector<RigidBodyState> summed = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::RELATIVE_SPEED_COLORING), summed_colors);
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < relative.size(); ++index)
+    {
+        ASSERT_TRUE(finite(relative[index]));
+        largest = std::max(largest, gfx::length(relative[index].pose.position - summed[index].pose.position));
+    }
+    EXPECT_LT(largest, 1.0e-6F) << "the balls fly as with their contacts colored";
+    EXPECT_NEAR(relative.front().pose.position.x, 10.0F, 0.01F) << "30 steps at 20 m/s";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        if (mode() == GpuSolverMode::GRAPH_COLORING)
+        {
+            EXPECT_EQ(relative_colors, 0.0) << "no contact colored";
+            EXPECT_GE(summed_colors, 4.0 * 30.0) << "the contacts colored without the flag";
+        }
+        else
+        {
+            EXPECT_EQ(relative_colors, 0.0);
+            EXPECT_EQ(summed_colors, 0.0);
+        }
     }
     EXPECT_TRUE(take_validation_messages().empty());
 }

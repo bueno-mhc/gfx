@@ -15,7 +15,11 @@
 // pile's candidates keep a gap; the Jacobi gather splits the nodes among their touching contacts only. With mode bit 1
 // (GpuOptimization::REACHABLE_CONTACTS) a contact none of whose points is touching nor within LINEAR_SLOP is no constraint
 // (as an empty manifold: one fast body no longer makes every nearby pair a constraint); its friction anchors are marked
-// slipped, so that the next step's contact cache keeps none of this slot's old ones. Mode bit 0: no previous anchors.
+// slipped, so that the next step's contact cache keeps none of this slot's old ones. With mode bit 2
+// (GpuOptimization::RELATIVE_SPEED_COLORING) a contact none of whose points can meet at the relative speed of its two
+// points (and gravity's pull) within the step, nor is within LINEAR_SLOP, is flagged CONTACT_DISTANT: the coloring leaves
+// it to the overflow set (it meets only if a body is stopped by something else, which the Jacobi pass still handles).
+// Mode bit 0: no previous anchors.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 #include "narrow_phase.glsl"
@@ -117,6 +121,7 @@ void main()
         }
     }
     bool touching = false;
+    bool near = false;
     for (uint point = 0U; point < points; ++point)
     {
         const vec4 contact = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 3U + 2U * point];
@@ -128,6 +133,7 @@ void main()
         const vec3 relative = (second_body.linear_velocity + cross(second_body.angular_velocity, on_second - second_center)) -
                               (first_body.linear_velocity + cross(first_body.angular_velocity, on_first - first_center));
         const float approach = max(-dot(relative, normal), 0.0);
+        near = near || contact.w - length(relative) * step - pull <= 0.0 || contact.w < LINEAR_SLOP;
         const vec3 anchor_first = rotate_by(quaternion_conjugate(first_orientation), on_first - normal * first_margin - first_center);
         const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second + normal * second_margin - second_center);
         vec4 friction_first = vec4(rotate_by(quaternion_conjugate(first_orientation), on_first - first_center), 0.0);
@@ -149,7 +155,8 @@ void main()
         gpu_vectors[SOLVER.contacts].values[anchors + 2U] = friction_first;
         gpu_vectors[SOLVER.contacts].values[anchors + 3U] = friction_second;
     }
-    gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(first.body, second.body, points, CONTACT_ACTIVE | (touching ? CONTACT_TOUCHING : 0U));
+    const uint distant = (push.mode & 4U) != 0U && !near ? CONTACT_DISTANT : 0U;
+    gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(first.body, second.body, points, CONTACT_ACTIVE | (touching ? CONTACT_TOUCHING : 0U) | distant);
     atomicAdd(gpu_words[SOLVER.counts].words[COUNT_ACTIVE_CONSTRAINTS], 1U);
     atomicAdd(gpu_words[SOLVER.counts].words[COUNT_CONTACT_POINTS], points);
 }

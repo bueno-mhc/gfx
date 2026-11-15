@@ -4,11 +4,14 @@
 // load's weight, a six-degrees-of-freedom joint's locked and limited axes), then what only these tests check: sliders
 // within their limits under their motors, cone-twist joints' swing and twist limits, springs at their frequencies (a
 // distance spring, a hinge's spring, a soft weld's sag), rods and stubs, joined bodies not colliding unless asked, a
-// chain sleeping and waking as one island, and the same steps giving the same bits.
+// chain sleeping and waking as one island, chains of links swinging at their speed in either mode (joints between rigid
+// bodies split equally in the overflow set), the constraints of new colors joining the overflow set (OVERFLOW_NEW_COLORS),
+// and the same steps giving the same bits.
 #include "vulkan_test.hpp"
 
 import gfx.physics;
 import gfx.physics.gpu_xpbd;
+import gfx.profiler;
 
 namespace
 {
@@ -501,6 +504,192 @@ TEST_P(GpuXpbdJointTest, AChainSleepsAndWakesAsOneIsland)
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
+TEST_P(GpuXpbdJointTest, ChainsOfLinksSwingAtTheirSpeedInEitherMode)
+{
+    // Eight chains of 24 capsule links on ball joints, released level side by side (their links do not collide): each
+    // link is held at both ends by joints of equal masses, which the overflow set's shares did not split (a share of one
+    // half each), so in the Jacobi mode both joints turned the link by their whole error: the chains reached 677 m/s
+    // and then NaN within 0.2 s on one GPU, 59 m/s on the other. Split equally (a whole share per joint between rigid
+    // bodies), they swing as in the coloring mode: their tips whip past the speed of a fall from the chain's length (25 m/s
+    // against 13 in both modes) but stay under three times it, and their joints hold (each link's end within 3 cm of the
+    // next one's: 1.4 cm in the Jacobi mode, which converges slower).
+    constexpr int CHAINS = 8;
+    constexpr int LINKS = 24;
+    constexpr float PITCH = 0.36F;
+    Scene world = scene();
+    std::vector<RigidBody*> links;
+    const std::shared_ptr<const Shape> link = make_shape(CapsuleShape{.half_height = 0.15F, .radius = 0.06F});
+    const Quaternion along_x = Quaternion::from_axis_angle({.z = 1.0F}, 0.5F * PI);
+    for (int chain = 0; chain < CHAINS; ++chain)
+    {
+        const Vector3 anchor{.y = 10.0F, .z = 0.3F * static_cast<float>(chain)};
+        const RigidBody* previous = nullptr;
+        for (int index = 0; index < LINKS; ++index)
+        {
+            const float x = PITCH * static_cast<float>(index);
+            RigidBody& body = world.add({.pose = {.position = anchor + Vector3{.x = x + 0.5F * PITCH}, .orientation = along_x}, .angular_damping = 0.1F},
+                                        {.shape = link, .filter = {.group = -1}});
+            (void)world.join(ball_and_socket_joint(
+                {.first = body.handle(), .second = previous != nullptr ? previous->handle() : RigidBodyHandle{}, .anchor = anchor + Vector3{.x = x}}));
+            previous = &body;
+            links.push_back(&body);
+        }
+    }
+    const float fall_speed = std::sqrt(2.0F * STANDARD_GRAVITY * PITCH * static_cast<float>(LINKS));
+    float fastest = 0.0F;
+    for (int step = 0; step < 90; ++step)
+    {
+        world.world->step(STEP);
+        for (const RigidBody* body : links)
+        {
+            const RigidBodyState state = body->state();
+            ASSERT_TRUE(finite(state)) << "step " << step;
+            fastest = std::max(fastest, gfx::length(state.linear_velocity));
+        }
+    }
+    EXPECT_LT(fastest, 3.0F * fall_speed) << "the fastest link, against a fall from the chain's length at " << fall_speed << " m/s";
+    EXPECT_GT(fastest, 0.3F * fall_speed) << "the chains swung";
+    float widest = 0.0F;
+    for (std::size_t index = 0; index + 1 < links.size(); ++index)
+    {
+        if ((index + 1) % LINKS == 0)
+        {
+            continue;
+        }
+        const Vector3 end = gfx::transform_point(links[index]->state().pose, Vector3{.y = -0.5F * PITCH});
+        const Vector3 start = gfx::transform_point(links[index + 1]->state().pose, Vector3{.y = 0.5F * PITCH});
+        widest = std::max(widest, gfx::length(end - start));
+    }
+    EXPECT_LT(widest, 0.03F) << "the joints hold";
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdJointTest, NewColorsJoinTheOverflowSetInsteadOfSpareColors)
+{
+    // OVERFLOW_NEW_COLORS: eight chains of 24 capsule links released level side by side 0.3 m apart (their links collide):
+    // the links' speculative contacts, which cannot meet at their relative speed, keep an overflow set
+    // (RELATIVE_SPEED_COLORING), so with the flag each step records the colors the previous step used (the joints' three,
+    // not two spare ones): fewer dispatches (traced builds), no more replays, and the chains swing as without it (each link
+    // within 2 cm). Then a hub with six rods on ball joints, the rods moving outward at 3 m/s, joins the world: its joints
+    // need six colors, three of them new, whose joints the flag gives to the overflow set — solved in that step (each
+    // joint within 1 cm; unsolved, they open by 5 cm). In the Jacobi mode nothing is colored: the same bits.
+    constexpr int CHAINS = 8;
+    constexpr int LINKS = 24;
+    constexpr float PITCH = 0.36F;
+    struct Run
+    {
+        std::vector<RigidBodyState> states{};
+        double dispatches = 0.0;
+        double replays = 0.0;
+        float hub_gap = 0.0F;
+    };
+    const auto run = [&](GpuOptimization optimizations) {
+        Scene world = scene({}, optimizations);
+        std::vector<RigidBody*> links;
+        const std::shared_ptr<const Shape> link = make_shape(CapsuleShape{.half_height = 0.15F, .radius = 0.06F});
+        const Quaternion along_x = Quaternion::from_axis_angle({.z = 1.0F}, 0.5F * PI);
+        for (int chain = 0; chain < CHAINS; ++chain)
+        {
+            const Vector3 anchor{.y = 10.0F, .z = 0.3F * static_cast<float>(chain)};
+            const RigidBody* previous = nullptr;
+            for (int index = 0; index < LINKS; ++index)
+            {
+                const float x = PITCH * static_cast<float>(index);
+                RigidBody& body = world.add({.pose = {.position = anchor + Vector3{.x = x + 0.5F * PITCH}, .orientation = along_x}, .angular_damping = 0.1F},
+                                            {.shape = link});
+                (void)world.join(ball_and_socket_joint(
+                    {.first = body.handle(), .second = previous != nullptr ? previous->handle() : RigidBodyHandle{}, .anchor = anchor + Vector3{.x = x}}));
+                previous = &body;
+                links.push_back(&body);
+            }
+        }
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "new colors"});
+        for (int step = 0; step < 90; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        Run result;
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                const std::string_view name = trace.sites()[sample.site].name;
+                result.dispatches += name == "GPU XPBD: dispatches" ? sample.number() : 0.0;
+                result.replays += name == "GPU XPBD: replay" ? 1.0 : 0.0;
+            }
+        }
+        for (const RigidBody* body : links)
+        {
+            result.states.push_back(body->state());
+        }
+
+        // The hub: six rods on ball joints at its faces, moving outward; one step; how far each joint opened.
+        const Vector3 center{.x = -4.0F, .y = 5.0F};
+        RigidBody& hub = world.add({.pose = {.position = center}}, {.shape = box_shape({.x = 0.1F, .y = 0.1F, .z = 0.1F})});
+        const std::shared_ptr<const Shape> rod = box_shape({.x = 0.2F, .y = 0.03F, .z = 0.03F});
+        std::vector<std::pair<RigidBody*, Vector3>> rods;
+        for (int face = 0; face < 6; ++face)
+        {
+            std::array<float, 3> components{};
+            components[static_cast<std::size_t>(face / 2)] = face % 2 == 0 ? 1.0F : -1.0F;
+            const Vector3 direction{.x = components[0], .y = components[1], .z = components[2]};
+            const Quaternion along = Quaternion::from_axis_angle({.z = 1.0F}, face / 2 == 1 ? 0.5F * PI : 0.0F) *
+                                     Quaternion::from_axis_angle({.y = 1.0F}, face / 2 == 2 ? 0.5F * PI : 0.0F);
+            RigidBody& body = world.add({.pose = {.position = center + direction * 0.3F, .orientation = along}, .linear_velocity = direction * 3.0F}, {.shape = rod});
+            const Vector3 anchor = center + direction * 0.1F;
+            (void)world.join(ball_and_socket_joint({.first = body.handle(), .second = hub.handle(), .anchor = anchor}));
+            rods.emplace_back(&body, gfx::transform_point(gfx::inverse(body.state().pose), anchor));
+        }
+        const Transform hub_start = hub.state().pose;
+        std::vector<Vector3> hub_anchors;
+        for (int face = 0; face < 6; ++face)
+        {
+            std::array<float, 3> components{};
+            components[static_cast<std::size_t>(face / 2)] = face % 2 == 0 ? 0.1F : -0.1F;
+            hub_anchors.push_back(gfx::transform_point(gfx::inverse(hub_start), center + Vector3{.x = components[0], .y = components[1], .z = components[2]}));
+        }
+        world.world->step(STEP);
+        for (std::size_t index = 0; index < rods.size(); ++index)
+        {
+            const Vector3 on_rod = gfx::transform_point(rods[index].first->state().pose, rods[index].second);
+            const Vector3 on_hub = gfx::transform_point(hub.state().pose, hub_anchors[index]);
+            result.hub_gap = std::max(result.hub_gap, gfx::length(on_rod - on_hub));
+        }
+        return result;
+    };
+    const Run new_colors = run(DEFAULT_GPU_OPTIMIZATIONS);
+    const Run spare_colors = run(static_cast<GpuOptimization>(std::to_underlying(DEFAULT_GPU_OPTIMIZATIONS) &
+                                                              ~std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS)));
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < new_colors.states.size(); ++index)
+    {
+        ASSERT_TRUE(finite(new_colors.states[index]));
+        largest = std::max(largest, gfx::length(new_colors.states[index].pose.position - spare_colors.states[index].pose.position));
+    }
+    if (mode() == GpuSolverMode::JACOBI)
+    {
+        EXPECT_EQ(largest, 0.0F) << "nothing is colored in the Jacobi mode";
+    }
+    else
+    {
+        EXPECT_LT(largest, 0.02F) << "the chains swing as with spare colors";
+        EXPECT_LT(new_colors.hub_gap, 0.01F) << "the hub's joints of new colors solved in the overflow set";
+        EXPECT_LT(spare_colors.hub_gap, 0.01F) << "the hub's joints solved after a replay";
+        if constexpr (gfx::profiler::PROFILER_ENABLED)
+        {
+            EXPECT_LT(new_colors.dispatches, spare_colors.dispatches) << "no spare colors recorded";
+            EXPECT_LE(new_colors.replays, spare_colors.replays) << "no more replays";
+        }
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdJointTest, TheSameStepsGiveTheSameBits)
 {
     // Two worlds of the same jointed scene (a chain of hinges with a motor falling onto a floor, a rope, a slider): their
@@ -552,8 +741,9 @@ TEST_P(GpuXpbdJointTest, TheSameStepsGiveTheSameBits)
 TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
 {
     // The default optimizations that keep the bits (all but REACH_BOXES and BVH_REFIT, which find the same pairs in another
-    // order, RESTING_STEPS, whose woken contacts warm-start from an earlier step, and REACHABLE_CONTACTS, which makes fewer
-    // constraints) against none (the baseline) on a
+    // order, RESTING_STEPS, whose woken contacts warm-start from an earlier step, REACHABLE_CONTACTS, which makes fewer
+    // constraints, RELATIVE_SPEED_COLORING, which solves some contacts in the overflow set, and OVERFLOW_NEW_COLORS, which
+    // solves the constraints of new colors there) against none (the baseline) on a
     // scene whose layouts change while it runs — a joint disabled, a collider's material changed, a body and a collider
     // made, a joint breaking during a step — between steps whose edits keep them (forces, impulses, velocities): the same
     // states bit for bit every 15 steps, the same events.
@@ -561,7 +751,9 @@ TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
         static_cast<GpuOptimization>(std::to_underlying(DEFAULT_GPU_OPTIMIZATIONS) &
                                      ~(std::to_underlying(GpuOptimization::REACH_BOXES) | std::to_underlying(GpuOptimization::BVH_REFIT) |
                                        std::to_underlying(GpuOptimization::RESTING_STEPS) |
-                                       std::to_underlying(GpuOptimization::REACHABLE_CONTACTS)));
+                                       std::to_underlying(GpuOptimization::REACHABLE_CONTACTS) |
+                                       std::to_underlying(GpuOptimization::RELATIVE_SPEED_COLORING) |
+                                       std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS)));
     const auto build = [](Scene& world) {
         world.floor();
         std::vector<RigidBody*> bodies;

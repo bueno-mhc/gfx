@@ -167,6 +167,8 @@ const uint COUNT_OVERFLOW_ENTRIES = 19U;
 const uint COUNT_GATHER_CHUNKS = 20U;
 const uint COUNT_JOINT_COLORS = 21U;
 const uint COUNT_CONTACT_COLORS = 22U;
+const uint COUNT_COLORING_ROUNDS = 23U;
+const uint COUNT_UNCOLORED = 24U;
 
 uint count_word(uint word)
 {
@@ -276,6 +278,7 @@ const uint CONTACT_MARGINS = 19U;
 const uint CONTACT_ACTIVE = 1U;
 const uint CONTACT_TOUCHING = 2U;
 const uint CONTACT_PUSHED = 4U;
+const uint CONTACT_DISTANT = 8U; // RELATIVE_SPEED_COLORING: cannot meet at its points' relative speed (the overflow set).
 
 uint contact_base(uint slot)
 {
@@ -459,6 +462,17 @@ float constraint_share(float own_inverse_mass,
                        float partner_inverse_mass)
 {
     return own_inverse_mass / (own_inverse_mass + partner_inverse_mass);
+}
+
+// Whether a constraint counts as a whole share of a node (as against a static partner): a joint between rigid bodies. Two
+// joints at a link's ends both turn it, and each would, unsplit, turn it by its whole error: with the shares of equal
+// masses (one half each, a sum of 1) a chain's links were not split at all, and chains of capsules swinging in the Jacobi
+// mode reached hundreds of meters a second, then NaN, within 0.2 s; split equally (a whole share each: P = the count of
+// its joints, Tonge et al. 2012) they swing as in the coloring mode. Contacts push along one normal and keep their shares;
+// a pin (a joint with a particle: GpuJointPartKind::PIN, no turn) keeps them too (a heavy body's pins hardly count).
+bool whole_share(bool joint, uint node, uint partner)
+{
+    return joint && !is_particle(node) && !is_particle(partner);
 }
 
 // A node's part in the overflow set (mass splitting weighted by the constraints' shares, jacobi_gather.comp). Each overflow
