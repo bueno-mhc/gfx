@@ -12,10 +12,15 @@
 // solver has none). A contact is flagged touching when a point overlaps at the step's start or could within the step: its
 // gap closed at the sum of the two points' speeds and gravity's pull (not their approach speed: a body stopped by another
 // contact meets what was falling along with it). The speculative margin is the farthest motion of any body, so most of a
-// pile's candidates keep a gap; the Jacobi gather splits the nodes among their touching contacts only.
+// pile's candidates keep a gap; the Jacobi gather splits the nodes among their touching contacts only. With mode bit 1
+// (GpuOptimization::REACHABLE_CONTACTS) a contact none of whose points is touching nor within LINEAR_SLOP is no constraint
+// (as an empty manifold: one fast body no longer makes every nearby pair a constraint); its friction anchors are marked
+// slipped, so that the next step's contact cache keeps none of this slot's old ones. Mode bit 0: no previous anchors.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 #include "narrow_phase.glsl"
+
+layout(constant_id = 67) const float LINEAR_SLOP = 0.0;
 
 // The margin around the core of a collider's shape where the manifold's sub-shape touches it: a convex shape's own, a
 // compound child's (none for a nested compound), none for the triangles of a mesh or a height field.
@@ -88,6 +93,29 @@ void main()
     const Body second_body = load_body(second.body);
     const float step = PARAMETERS.gravity.w * float(PARAMETERS.substeps);
     const float pull = length(PARAMETERS.gravity.xyz) * step * step;
+    if ((push.mode & 2U) != 0U)
+    {
+        // REACHABLE_CONTACTS: a contact none of whose points can meet within the step is no constraint.
+        bool reachable = false;
+        for (uint point = 0U; point < points; ++point)
+        {
+            const vec4 contact = gpu_vectors[SOLVER.manifolds].values[MANIFOLD_VECTORS * slot + 3U + 2U * point];
+            const vec3 on_first = contact.xyz - normal * (0.5 * contact.w);
+            const vec3 on_second = contact.xyz + normal * (0.5 * contact.w);
+            const float closing = length(second_body.linear_velocity + cross(second_body.angular_velocity, on_second - second_center)) +
+                                  length(first_body.linear_velocity + cross(first_body.angular_velocity, on_first - first_center));
+            reachable = reachable || contact.w - closing * step - pull <= 0.0 || contact.w < LINEAR_SLOP;
+        }
+        if (!reachable)
+        {
+            for (uint point = 0U; point < 4U; ++point)
+            {
+                gpu_vectors[SOLVER.contacts].values[base + 3U + 4U * point + 2U] = vec4(0.0, 0.0, 0.0, 1.0);
+            }
+            gpu_word_vectors[SOLVER.contacts].values[base] = uvec4(0U);
+            return;
+        }
+    }
     bool touching = false;
     for (uint point = 0U; point < points; ++point)
     {
@@ -104,7 +132,7 @@ void main()
         const vec3 anchor_second = rotate_by(quaternion_conjugate(second_orientation), on_second + normal * second_margin - second_center);
         vec4 friction_first = vec4(rotate_by(quaternion_conjugate(first_orientation), on_first - first_center), 0.0);
         vec4 friction_second = vec4(rotate_by(quaternion_conjugate(second_orientation), on_second - second_center), 0.0);
-        const uint predecessor = push.mode == 0U ? gpu_words[SOLVER.predecessors].words[4U * slot + point] : 0xFFFFFFFFU;
+        const uint predecessor = (push.mode & 1U) == 0U ? gpu_words[SOLVER.predecessors].words[4U * slot + point] : 0xFFFFFFFFU;
         if (predecessor != 0xFFFFFFFFU)
         {
             const uint previous = contact_base(predecessor / 4U) + 3U + 4U * (predecessor % 4U);

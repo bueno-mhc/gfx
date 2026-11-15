@@ -680,6 +680,76 @@ TEST_P(GpuXpbdRigidTest, ReachBoxesFindThePairsTheFilterKeeps)
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
+TEST_P(GpuXpbdRigidTest, ContactsThatCannotMeetWithinAStepAreNoConstraints)
+{
+    // REACHABLE_CONTACTS: rows of rods tilted 45° side by side 0.5 m apart (their boxes overlap: the pair filter keeps
+    // them; their surfaces are 25 cm apart) at rest without gravity, and a ball fired past them at 40 m/s (the step's
+    // speculative distance grows by its 0.67 m a step, so every pair of neighbors gets speculative contact points, as a
+    // chain's links do): the neighbors' gaps cannot close within a step, so their contacts are no constraints — the steps
+    // make far fewer of them (traced builds) — and the bodies end where they end with them all (within 0.1 mm).
+    const auto run = [&](GpuOptimization optimizations, double& constraints) {
+        Scene world = scene({.gravity = {}}, optimizations);
+        std::vector<RigidBody*> bodies;
+        const std::shared_ptr<const Shape> rod = make_shape(CapsuleShape{.half_height = 0.5F, .radius = 0.05F});
+        const Quaternion tilt = Quaternion::from_axis_angle({.z = 1.0F}, 0.25F * std::numbers::pi_v<float>);
+        for (int row = 0; row < 6; ++row)
+        {
+            for (int column = 0; column < 20; ++column)
+            {
+                const Vector3 position{.x = 0.5F * static_cast<float>(column), .y = 1.0F, .z = 0.5F * static_cast<float>(row)};
+                bodies.push_back(&world.add({.pose = {.position = position, .orientation = tilt}}, {.shape = rod}));
+            }
+        }
+        bodies.push_back(&world.add({.pose = {.position = {.x = -3.0F, .y = 3.5F, .z = 1.2F}}, .linear_velocity = {.x = 40.0F}},
+                                    {.shape = make_shape(SphereShape{.radius = 0.1F})}));
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "reachable contacts"});
+        for (int step = 0; step < 30; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                if (trace.sites()[sample.site].name == "GPU XPBD: contact constraints")
+                {
+                    constraints += sample.number();
+                }
+            }
+        }
+        std::vector<RigidBodyState> states;
+        for (const RigidBody* body : bodies)
+        {
+            states.push_back(body->state());
+        }
+        return states;
+    };
+    double reachable_constraints = 0.0;
+    double every_constraint = 0.0;
+    const std::vector<RigidBodyState> reachable = run(DEFAULT_GPU_OPTIMIZATIONS, reachable_constraints);
+    const std::vector<RigidBodyState> every = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::REACHABLE_CONTACTS), every_constraint);
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < reachable.size(); ++index)
+    {
+        ASSERT_TRUE(finite(reachable[index]));
+        largest = std::max(largest, gfx::length(reachable[index].pose.position - every[index].pose.position));
+    }
+    EXPECT_LT(largest, 1.0e-4F) << "the bodies move as with every contact a constraint";
+    EXPECT_GT(reachable.back().pose.position.x, 5.0F) << "the ball flew past the rods";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_LT(4.0 * reachable_constraints, every_constraint)
+            << "the steps made " << reachable_constraints << " contact constraints, against " << every_constraint;
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdRigidTest, TheSameStepsGiveTheSameBits)
 {
     // Two worlds, the same pile of 40 bodies: their states equal bit for bit every 30 steps of 4 s.

@@ -1201,6 +1201,51 @@ from PowerShell with `--timeout 900`. The first Debug build stopped on two "cc1p
 16 GB) and had lost the GPU backend and the profiler again (its cache named the compiler `g++.exe`); the second `build.py` run
 built everything with both.
 
+### Follow-up after PF6: the comparison's GPU world as fast as Box3D's (2026-11-14)
+
+Asked (user, 2026-11-14): "graphically, the XPBD GPU should be faster, that is, have a higher frame rate. This is not observed.
+Profile and fix the issue, as to make XPBD GPU have a better or at least equal frame rate to the Box3D approach." In the
+comparison both worlds step once a frame, one after the other, so "frame rate" is read as each world's step time (the labels and
+plots).
+
+**Profiled** (traces of the comparison at size 8, scratchpad gpu_frame_breakdown.py): the GPU world's velocity iterations were
+60–70 % of its GPU time — the wall 9.8 ms and the pile 8.0 ms a step of 32 velocity iterations (4 substeps × 8), each a pass over
+every contact color (17–18), the Jacobi set (20 000–33 000 constraints) and its gather; the chains 780 dispatches a step for 7 439
+contact constraints of which 11 touched. The velocity iterations' count is the library default the user kept at 8 in PF5; 8 is the
+sequential-impulse solver's count, XPBD's velocity pass is one pass a substep (Müller et al. 2020); Box3D makes about two passes a
+substep. A matrix of GPU solver settings (4/3/8, 4/3/1, 4/2/1, 8/1/1) over the five scenes at sizes 1 and 8 chose 4/3/1.
+
+**Changed:**
+1. **The comparison's GPU world runs 4/3/1** (`--gpu-solver S/P/V`, the panel's "GPU solver" combo: 4/3/1, 4/3/8 (library
+   defaults), 4/3/2, 4/2/1, 8/1/1; `set_solver()` applies it to the GPU worlds at each build and on a change). **The library's
+   defaults are unchanged** (the user's PF5 decision).
+2. **`GpuOptimization::REACHABLE_CONTACTS`** (1 << 11, in `DEFAULT_GPU_OPTIMIZATIONS`): `contact_prepare.comp` mode bit 1 (bit 0:
+   no previous anchors) — a contact none of whose points is touching (the gap closed by the two points' speeds and gravity's pull
+   within the step, the existing `CONTACT_TOUCHING` test) nor within `LINEAR_SLOP` (spec constant 67, the reports' rule: events
+   unchanged) is written as an empty manifold; its friction anchors are marked slipped (w = 1), so the next step's contact cache
+   keeps none of this slot's stale ones. Other bits (excluded from `TheOptimizationsGiveTheBaselinesBits`), the same motion. Test
+   `GpuXpbdRigidTest.ContactsThatCannotMeetWithinAStepAreNoConstraints` (× 4: 120 rods tilted 45° side by side 0.5 m apart without
+   gravity — boxes overlapping, surfaces 25 cm apart — and a ball past them at 40 m/s: 4× fewer "GPU XPBD: contact constraints",
+   poses within 0.1 mm; fails with the mode bit never set: 3 420 = 3 420, checked). A first version of the test (boxes 5 cm apart)
+   could not fail: the pair filter already removes pairs whose boxes are out of reach.
+3. **The comparison's GPU worlds keep a pipeline cache file** (`gfx_physics_comparison.pipelines` in the working directory): a
+   cold driver cache had made a world's creation take 36 s.
+
+**Measured** (profile build, median ms, 200 steps; PERFORMANCE.md §6.1): at size 8 the GPU world is faster than Box3D's on the
+pile (2.3×), the wall (1.25×), the pyramid (3.2×, awake) and the cloth (4.7×); still slower on the chains (0.68×: their links are
+within each other's speeds-sum reach, so their 7 400 speculative contacts stay) and in worlds of about 2 000 bodies (0.47–0.83×:
+a GPU step's floor of about 1.4–3.5 ms). The GPU wall still collapses by itself at sizes 4 and 8 (a quality problem, not timed).
+
+**Deviations (for validation).**
+1. The comparison runs its GPU world with 4/3/1 instead of the library's 4/3/8 (shown and switchable in the panel).
+2. A new default GPU optimization that changes bits (`REACHABLE_CONTACTS`).
+3. Not reached: the chains at every size and the worlds of about 2 000 bodies stay faster on Box3D (follow-ups in PERFORMANCE.md §7).
+
+**Results**: 1 579 tests (+ 4 `ContactsThatCannotMeetWithinAStepAreNoConstraints`). Debug 1 576 of 1 579 (1 262 s) and Release 1 577
+of 1 579 (891 s): the sandbox's script runs (`PhysicsSandbox.SDL3`, `.GLFW`; Debug also the tour) went past their limits under the
+full parallel load — they use Box3D and the reference backend, untouched — and pass alone (Release `GLFW` 224 s, Debug `SDL3` 40 s,
+`GLFW` 39 s, tour 393 s: paced by the window's presentation). Their limit is now 900 s, as the tour's and the GPU run's.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

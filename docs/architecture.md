@@ -1676,7 +1676,8 @@ flowchart LR
     subgraph detect_stage["detection"]
         direction TB
         reach["REACH_BOXES<br/>boxes grown by each<br/>collider's own reach"] --> refit["BVH_REFIT<br/>the moving tree refit<br/>for 30 steps"]
-        refit --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
+        refit --> reachable["REACHABLE_CONTACTS<br/>contacts that cannot meet<br/>in the step: no constraints"]
+        reachable --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
     end
     subgraph substep_stage["substeps"]
         direction TB
@@ -1694,7 +1695,8 @@ flowchart LR
 
 Each is a bit of `GpuOptimization` (`GpuXpbdDescription::optimizations`, all on by default; `NONE` is the backend before
 them). Most give the same bits as the baseline (tests compare them); `REACH_BOXES` and `BVH_REFIT` find the same pairs in
-another order, `RESTING_STEPS` gives the same bits for the same steps. Beside the flags, the framework (lazy query tree with
+another order, `RESTING_STEPS` gives the same bits for the same steps, `REACHABLE_CONTACTS` makes fewer constraints (the same
+motion). Beside the flags, the framework (lazy query tree with
 fat leaves, parallel bounds and copies, swapped events, unmoved colliders' boxes kept, `gfx::SharedMutex` for the published
 snapshot) and the GPU backend's CPU side (contacts sorted by 64-bit keys and converted in place, parallel readback, no
 denormal floats) changed for every world.

@@ -141,6 +141,7 @@ Every GPU optimization is a bit of `GpuOptimization` in `GpuXpbdDescription::opt
 | `BVH_REFIT` | PF5b | the moving tree refit for 30 steps while the moving colliders stay the same, then built again | the tree's build in the scenes with motion | the same pairs, another order |
 | `KERNEL_FUSION` | PF5b | bodies' and particles' velocity updates in one dispatch | a dispatch and a barrier per substep with particles | the same |
 | `PARTIAL_SUBMISSIONS` | PF5b | the step submitted in parts of at least 64 dispatches as it is recorded | recording hidden behind the GPU's work; small worlds 5–24 % faster | the same |
+| `REACHABLE_CONTACTS` | after PF6 | a contact none of whose points can meet within the step is no constraint (the pair filter's reach test on the points' gaps) | rods beside a fast ball: 4× fewer constraints; the comparison's wall at size 8 with 4/3/1: 11.5 → 9.3 ms | other bits, the same motion |
 
 Changes that are not flags (every backend, or the GPU backend's CPU side; kept because the conformance suite and the
 determinism tests pass unchanged):
@@ -234,11 +235,62 @@ What it shows:
 - **Our Box3D wrapper's contact capture is most of Box3D's step**: 7.8 ms of an 11.4 ms step at 8 000 bodies (37 000 contact
   points), against `b3World_Step`'s 4.2 ms.
 
+### 6.1 The GPU world as fast as Box3D's
+
+The comparison first ran the GPU world with the library's solver defaults, 4 substeps × (3 position + 8 velocity
+iterations). Those defaults are the sequential-impulse solver's: in XPBD the velocity pass, which applies dynamic friction
+and restitution, is one pass per substep (Müller et al. 2020), and on the GPU each velocity iteration is a pass over every
+contact color, the Jacobi set and its gather — 60–70 % of the GPU's solver time in the pile and the wall (8.0 and 9.8 ms a
+step at size 8). Box3D makes about two passes a substep. Two changes (2026-11-14):
+
+- **The comparison runs its GPU world with one velocity pass a substep (4/3/1)** — `--gpu-solver S/P/V` and the panel's "GPU
+  solver" set it, 4/3/8 (the library's defaults) included. The library's defaults are unchanged. In the benchmark's Pareto
+  front this setting made the pyramid 1.8× faster for 27 % more drift of its top box (0.110 → 0.140 m), the cloth and the
+  chains no worse.
+- **`GpuOptimization::REACHABLE_CONTACTS`** (on by default): a contact none of whose points can meet within the step is no
+  constraint. The narrow phase keeps points within the step's speculative distance, the farthest any body gets, so one fast body
+  (a wrecking ball, a bullet) made every pair of nearby bodies a constraint: more colors, a larger Jacobi set. The test is the
+  pair filter's, on the points' own gaps (the two points' speeds and gravity's pull over the step; within `LINEAR_SLOP` always
+  kept, so events are unchanged). Other bits, the same motion: a test of rods side by side past which a ball flies finds 4×
+  fewer constraints and the same poses within 0.1 mm.
+
+Median step in milliseconds after both, 200 steps (`awake`: `--no-sleep`):
+
+| Scene, size | Box3D | GPU | Box3D ÷ GPU | Box3D, sleep on | GPU, sleep on | Box3D ÷ GPU |
+|---|---|---|---|---|---|---|
+| pile, 1 | 2.49 | 3.60 | 0.69 | 2.54 | 3.82 | 0.67 |
+| pile, 4 | 10.63 | 6.75 | 1.57 | 10.55 | 7.96 | 1.32 |
+| pile, 8 | 23.69 | 10.30 | 2.30 | 23.80 | 12.54 | 1.90 |
+| wrecking, 1 | 1.62 | 3.42 | 0.47 | 1.63 | 3.11 | 0.52 |
+| wrecking, 4 | 9.87 | 15.81 | 0.62 | 5.39 | 6.20 | 0.87 |
+| wrecking, 8 | 11.60 | 9.26 | 1.25 | 11.23 | 9.63 | 1.17 |
+| chains, 1 | 0.66 | 1.40 | 0.47 | 0.80 | 2.41 | 0.33 |
+| chains, 4 | 1.31 | 2.28 | 0.58 | 1.36 | 2.61 | 0.52 |
+| chains, 8 | 2.18 | 3.21 | 0.68 | 2.36 | 3.36 | 0.70 |
+| pyramid, 1 | 3.45 | 4.14 | 0.83 | 2.13 | 0.11 | 19.4 |
+| pyramid, 4 | 18.27 | 8.51 | 2.15 | 17.95 | 0.61 | 29.3 |
+| pyramid, 8 | 40.61 | 12.91 | 3.15 | 39.94 | 0.88 | 45.5 |
+| cloth, 1 | 7.06 | 1.87 | 3.78 | 7.46 | 1.93 | 3.87 |
+| cloth, 4 | 15.61 | 2.82 | 5.53 | 12.92 | 2.88 | 4.48 |
+| cloth, 8 | 21.45 | 4.59 | 4.67 | 18.38 | 4.57 | 4.02 |
+
+At the comparison's default size (8) the GPU world now steps the pile, the wall, the pyramid and the cloth faster than
+Box3D's (1.2× to 4.7×; before: the wall 0.47×, the chains 0.52×). Still slower:
+
+- **The chains** (0.68× at size 8): a fast chain's links are all within reach of each other — the test uses the two
+  points' speeds, not their approach (a body stopped by another contact meets what follows it), so `REACHABLE_CONTACTS` keeps
+  them — and 7 400 contact constraints spread 7 700 joints over 8 colors and a Jacobi set of 2 300.
+- **Worlds of about 2 000 bodies or fewer**: a GPU step costs at least about 1.4–3.5 ms (hundreds of dispatches each
+  followed by a barrier, the submission, the wait, the readback), where Box3D steps them in 0.7–2.5 ms.
+- **The wall at size 4** collapses by itself in the GPU world (as at size 8, its top falls to 13 m) and its falling bricks keep
+  the step busy.
+
 ## 7. Follow-ups
 
-1. **Small and mid-size worlds on the GPU**: fewer passes per step. The velocity iterations' count is the first lever (§5). A
-   single-dispatch solve of small colors or islands within one workgroup (no inter-workgroup wait, so no deadlock) is the
-   second.
+1. **Small and mid-size worlds on the GPU**: fewer passes per step. The velocity iterations' count is the first lever (§5;
+   the comparison uses 4/3/1, §6.1 — the library's defaults could follow). A single-dispatch solve of small colors or islands
+   within one workgroup (no inter-workgroup wait, so no deadlock) is the second. Chains of fast links need fewer speculative
+   contacts than the speeds-sum test keeps, without losing a link stopped by another.
 2. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
    Box3D's touching pairs.
 3. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of

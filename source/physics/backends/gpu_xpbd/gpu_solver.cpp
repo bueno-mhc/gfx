@@ -886,8 +886,11 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     // The contact constraints (and the step's counts of constraints).
     PROFILE_NAMED_SCOPE(constraints_scope, "GPU XPBD: record the constraints, islands, graph and colors");
     {
+        // Mode bit 0: no previous anchors (the instances name other colliders); bit 1: contacts that cannot meet within the
+        // step are no constraints (REACHABLE_CONTACTS).
         PROFILE_GPU_SCOPE("contact_prepare", recorder, state.passes);
-        state.pass(recorder, *state.contact_prepare, 0, keeps_anchors ? 0U : 1U, slots);
+        const bool reachable_only = has_all(state.settings.optimizations, GpuOptimization::REACHABLE_CONTACTS);
+        state.pass(recorder, *state.contact_prepare, 0, (keeps_anchors ? 0U : 1U) | (reachable_only ? 2U : 0U), slots);
     }
 
     // Islands over contacts and joints: labels hooked and compressed (the last round counts its changes), awake islands,

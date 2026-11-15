@@ -11,7 +11,8 @@
 //
 // Usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>]
 //                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd] [--real-time]
-//                               [--no-sleep] [--device <index>] [--threads <count>] [--frames <count>] [--validation]
+//                               [--no-sleep] [--gpu-solver S/P/V] [--device <index>] [--threads <count>] [--frames <count>]
+//                               [--validation]
 //                               [--trace <file.json>] [--capture <file.ppm>] [--capture-frame <index>]
 //   --scene S      the scene (pyramid by default): a square pyramid of boxes, a pile poured into a bin, a brick wall hit
 //                  by a wrecking ball, rows of swinging chains, a large cloth
@@ -19,6 +20,10 @@
 //   --left B       the left world's backend (Box3D by default); --right B the right one's (the GPU backend by default,
 //                  on the program's own device)
 //   --real-time    each world advances by the real time of a frame, both at once (default: one step each per frame)
+//   --gpu-solver S/P/V  the GPU world's solver: substeps, position iterations, velocity iterations per substep (4/3/1 by
+//                  default: one velocity pass a substep, as XPBD prescribes; the library's defaults, 4/3/8, are the
+//                  sequential-impulse solver's and cost the GPU backend most; the panel switches it). Box3D has no
+//                  iterations to set (it makes about two passes a substep)
 //   --no-sleep     bodies never sleep (the panel switches it): resting bodies keep being simulated, so a scene at rest
 //                  still measures each backend's work (with sleep, a world at rest costs almost nothing)
 //   --frames N     closes after N frames and prints how the steps compared; the window then does not take the focus
@@ -92,6 +97,30 @@ constexpr std::size_t PLOTTED_STEPS = 240;     ///< Step times plotted (and aver
 constexpr std::uint32_t DIVIDER = 2;           ///< Pixels between the halves.
 constexpr float PANEL_ROOM = 0.12F;            ///< How far below a scene's center the camera aims, in camera distances.
 
+/// A GPU world's solver settings: substeps, position iterations and velocity iterations per substep.
+struct SolverChoice
+{
+    std::uint32_t sub_steps = physics::SolverDescription{}.sub_steps;
+    std::uint32_t position_iterations = physics::SolverDescription{}.position_iterations;
+    std::uint32_t velocity_iterations = physics::SolverDescription{}.velocity_iterations;
+
+    [[nodiscard]] constexpr auto operator==(const SolverChoice&) const noexcept -> bool = default;
+};
+
+/// The GPU solver settings the panel offers, the comparison's default first: one velocity pass a substep, as XPBD
+/// prescribes (Müller et al. 2020). The library's defaults (4/3/8) are the sequential-impulse solver's: eight velocity
+/// passes a substep, each a pass over every contact color, are most of the GPU backend's step (the benchmark's Pareto front:
+/// 1.8x faster for 27 % more drift of a pyramid's top box). Box3D makes about two passes a substep.
+constexpr std::array GPU_SOLVER_CHOICES{SolverChoice{.sub_steps = 4, .position_iterations = 3, .velocity_iterations = 1},
+                                        SolverChoice{},
+                                        SolverChoice{.sub_steps = 4, .position_iterations = 3, .velocity_iterations = 2},
+                                        SolverChoice{.sub_steps = 4, .position_iterations = 2, .velocity_iterations = 1},
+                                        SolverChoice{.sub_steps = 8, .position_iterations = 1, .velocity_iterations = 1}};
+
+/// The pipeline cache file of the GPU worlds (in the working directory): later runs make their pipelines from it (a world's
+/// first creation compiles every pipeline: up to 40 s when the driver's own cache is cold).
+constexpr std::string_view PIPELINE_CACHE = "gfx_physics_comparison.pipelines";
+
 /// How the worlds advance.
 enum class Stepping : std::uint8_t
 {
@@ -109,6 +138,7 @@ struct Options
     physics::PhysicsBackendKind right = physics::PhysicsBackendKind::GPU_XPBD;
     Stepping stepping = Stepping::LOCKSTEP;
     bool sleep = true;
+    SolverChoice gpu_solver = GPU_SOLVER_CHOICES[0];
     std::optional<std::size_t> physical_device{};
     std::uint32_t threads = std::max(1U, std::thread::hardware_concurrency() / 2U);
     std::optional<std::uint64_t> frames{};
@@ -207,6 +237,36 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.sleep = false;
         }
+        else if (argument == "--gpu-solver" && has_value)
+        {
+            // S/P/V: three positive counts (velocity and substeps at least 1).
+            const std::string_view text = arguments[++index];
+            std::array<std::uint32_t, 3> counts{};
+            std::size_t part = 0;
+            const char* cursor = text.data();
+            const char* const last = text.data() + text.size();
+            while (part < counts.size())
+            {
+                const auto [end, error] = std::from_chars(cursor, last, counts[part]);
+                if (error != std::errc{})
+                {
+                    break;
+                }
+                ++part;
+                cursor = end;
+                if (cursor == last || *cursor != '/')
+                {
+                    break;
+                }
+                ++cursor;
+            }
+            if (part != counts.size() || cursor != last || counts[0] == 0 || counts[2] == 0)
+            {
+                std::println(std::cerr, "--gpu-solver needs substeps/position iterations/velocity iterations, such as 4/3/1: '{}'", text);
+                return std::nullopt;
+            }
+            options.gpu_solver = {.sub_steps = counts[0], .position_iterations = counts[1], .velocity_iterations = counts[2]};
+        }
         else if (argument == "--trace" && has_value)
         {
             options.trace = arguments[++index];
@@ -238,7 +298,7 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         else
         {
             std::println(std::cerr, "usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>] "
-                                    "[--left <physics backend>] [--right <physics backend>] [--real-time] [--no-sleep] [--device <index>] "
+                                    "[--left <physics backend>] [--right <physics backend>] [--real-time] [--no-sleep] [--gpu-solver S/P/V] [--device <index>] "
                                     "[--threads <count>] [--frames <count>] [--validation] [--trace <file.json>] [--capture <file.ppm>] "
                                     "[--capture-frame <index>]");
             return std::nullopt;
@@ -428,6 +488,26 @@ set_sleeping(Scene& scene,
     }
 }
 
+/// Gives @p scene's world the solver settings of @p choice (after its step in flight), the rest of its solver unchanged.
+void
+set_solver(Scene& scene,
+           const SolverChoice& choice)
+{
+    scene.finish();
+    physics::SolverDescription solver = scene.world().description().solver;
+    solver.sub_steps = choice.sub_steps;
+    solver.position_iterations = choice.position_iterations;
+    solver.velocity_iterations = choice.velocity_iterations;
+    scene.world().set_solver_description(solver);
+}
+
+/// "S/P/V" for @p choice.
+auto
+solver_label(const SolverChoice& choice) -> std::string
+{
+    return std::format("{}/{}/{}", choice.sub_steps, choice.position_iterations, choice.velocity_iterations);
+}
+
 /// Adds @p scene's bodies and soft bodies to @p renderer at their drawn poses; distance joints as lines. @p positions is
 /// scratch storage.
 void
@@ -506,6 +586,7 @@ comparison_panel(gfx::ui::UiFrame& frame,
                  float size,
                  Stepping& stepping,
                  bool& sleeping,
+                 SolverChoice& gpu_solver,
                  bool& paused,
                  double frame_seconds,
                  float display_height) -> PanelRequest
@@ -574,6 +655,28 @@ comparison_panel(gfx::ui::UiFrame& frame,
         frame.item_tooltip("off: resting bodies keep being simulated (a world at rest then still measures each backend's work)");
         frame.same_line();
         static_cast<void>(frame.checkbox("paused (P)", paused));
+
+        // The GPU world's solver (substeps / position iterations / velocity iterations).
+        if (std::ranges::any_of(sides, [](const Side& side) { return side.backend == physics::PhysicsBackendKind::GPU_XPBD; }))
+        {
+            std::array<std::string, GPU_SOLVER_CHOICES.size() + 1> solver_names{};
+            std::size_t solver_index = GPU_SOLVER_CHOICES.size();
+            for (std::size_t index = 0; index < GPU_SOLVER_CHOICES.size(); ++index)
+            {
+                solver_names[index] = solver_label(GPU_SOLVER_CHOICES[index]) + (GPU_SOLVER_CHOICES[index] == SolverChoice{} ? " (library defaults)" : "");
+                solver_index = GPU_SOLVER_CHOICES[index] == gpu_solver ? index : solver_index;
+            }
+            solver_names.back() = solver_label(gpu_solver) + " (command line)";
+            const std::span<const std::string> offered{solver_names.data(),
+                                                       solver_index == GPU_SOLVER_CHOICES.size() ? solver_names.size() : GPU_SOLVER_CHOICES.size()};
+            frame.set_next_item_width(COMBO_WIDTH + 40.0F);
+            if (frame.combo("GPU solver", solver_index, offered) && solver_index < GPU_SOLVER_CHOICES.size())
+            {
+                gpu_solver = GPU_SOLVER_CHOICES[solver_index];
+            }
+            frame.item_tooltip("the GPU world's substeps / position iterations / velocity iterations per substep; each velocity iteration is a pass "
+                               "over every contact color, the GPU's largest cost (Box3D does about two passes a substep)");
+        }
         frame.separator();
 
         // Each world: its last step, the mean of the latest ones, its state, and a plot of its steps.
@@ -709,7 +812,7 @@ run(const Options& options) -> int
 #if GFX_SANDBOX_GPU_XPBD
         if (backend == physics::PhysicsBackendKind::GPU_XPBD)
         {
-            return physics::gpu_xpbd::create_physics_world(description, *device);
+            return physics::gpu_xpbd::create_physics_world(description, *device, {.pipeline_cache_path = std::filesystem::path{PIPELINE_CACHE}});
         }
 #else
         static_cast<void>(device);
@@ -724,14 +827,15 @@ run(const Options& options) -> int
                                                                                           .frames_in_flight = FRAMES_IN_FLIGHT,
                                                                                           .frame_bytes = 16ULL << 20U});
     }
-    std::println("{} window on '{}': {} on the left, {} on the right, {} scheduler threads, sleeping {}", host->backend(),
+    std::println("{} window on '{}': {} on the left, {} on the right, {} scheduler threads, sleeping {}, GPU solver {}", host->backend(),
                  physical_device.properties().name, backend_label(options.left), backend_label(options.right), options.threads,
-                 options.sleep ? "on" : "off");
+                 options.sleep ? "on" : "off", solver_label(options.gpu_solver));
 
     // A scene: built again into both worlds (the old ones finished and their meshes forgotten first).
     LargeScene scene = options.scene;
     float size = options.size;
     bool sleeping = options.sleep;
+    SolverChoice gpu_solver = options.gpu_solver;
     const auto build = [&](LargeScene next,
                            float next_size)
     {
@@ -753,6 +857,10 @@ run(const Options& options) -> int
             if (!sleeping)
             {
                 set_sleeping(*side.scene, false);
+            }
+            if (side.backend == physics::PhysicsBackendKind::GPU_XPBD)
+            {
+                set_solver(*side.scene, gpu_solver);
             }
             side.step_milliseconds.assign(PLOTTED_STEPS, 0.0F);
             side.timed_steps = 0;
@@ -787,6 +895,7 @@ run(const Options& options) -> int
 
     // The loop.
     bool sleeping_applied = sleeping;
+    SolverChoice gpu_solver_applied = gpu_solver;
     platform::InputSystem input{INPUT};
     const platform::ContextActivation context = input.activate_context("comparison"_context);
     std::vector<gfx::Vector3> positions;
@@ -842,6 +951,17 @@ run(const Options& options) -> int
                 set_sleeping(*side.scene, sleeping);
             }
             sleeping_applied = sleeping;
+        }
+        if (gpu_solver != gpu_solver_applied)
+        {
+            for (Side& side : sides)
+            {
+                if (side.backend == physics::PhysicsBackendKind::GPU_XPBD)
+                {
+                    set_solver(*side.scene, gpu_solver);
+                }
+            }
+            gpu_solver_applied = gpu_solver;
         }
 
         // The camera (one for both halves, each half's aspect), turned and moved by the mouse outside the panel.
@@ -934,7 +1054,7 @@ run(const Options& options) -> int
         // The UI: the panel and the labels.
         gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(ui_time));
         const float units_per_pixel = 1.0F / std::max(ui_input.pixels_per_unit(), 0.01F);
-        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, paused, frame_seconds,
+        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, gpu_solver, paused, frame_seconds,
                                    static_cast<float>(extent.height) * units_per_pixel);
         side_labels(ui_frame, sides, static_cast<float>(extent.width) * units_per_pixel);
         static_cast<void>(ui.end_frame());

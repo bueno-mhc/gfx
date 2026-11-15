@@ -160,6 +160,12 @@ enum class GpuOptimization : std::uint32_t
                                     ///< then the substeps, each part once it holds GPU_XPBD_PART_DISPATCHES dispatches):
                                     ///< the GPU runs a part while the next is recorded, instead of waiting for the whole
                                     ///< step's recording. The same commands, the same bits.
+    REACHABLE_CONTACTS  = 1U << 11, ///< A contact none of whose points can meet within the step — each point's gap wider
+                                    ///< than the two points' speeds and gravity's pull close in the step, and not within
+                                    ///< LINEAR_SLOP — is no constraint (as an empty manifold). The narrow phase keeps points
+                                    ///< within the step's speculative distance, the farthest any body gets, so one fast body
+                                    ///< made every nearby pair a constraint: the pair filter's reach test, on the points'
+                                    ///< own gaps. Fewer constraints, colors and overflow constraints (other bits).
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -722,7 +728,7 @@ inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
                                  std::to_underlying(GpuOptimization::RECORDED_PASSES_BY_USE) | std::to_underlying(GpuOptimization::REACH_BOXES) |
                                  std::to_underlying(GpuOptimization::COMPACT_READBACK) | std::to_underlying(GpuOptimization::RESTING_STEPS) |
                                  std::to_underlying(GpuOptimization::BVH_REFIT) | std::to_underlying(GpuOptimization::KERNEL_FUSION) |
-                                 std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS));
+                                 std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS) | std::to_underlying(GpuOptimization::REACHABLE_CONTACTS));
 
 /// @brief Steps the GPU backend refits its moving colliders' tree before building it again (GpuOptimization::BVH_REFIT).
 inline constexpr std::uint32_t GPU_XPBD_REFIT_STEPS = 30;
@@ -931,6 +937,7 @@ struct EnumerationTraits<physics::GpuOptimization>
         EnumeratorName{physics::GpuOptimization::BVH_REFIT, "BVH_REFIT"},
         EnumeratorName{physics::GpuOptimization::KERNEL_FUSION, "KERNEL_FUSION"},
         EnumeratorName{physics::GpuOptimization::PARTIAL_SUBMISSIONS, "PARTIAL_SUBMISSIONS"},
+        EnumeratorName{physics::GpuOptimization::REACHABLE_CONTACTS, "REACHABLE_CONTACTS"},
     };
 };
 

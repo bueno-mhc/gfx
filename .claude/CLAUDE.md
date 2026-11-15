@@ -1242,7 +1242,19 @@ Original hard requirements (from the user's initial specification):
   in both halves; the panel (it covered the left half at 150 % display scaling) is now compact, anchored bottom-left, help in
   tooltips; the camera aims PANEL_ROOM 0.12 × distance below a scene's center; chains/pyramid/wall views adjusted. **Found**: at
   size 8 the GPU world's 90-row single-brick wall collapses by itself within 2.5 s (Box3D's stands): XPBD at 4 × 3 holds very
-  tall stacks less well (scene kept as is: a result to show).
+  tall stacks less well (scene kept as is: a result to show). Committed by Claude at the user's request (3f2328a).
+- **Follow-up after PF6: the comparison's GPU world as fast as Box3D's (2026-11-14; awaiting validation)** — docs/profiler-
+  performance-design.md §B "Follow-up after PF6", PERFORMANCE.md §6.1. User: "the XPBD GPU should … have a higher frame rate …
+  Profile and fix" (read as each world's step time: lockstep frames are shared). Profiled: velocity iterations (4 × 8) 60–70 % of the
+  GPU's solver time (each a pass over every contact color + Jacobi set + gather); chains 7 439 speculative contacts (11 touching).
+  **Comparison**: `--gpu-solver S/P/V` + panel combo (`SolverChoice`, `GPU_SOLVER_CHOICES`, `set_solver()`), default **4/3/1** (library
+  default 4/3/8 unchanged: the user's PF5 decision); pipeline cache file `gfx_physics_comparison.pipelines` (cwd; a cold creation took
+  36 s). **`GpuOptimization::REACHABLE_CONTACTS`** (1 << 11, default): contact_prepare mode bit 1 drops contacts none of whose points is
+  touching (speeds-sum + gravity test) nor within LINEAR_SLOP (spec 67) → empty manifold, friction anchors marked slipped (w = 1);
+  other bits (excluded from TheOptimizationsGiveTheBaselinesBits). Test ContactsThatCannotMeetWithinAStepAreNoConstraints (tilted
+  rods, no gravity, fast ball: 4× fewer constraints; mutation-checked). Result size 8 (Box3D ÷ GPU): pile 2.3, wall 1.25, pyramid 3.2,
+  cloth 4.7, **chains 0.68** (speeds-sum keeps fast links' contacts), size 1 0.47–0.83 (GPU floor 1.4–3.5 ms). Gotcha: the pair filter
+  already drops pairs whose boxes are out of reach — the flag's test needs tilted shapes (boxes much larger than the shapes).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1804,7 +1816,10 @@ the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1575**, 2026-11-14 (profiler PF6: + 3 SharedMutexTest, + 1 PhysicsComparison.Pile; Debug 1575/1575
+Test count at last report: **1579**, 2026-11-14 (follow-up after PF6, the comparison's GPU world: + 4
+ContactsThatCannotMeetWithinAStepAreNoConstraints; Debug 1576/1579 (1262 s), Release 1577/1579 (891 s): the sandbox's script runs
+(SDL3, GLFW; Debug also the tour) timed out under load and pass alone (39–393 s, window-paced) — their TIMEOUT is now 900). Before:
+**1575**, 2026-11-14 (profiler PF6: + 3 SharedMutexTest, + 1 PhysicsComparison.Pile; Debug 1575/1575
 (858 s, 8 skips), Release 1575/1575 (518 s, 46 skips: the profiler's tests with GFX_PROFILER off, Debug-only compiler/hot reload,
 opt-in clipboard/RenderDoc/benchmark); run from PowerShell with `--timeout 900`; check `ctest -N` = 1575). Before: **1571**,
 2026-11-11 (profiler PF5b: + 5 Tetrahedralize.*, + 4 TetrahedralMeshTest, + 20 GPU (compact

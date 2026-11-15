@@ -86,9 +86,12 @@ if(GFX_BUILD_TESTS)
             add_test(NAME PhysicsSandbox.${_gfx_backend}
                      COMMAND gfx_physics_sandbox --backend ${_gfx_backend_name} --physics ${_gfx_sandbox_physics_${_gfx_backend}}
                              ${_gfx_sandbox_arguments})
+            # Paced by the window's presentation: the same script took 39 s alone and over 300 s in a full parallel run
+            # (an unfocused window's presents are throttled), as the tour does.
             set_tests_properties(PhysicsSandbox.${_gfx_backend} PROPERTIES
                 ENVIRONMENT "${_gfx_sandbox_environment}"
-                LABELS example)
+                LABELS example
+                TIMEOUT 900)
             gfx_use_gpu_in_tests(PhysicsSandbox.${_gfx_backend})
             if(NOT TEST PhysicsSandbox.Tour)
                 add_test(NAME PhysicsSandbox.Tour
