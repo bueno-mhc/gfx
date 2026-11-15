@@ -967,6 +967,7 @@ classDiagram
         +step(seconds)
         +begin_step(seconds)
         +wait_step()
+        +is_step_finished() bool
         +events() PhysicsEvents
         +ray_cast() QueryResult
         +shape_cast() QueryResult
@@ -1660,7 +1661,10 @@ flowchart LR
 The benchmark compares what an application gets: `step()`'s wall clock, both backends paying the framework, Box3D's own
 time (`b3World_GetProfile`) reported beside it. The comparison (`examples/physics_sandbox/physics_comparison.cpp`) shows the
 same thing on scenes in motion one can watch and act on; it shares the sandbox's renderer, scenes and camera rig, each
-program compiling those modules itself.
+program compiling those modules itself. With `--single <backend>` it shows one world alone in the whole window, stepped in real
+time — frames never wait for a step still running (`PhysicsWorld::is_step_finished()`), so they follow the display while the
+panel gives the world's steps per second and share of real time (the VS Code configuration "gfx: Large scale at 60 FPS": a
+pyramid of 12 529 boxes kept awake).
 
 ### 10.4 The optimizations in a GPU step
 
@@ -1732,7 +1736,7 @@ flowchart TB
 | `WindowedExample.*` | the windowed example, 120 frames on each platform backend with the validation layers (label `example`) |
 | `PhysicsExample.*` | the physics example on Box3D, on the reference backend and on the GPU backend: four seconds of the scene on four threads, every check passing (label `example`) |
 | `PhysicsSandbox.*` | the physics sandbox's scripted runs, one with each physics backend, and its tour of every preset on every physics backend, with the validation layers (§9.4, label `example`) |
-| `PhysicsComparison.Pile` | the physics comparison on a small pile, 120 frames with Box3D and the GPU backend side by side, with the validation layers (label `example`) |
+| `PhysicsComparison.*` | the physics comparison on a small pile, 120 frames with Box3D and the GPU backend side by side, and the GPU backend's world alone (`--single`) on a small pyramid in real time, with the validation layers (label `example`) |
 | `PhysicsBenchmark.*` | a smoke run of the physics benchmark at 1 % of its scenes (label `example`); the whole benchmark only with `GFX_RUN_BENCHMARKS=1` (label `benchmark`) |
 | `UiEditorExample.*` | the UI editor example on each platform backend with the validation layers: five cycles of a synthetic mouse sweep at a fixed time step, no allocation in the UI's frames and its renderer in the last two (label `example`) |
 

@@ -690,6 +690,76 @@ TEST_P(GpuXpbdJointTest, NewColorsJoinTheOverflowSetInsteadOfSpareColors)
     EXPECT_TRUE(take_validation_messages().empty());
 }
 
+TEST_P(GpuXpbdJointTest, IslandRoundsFollowWhatTheLastStepUsed)
+{
+    // RECORDED_PASSES_BY_USE: a chain of 16 boxes hanging on ball joints and 30 boxes resting apart on a floor: the islands'
+    // hooks change labels in a few rounds only (traced builds: fewer than the 6 that would make 8 recorded), so the steps
+    // record that many and two more — and replay no step after the first ones (a round count kept too small would replay
+    // every step) — and the islands stay right: everything falls asleep, a push on one box wakes it alone, a push on the
+    // chain's lowest link wakes its highest.
+    Scene world = scene();
+    world.add({.kind = BodyKind::STATIC, .pose = {.position = {.y = -0.5F}}}, {.shape = box_shape({.x = 30, .y = 0.5F, .z = 30})});
+    std::vector<RigidBody*> boxes;
+    for (int index = 0; index < 30; ++index)
+    {
+        boxes.push_back(&world.add({.pose = {.position = {.x = -8.0F + 0.8F * static_cast<float>(index % 10), .y = 0.2F, .z = -6.0F + 0.8F * static_cast<float>(index / 10)}}},
+                                   {.shape = box_shape({.x = 0.2F, .y = 0.2F, .z = 0.2F})}));
+    }
+    std::vector<RigidBody*> links;
+    for (int index = 0; index < 16; ++index)
+    {
+        const float y = 9.8F - 0.4F * static_cast<float>(index);
+        links.push_back(&world.add({.pose = {.position = {.x = 6.0F, .y = y}}}, {.shape = box_shape({.x = 0.1F, .y = 0.2F, .z = 0.1F})}));
+        const RigidBodyHandle above = index == 0 ? RigidBodyHandle{} : links[static_cast<std::size_t>(index - 1)]->handle();
+        (void)world.join(ball_and_socket_joint({.first = links.back()->handle(), .second = above, .anchor = {.x = 6.0F, .y = y + 0.2F}}));
+    }
+    const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+    gfx::profiler::set_current_profiler(recorder.get());
+    const gfx::profiler::SessionHandle session = recorder->create_session({.name = "island rounds"});
+    for (int step = 0; step < 240; ++step)
+    {
+        recorder->begin_frame(session);
+        world.world->step(STEP);
+        (void)recorder->end_frame(session);
+    }
+    const gfx::profiler::Trace trace = recorder->finalize_session(session);
+    gfx::profiler::set_current_profiler(nullptr);
+    double late_replays = 0.0;
+    double most_rounds = 0.0;
+    std::size_t frame_index = 0;
+    for (const gfx::profiler::TraceFrame& frame : trace.frames())
+    {
+        for (const gfx::profiler::TraceSample& sample : frame.samples)
+        {
+            const std::string_view name = trace.sites()[sample.site].name;
+            late_replays += name == "GPU XPBD: replay" && frame_index >= 10 ? 1.0 : 0.0;
+            most_rounds = name == "GPU XPBD: island rounds" ? std::max(most_rounds, sample.number()) : most_rounds;
+        }
+        ++frame_index;
+    }
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_EQ(late_replays, 0.0) << "no step replayed for its islands after the first ones";
+        EXPECT_GT(most_rounds, 0.0) << "the chain's hooks changed labels";
+        EXPECT_LT(most_rounds, 6.0) << "fewer rounds than the 8 recorded before";
+    }
+    for (const RigidBody* body : boxes)
+    {
+        EXPECT_FALSE(body->state().awake);
+    }
+    for (const RigidBody* link : links)
+    {
+        EXPECT_FALSE(link->state().awake);
+    }
+    boxes[7]->apply_linear_impulse({.y = 0.5F});
+    links.back()->apply_linear_impulse({.x = 0.5F});
+    world.world->step(STEP);
+    EXPECT_TRUE(boxes[7]->state().awake) << "the pushed box";
+    EXPECT_FALSE(boxes[8]->state().awake) << "a box apart stays asleep";
+    EXPECT_TRUE(links.front()->state().awake) << "woken through the chain";
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
 TEST_P(GpuXpbdJointTest, TheSameStepsGiveTheSameBits)
 {
     // Two worlds of the same jointed scene (a chain of hinges with a motor falling onto a floor, a rope, a slider): their

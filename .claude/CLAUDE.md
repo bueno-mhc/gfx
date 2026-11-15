@@ -1291,6 +1291,33 @@ Original hard requirements (from the user's initial specification):
   Box3D ÷ GPU 1.17–1.48: faster than Box3D at size 8), 4: 1.81 → 1.68, 1: 1.11 → 1.10; others same or faster. **Gotcha**: the
   size-1 pyramid's GPU step is bimodal (3.9 or 6.7 ms) and the second program of a pair often lands in the slow state — swap the
   order before calling a regression (scratchpad ab_head_comparison_reversed.ps1).
+- **Follow-up after PF6: small worlds' passes and a large scene alone (2026-11-15; implemented, awaiting validation)** —
+  docs/profiler-performance-design.md §B "Follow-up after PF6: small worlds' passes and a large scene alone", PERFORMANCE.md §5,
+  §6.2 end, §6.3, §7. User: "Commit the changes and proceed to the next step. After finishing, I also want an launch.json task …
+  at least 60 FPS using the XPBD GPU but that cannot be ran using Box3D at acceptable frame rates". Pass cuts kept: graph entries of
+  no body keyed at the node count (sort `key_bits(node_count)`, ranges skip it, jacobi_gather mode 3 `< node_count`); islands' hook
+  rounds by use (`COUNT_ISLAND_ROUNDS` 26, GpuSolverCounts 108 B `island_rounds`, argument = round | bit 31 last round, complete_step
+  clamp(used + 2, 2, 64) under RECORDED_PASSES_BY_USE; counter "GPU XPBD: island rounds"); test IslandRoundsFollowWhatTheLastStepUsed
+  (mutation-checked); measured chain −7/−10 %, many_boxes −3/−9 %, pyramid −1 %. **Single-workgroup substeps (`FUSED_SUBSTEPS`,
+  solver_substeps.comp, pass bodies as .glsl functions) built, measured 1.6–6.5× slower (chain 0.41 → 0.64/0.71 ms, pyramid 2.05 →
+  5.19, resting boxes 0.27 → 1.77) and removed** — the passes are work-bound across SMs, not dispatch-bound (attempt's diff in the
+  session scratchpad fused_attempt/, not durable). Comparison **`--single <backend>`** (one world, whole window via `areas_of()`,
+  panel "N frames a second", `--frames` prints frame mean/median/slowest), launch config **"gfx: Large scale at 60 FPS (GPU XPBD;
+  Box3D for contrast)"** (pyramid, inputs largeScaleBackend gpu_xpbd/box3d, largeScaleSize 4/6/8 default 6, --no-sleep --real-time,
+  profile build), CTest `PhysicsComparison.SingleWorld`. Measured: size 6 (12 529 boxes) GPU step 10.2 ms (~88 fps) vs Box3D 29.1 ms
+  (~10 fps real time); size 8 12.4 ms (~70) vs 43.9 (~7); size 10 15.9 ms (< 60). Size-8 GPU step: ~4.7 ms reporting contacts
+  nothing reads (follow-up). **Then (user: "The image shown is showing 6 frames per second, not 60. It has to be improved and
+  optimized" — a capture made while locked)**: three faults of the real-time loop fixed: (1) presentation stalls while locked (not
+  the program's); (2) catch-up spiral in `Scene::advance` → `catch_up_steps(cost, frame_seconds)` = steps fitting in
+  max(frame time, STEP) at the last step's wall time (≤ MAXIMUM_CATCH_UP_STEPS 2), rest dropped; (3) frames waited for the running
+  step → new **`PhysicsWorld::is_step_finished()`** (pure virtual noexcept; SteppedWorld reads step_finished under step_mutex; null
+  world + BarePhysicsWorld true; SteppedWorldTest.AsynchronousStepsRunOnTheWorldsThreadAndRefuseQueries extended): advance()
+  returns at once while the step runs (alpha held ≤ 1); the sandbox calls finish() itself before picking (unchanged). Panel:
+  "<backend>: N steps a second, M % of real time" (`Side::track_speed`, half-second windows); `--frames` prints simulated vs real
+  time. Measured unthrottled (240 Hz): size 6 GPU 11.6 ms, 98 % real time, 221 fps; Box3D 56 ms, 27 %; size 8 88 % vs 19 %; GPU
+  sizes 10/12 75/61 %. Rendering at 240 fps slows both worlds' steps (GPU 10.2 → 11.6, Box3D 29 → 56 ms). **Gotcha**: when the
+  workstation is locked (LogonUI.exe running) presentations stall 0.25–1 s or are paced at ~30 Hz (it changed during the session) —
+  window frame rates cannot be measured then; the panel's steps a second / % of real time still can.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1852,7 +1879,10 @@ the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1599**, 2026-11-15 (follow-up after PF6, the contact cache: + 4
+Test count at last report: **1604**, 2026-11-15 (follow-up after PF6, small worlds' passes and a large scene alone: + 4
+IslandRoundsFollowWhatTheLastStepUsed, + 1 PhysicsComparison.SingleWorld; Debug 1604/1604 (785 s); Release 1604/1604 (524 s; a first
+Release run, stopped at 982/1604, had slowed the user's run of the launch configuration to 15 fps)). **Never run the full suites while the user
+measures frame rates**: hundreds of GPU tests share the GPU. Before: **1599**, 2026-11-15 (follow-up after PF6, the contact cache: + 4
 PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached, + 4 TheContactCacheSortsOnlyThePushedContacts; Debug 1599/1599 (836 s),
 Release 1599/1599 (755 s); a first Debug build stopped once on "failed to write compiled module: File exists", fine when rerun).
 Before: **1591**, 2026-11-15 (follow-up after PF6, the chains: + 4 ChainsOfLinksSwingAtTheirSpeedInEitherMode,

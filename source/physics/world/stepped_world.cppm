@@ -219,6 +219,7 @@ public:
     void begin_step(float seconds) override;
     void wait_step() override;
     [[nodiscard]] auto is_stepping() const noexcept -> bool override;
+    [[nodiscard]] auto is_step_finished() const noexcept -> bool override;
     [[nodiscard]] auto step_count() const noexcept -> std::uint64_t override;
 
     [[nodiscard]] auto events() const -> PhysicsEvents override;

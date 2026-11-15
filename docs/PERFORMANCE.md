@@ -134,7 +134,7 @@ Every GPU optimization is a bit of `GpuOptimization` in `GpuXpbdDescription::opt
 | `SHARED_PIPELINES` | PF4 | pipelines made once per device through a `PipelineCache` read from and written to `pipeline_cache_path` | a world's creation 0.4–2.7 s → 0.09–0.32 s (this run's worlds) | the same |
 | `CHUNKED_GATHER` | PF5 | the Jacobi gather reads lists of the overflow set's entries made once per step; a body with more than 32 sums them in chunks in parallel | `mixed`'s gather 19.1 → 1.2 ms | the same (a heavy body's sum associated by chunks) |
 | `NODE_MAXIMA_COLORING` | PF5 | each coloring round compares a constraint with its bodies' atomic maxima instead of scanning their constraints | `mixed`'s coloring 7.3 → 0.4 ms | the same colors |
-| `RECORDED_PASSES_BY_USE` | PF5 | solver passes recorded for the colors each kind of constraint used in the previous step; overflow passes only after a step that had an overflow set; the coloring's rounds those the previous step decided constraints in, and two more (since the chains' follow-up); a replay otherwise | 308–703 fewer dispatches and barriers a step; the chains' 24 rounds → 8 (32 passes) | the same |
+| `RECORDED_PASSES_BY_USE` | PF5 | solver passes recorded for the colors each kind of constraint used in the previous step; overflow passes only after a step that had an overflow set; the coloring's rounds those the previous step decided constraints in, and two more (since the chains' follow-up); the islands' rounds those the previous step changed labels in, and two more (since 2026-11-15: 8 → 3–4 in most worlds); a replay otherwise | 308–703 fewer dispatches and barriers a step; the chains' 24 rounds → 8 (32 passes) | the same |
 | `REACH_BOXES` | PF5 | the broad phase's boxes grown by each collider's own reach, not the fastest body's | `chain`'s 832 000 tree pairs a step gone; its broad phase 1.65 → 0.58 ms | the same pairs, another order |
 | `COMPACT_READBACK` | PF5b | the GPU lists and gathers the bodies that may have changed; only in worlds of 4 096 bodies or more of which at most half changed | the readback of resting worlds (with sleep) | the same |
 | `RESTING_STEPS` | PF5b | a world at rest (no awake body, no edit, no particle or trigger) steps without the GPU | with sleep: 50 000 boxes 12.4 → 0.9 ms, the pyramid 14.0 → 0.9 ms | the same for the same steps |
@@ -183,6 +183,7 @@ determinism tests pass unchanged):
 | Coloring warm start (`COLORING_CACHE`) | the coloring is 0.2–1.7 ms a step since `NODE_MAXIMA_COLORING` |
 | Subgroup operations in more passes, vectorized loads | no measured pass is bound by them |
 | Persistent kernels | Vulkan guarantees no forward progress between workgroups: a kernel whose workgroups wait for each other can deadlock |
+| A small world's substeps in one workgroup (`FUSED_SUBSTEPS`, tried 2026-11-15) | slower wherever it was meant to help. One dispatch of one workgroup ran every substep's passes (prediction, each color of each position iteration, the overflow set and its gather, the velocity update and iterations) as loops of its invocations, the same functions on the same items in the same order, barriers between them, the storage buffers coherent. Substeps' GPU time a step, the benchmark at a twentieth of its size (RTX 5060, 4/3/1): chain (1 000 links, 3 colors) 0.41 ms as passes, 0.64 ms in a workgroup of 256 invocations, 0.71 ms of 1 024; pyramid (1 468 boxes, 4 485 contacts) 2.05 → 5.19 ms; 2 500 resting boxes 0.27 → 1.77 ms. The passes are not bound by their dispatches at these sizes: a joint's or a contact's projection is a long chain of dependent loads and arithmetic, which one multiprocessor runs in more rounds than the whole GPU, its coherent loads past the L1 |
 | Sleep tuning | not needed: with the default thresholds the resting scenes sleep within the warm-up |
 | Half floats | 11-bit mantissas (about 6 cm at 100 m): not for positions, velocities or contacts |
 
@@ -358,17 +359,79 @@ chains faster than Box3D's in every round (1.17–1.18 when Box3D ran at 2.2 ms,
 step is bimodal whichever build runs (about 3.9 or 6.7 ms; medians 3.98 before, 3.88 after with the order swapped), not a
 regression.
 
+**Fewer detection passes (2026-11-15).** The graph's entries of no body were keyed 0xFFFFFFFF, so its sort took four radix
+passes whatever the world; they are now keyed at the node count, and the sort takes the node count's bits (two passes up to
+65 536 bodies, the same order). The islands ran 8 rounds of hooks and pointer jumps (16 passes) every step; each hook now
+records the round that changed a label, and `RECORDED_PASSES_BY_USE` records those rounds and two more (labels still changing
+in the last one replay the step with twice as many, as before: the same islands). The previous commit built beside this one,
+the benchmark headless (the GPU's clocks not left to idle between frames), 3 rounds alternated, median of each run's median
+step, GPU solver 4/3/1:
+
+| Scene, scale | before | after |
+|---|---|---|
+| chain, 0.05 / 0.5 | 1.39 / 2.44 ms | 1.24 / 2.27 ms |
+| many_boxes, 0.05 / 0.5 | 1.73 / 4.14 ms | 1.58 / 4.02 ms |
+| pyramid, 0.05 / 0.5 | 3.86 / 11.50 ms | 3.83 / 11.44 ms |
+
+### 6.3 A large scene alone at 60 frames a second
+
+The comparison's `--single <backend>` shows one world alone in the whole window, stepped as an application steps it
+(`--real-time`: 60 steps a simulated second, each frame advancing the world by its own real time), and its panel shows the
+frames per second and, in real time, the world's steps per second and the share of real time it keeps. The VS Code
+configuration "gfx: Large scale at 60 FPS (GPU XPBD; Box3D for contrast)" runs the pyramid with every body awake
+(`--no-sleep`: asleep, the GPU world's pyramid costs under a millisecond a step and Box3D's still 40 ms, §6.1).
+
+**Three faults of the real-time loop, found and fixed (2026-11-15).** A capture of the first version read "6 frames a
+second":
+
+1. *Presentation stalls.* The workstation was locked (LogonUI running): nothing composed the window, presentations blocked
+   for 0.25–1 s now and then, or the display paced them at about 30 a second. Not the program's — but each stall left the
+   world owing time.
+2. *A catch-up spiral.* A frame ran up to two steps on the spot whenever time was owed, whatever a step cost. A pyramid of
+   20 540 boxes stepping in 15.7 ms of its 16.7 fell behind once and then ran three steps every frame for good: 21 frames
+   a second. Now a frame catches up only the steps that fit in its own time (one step's period at least) at the last
+   step's cost (`catch_up_steps()` in scene.cpp); what does not fit is dropped and the world runs slower than real time.
+3. *Frames waited for steps.* Each frame waited for the step begun the frame before, so a saturated world's frames followed
+   its steps. Frames now wait for nothing: while a step runs they draw the last finished one (its interpolation held at
+   the end), and the next step begins on the first frame after it finishes (`PhysicsWorld::is_step_finished()`, new: whether
+   `wait_step()` would wait). The sandbox, whose picking needs the world between steps, still waits each frame.
+
+Medians of 900 frames each with the display unthrottled (240 Hz), the RTX 5060 (GPU solver 4/3/1), Box3D on 16 scheduler
+threads, after the three fixes:
+
+| Pyramid size | Boxes | GPU step | GPU world | Box3D step | Box3D world | Frames, either |
+|---|---|---|---|---|---|---|
+| 6 (the configuration's default) | 12 529 | 11.6 ms | 98 % of real time (59 steps a second) | 56 ms | 27 % (16 steps a second) | 221–233 a second |
+| 8 | 16 206 | 14.0 ms | 88 % | 80 ms | 19 % | 209–227 a second |
+| 10 | 20 540 | 17.4 ms | 75 % | — | — | 213 a second |
+| 12 | 25 585 | 21.6 ms | 61 % | — | — | 197 a second |
+
+The window drawing at 240 frames a second costs both worlds: their steps run beside it (the GPU's 10.2 → 11.6 ms at size 6;
+Box3D's 29 → 56 ms, its 16 threads sharing the laptop's power with the GPU). With the display paced at about 30 frames a second
+(locked), the size-6 panel read 95 % of real time on the GPU between the half-second stalls (57 steps a second, two steps
+fitting some frames; 76 % over the whole run, stalls included, Box3D 33 %); with a catch-up budget of one step's period, not
+the frame's time, it had kept 47 %.
+
+A size-8 GPU step: about 9.2 ms of GPU work (the solver 5.2, the narrow phase 1.4, the contact reports 1.2, copying them back
+1.0, the broad phase 0.4) and 2.7 ms of CPU after it sorting and converting its 69 000 touching contacts into the interface's
+records, which nothing reads here (§7, follow-up 2).
+
 ## 7. Follow-ups
 
 1. **Small and mid-size worlds on the GPU**: fewer passes per step. The velocity iterations' count is the first lever (§5;
-   the comparison uses 4/3/1, §6.1 — the library's defaults could follow). A single-dispatch solve of small colors or islands
-   within one workgroup (no inter-workgroup wait, so no deadlock) is the second: what keeps the chains slower than Box3D
-   at sizes 1 and 4 (§6.2; about 180 dependent passes a step at size 1).
-2. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
+   the comparison uses 4/3/1, §6.1 — the library's defaults could follow). Running a small world's substeps in one workgroup
+   was measured and lost 1.6–6.5× (§5): the passes are bound by their work, spread over every multiprocessor, more than by
+   their dispatches. What keeps the chains slower than Box3D at sizes 1 and 4 (§6.2) is the detection's passes and the CPU
+   around the GPU's work.
+2. **Contacts reported only when read**: at the large-scale configuration's size 8 (§6.3) reporting the 69 000 touching
+   contacts costs about 4.7 of a step's 12.4 ms (the GPU's report pass 1.2 ms, copying the reports back 1.0 ms, sorting and
+   converting them on the CPU 2.7 ms) though nothing reads them; reporting only the colliders that ask for contact events, and
+   the rest when `contacts_of()` is first called after a step, would remove most of it.
+3. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
    Box3D's touching pairs.
-3. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of
+4. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of
    their own).
-4. **Queries on the GPU**: one submission and its wait per query (0.14 ms on the RTX 5060, 0.33–0.50 ms on the Intel GPU):
+5. **Queries on the GPU**: one submission and its wait per query (0.14 ms on the RTX 5060, 0.33–0.50 ms on the Intel GPU):
    a batch query API.
 
 ## 8. Reproducing
@@ -378,6 +441,7 @@ python build.py --profile
 build/profile/benchmarks/physics/gfx_physics_benchmark.exe --output build/profile/benchmark
 build/profile/benchmarks/physics/gfx_physics_benchmark.exe --sleep --output build/profile/benchmark_sleep
 build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --scene pile --size 4 --no-sleep
+build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --single gpu_xpbd --scene pyramid --size 6 --no-sleep --real-time
 ```
 
 The benchmark takes about 9 minutes per pass (7 scenes × 2 backends × 1 100 steps). `--record-baseline <directory>` and

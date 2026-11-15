@@ -1,8 +1,9 @@
 #version 460
 // The body-to-constraint graph's entries (two per constraint: joints, then manifold slots): a constraint in use whose
 // side's body moves through constraints (awake and dynamic) is keyed by that body, its value the constraint × 2 + the
-// side; other entries are keyed 0xFFFFFFFF (they sort last and form no range). Sorted stably by key, the entries of a
-// body are its constraints in order: what the coloring's neighbors and the Jacobi gathers read.
+// side; other entries are keyed the node count (above every node: they sort last and form no range; the sort takes the
+// node count's bits). Sorted stably by key, the entries of a body are its constraints in order: what the coloring's
+// neighbors and the Jacobi gathers read.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -18,7 +19,7 @@ void main()
     {
         const uint body = side == 0U ? loaded.first : loaded.second;
         const bool keyed = loaded.in_use && body_is_dynamic_awake(body_flags_of(body));
-        gpu_words[SOLVER.graph_keys].words[2U * constraint + side] = keyed ? body : 0xFFFFFFFFU;
+        gpu_words[SOLVER.graph_keys].words[2U * constraint + side] = keyed ? body : SOLVER.node_count;
         gpu_words[SOLVER.graph_values].words[2U * constraint + side] = 2U * constraint + side;
     }
 }

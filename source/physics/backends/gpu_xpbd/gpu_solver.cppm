@@ -167,8 +167,9 @@ struct GpuSolverCounts
     std::uint32_t coloring_rounds = 0;      ///< The rounds in which the coloring decided constraints (the last one's + 1).
     std::uint32_t uncolored = 0;            ///< Constraints the recorded rounds left undecided (in the overflow set).
     std::uint32_t held = 0;                 ///< PUSHED_CONTACT_CACHE: the slots whose contact pushed (the next step's cache).
+    std::uint32_t island_rounds = 0;        ///< The rounds in which the islands' hooks changed a label (the last one's + 1).
 };
-static_assert(sizeof(GpuSolverCounts) == 104);
+static_assert(sizeof(GpuSolverCounts) == 108);
 
 /// A trigger overlapping a collider after a step (triggers_filter.comp).
 struct GpuTriggerOverlap

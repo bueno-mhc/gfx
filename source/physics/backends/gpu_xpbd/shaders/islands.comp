@@ -4,7 +4,9 @@
 // are in no island (soft bodies never sleep): a body touching or holding one is kept awake. Modes:
 //   0 (bodies)       labels to themselves (dynamic bodies), island flags cleared, island timers to +inf;
 //   1 (constraints)  hook: the roots of an edge's two bodies, the larger one pointed at the smaller (atomic minimum);
-//                    with argument 1, the changes counted (the last round: none left means converged);
+//                    argument: the round, with bit 31 in the last recorded round, whose changes are counted (none
+//                    left means converged); every change counts the round (the last round that changed a label + 1:
+//                    GpuOptimization::RECORDED_PASSES_BY_USE records as many and two more next step);
 //   2 (bodies)       pointer jumping: each label replaced by its root;
 //   3 (bodies)       awake bodies mark their island awake;
 //   4 (constraints)  a dynamic body touching or joined to a moving kinematic one, or a particle, marks its island awake
@@ -92,7 +94,8 @@ void main()
             if (first != second)
             {
                 atomicMin(gpu_words[SOLVER.labels].words[max(first, second)], min(first, second));
-                if (push.argument == 1U)
+                atomicMax(gpu_words[SOLVER.counts].words[COUNT_ISLAND_ROUNDS], (push.argument & 0x7FFFFFFFU) + 1U);
+                if ((push.argument & 0x80000000U) != 0U)
                 {
                     atomicAdd(gpu_words[SOLVER.counts].words[COUNT_ISLAND_CHANGES], 1U);
                 }

@@ -134,7 +134,8 @@ enum class GpuOptimization : std::uint32_t
                                    ///< of each kind of constraint (joints, contacts) and two more, instead of the colors
                                    ///< either used and two more, at least GPU_XPBD_INITIAL_COLORS; the overflow set's
                                    ///< passes and gathers only after a step that had one; the coloring's rounds those the
-                                   ///< previous step decided constraints in and two more, not GPU_XPBD_COLORING_ROUNDS.
+                                   ///< previous step decided constraints in and two more, not GPU_XPBD_COLORING_ROUNDS; the
+                                   ///< islands' rounds those the previous step changed labels in and two more.
                                    ///< Fewer empty dispatches and barriers; a step that needs more replays, as before (the
                                    ///< same bits).
     REACH_BOXES         = 1U << 5, ///< The broad phase's trees bound each collider by its box grown by its own reach in the

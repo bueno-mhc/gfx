@@ -102,6 +102,11 @@ public:
     /// @brief Whether a step is running (between begin_step() and wait_step()).
     [[nodiscard]] virtual auto is_stepping() const noexcept -> bool = 0;
 
+    /// @brief Whether wait_step() would return without waiting: no step is running, or the running one has finished (its
+    ///        results wait for wait_step() to publish them). A frame can draw the last published step while the next runs,
+    ///        and wait only once it has finished, instead of waiting for it each frame (its frames then follow its steps).
+    [[nodiscard]] virtual auto is_step_finished() const noexcept -> bool = 0;
+
     /// @brief Steps completed and published.
     [[nodiscard]] virtual auto step_count() const noexcept -> std::uint64_t = 0;
 

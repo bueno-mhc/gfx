@@ -56,6 +56,9 @@ struct RangesPush
 /// A sort key no range is made for (entries of no body).
 constexpr std::uint32_t NO_KEY = 0xFFFFFFFFU;
 
+/// The islands' hook pass argument bit of the last recorded round (the others: the round).
+constexpr std::uint32_t ISLAND_LAST_ROUND = 0x80000000U;
+
 /// The words of GpuSolverCounts (COUNT_* in solver.glsl).
 enum CountWord : std::uint32_t
 {
@@ -85,6 +88,7 @@ enum CountWord : std::uint32_t
     COLORING_ROUNDS,
     UNCOLORED,
     HELD,
+    ISLAND_ROUNDS,
 };
 
 /// Bytes of the indirect dispatch arguments of a color key.
@@ -276,7 +280,8 @@ struct GpuConstraintSolver::State
                 const GpuArray& end,
                 std::uint32_t range_count,
                 std::uint32_t maximum_entries,
-                CountWord count_word) const
+                CountWord count_word,
+                std::uint32_t skipped = NO_KEY) const
     {
         const RangesPush clear{.keys = sorted_keys.index(), .begin_buffer = begin.index(), .end_buffer = end.index(), .maximum = range_count, .mode = 0};
         record_pass(recorder, *ranges_pass, clear, workgroups(std::max(range_count, 1U)));
@@ -287,7 +292,7 @@ struct GpuConstraintSolver::State
                               .count_buffer = counts[parity].index(),
                               .count_word = count_word,
                               .mode = 1,
-                              .skipped = NO_KEY};
+                              .skipped = skipped};
         record_pass(recorder, *ranges_pass, mark, workgroups(std::max(maximum_entries, 1U)));
     }
 
@@ -949,7 +954,8 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         state.pass(recorder, *state.islands, 0, 0, step.body_count);
         for (std::uint32_t round = 0; round < state.island_rounds; ++round)
         {
-            state.pass(recorder, *state.islands, round + 1 == state.island_rounds ? 1U : 0U, 1, constraints);
+            // The round (it counts the last round that changed a label), the last one flagged (it counts its changes).
+            state.pass(recorder, *state.islands, round | (round + 1 == state.island_rounds ? ISLAND_LAST_ROUND : 0U), 1, constraints);
             state.pass(recorder, *state.islands, 0, 2, step.body_count);
         }
         state.pass(recorder, *state.islands, 0, 3, step.body_count);
@@ -961,10 +967,12 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     {
         PROFILE_GPU_SCOPE("graph", recorder, state.passes);
         state.pass(recorder, *state.graph, 0, 0, constraints);
+        // Keys below the node count, entries of no body at it (the node count's bits: fewer radix passes, the same order).
         state.primitives.sort(recorder, span_of(state.graph_keys.buffer()), span_of(state.graph_values.buffer()), span_of(state.graph_sorted_keys.buffer()),
-                              span_of(state.graph_sorted_values.buffer()), {.maximum = 2 * constraints, .word = state.count(GRAPH_ENTRIES)});
+                              span_of(state.graph_sorted_values.buffer()), {.maximum = 2 * constraints, .word = state.count(GRAPH_ENTRIES)},
+                              key_bits(step.node_count));
         PROFILE_GPU_SCOPE("ranges", recorder, state.passes);
-        state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.node_count, 2 * constraints, GRAPH_ENTRIES);
+        state.ranges(recorder, state.graph_sorted_keys, state.body_begin, state.body_end, step.node_count, 2 * constraints, GRAPH_ENTRIES, step.node_count);
     }
 
     // The colors (the overflow set only, in the Jacobi mode), the lists by color and kind, their dispatch arguments.
@@ -1365,6 +1373,12 @@ GpuConstraintSolver::complete_step(const GpuSolverCounts& counts)
     state.recorded_joint_colors = std::min(counts.joint_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
     state.recorded_contact_colors = std::min(counts.contact_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
     state.recorded_rounds = std::min(counts.coloring_rounds + 2, GPU_XPBD_COLORING_ROUNDS);
+    if (has_all(state.settings.optimizations, GpuOptimization::RECORDED_PASSES_BY_USE))
+    {
+        // The islands' rounds: those this step changed labels in and two more (labels that still change in the last
+        // recorded round double them and replay, as before: the same islands).
+        state.island_rounds = std::clamp(counts.island_rounds + 2, 2U, 64U);
+    }
     state.previous_held = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE) ? counts.held : 0;
     if (state.refitting)
     {

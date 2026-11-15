@@ -24,11 +24,25 @@ namespace
 /// A real-time pause longer than this (a breakpoint, a dragged window) is not caught up.
 constexpr double LONGEST_FRAME = 0.25;
 
-/// Steps a frame runs at once beyond the one it begins. While steps cost more real time than they simulate (the GPU
+/// Steps a frame runs at once beyond the one it begins, at most. While steps cost more real time than they simulate (the GPU
 /// backend under the validation layers: 60 ms a step), catching up fully made each frame owe more steps than the last,
 /// up to LONGEST_FRAME's worth (15 steps, about a frame a second): the time beyond these steps is dropped instead, so the
-/// simulation runs slower than real time and the window stays responsive.
+/// simulation runs slower than real time and the window stays responsive. Fewer when they do not fit (catch_up_steps()).
 constexpr int MAXIMUM_CATCH_UP_STEPS = 2;
+
+/// The steps a frame of @p frame_seconds catches up at once when the last step took @p cost seconds: as many as fit, with
+/// the step it begins, in the frame's time (one step's period at least). A world whose steps take most of that cannot catch
+/// up: running two more whenever a frame was late made the next frame later still, and a pyramid of 20 540 boxes stepping
+/// in 15.7 ms (of 16.7) ran three steps a frame for good, 21 frames a second; it now drops the time it cannot step (slower
+/// than real time) and keeps its frames. Frames paced by the display at 30 a second still fit two 13 ms steps each.
+[[nodiscard]] auto
+catch_up_steps(double cost,
+               double frame_seconds) noexcept -> int
+{
+    const double step_cost = std::max(cost, 1.0e-4);
+    const double affordable = (std::max(frame_seconds, static_cast<double>(STEP)) - step_cost) / step_cost;
+    return std::clamp(static_cast<int>(affordable), 0, MAXIMUM_CATCH_UP_STEPS);
+}
 
 /// The corners of a frustum of a square pyramid (a plinth): a base of half side 0.5, a top of half side 0.25, 0.6 high.
 consteval auto
@@ -300,10 +314,20 @@ Scene::body_of(ColliderHandle collider) const noexcept -> const SceneBody*
 void
 Scene::advance(double seconds)
 {
-    // The step begun by the last call, then the steps due beyond one at once, then the next one on the world's thread.
+    // The step begun by an earlier call once it has finished, then the steps due beyond one at once (those that fit), then
+    // the next one on the world's thread. While it runs, a frame waits for nothing: it draws the last completed step (its
+    // interpolation held at the end), so frames follow the display, not the steps (a world whose steps took 15 ms drew at
+    // 60 frames a second at most, waiting for each).
+    const double frame_seconds = std::min(seconds, LONGEST_FRAME);
+    m_accumulator += frame_seconds;
+    if (!m_world->is_step_finished())
+    {
+        m_alpha = static_cast<float>(std::min(m_accumulator / STEP, 1.0));
+        return;
+    }
     finish();
-    m_accumulator += std::min(seconds, LONGEST_FRAME);
-    for (int caught_up = 0; m_accumulator >= 2.0 * STEP && caught_up < MAXIMUM_CATCH_UP_STEPS; ++caught_up)
+    const int catch_up = catch_up_steps(m_world->statistics().wall_seconds, frame_seconds);
+    for (int caught_up = 0; m_accumulator >= 2.0 * STEP && caught_up < catch_up; ++caught_up)
     {
         m_world->step(STEP);
         capture();

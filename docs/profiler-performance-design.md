@@ -1366,6 +1366,87 @@ runs was swapped: its GPU step is bimodal (about 3.9 or 6.7 ms) whichever build 
 `TheContactCacheSortsOnlyThePushedContacts`): Debug 1 599 of 1 599 (836 s), Release 1 599 of 1 599 (755 s). The first Debug build
 stopped once on "failed to write compiled module: File exists" (physics_benchmark.scenes) and passed when run again.
 
+### Follow-up after PF6: small worlds' passes and a large scene alone (2026-11-15)
+
+Asked (user, 2026-11-15): "Commit the changes and proceed to the next step. After finishing, I also want an launch.json task that
+is high scale/large enough to run at a high frame rate (at least 60 FPS) using the XPBD GPU but that cannot be ran using Box3D at
+acceptable frame rates" — the contact cache committed (e39c9fe); the next step was the one offered: a single-dispatch solver for
+small worlds.
+
+**Fewer detection passes** (no flag for the first, `RECORDED_PASSES_BY_USE` for the second; the same bits):
+1. **The graph's sort by the node count's bits**: `graph.comp` keys an entry of no body at the node count (was 0xFFFFFFFF), the
+   sort takes `key_bits(node_count)` (two radix passes up to 65 536 bodies instead of four), `ranges` skips the node count, and
+   `jacobi_gather` mode 3 compares with it.
+2. **The islands' rounds by use**: each hook that changes a label records its round (`COUNT_ISLAND_ROUNDS`, word 26;
+   GpuSolverCounts 108 B: `island_rounds`; the last recorded round flagged by bit 31 of the argument still counts its changes);
+   `complete_step()` records the rounds used and two more (2 to 64; were 8 every step: 16 passes); labels still changing in the
+   last one double them and replay, as before. Counter "GPU XPBD: island rounds".
+
+Measured (the benchmark headless, e39c9fe built in build/head, 3 rounds alternated, 4/3/1; PERFORMANCE.md §6.2): chain 1.39 →
+1.24 ms (scale 0.05) and 2.44 → 2.27 (0.5), many_boxes 1.73 → 1.58 and 4.14 → 4.02, pyramid 3.86 → 3.83 and 11.50 → 11.44.
+
+**The single-dispatch solver, built, measured and removed.** `solver_substeps.comp` ran a small world's substeps (no particles) in
+one dispatch of one workgroup: the passes' bodies moved into `.glsl` functions (`solve_joint`, `solve_contact`,
+`solve_contact_velocity`, `jacobi_gather`, `integrate_body`) called by the passes and by the kernel's loops over its invocations,
+barriers (`memoryBarrierBuffer()` + `barrier()`, buffers coherent) where the passes have theirs, the same items in the same order;
+flag `FUSED_SUBSTEPS`, the workgroup size a specialization constant. Substeps' GPU time a step against the passes (benchmark,
+scale 0.05, RTX 5060): chain 0.41 → 0.64 ms (256 invocations) and 0.71 (1 024), pyramid 2.05 → 5.19, 2 500 resting boxes 0.27 →
+1.77. A pass costs a few microseconds of dispatch and barrier, but its items — long chains of dependent loads and arithmetic
+— run in one round over every multiprocessor, in several on one (whose coherent loads also miss the L1). Removed from the code
+(PERFORMANCE.md §5 records it; its sources are not kept).
+
+**A large scene alone**: the comparison's `--single <backend>` (one world in the whole window: `areas_of()` gives it the whole
+image; the panel's line "N frames a second (M ms a frame)" from a running mean of the frames; `--frames` also prints the frames'
+mean, median and slowest time, and each world's simulated time against the real time) and the VS Code configuration **"gfx:
+Large scale at 60 FPS (GPU XPBD; Box3D for contrast)"**: `--single ${input:largeScaleBackend} --scene pyramid --size
+${input:largeScaleSize} --no-sleep --real-time` (profile build; backend gpu_xpbd by default or box3d; size 6 by default, or 4,
+8).
+
+Asked then (user, 2026-11-15): "The image shown is showing 6 frames per second, not 60. It has to be improved and optimized" — a
+capture taken while the workstation was locked. Three faults of the real-time loop (PERFORMANCE.md §6.3):
+1. **Presentation stalls** while locked (LogonUI running): presentations blocked 0.25–1 s now and then, or were paced at about
+   30 a second — the capture's "6". Not the program's, but each stall left the world owing time.
+2. **A catch-up spiral** (`Scene::advance`, shared by the sandbox and the comparison): up to two steps on the spot whenever time
+   was owed, whatever a step cost — a 20 540-box pyramid stepping in 15.7 ms ran three steps a frame for good (21 frames a
+   second). Now `catch_up_steps(cost, frame_seconds)`: the steps that fit, with the one begun, in the frame's own time (one step's
+   period at least) at the last step's wall time (`StepStatistics::wall_seconds`), at most `MAXIMUM_CATCH_UP_STEPS`; the rest
+   dropped (slower than real time). The old rule is the case of frames shorter than a step's period.
+3. **Frames waited for steps**: each `advance()` began with `finish()`, so a saturated world's frames followed its steps. Now a
+   frame returns at once while the step runs (`PhysicsWorld::is_step_finished()`, new), drawing the last finished step with its
+   interpolation held at 1; the next step begins on the first frame after it finishes. The sandbox calls `finish()` itself before
+   its picking each frame: unchanged.
+
+The panel also shows, in real time, "<backend>: N steps a second, M % of real time" (simulated time over each half second of real
+time, `Side::track_speed()`). Measured (900 frames, display unthrottled at 240 Hz): size 6 GPU 11.6 ms steps, 98 % of real time,
+221 frames a second; Box3D 56 ms, 27 %, 233; size 8 GPU 88 %, Box3D 19 %; sizes 10 and 12 on the GPU 75 % and 61 %. Drawing at
+240 frames a second slows both worlds' steps (GPU 10.2 → 11.6 ms; Box3D 29 → 56 ms). With the display paced at 30 a second
+(locked), the size-6 GPU world read 95 % between stalls (76 % over the run with its half-second stalls; Box3D 33 %); with the
+first version of the catch-up rule (one step's period), 47 %.
+
+**Tests**: `GpuXpbdJointTest.IslandRoundsFollowWhatTheLastStepUsed` (× 4: 30 boxes resting apart and a 16-link chain, 240 traced
+steps: no replay after the tenth, the island rounds used between 1 and 5, everything asleep; a push on one box wakes it alone, one
+on the chain's lowest link wakes its highest; fails when the hooks do not count their round (the counter stays 0 and two rounds are
+recorded), checked); CTest `PhysicsComparison.SingleWorld` (the GPU backend's world alone, a small pyramid awake, real time, 120 frames, the
+validation layers); `SteppedWorldTest.AsynchronousStepsRunOnTheWorldsThreadAndRefuseQueries` extended: `is_step_finished()` true before any step, false while the
+step is held, true once released though not yet published (step count unchanged until `wait_step()`).
+
+**Deviations (for validation).**
+1. The step offered (a single-dispatch solver for small worlds) was built and measured slower everywhere (1.6–6.5×): removed,
+   recorded in PERFORMANCE.md §5. What was kept are the two pass cuts found while profiling for it.
+2. The large-scale configuration runs the comparison program (new `--single`), not a new program, with the pyramid and size 6 by
+   default (size 8, 16 206 boxes, reaches about 70 frames a second: a thin margin over 60).
+3. Measured mostly with the workstation locked (presentations stalled or paced); the clean figures above come from runs the
+   display did not pace. With the window in front, the panel shows the frames and the world's steps per second.
+4. **Interface addition**: `PhysicsWorld::is_step_finished()` (pure virtual, noexcept; SteppedWorld under its step mutex, the
+   null world true, the test's bare world true).
+5. The comparison's real-time frames no longer wait for steps (frames follow the display; the panel's steps per second and
+   share of real time are the measure of a world), and `Scene::advance`'s catch-up depends on the last step's cost and the
+   frame's time (the sandbox's real-time frames catch up as before while steps are cheap).
+
+**Results**: 1 604 tests (+ 4 `IslandRoundsFollowWhatTheLastStepUsed`, + 1 `PhysicsComparison.SingleWorld`): Debug 1 604 of 1 604
+(785 s); Release 1 604 of 1 604 (524 s; a first Release run, stopped at 982 without a failure, had shared the GPU with the user's
+run of the configuration: 15 frames a second there, 222–226 on the quiet machine, under gdb or not).
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

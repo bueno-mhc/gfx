@@ -120,7 +120,8 @@ if(GFX_BUILD_TESTS)
     endforeach()
 
     # The comparison on a small pile (size 0.25: 500 bodies), 120 frames in lockstep on the first platform backend: Box3D
-    # against the GPU backend (the reference backend for either not built), both stepped, no validation error.
+    # against the GPU backend (the reference backend for either not built), both stepped, no validation error; and the
+    # GPU backend's world alone.
     set(_gfx_comparison_left reference)
     if(GFX_PHYSICS_BACKEND_BOX3D)
         set(_gfx_comparison_left box3d)
@@ -140,6 +141,16 @@ if(GFX_BUILD_TESTS)
                 LABELS example
                 TIMEOUT 900)
             gfx_use_gpu_in_tests(PhysicsComparison.Pile)
+            # One world alone (--single, the large-scale launch configuration's mode): the right one's backend, a small
+            # pyramid kept awake, stepped in real time.
+            add_test(NAME PhysicsComparison.SingleWorld
+                     COMMAND gfx_physics_comparison --backend ${_gfx_backend_name} --single ${_gfx_comparison_right} --scene pyramid --size 0.25
+                             --no-sleep --real-time --frames 120 ${_gfx_sandbox_validation})
+            set_tests_properties(PhysicsComparison.SingleWorld PROPERTIES
+                ENVIRONMENT "${_gfx_sandbox_environment}"
+                LABELS example
+                TIMEOUT 900)
+            gfx_use_gpu_in_tests(PhysicsComparison.SingleWorld)
         endif()
     endforeach()
 endif()

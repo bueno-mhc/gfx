@@ -93,6 +93,11 @@ public:
         return false;
     }
 
+    [[nodiscard]] auto is_step_finished() const noexcept -> bool override
+    {
+        return true;
+    }
+
     [[nodiscard]] auto step_count() const noexcept -> std::uint64_t override
     {
         return 0;

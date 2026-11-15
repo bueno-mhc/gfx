@@ -1736,9 +1736,22 @@ world's `GpuOptimization` flags (one flag's effect is the difference of two runs
 (a world at rest costs the GPU backend almost nothing: compare scenes in motion), `--trace <file.json>` writes a Chrome trace of every frame
 (each world's step, its own scopes, the GPU's passes), `--capture <file.ppm>` writes the last frame as the window showed it
 (or the one `--capture-frame <index>` names); `--backend`, `--device`, `--threads`, `--frames` and `--validation` work
-as for the sandbox. With `--frames`, it prints each world's mean, median and slowest step and their ratio. Measure in the
-`profile` build (the VS Code configuration "gfx: Physics comparison (Box3D vs GPU XPBD)" builds and runs it there): a Debug
-build's timings compare nothing. CTest runs a small pile for 120 frames with the validation layers.
+as for the sandbox. With `--frames`, it prints each world's mean, median and slowest step and their ratio, and the frames'
+times. Measure in the `profile` build (the VS Code configuration "gfx: Physics comparison (Box3D vs GPU XPBD)" builds and runs
+it there): a Debug build's timings compare nothing. CTest runs a small pile for 120 frames with the validation layers.
+
+`--single <backend>` shows one world alone in the whole window, as an application would run it; the panel then shows the frames
+per second and, with `--real-time`, the world's steps per second and the share of real time it keeps (frames never wait for a
+step still running: they draw the last finished one). The VS Code configuration **"gfx: Large scale at 60 FPS (GPU XPBD;
+Box3D for contrast)"** runs a pyramid of 12 529 boxes (size 6; 8 555 at size 4, 16 206 at size 8), every body kept awake
+(`--no-sleep`), in real time: on the RTX 5060 laptop GPU the GPU world steps about 59 times a second (98 % of real time,
+11.6 ms a step) while the window draws at the display's 240 frames a second; Box3D, picked from the configuration's list,
+keeps 27 % of real time (16 steps a second, 56 ms a step beside the drawing): its pyramid moves in slow motion
+(docs/PERFORMANCE.md §6.3).
+
+```bash
+build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --single gpu_xpbd --scene pyramid --size 6 --no-sleep --real-time
+```
 
 ## Requirements (Windows)
 

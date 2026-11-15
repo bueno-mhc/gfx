@@ -198,6 +198,40 @@
             "preLaunchTask": "gfx: Build Profile (physics comparison)"
         },
         {
+            // A large scene at 60 frames a second or more on the GPU backend: the comparison program with one world alone in
+            // the window (--single). A pyramid of boxes kept awake (--no-sleep: every body simulated every step; with
+            // sleep the GPU world's pyramid falls asleep and costs nothing) stepped in real time, 60 steps a simulated
+            // second, as an application runs it: frames never wait for a step still running. The panel shows the frames
+            // per second, the world's steps per second and the share of real time it keeps. Size 6 by default: 12 529
+            // boxes, about 215 000 contact points; on the RTX 5060 laptop GPU the GPU world keeps 98 % of real time (about
+            // 59 steps a second, 11.6 ms each) while the window draws at the display's rate (240 frames a second); picked
+            // from the list, Box3D keeps 27 % (16 steps a second): its pyramid moves in slow motion. Size 8 (16 206 boxes):
+            // 88 % against 19 %. While the workstation is locked the display paces or stalls presentations: measure with
+            // the window in front. Space shoots balls into the pyramid, right drag turns, the wheel zooms.
+            "name": "gfx: Large scale at 60 FPS (GPU XPBD; Box3D for contrast)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/profile/examples/physics_sandbox/gfx_physics_comparison.exe",
+            "args": ["--backend", "${input:platformBackend}", "--single", "${input:largeScaleBackend}", "--scene", "pyramid", "--size",
+                     "${input:largeScaleSize}", "--no-sleep", "--real-time"],
+            "cwd": "${workspaceFolder}/build/profile",
+            "environment": [
+                { "name": "_NO_DEBUG_HEAP", "value": "1" }
+            ],
+            "stopAtEntry": false,
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "gfx: Build Profile (physics comparison)"
+        },
+        {
             // The physics example (examples/physics): a headless scene stepped for four seconds, then checked
             // (each check printed; the exit code is 1 when one fails). Asks for the physics backend.
             "name": "gfx: Physics example",
@@ -251,6 +285,20 @@
             "description": "Size of the comparison's scene: a factor of every count (1: about 2 000 bodies, 6 400 cloth particles; 8: about 16 000 bodies, where the GPU backend starts to pull ahead on piles and pyramids)",
             "options": ["0.25", "0.5", "1", "2", "4", "8", "16"],
             "default": "8"
+        },
+        {
+            "id": "largeScaleBackend",
+            "type": "pickString",
+            "description": "Physics backend of the large scene: the GPU backend (about 60 steps a second, drawn at the display's rate), or Box3D to see the same scene fall behind (slow motion)",
+            "options": ["gpu_xpbd", "box3d"],
+            "default": "gpu_xpbd"
+        },
+        {
+            "id": "largeScaleSize",
+            "type": "pickString",
+            "description": "Size of the pyramid: 4 (8 555 boxes), 6 (12 529 boxes: the GPU world keeps 98 % of real time, Box3D 27 %), 8 (16 206 boxes: 88 % against 19 %)",
+            "options": ["4", "6", "8"],
+            "default": "6"
         },
         {
             "id": "sandboxPreset",

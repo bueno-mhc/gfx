@@ -27,8 +27,6 @@
 
 layout(constant_id = 68) const uint GATHER_CHUNK = 32U;
 
-const uint NO_GRAPH_KEY = 0xFFFFFFFFU;
-
 // Whether the graph entry `value` (its constraint × 2 + the node's side) names a constraint of the overflow set.
 bool overflow_entry(uint value)
 {
@@ -174,7 +172,7 @@ void main()
             // The graph's overflow entries flagged (entries of no body and constraints with a color: 0).
             if (index < count_word(COUNT_GRAPH_ENTRIES))
             {
-                const bool overflow = gpu_words[SOLVER.graph_sorted_keys].words[index] != NO_GRAPH_KEY &&
+                const bool overflow = gpu_words[SOLVER.graph_sorted_keys].words[index] < SOLVER.node_count &&
                                       overflow_entry(gpu_words[SOLVER.graph_sorted_values].words[index]);
                 gpu_words[SOLVER.overflow_flags].words[index] = overflow ? 1U : 0U;
             }

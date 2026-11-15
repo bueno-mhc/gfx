@@ -1758,6 +1758,19 @@ SteppedWorld::is_stepping() const noexcept -> bool
 }
 
 auto
+SteppedWorld::is_step_finished() const noexcept -> bool
+{
+    // No step, or the world's thread has ended it (a step run on the caller ended in begin_step()).
+    Implementation& implementation = *m_implementation;
+    if (!implementation.stepping.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+    const std::scoped_lock lock{implementation.step_mutex};
+    return implementation.step_finished;
+}
+
+auto
 SteppedWorld::step_count() const noexcept -> std::uint64_t
 {
     return m_implementation->completed.load(std::memory_order_acquire);

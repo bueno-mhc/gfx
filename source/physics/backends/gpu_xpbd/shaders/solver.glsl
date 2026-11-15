@@ -173,6 +173,7 @@ const uint COUNT_CONTACT_COLORS = 22U;
 const uint COUNT_COLORING_ROUNDS = 23U;
 const uint COUNT_UNCOLORED = 24U;
 const uint COUNT_HELD = 25U;
+const uint COUNT_ISLAND_ROUNDS = 26U;
 
 uint count_word(uint word)
 {

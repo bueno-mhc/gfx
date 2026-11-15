@@ -3,14 +3,17 @@
 // step's wall time measured and plotted. By default the worlds step in lockstep, one after the other: each frame, the
 // left world takes one step, then the right one, so both show the same simulated time and neither step shares the
 // processor with the other (their times compare). With --real-time, each world advances by the real time a frame takes,
-// both at once, as an application would run it: the slower one falls behind (it drops the steps it cannot catch up).
+// both at once, as an application would run it: the slower one falls behind (it drops the steps it cannot catch up), and
+// a frame never waits for a step still running (it draws the last finished one: frames follow the display).
+// With --single, one world alone fills the window: a backend's frame rate on a large scene, as an application would see it.
 //
 // Mouse: right drag turns the camera, middle drag pans it, the wheel zooms. Keys: Space shoots a ball into both worlds
 // along the pointer's ray (from either half), R builds the scene again, P pauses, N takes a single step while paused,
 // Escape quits. The panel picks the scene, its size and the stepping.
 //
 // Usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>]
-//                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd] [--real-time]
+//                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd]
+//                               [--single box3d|reference|gpu_xpbd] [--real-time]
 //                               [--no-sleep] [--gpu-solver S/P/V] [--gpu-optimizations "A | B" | NONE] [--device <index>]
 //                               [--threads <count>] [--frames <count>] [--validation]
 //                               [--trace <file.json>] [--capture <file.ppm>] [--capture-frame <index>]
@@ -19,7 +22,9 @@
 //   --size F       scales every count of the scene (1 by default: about two thousand bodies, 6 400 cloth particles)
 //   --left B       the left world's backend (Box3D by default); --right B the right one's (the GPU backend by default,
 //                  on the program's own device)
-//   --real-time    each world advances by the real time of a frame, both at once (default: one step each per frame)
+//   --single B     one world of the backend B alone, the whole window (no comparison): its frame rate
+//   --real-time    each world advances by the real time of a frame, both at once, frames not waiting for steps still
+//                  running (default: one step each per frame)
 //   --gpu-solver S/P/V  the GPU world's solver: substeps, position iterations, velocity iterations per substep (4/3/1 by
 //                  default: one velocity pass a substep, as XPBD prescribes; the library's defaults, 4/3/8, are the
 //                  sequential-impulse solver's and cost the GPU backend most; the panel switches it). Box3D has no
@@ -28,7 +33,8 @@
 //                  otherwise): one flag's effect is the difference of two runs
 //   --no-sleep     bodies never sleep (the panel switches it): resting bodies keep being simulated, so a scene at rest
 //                  still measures each backend's work (with sleep, a world at rest costs almost nothing)
-//   --frames N     closes after N frames and prints how the steps compared; the window then does not take the focus
+//   --frames N     closes after N frames and prints how the steps compared and the frames' times (frames per second);
+//                  the window then does not take the focus
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
 //   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM): what the window
 //                  showed, both worlds and the panel
@@ -138,6 +144,7 @@ struct Options
     float size = 1.0F;
     physics::PhysicsBackendKind left = physics::PhysicsBackendKind::BOX3D;
     physics::PhysicsBackendKind right = physics::PhysicsBackendKind::GPU_XPBD;
+    std::optional<physics::PhysicsBackendKind> single{}; ///< One world of this backend alone (--single).
     Stepping stepping = Stepping::LOCKSTEP;
     bool sleep = true;
     SolverChoice gpu_solver = GPU_SOLVER_CHOICES[0];
@@ -232,6 +239,14 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
             }
             (argument == "--left" ? options.left : options.right) = *kind;
         }
+        else if (argument == "--single" && has_value)
+        {
+            options.single = backend(arguments[++index]);
+            if (!options.single)
+            {
+                return std::nullopt;
+            }
+        }
         else if (argument == "--real-time")
         {
             options.stepping = Stepping::REAL_TIME;
@@ -312,7 +327,8 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         else
         {
             std::println(std::cerr, "usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>] "
-                                    "[--left <physics backend>] [--right <physics backend>] [--real-time] [--no-sleep] [--gpu-solver S/P/V] [--device <index>] "
+                                    "[--left <physics backend>] [--right <physics backend>] [--single <physics backend>] [--real-time] [--no-sleep] "
+                                    "[--gpu-solver S/P/V] [--device <index>] "
                                     "[--threads <count>] [--frames <count>] [--validation] [--trace <file.json>] [--capture <file.ppm>] "
                                     "[--capture-frame <index>]");
             return std::nullopt;
@@ -426,6 +442,21 @@ struct Side
     std::uint64_t timed_steps = 0;                                                  ///< Steps measured since the scene was built.
     std::uint64_t counted_steps = 0;                                                ///< The world's step count when last looked at.
     std::vector<double> all_steps{};                                                ///< Every step's wall time (the summary).
+    double speed = 1.0;                  ///< Simulated seconds per real second over the latest half second.
+    double speed_seconds = 0.0;          ///< Real seconds since the speed was last measured.
+    std::uint64_t speed_steps = 0;       ///< The world's step count then.
+
+    /// Counts @p frame_seconds of real time: every half second, the simulated time the world advanced in it over it.
+    void track_speed(double frame_seconds)
+    {
+        speed_seconds += frame_seconds;
+        if (speed_seconds >= 0.5)
+        {
+            speed = static_cast<double>(scene->step_count() - speed_steps) * STEP / speed_seconds;
+            speed_steps = scene->step_count();
+            speed_seconds = 0.0;
+        }
+    }
 
     /// Takes the wall time of the step just completed, if one did.
     void measure()
@@ -570,10 +601,17 @@ add_scene(SceneRenderer& renderer,
     }
 }
 
-/// The halves of an image of @p extent: the left one and the right one, DIVIDER pixels apart.
+/// The areas of the worlds in an image of @p extent: for @p worlds 2 the left half and the right one, DIVIDER pixels
+/// apart; for one world the whole image (twice).
 auto
-halves(gfx::Extent extent) -> std::array<gfx::Rectangle, 2>
+areas_of(gfx::Extent extent,
+         std::size_t worlds) -> std::array<gfx::Rectangle, 2>
 {
+    if (worlds == 1)
+    {
+        const gfx::Rectangle whole{.width = std::max(extent.width, 1U), .height = std::max(extent.height, 1U)};
+        return {whole, whole};
+    }
     const std::uint32_t left = (extent.width - std::min(extent.width, DIVIDER)) / 2;
     const std::uint32_t right_x = std::min(extent.width, left + DIVIDER);
     return {gfx::Rectangle{.width = std::max(left, 1U), .height = extent.height},
@@ -591,11 +629,11 @@ struct PanelRequest
 };
 
 /// The panel, in the window's bottom-left corner over the near floor (the scenes stand in the middle of each half): the
-/// scene and its size, the stepping, sleeping, pausing, and how each world's steps compare. Compact, so that the left
-/// world stays in view; collapsible by its title bar.
+/// scene and its size, the stepping, sleeping, pausing, and how each world's steps compare (one world alone: its steps),
+/// the frames' mean time and rate. Compact, so that the left world stays in view; collapsible by its title bar.
 auto
 comparison_panel(gfx::ui::UiFrame& frame,
-                 std::span<Side, 2> sides,
+                 std::span<Side> sides,
                  LargeScene scene,
                  float size,
                  Stepping& stepping,
@@ -650,7 +688,7 @@ comparison_panel(gfx::ui::UiFrame& frame,
         frame.same_line();
         request.reset = frame.button("reset (R)");
         const LargeSceneResult& built = sides[0].built;
-        frame.text_disabled("{} bodies, {} particles, {} joints in each world", built.bodies, built.particles, built.joints);
+        frame.text_disabled("{} bodies, {} particles, {} joints{}", built.bodies, built.particles, built.joints, sides.size() > 1 ? " in each world" : "");
 
         // How the worlds advance.
         if (frame.radio_button("lockstep", stepping == Stepping::LOCKSTEP))
@@ -699,38 +737,48 @@ comparison_panel(gfx::ui::UiFrame& frame,
             const physics::StepStatistics step = side.scene->statistics();
             frame.text("{}: {:.2f} ms a step (mean {:.2f}), {} awake, {} contacts", backend_label(side.backend), step.wall_seconds * 1000.0,
                        side.recent_mean(), step.awake_bodies, step.contacts);
+            if (stepping == Stepping::REAL_TIME)
+            {
+                frame.text("{}: {:.0f} steps a second, {:.0f} % of real time", backend_label(side.backend), side.speed / STEP, side.speed * 100.0);
+                frame.item_tooltip("the world steps 60 times a simulated second, each step begun once the last has finished; frames do not wait for "
+                                   "a step (they draw the last finished one): a world whose steps take longer than the time they simulate "
+                                   "steps fewer times a second and moves in slow motion");
+            }
             std::array<float, PLOTTED_STEPS> values{};
             side.plot(values);
             const std::string overlay = std::format("slowest {:.2f} ms", std::ranges::max(values));
             frame.plot_lines(std::format("##{}", backend_label(side.backend)), values, {.overlay = overlay, .minimum = 0.0F, .size = {.x = PLOT_WIDTH, .y = PLOT_HEIGHT}});
         }
 
-        // Which is faster, the frame, the controls.
+        // Which is faster, the frames, the controls.
         const double left = sides[0].recent_mean();
-        const double right = sides[1].recent_mean();
+        const double right = sides.size() > 1 ? sides[1].recent_mean() : 0.0;
         if (left > 0.0 && right > 0.0)
         {
             const bool right_faster = right < left;
             frame.text("{} steps {:.2f}x faster ({:.1f} s simulated)", backend_label(right_faster ? sides[1].backend : sides[0].backend),
                        right_faster ? left / right : right / left, static_cast<double>(sides[0].scene->step_count()) * STEP);
         }
-        frame.text_disabled("frame {:.1f} ms   (?) controls", frame_seconds * 1000.0);
-        frame.item_tooltip("right drag: turn   middle drag: pan   wheel: zoom\nSpace: shoot a ball into both worlds\n"
+        frame.text("{:.0f} frames a second ({:.1f} ms a frame)", frame_seconds > 0.0 ? 1.0 / frame_seconds : 0.0, frame_seconds * 1000.0);
+        frame.item_tooltip("the mean of the latest frames: the worlds' steps, the drawing and the presentation (paced by the display)");
+        frame.same_line();
+        frame.text_disabled("(?) controls");
+        frame.item_tooltip("right drag: turn   middle drag: pan   wheel: zoom\nSpace: shoot a ball into the worlds\n"
                            "R: build the scene again   P: pause   N: one step while paused   Esc: quit");
     }
     frame.end_window();
     return request;
 }
 
-/// A label at the top of each half: the backend and its latest steps' mean.
+/// A label at the top of each world's area: the backend and its latest steps' mean.
 void
 side_labels(gfx::ui::UiFrame& frame,
-            std::span<const Side, 2> sides,
+            std::span<const Side> sides,
             float width)
 {
     for (std::size_t index = 0; index < sides.size(); ++index)
     {
-        const float center = (static_cast<float>(index) + 0.5F) * 0.5F * width;
+        const float center = (static_cast<float>(index) + 0.5F) / static_cast<float>(sides.size()) * width;
         frame.set_next_window_position({.x = center, .y = 8.0F}, gfx::ui::UiCondition::ALWAYS, {.x = 0.5F, .y = 0.0F});
         frame.set_next_window_background_alpha(0.55F);
         const std::string name = std::format("##side{}", index);
@@ -755,7 +803,9 @@ run(const Options& options) -> int
         std::println(std::cerr, "no platform backend is available: {}", platform::platform_backend_availability(platform::PlatformBackendKind::SDL3).reason);
         return 1;
     }
-    for (const physics::PhysicsBackendKind backend : {options.left, options.right})
+    const std::vector<physics::PhysicsBackendKind> world_backends =
+        options.single ? std::vector{*options.single} : std::vector{options.left, options.right};
+    for (const physics::PhysicsBackendKind backend : world_backends)
     {
         const physics::PhysicsBackendAvailability availability = physics::physics_backend_availability(backend);
         if (!availability.available)
@@ -835,7 +885,11 @@ run(const Options& options) -> int
 #endif
         return physics::create_physics_world(description, backend);
     };
-    std::array<Side, 2> sides{Side{.backend = options.left}, Side{.backend = options.right}};
+    std::vector<Side> sides;
+    for (const physics::PhysicsBackendKind backend : world_backends)
+    {
+        sides.push_back(Side{.backend = backend});
+    }
     for (Side& side : sides)
     {
         side.renderer = std::make_unique<SceneRenderer>(*device, SceneRendererDescription{.color_format = presentation.format(),
@@ -843,9 +897,11 @@ run(const Options& options) -> int
                                                                                           .frames_in_flight = FRAMES_IN_FLIGHT,
                                                                                           .frame_bytes = 16ULL << 20U});
     }
-    std::println("{} window on '{}': {} on the left, {} on the right, {} scheduler threads, sleeping {}, GPU solver {}", host->backend(),
-                 physical_device.properties().name, backend_label(options.left), backend_label(options.right), options.threads,
-                 options.sleep ? "on" : "off", solver_label(options.gpu_solver));
+    const std::string placement = options.single ? std::format("{} alone", backend_label(*options.single))
+                                                 : std::format("{} on the left, {} on the right", backend_label(options.left), backend_label(options.right));
+    std::println("{} window on '{}': {}, {} scheduler threads, sleeping {}, {}, GPU solver {}", host->backend(), physical_device.properties().name, placement,
+                 options.threads, options.sleep ? "on" : "off", options.stepping == Stepping::LOCKSTEP ? "lockstep" : "real time",
+                 solver_label(options.gpu_solver));
 
     // A scene: built again into both worlds (the old ones finished and their meshes forgotten first).
     LargeScene scene = options.scene;
@@ -882,6 +938,9 @@ run(const Options& options) -> int
             side.timed_steps = 0;
             side.counted_steps = side.scene->step_count();
             side.all_steps.clear();
+            side.speed = 1.0;
+            side.speed_seconds = 0.0;
+            side.speed_steps = side.scene->step_count();
             std::println("{} at size {} on {}: {} bodies, {} particles, {} joints, built in {:.0f} ms", large_scene_information(next).name, next_size,
                          backend_label(side.backend), side.built.bodies, side.built.particles, side.built.joints,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
@@ -921,7 +980,10 @@ run(const Options& options) -> int
     bool ui_wants_mouse = false;
     bool ui_wants_keyboard = false;
     std::uint64_t presented = 0;
+    const auto loop_started = std::chrono::steady_clock::now();
     double frame_seconds = 0.0;
+    double average_frame_seconds = 0.0;  ///< The panel's: a running mean of the frames' times.
+    std::vector<double> frame_times{};    ///< Every frame's time after the first ten (the summary).
     double ui_time = 0.0;
     PanelRequest request;
     auto previous_time = std::chrono::steady_clock::now();
@@ -947,6 +1009,11 @@ run(const Options& options) -> int
         frame_seconds = std::chrono::duration<double>(now - previous_time).count();
         previous_time = now;
         ui_time += frame_seconds;
+        average_frame_seconds = average_frame_seconds == 0.0 ? frame_seconds : 0.95 * average_frame_seconds + 0.05 * frame_seconds;
+        if (presented >= 10)
+        {
+            frame_times.push_back(frame_seconds);
+        }
 
         // A new scene (the panel or R), pausing, a single step.
         if (!ui_wants_keyboard)
@@ -982,7 +1049,7 @@ run(const Options& options) -> int
 
         // The camera (one for both halves, each half's aspect), turned and moved by the mouse outside the panel.
         const gfx::Extent extent = presentation.extent();
-        const std::array<gfx::Rectangle, 2> areas = halves(extent);
+        const std::array<gfx::Rectangle, 2> areas = areas_of(extent, sides.size());
         FrameCommands commands{};
         const gfx::Extent window_size = window->size();
         const gfx::Extent pixels = window->framebuffer_size();
@@ -1038,12 +1105,14 @@ run(const Options& options) -> int
                 side.scene->advance(frame_seconds);
             }
             side.measure();
+            side.track_speed(frame_seconds);
             side.scene->clear_events(); // the scene keeps the contact events until cleared (nothing here reads them)
         };
         {
             PROFILE_SCOPE("Comparison: the left world");
             step(sides[0]);
         }
+        if (sides.size() > 1)
         {
             PROFILE_SCOPE("Comparison: the right world");
             step(sides[1]);
@@ -1070,7 +1139,7 @@ run(const Options& options) -> int
         // The UI: the panel and the labels.
         gfx::ui::UiFrame& ui_frame = ui.begin_frame(ui_input.frame_input(ui_time));
         const float units_per_pixel = 1.0F / std::max(ui_input.pixels_per_unit(), 0.01F);
-        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, gpu_solver, paused, frame_seconds,
+        request = comparison_panel(ui_frame, sides, scene, size, stepping, sleeping, gpu_solver, paused, average_frame_seconds,
                                    static_cast<float>(extent.height) * units_per_pixel);
         side_labels(ui_frame, sides, static_cast<float>(extent.width) * units_per_pixel);
         static_cast<void>(ui.end_frame());
@@ -1172,7 +1241,7 @@ run(const Options& options) -> int
         gfx::profiler::export_trace(trace, gfx::profiler::TraceFormat::CHROME_JSON, *options.trace);
         std::println("{} frames traced into {}", trace.frames().size(), *options.trace);
     }
-    std::array<double, 2> medians{};
+    std::vector<double> medians(sides.size(), 0.0);
     for (std::size_t index = 0; index < sides.size(); ++index)
     {
         std::vector<double> steps{sides[index].all_steps.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(10, sides[index].all_steps.size())),
@@ -1184,10 +1253,22 @@ run(const Options& options) -> int
         std::println("{:>10}: {} steps, mean {:.2f} ms, median {:.2f} ms, slowest {:.2f} ms; {} awake, {} contact points, highest body {:.2f} m",
                      backend_label(sides[index].backend), sides[index].scene->step_count(), mean, medians[index], steps.empty() ? 0.0 : steps.back(),
                      last.awake_bodies, last.contacts, sides[index].highest());
+        const double real_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - loop_started).count();
+        std::println("{:>10}: {:.1f} s simulated in {:.1f} s ({:.0f} % of real time)", backend_label(sides[index].backend),
+                     static_cast<double>(sides[index].scene->step_count()) * STEP, real_seconds,
+                     real_seconds > 0.0 ? static_cast<double>(sides[index].scene->step_count()) * STEP / real_seconds * 100.0 : 0.0);
     }
-    if (medians[0] > 0.0 && medians[1] > 0.0)
+    if (medians.size() > 1 && medians[0] > 0.0 && medians[1] > 0.0)
     {
         std::println("median step: {} / {} = {:.2f}", backend_label(sides[0].backend), backend_label(sides[1].backend), medians[0] / medians[1]);
+    }
+    if (!frame_times.empty())
+    {
+        // The frames after the first ten: what the window showed per second.
+        std::ranges::sort(frame_times);
+        const double mean = std::ranges::fold_left(frame_times, 0.0, std::plus{}) / static_cast<double>(frame_times.size());
+        std::println("frames: mean {:.2f} ms ({:.1f} a second), median {:.2f} ms ({:.1f} a second), slowest {:.2f} ms", mean * 1000.0, 1.0 / mean,
+                     frame_times[frame_times.size() / 2] * 1000.0, 1.0 / frame_times[frame_times.size() / 2], frame_times.back() * 1000.0);
     }
     std::println("{} frames presented, {} validation errors", presented, validation_errors.count());
     return validation_errors.count() == 0 ? 0 : 1;

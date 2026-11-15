@@ -340,10 +340,12 @@ TEST(SteppedWorldTest, AsynchronousStepsRunOnTheWorldsThreadAndRefuseQueries)
     ASSERT_TRUE(world->ray_cast(down, 100).has_value());
 
     // A held step: begin_step returns at once; queries fail without blocking, getters still answer.
+    EXPECT_TRUE(world->is_step_finished()) << "no step running";
     backend->hold();
     world->begin_step(STEP);
     backend->wait_until_held();
     EXPECT_TRUE(world->is_stepping());
+    EXPECT_FALSE(world->is_step_finished()) << "the held step has not finished";
     std::vector<std::jthread> readers;
     std::atomic<int> refused{0};
     for (int reader = 0; reader < 4; ++reader)
@@ -358,9 +360,18 @@ TEST(SteppedWorldTest, AsynchronousStepsRunOnTheWorldsThreadAndRefuseQueries)
     EXPECT_FLOAT_EQ(ball->state().pose.position.y, 5.0F + (-10.0F * STEP) * STEP) << "the last completed step";
     expect_physics_error([&] { world->begin_step(STEP); }, "a step is already running");
 
-    // Released and waited for: published.
+    // Released: finished (without waiting for it) but published only by wait_step().
     backend->release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while (!world->is_step_finished() && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(world->is_step_finished());
+    EXPECT_TRUE(world->is_stepping()) << "until wait_step()";
+    EXPECT_EQ(world->step_count(), 1U) << "not published yet";
     world->wait_step();
+    EXPECT_TRUE(world->is_step_finished());
     EXPECT_FALSE(world->is_stepping());
     EXPECT_EQ(world->step_count(), 2U);
     EXPECT_FLOAT_EQ(ball->state().pose.position.y, 5.0F + (-10.0F * STEP) * STEP + (-20.0F * STEP) * STEP);
