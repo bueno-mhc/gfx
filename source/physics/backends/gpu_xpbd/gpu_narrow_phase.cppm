@@ -83,6 +83,14 @@ struct GpuPieceSpans
 /// @brief @p manifold as the CPU's narrow phase holds one (its points' impulses zero).
 [[nodiscard]] auto to_contact_manifold(const GpuManifold& manifold) noexcept -> ContactManifold;
 
+/// @brief What a contact cache may know of the previous manifolds (GpuNarrowPhase::match()).
+struct GpuMatchOptions
+{
+    std::uint32_t instance_count = 0; ///< Above every instance the manifolds name: the sorts take its bits only (an empty
+                                      ///< manifold sorts at it); 0: unknown (32-bit keys).
+    GpuSpan listed{};                 ///< The previous slots to match against, in order (a word each); none: every slot.
+};
+
 /// @brief The narrow phase: its pipelines, its shape table, its scratch.
 class GpuNarrowPhase
 {
@@ -192,14 +200,17 @@ public:
     /// @brief Records the contact cache: for each point of the @p count manifold slots of @p current, its predecessor
     ///        among the @p previous_count slots of @p previous — the point with the same feature among the previous
     ///        manifolds of the same pair, the first of them — as that manifold's slot × 4 + its point, or 0xFFFFFFFF; four
-    ///        words per current slot into @p predecessors (empty slots have none).
+    ///        words per current slot into @p predecessors (empty slots have none). With @p options.listed, only the
+    ///        previous slots that list names (@p previous_count then counts the list's entries); with
+    ///        @p options.instance_count, the sorts take the bits of that count only (the same predecessors).
     /// @throws InvalidUsageError if the previous count's maximum is above reserved_manifolds().
     void match(ComputeRecorder& recorder,
                GpuSpan previous,
                const GpuCount& previous_count,
                GpuSpan current,
                const GpuCount& count,
-               GpuSpan predecessors);
+               GpuSpan predecessors,
+               const GpuMatchOptions& options = {});
 
     /// @brief What only the implementation touches (pipelines, tables, scratch).
     struct State;

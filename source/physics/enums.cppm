@@ -180,6 +180,12 @@ enum class GpuOptimization : std::uint32_t
                                     ///< color beyond them joins the overflow set (Jacobi) instead of the step replaying.
                                     ///< Other steps as without it. Two passes fewer a solver iteration where chains of
                                     ///< joints or piles keep an overflow set (other bits in the steps whose colors grow).
+    PUSHED_CONTACT_CACHE = 1U << 14, ///< The contact cache matches a manifold's points only with the previous step's
+                                     ///< manifolds whose contact pushed (CONTACT_PUSHED, listed at the end of each step):
+                                     ///< the only ones whose friction anchors static friction held. The next step sorts
+                                     ///< that list (a handful in swinging chains, one pass) instead of every speculative
+                                     ///< manifold (two radix sorts). A contact that never pushed no longer passes on the
+                                     ///< anchors it was first found with (other bits).
 };
 
 /// @brief A part of the physics library that is not a backend: errors of the abstraction's own components name it
@@ -743,7 +749,8 @@ inline constexpr GpuOptimization DEFAULT_GPU_OPTIMIZATIONS =
                                  std::to_underlying(GpuOptimization::COMPACT_READBACK) | std::to_underlying(GpuOptimization::RESTING_STEPS) |
                                  std::to_underlying(GpuOptimization::BVH_REFIT) | std::to_underlying(GpuOptimization::KERNEL_FUSION) |
                                  std::to_underlying(GpuOptimization::PARTIAL_SUBMISSIONS) | std::to_underlying(GpuOptimization::REACHABLE_CONTACTS) |
-                                 std::to_underlying(GpuOptimization::RELATIVE_SPEED_COLORING) | std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS));
+                                 std::to_underlying(GpuOptimization::RELATIVE_SPEED_COLORING) | std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS) |
+                                 std::to_underlying(GpuOptimization::PUSHED_CONTACT_CACHE));
 
 /// @brief Steps the GPU backend refits its moving colliders' tree before building it again (GpuOptimization::BVH_REFIT).
 inline constexpr std::uint32_t GPU_XPBD_REFIT_STEPS = 30;
@@ -960,6 +967,7 @@ struct EnumerationTraits<physics::GpuOptimization>
         EnumeratorName{physics::GpuOptimization::REACHABLE_CONTACTS, "REACHABLE_CONTACTS"},
         EnumeratorName{physics::GpuOptimization::RELATIVE_SPEED_COLORING, "RELATIVE_SPEED_COLORING"},
         EnumeratorName{physics::GpuOptimization::OVERFLOW_NEW_COLORS, "OVERFLOW_NEW_COLORS"},
+        EnumeratorName{physics::GpuOptimization::PUSHED_CONTACT_CACHE, "PUSHED_CONTACT_CACHE"},
     };
 };
 

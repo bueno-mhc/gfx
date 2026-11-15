@@ -144,6 +144,7 @@ Every GPU optimization is a bit of `GpuOptimization` in `GpuXpbdDescription::opt
 | `REACHABLE_CONTACTS` | after PF6 | a contact none of whose points can meet within the step is no constraint (the pair filter's reach test on the points' gaps) | rods beside a fast ball: 4× fewer constraints; the comparison's wall at size 8 with 4/3/1: 11.5 → 9.3 ms | other bits, the same motion |
 | `RELATIVE_SPEED_COLORING` | after PF6 (chains) | a contact that cannot meet at its points' relative speed is solved in the overflow set (Jacobi), not colored | the chains at size 8: 8.5 → 3 colors, 488 → 338 dispatches, the solver's GPU time 1.79 → 1.15 ms | other bits, the same motion |
 | `OVERFLOW_NEW_COLORS` | after PF6 (chains) | in a step that records the overflow set's passes anyway, the colors recorded are those the previous step used (no two spare ones) and a new color's constraints join the overflow set instead of a replay | two passes fewer a solver iteration where an overflow set stays (the chains: 3 colors recorded instead of 5) | other bits in the steps whose colors grow |
+| `PUSHED_CONTACT_CACHE` | after PF6 (cache) | the contact cache matches only the previous step's contacts that pushed, listed at the end of each step (their exact count read back: one pass below 4 096, no cache when none pushed) instead of sorting every manifold slot | the size-8 chains: the narrow phase 0.43 → 0.08 ms of GPU work, 250 → 231 dispatches | other bits (a contact that never pushed no longer passes on its first anchors) |
 
 Changes that are not flags (every backend, or the GPU backend's CPU side; kept because the conformance suite and the
 determinism tests pass unchanged):
@@ -165,6 +166,9 @@ determinism tests pass unchanged):
   two differ.
 - **The first part submitted once the broad phase is recorded** (`PARTIAL_SUBMISSIONS`, `GPU_XPBD_FIRST_PART_DISPATCHES` 16): the
   GPU starts while the narrow phase and the constraints are recorded (0.35 → 0.08 ms before the GPU starts, size-8 chains).
+- **The contact cache's keys take the instances' bits** (`GpuMatchOptions::instance_count`): an empty manifold sorts at the
+  instance count instead of 0xFFFFFFFF, so both sorts need about 14 key bits, not 32 (two radix passes each instead of four;
+  13.4 → 9.2 radix passes a step for the chains). The same order, the same bits.
 - **`gfx::SharedMutex`** (PF6): the framework's objects lock the published snapshot for every getter. MinGW's
   `std::shared_mutex` (winpthreads' read-write lock) takes about 900 ns to lock and unlock uncontended, so reading the poses
   of 8 000 bodies took 8.4 ms; `gfx::SharedMutex` (`gfx.core.shared_mutex`: a slim reader/writer lock on Windows, 10 ns)
@@ -332,14 +336,34 @@ their whole error, and chains of capsules swinging in the Jacobi mode reached 59
 0.2 s (RTX 5060). Joints between rigid bodies now count a whole share each (equal splitting, Tonge et al. 2012); pins and
 contacts keep their shares. The coloring mode solves joints in the overflow set the same way.
 
+**The contact cache, rebuilt (2026-11-15).** The cache sorted every previous manifold slot twice a step (18 800 for the size-8
+chains, 8 of them touching: 0.25 ms of GPU work), though only friction anchors that static friction held matter — and even
+those little at rest: a box resting on 20–30° slopes creeps by the same micrometers in 3 s whether anchors are kept or not.
+Now its keys take the instances' bits (the same bits, every world) and `PUSHED_CONTACT_CACHE` matches only the contacts that
+pushed (§4). The previous commit built beside this one, alternated, median step in milliseconds:
+
+| Scene, size | GPU before | GPU after | Box3D ÷ GPU before | after |
+|---|---|---|---|---|
+| chains, 1 | 1.11 | 1.10 | 0.73 | 0.74 |
+| chains, 4 | 1.81 | 1.68 | 0.82 | 0.86 |
+| chains, 8 | 2.32 | 2.19 | 1.31 | 1.43 |
+| pile, 1 / 8 | 3.81 / 9.53 | 3.68 / 9.48 | 0.79 / 2.82 | 0.76 / 2.90 |
+| wrecking, 1 / 8 | 2.93 / 8.25 | 2.85 / 7.70 | 0.60 / 1.59 | 0.58 / 1.66 |
+| pyramid, 8 | 12.70 | 12.16 | 4.00 | 4.01 |
+| cloth, 1 / 8 | 1.59 / 4.14 | 1.48 / 3.97 | 5.72 / 5.48 | 5.99 / 5.72 |
+
+Box3D's own speed moved between two levels during the chains' runs (about 2.2 ms a step in some rounds, 3.1–3.2 in others),
+so the ratio of each round, both worlds stepped one after the other, is the measure: at size 8 the GPU world now steps the
+chains faster than Box3D's in every round (1.17–1.18 when Box3D ran at 2.2 ms, 1.43–1.48 at 3.2). The size-1 pyramid's GPU
+step is bimodal whichever build runs (about 3.9 or 6.7 ms; medians 3.98 before, 3.88 after with the order swapped), not a
+regression.
+
 ## 7. Follow-ups
 
 1. **Small and mid-size worlds on the GPU**: fewer passes per step. The velocity iterations' count is the first lever (§5;
    the comparison uses 4/3/1, §6.1 — the library's defaults could follow). A single-dispatch solve of small colors or islands
-   within one workgroup (no inter-workgroup wait, so no deadlock) is the second. The chains (§6.2): the contact cache sorts
-   every speculative manifold twice a step (0.25 ms at size 8) although only contacts that pushed keep friction anchors — a
-   cache of the pushed contacts alone, sorted after the solve, would drop both sorts (other bits: a contact that never pushed
-   would no longer keep the anchors it was first found with).
+   within one workgroup (no inter-workgroup wait, so no deadlock) is the second: what keeps the chains slower than Box3D
+   at sizes 1 and 4 (§6.2; about 180 dependent passes a step at size 1).
 2. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
    Box3D's touching pairs.
 3. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of

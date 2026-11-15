@@ -1255,7 +1255,7 @@ Original hard requirements (from the user's initial specification):
   rods, no gravity, fast ball: 4× fewer constraints; mutation-checked). Result size 8 (Box3D ÷ GPU): pile 2.3, wall 1.25, pyramid 3.2,
   cloth 4.7, **chains 0.68** (speeds-sum keeps fast links' contacts), size 1 0.47–0.83 (GPU floor 1.4–3.5 ms). Gotcha: the pair filter
   already drops pairs whose boxes are out of reach — the flag's test needs tilted shapes (boxes much larger than the shapes).
-- **Follow-up after PF6: the chains (2026-11-15; awaiting validation)** — docs/profiler-performance-design.md §B "Follow-up after
+- **Follow-up after PF6: the chains (2026-11-15; committed by the user, d46b54b)** — docs/profiler-performance-design.md §B "Follow-up after
   PF6: the chains", PERFORMANCE.md §6.2. User: "Work on the chains". **Defect found and fixed**: the Jacobi mode diverged on chains
   (NaN on the RTX at step 11) since the fix after G10: two equal-mass joints on a link gave shares ½ + ½ = 1 → P = 1, unsplit;
   `whole_share()` in solver.glsl: joints between rigid bodies count a whole share (equal splitting), pins (particle joints) and
@@ -1277,6 +1277,20 @@ Original hard requirements (from the user's initial specification):
   rounds) to decide; PowerShell 5.1 `Get-Content -Raw` reads UTF-8 scripts as ANSI (mangled "×": patch_tool aborted mid-way; edit
   scripts with Python/the Write tool only); `git stash` in a worktree lands in the shared stash list (build/head's PF5b patches
   are now stash@{0}/{1}).
+- **Follow-up after PF6: the contact cache (2026-11-15; committed by Claude at the user's request)** — docs/profiler-performance-design.md §B "Follow-up
+  after PF6: the contact cache", PERFORMANCE.md §6.2 end. User: "Rebuild the cache". `GpuMatchOptions` {instance_count, listed}
+  (exported with GpuNarrowPhase; match()'s defaulted last parameter): keys of bit_width(instance_count) bits, empty manifolds keyed
+  at the instance count (same bits; 32 → 14 bits for the chains); a list of previous slots (contact_keys reads them, values =
+  slots). **`PUSHED_CONTACT_CACHE`** (1 << 14): contacts_report mode 0 argument bit 0 flags pushed slots (particles too) →
+  compacted into `held_slots[parity]` (GpuSolverParameters 376 B held_flags/held_slots; GpuSolverCounts 104 B `held`;
+  `previous_held` from the read-back counts = the next match's exact maximum → rank sort below 4096; 0 → keeps_anchors false).
+  Found: friction anchors kept across steps barely matter at rest (same creep to the µm kept/new/none; 87 friction tests pass with
+  none kept) → the world-level test compares bits where every contact pushes. Tests (mutation-checked):
+  PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached, TheContactCacheSortsOnlyThePushedContacts (600 balls: 216 stayed under
+  the rank-sort limit), TheCacheFindsEachPointsPredecessor extended. Measured vs d46b54b: chains 8 2.32 → 2.19 ms (per round
+  Box3D ÷ GPU 1.17–1.48: faster than Box3D at size 8), 4: 1.81 → 1.68, 1: 1.11 → 1.10; others same or faster. **Gotcha**: the
+  size-1 pyramid's GPU step is bimodal (3.9 or 6.7 ms) and the second program of a pair often lands in the slow state — swap the
+  order before calling a regression (scratchpad ab_head_comparison_reversed.ps1).
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1838,7 +1852,10 @@ the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1591**, 2026-11-15 (follow-up after PF6, the chains: + 4 ChainsOfLinksSwingAtTheirSpeedInEitherMode,
+Test count at last report: **1599**, 2026-11-15 (follow-up after PF6, the contact cache: + 4
+PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached, + 4 TheContactCacheSortsOnlyThePushedContacts; Debug 1599/1599 (836 s),
+Release 1599/1599 (755 s); a first Debug build stopped once on "failed to write compiled module: File exists", fine when rerun).
+Before: **1591**, 2026-11-15 (follow-up after PF6, the chains: + 4 ChainsOfLinksSwingAtTheirSpeedInEitherMode,
 + 4 BodiesMovingTogetherAddNoColors, + 4 NewColorsJoinTheOverflowSetInsteadOfSpareColors; Debug 1591/1591 (579 s), Release 1591/1591
 (547 s); run from PowerShell with `--timeout 900`). Before: **1579**, 2026-11-14 (follow-up after PF6, the comparison's GPU world: + 4
 ContactsThatCannotMeetWithinAStepAreNoConstraints; Debug 1576/1579 (1262 s), Release 1577/1579 (891 s): the sandbox's script runs

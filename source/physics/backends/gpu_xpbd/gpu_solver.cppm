@@ -129,8 +129,11 @@ struct GpuSolverParameters
     std::uint32_t node_maxima = 0;        ///< per node: priority maxima of three rounds, index maxima of three, colors taken (8 words),
     std::uint32_t maxima_coloring = 0;    ///< 1: the rounds compare with the maxima (else they scan the graph);
     std::uint32_t reach_boxes = 0;        ///< REACH_BOXES: the instances' boxes grown by their own reach (the trees' boxes).
+    // The contact cache of the contacts that pushed (GpuOptimization::PUSHED_CONTACT_CACHE):
+    std::uint32_t held_flags = 0;         ///< a word per manifold slot: its contact pushed in this step,
+    std::uint32_t held_slots = 0;         ///< those slots, compacted (the next step's cache).
 };
-static_assert(sizeof(GpuSolverParameters) == 368 && offsetof(GpuSolverParameters, reach_boxes) == 364 && offsetof(GpuSolverParameters, maxima_coloring) == 360 && offsetof(GpuSolverParameters, gather_lists) == 348 && offsetof(GpuSolverParameters, tables) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
+static_assert(sizeof(GpuSolverParameters) == 376 && offsetof(GpuSolverParameters, held_slots) == 372 && offsetof(GpuSolverParameters, reach_boxes) == 364 && offsetof(GpuSolverParameters, maxima_coloring) == 360 && offsetof(GpuSolverParameters, gather_lists) == 348 && offsetof(GpuSolverParameters, tables) == 304 && offsetof(GpuSolverParameters, reports) == 252 && offsetof(GpuSolverParameters, trigger_results) == 300 && offsetof(GpuSolverParameters, colliders) == 60 && offsetof(GpuSolverParameters, counts) == 76 &&
               offsetof(GpuSolverParameters, corrections) == 184 && offsetof(GpuSolverParameters, joint_count) == 188 &&
               offsetof(GpuSolverParameters, joined_pairs) == 216 && offsetof(GpuSolverParameters, overflow_counts) == 224 &&
               offsetof(GpuSolverParameters, boxes) == 232);
@@ -163,8 +166,9 @@ struct GpuSolverCounts
     std::uint32_t contact_colors = 0;       ///< Colors the coloring gave contacts.
     std::uint32_t coloring_rounds = 0;      ///< The rounds in which the coloring decided constraints (the last one's + 1).
     std::uint32_t uncolored = 0;            ///< Constraints the recorded rounds left undecided (in the overflow set).
+    std::uint32_t held = 0;                 ///< PUSHED_CONTACT_CACHE: the slots whose contact pushed (the next step's cache).
 };
-static_assert(sizeof(GpuSolverCounts) == 100);
+static_assert(sizeof(GpuSolverCounts) == 104);
 
 /// A trigger overlapping a collider after a step (triggers_filter.comp).
 struct GpuTriggerOverlap

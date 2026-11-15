@@ -742,8 +742,9 @@ TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
 {
     // The default optimizations that keep the bits (all but REACH_BOXES and BVH_REFIT, which find the same pairs in another
     // order, RESTING_STEPS, whose woken contacts warm-start from an earlier step, REACHABLE_CONTACTS, which makes fewer
-    // constraints, RELATIVE_SPEED_COLORING, which solves some contacts in the overflow set, and OVERFLOW_NEW_COLORS, which
-    // solves the constraints of new colors there) against none (the baseline) on a
+    // constraints, RELATIVE_SPEED_COLORING, which solves some contacts in the overflow set, OVERFLOW_NEW_COLORS, which
+    // solves the constraints of new colors there, and PUSHED_CONTACT_CACHE, which keeps fewer friction anchors) against
+    // none (the baseline) on a
     // scene whose layouts change while it runs — a joint disabled, a collider's material changed, a body and a collider
     // made, a joint breaking during a step — between steps whose edits keep them (forces, impulses, velocities): the same
     // states bit for bit every 15 steps, the same events.
@@ -753,7 +754,8 @@ TEST_P(GpuXpbdJointTest, TheOptimizationsGiveTheBaselinesBits)
                                        std::to_underlying(GpuOptimization::RESTING_STEPS) |
                                        std::to_underlying(GpuOptimization::REACHABLE_CONTACTS) |
                                        std::to_underlying(GpuOptimization::RELATIVE_SPEED_COLORING) |
-                                       std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS)));
+                                       std::to_underlying(GpuOptimization::OVERFLOW_NEW_COLORS) |
+                                       std::to_underlying(GpuOptimization::PUSHED_CONTACT_CACHE)));
     const auto build = [](Scene& world) {
         world.floor();
         std::vector<RigidBody*> bodies;

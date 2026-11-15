@@ -124,6 +124,9 @@ struct SolverParameters
     uint node_maxima;        // per node: priority maxima of three rounds, index maxima of three, colors taken (8 words),
     uint maxima_coloring;    // 1: the rounds compare with the maxima (else they scan the graph);
     uint reach_boxes;        // REACH_BOXES: the instances' boxes grown by their own reach (the trees' boxes)
+    // The contact cache of the contacts that pushed (PUSHED_CONTACT_CACHE):
+    uint held_flags;         // a word per manifold slot: its contact pushed in this step,
+    uint held_slots;         // those slots, compacted (the next step's cache)
 };
 
 layout(set = 0, binding = 3, std430) readonly buffer GpuSolverParameterBuffer
@@ -169,6 +172,7 @@ const uint COUNT_JOINT_COLORS = 21U;
 const uint COUNT_CONTACT_COLORS = 22U;
 const uint COUNT_COLORING_ROUNDS = 23U;
 const uint COUNT_UNCOLORED = 24U;
+const uint COUNT_HELD = 25U;
 
 uint count_word(uint word)
 {

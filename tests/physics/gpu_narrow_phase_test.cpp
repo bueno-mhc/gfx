@@ -1020,6 +1020,72 @@ TEST_P(GpuNarrowPhaseTest, TheCacheFindsEachPointsPredecessor)
     EXPECT_EQ(wrong, 0U);
     EXPECT_GT(several, 0U) << "manifolds of pairs that had several";
     EXPECT_GT(matched, could_match * 3 / 4) << "most points keep their features when the shapes barely move (" << matched << " of " << could_match << ")";
+
+    // The same predecessors when the sorts take the instances' bits only (GpuMatchOptions::instance_count: empty manifolds
+    // sort at the instance count); among every second non-empty previous slot when a list names them (in slot order).
+    const std::uint32_t instance_count = 2 * count;
+    std::vector<std::uint32_t> listed_slots;
+    std::uint32_t non_empty = 0;
+    for (std::uint32_t slot = 0; slot < before.slots.size(); ++slot)
+    {
+        if (before.slots[slot].point_count > 0)
+        {
+            if (non_empty % 2 == 0)
+            {
+                listed_slots.push_back(slot);
+            }
+            ++non_empty;
+        }
+    }
+    gfx::Buffer& bounded = words_buffer(4 * std::size_t{after.capacity});
+    gfx::Buffer& list = words_buffer(listed_slots.size(), listed_slots);
+    gfx::Buffer& from_list = words_buffer(4 * std::size_t{after.capacity});
+    record([&](gfx::ComputeRecorder& recorder) {
+        m_narrow_phase->match(recorder, gpu::span_of(*before.manifolds), {.maximum = before.capacity, .word = gpu::span_of(*before.total_word)},
+                              gpu::span_of(*after.manifolds), {.maximum = after.capacity, .word = gpu::span_of(*after.total_word)}, gpu::span_of(bounded),
+                              {.instance_count = instance_count});
+    });
+    record([&](gfx::ComputeRecorder& recorder) {
+        m_narrow_phase->match(recorder, gpu::span_of(*before.manifolds), {.maximum = static_cast<std::uint32_t>(listed_slots.size())},
+                              gpu::span_of(*after.manifolds), {.maximum = after.capacity, .word = gpu::span_of(*after.total_word)}, gpu::span_of(from_list),
+                              {.instance_count = instance_count, .listed = gpu::span_of(list)});
+    });
+    EXPECT_EQ(words(bounded, 4 * after.slots.size()), found) << "the instances' bits only: the same predecessors";
+    std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::uint32_t>> listed_previous;
+    for (const std::uint32_t slot : listed_slots)
+    {
+        listed_previous[{before.slots[slot].first, before.slots[slot].second}].push_back(slot);
+    }
+    const std::vector<std::uint32_t> found_in_list = words(from_list, 4 * after.slots.size());
+    std::size_t wrong_in_list = 0;
+    std::size_t matched_in_list = 0;
+    for (std::size_t slot = 0; slot < after.slots.size(); ++slot)
+    {
+        const gpu::GpuManifold& manifold = after.slots[slot];
+        const auto earlier = listed_previous.find({manifold.first, manifold.second});
+        for (std::uint32_t point = 0; point < 4; ++point)
+        {
+            std::uint32_t expected = NO_PREDECESSOR;
+            const bool candidate = point < manifold.point_count && earlier != listed_previous.end();
+            for (std::size_t position = 0; candidate && position < earlier->second.size() && expected == NO_PREDECESSOR; ++position)
+            {
+                const gpu::GpuManifold& old = before.slots[earlier->second[position]];
+                for (std::uint32_t other = 0; other < old.point_count; ++other)
+                {
+                    if (old.points[other].feature == manifold.points[point].feature)
+                    {
+                        expected = earlier->second[position] * 4 + other;
+                        break;
+                    }
+                }
+            }
+            wrong_in_list += found_in_list[4 * slot + point] == expected ? 0U : 1U;
+            matched_in_list += expected != NO_PREDECESSOR ? 1U : 0U;
+        }
+    }
+    EXPECT_EQ(wrong_in_list, 0U) << "the predecessors among the listed slots";
+    EXPECT_GT(matched_in_list, 0U);
+    EXPECT_LT(matched_in_list, matched) << "only the listed slots' points";
     EXPECT_TRUE(take_validation_messages().empty());
 }
 

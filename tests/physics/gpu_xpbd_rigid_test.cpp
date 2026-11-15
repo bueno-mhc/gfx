@@ -2,8 +2,8 @@
 // both solver modes (graph coloring, Jacobi): a box coming to rest on a floor, stacks and pyramids standing still, static
 // friction holding a box on a slope and dynamic friction letting one slide as Coulomb's law says, restitution bouncing a
 // ball to the height e² predicts, islands falling asleep together and waking together, every shape kind coming to rest on
-// a triangle mesh and a height field, the same steps giving the same bits, and a pile large enough to overflow the first
-// step's buffers (replayed).
+// a triangle mesh and a height field, the same steps giving the same bits, a pile large enough to overflow the first
+// step's buffers (replayed), and the contact cache of the contacts that pushed (PUSHED_CONTACT_CACHE).
 #include "vulkan_test.hpp"
 
 import gfx.physics;
@@ -824,6 +824,101 @@ TEST_P(GpuXpbdRigidTest, BodiesMovingTogetherAddNoColors)
             EXPECT_EQ(relative_colors, 0.0);
             EXPECT_EQ(summed_colors, 0.0);
         }
+    }
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached)
+{
+    // PUSHED_CONTACT_CACHE: four boxes pressed 1 mm into slopes of 10° to 25° (far apart): each one's contact pushes in every
+    // step, so the list of contacts that pushed names every manifold the full cache sorts, and the friction anchors kept
+    // are the same — the same bits after 2 s (without the list no anchor is kept: the boxes creep by other bits).
+    const auto run = [&](GpuOptimization optimizations) {
+        Scene world = scene({}, optimizations);
+        std::vector<RigidBody*> boxes;
+        for (int index = 0; index < 4; ++index)
+        {
+            const float angle = (10.0F + 5.0F * static_cast<float>(index)) * PI / 180.0F;
+            const Quaternion tilt = Quaternion::from_axis_angle({.z = 1}, angle);
+            const Vector3 place{.x = 20.0F * static_cast<float>(index)};
+            const Vector3 up = gfx::rotate(tilt, {.y = 1});
+            world.add({.kind = BodyKind::STATIC, .pose = {.position = place, .orientation = tilt}},
+                      {.shape = box_shape({.x = 3, .y = 0.25F, .z = 2}), .material = material(0.6F)});
+            boxes.push_back(&world.add({.pose = {.position = place + up * (0.25F + 0.25F - 0.001F), .orientation = tilt}},
+                                       {.shape = box_shape({.x = 0.25F, .y = 0.25F, .z = 0.25F}), .material = material(0.6F)}));
+        }
+        world.run(2.0F);
+        return state_bytes(boxes);
+    };
+    EXPECT_EQ(run(DEFAULT_GPU_OPTIMIZATIONS), run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::PUSHED_CONTACT_CACHE)))
+        << "the pushed contacts' cache keeps the anchors every manifold's cache keeps";
+    EXPECT_TRUE(take_validation_messages().empty());
+}
+
+TEST_P(GpuXpbdRigidTest, TheContactCacheSortsOnlyThePushedContacts)
+{
+    // PUSHED_CONTACT_CACHE: 600 balls 5 cm apart flying together at 20 m/s without gravity (thousands of speculative
+    // manifolds between neighbors, none pushing: more than GPU_XPBD_RANK_SORT_LIMIT) beside a box pressed into the floor (one
+    // that pushes): the next step's cache sorts the one contact that pushed (one pass) instead of every manifold (radix
+    // passes) — fewer dispatches (traced builds) — and the balls fly as with the full cache (within a micrometer: no contact
+    // acts).
+    const auto run = [&](GpuOptimization optimizations, double& dispatches) {
+        Scene world = scene({.gravity = {.y = -STANDARD_GRAVITY}}, optimizations);
+        world.add({.kind = BodyKind::STATIC, .pose = {.position = {.x = -20.0F, .y = -0.5F}}}, {.shape = box_shape({.x = 2, .y = 0.5F, .z = 2})});
+        world.add({.pose = {.position = {.x = -20.0F, .y = 0.249F}}}, {.shape = box_shape({.x = 0.25F, .y = 0.25F, .z = 0.25F})});
+        std::vector<RigidBody*> balls;
+        const std::shared_ptr<const Shape> ball = make_shape(SphereShape{.radius = 0.1F});
+        for (int layer = 0; layer < 6; ++layer)
+        {
+            for (int row = 0; row < 10; ++row)
+            {
+                for (int column = 0; column < 10; ++column)
+                {
+                    const Vector3 position{.x = 0.25F * static_cast<float>(column), .y = 20.0F + 0.25F * static_cast<float>(layer), .z = 0.25F * static_cast<float>(row)};
+                    balls.push_back(&world.add({.pose = {.position = position}, .linear_velocity = {.x = 20.0F}, .gravity_scale = 0.0F}, {.shape = ball}));
+                }
+            }
+        }
+        const std::unique_ptr<gfx::profiler::Profiler> recorder = gfx::profiler::create_profiler();
+        gfx::profiler::set_current_profiler(recorder.get());
+        const gfx::profiler::SessionHandle session = recorder->create_session({.name = "pushed contact cache"});
+        for (int step = 0; step < 20; ++step)
+        {
+            recorder->begin_frame(session);
+            world.world->step(STEP);
+            (void)recorder->end_frame(session);
+        }
+        const gfx::profiler::Trace trace = recorder->finalize_session(session);
+        gfx::profiler::set_current_profiler(nullptr);
+        for (const gfx::profiler::TraceFrame& frame : trace.frames())
+        {
+            for (const gfx::profiler::TraceSample& sample : frame.samples)
+            {
+                dispatches += trace.sites()[sample.site].name == "GPU XPBD: dispatches" ? sample.number() : 0.0;
+            }
+        }
+        std::vector<RigidBodyState> states;
+        for (const RigidBody* body : balls)
+        {
+            states.push_back(body->state());
+        }
+        return states;
+    };
+    double pushed_dispatches = 0.0;
+    double every_dispatches = 0.0;
+    const std::vector<RigidBodyState> pushed = run(DEFAULT_GPU_OPTIMIZATIONS, pushed_dispatches);
+    const std::vector<RigidBodyState> every = run(without(DEFAULT_GPU_OPTIMIZATIONS, GpuOptimization::PUSHED_CONTACT_CACHE), every_dispatches);
+    float largest = 0.0F;
+    for (std::size_t index = 0; index < pushed.size(); ++index)
+    {
+        ASSERT_TRUE(finite(pushed[index]));
+        largest = std::max(largest, gfx::length(pushed[index].pose.position - every[index].pose.position));
+    }
+    EXPECT_LT(largest, 1.0e-6F) << "the balls fly as with the full cache";
+    if constexpr (gfx::profiler::PROFILER_ENABLED)
+    {
+        EXPECT_LT(pushed_dispatches + 8.0 * 19.0, every_dispatches)
+            << pushed_dispatches << " dispatches in the steps, against " << every_dispatches << " with every manifold sorted";
     }
     EXPECT_TRUE(take_validation_messages().empty());
 }

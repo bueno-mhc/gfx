@@ -2,7 +2,8 @@
 // The keys of the contact cache's sort (GpuNarrowPhase::match): manifolds ordered by their pair (first instance, then
 // second) by two stable sorts, the second word first. Without gathering, each manifold's second instance with its index;
 // gathering, the first instance of the manifold each sorted index names. A manifold without points has the largest keys
-// (INVALID_INDEX): it sorts last and matches nothing.
+// (empty_key: INVALID_INDEX, or the instance count when the sorts take its bits only): it sorts last and matches nothing.
+// With a list (listed_buffer), the first pass reads the listed slots (the values are the slots, gathered by the second).
 #extension GL_GOOGLE_include_directive : require
 #include "primitives.glsl"
 
@@ -17,6 +18,9 @@ layout(push_constant) uniform Push
     uint count_buffer;
     uint count_word;
     uint gather;
+    uint listed_buffer;
+    uint listed_first;
+    uint empty_key;
 } push;
 
 void main()
@@ -27,12 +31,14 @@ void main()
     {
         return;
     }
-    const uint manifold = push.gather != 0U ? gpu_words[push.order_buffer].words[index] : index;
+    const uint manifold = push.gather != 0U         ? gpu_words[push.order_buffer].words[index]
+                          : push.listed_buffer != INVALID_INDEX ? gpu_words[push.listed_buffer].words[push.listed_first + index]
+                                                              : index;
     const uvec4 header = gpu_word_vectors[push.manifolds_buffer].values[11U * (push.manifolds_first + manifold)];
-    const uint key = header.z == 0U ? INVALID_INDEX : push.gather != 0U ? header.x : header.y;
+    const uint key = header.z == 0U ? push.empty_key : push.gather != 0U ? header.x : header.y;
     gpu_words[push.keys_buffer].words[index] = key;
     if (push.gather == 0U)
     {
-        gpu_words[push.values_buffer].words[index] = index;
+        gpu_words[push.values_buffer].words[index] = manifold;
     }
 }

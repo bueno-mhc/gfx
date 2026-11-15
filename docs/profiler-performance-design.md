@@ -1317,6 +1317,55 @@ this one, 200 steps awake): the chains 1.38 → 1.20 ms (size 1), 2.58 → 1.70 
 **Results**: 1 591 tests (+ 4 `ChainsOfLinksSwingAtTheirSpeedInEitherMode`, + 4 `BodiesMovingTogetherAddNoColors`, + 4
 `NewColorsJoinTheOverflowSetInsteadOfSpareColors`): Debug 1 591 of 1 591 (579 s), Release 1 591 of 1 591 (547 s).
 
+### Follow-up after PF6: the contact cache (2026-11-15)
+
+Asked (user, 2026-11-15): "Rebuild the cache" — the contact cache, which the chains' follow-up named as their largest
+remaining cost (committed by the user as d46b54b).
+
+**Before**: each step's detection sorted the previous step's manifold slots twice by pair (`GpuNarrowPhase::match`: keys of 32
+bits, four radix passes per sort; empty manifolds keyed 0xFFFFFFFF) — 18 800 slots for the size-8 chains, of which 8 touched:
+0.25 ms of GPU work and its share of 13.4 radix passes a step. A predecessor's friction anchors are used only when static friction
+held them (w = 0), and a point that never pushed keeps w = 0: the cache passed on the anchors a speculative contact was first found
+with. Measured (temporary test, 3 s, box resting on a 20/28/30° slope, μ 0.6): the same creep to the micrometer whether anchors
+were kept by the old cache, by the new one, or never (0.84 mm at 28°, 1.21 mm at 30°): a resting body is held within each step and
+leaves it with no velocity. 87 friction, rest and stack tests passed with no anchor kept at all.
+
+**Changed:**
+1. **Keys of the instances' bits** (every world, the same bits): `GpuMatchOptions` (exported with GpuNarrowPhase; match()'s new last
+   parameter, defaulting to the old behavior) `instance_count`: `contact_keys` gives an empty manifold the instance count as its
+   key (after every pair, as 0xFFFFFFFF) and both sorts take `bit_width(instance_count)` bits (14 for the chains: two radix passes
+   instead of four; 13.4 → 9.2 radix passes a step).
+2. **`GpuOptimization::PUSHED_CONTACT_CACHE`** (1 << 14, default): `contacts_report.comp` mode 0 with argument bit 0 also flags each
+   slot whose contact pushed (CONTACT_PUSHED; particles' too), compacted into `held_slots[parity]` (GpuSolverParameters 376 B:
+   `held_flags`, `held_slots`; GpuSolverCounts 104 B: `held`), its count read back (`previous_held`); the next step matches against
+   that list (`GpuMatchOptions::listed`: `contact_keys` reads the listed slots, the values are slots) with its exact count as the
+   maximum — the one-pass rank sort below `GPU_XPBD_RANK_SORT_LIMIT` — and keeps no anchor when nothing pushed (`keeps_anchors`
+   false: no cache at all). Two lists by parity: a replay matches against the previous step's.
+
+**Tests**: `GpuNarrowPhaseTest.TheCacheFindsEachPointsPredecessor` extended (the instance count gives the same predecessors bit for
+bit; a list of every second non-empty slot gives the reference's predecessors among those only); `GpuXpbdRigidTest.
+PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached` (× 4: four boxes pressed 1 mm into slopes push every step, so the list
+names every manifold the full cache sorts: the same bits; fails when no list is kept — checked);
+`GpuXpbdRigidTest.TheContactCacheSortsOnlyThePushedContacts` (× 4: 600 balls flying together beside one resting box: fewer
+dispatches, the balls within a micrometer; fails when every active contact is listed — 88 more dispatches instead of fewer,
+checked; 216 balls were too few: the full cache's slots stayed under the rank sort's limit).
+
+**Measured** (comparison; d46b54b built in build/head, alternated; PERFORMANCE.md §6.2): the size-8 chains 2.32 → 2.19 ms
+(−4 to −8 % in each of 5 rounds; Box3D ÷ GPU per round 1.09–1.12 → 1.17–1.18 when Box3D stepped in 2.2 ms, 1.31–1.37 → 1.43–1.48
+when it stepped in 3.1–3.2), size 4 1.81 → 1.68 (0.86×), size 1 1.11 → 1.10 (0.74×); pile, wall, pyramid and cloth the same or
+faster at sizes 1 and 8 (wall 8: 8.25 → 7.70, cloth 8: 4.14 → 3.97). The size-1 pyramid looked 70 % slower until the order of the
+runs was swapped: its GPU step is bimodal (about 3.9 or 6.7 ms) whichever build runs.
+
+**Deviations (for validation).**
+1. A new default GPU optimization that changes bits (`PUSHED_CONTACT_CACHE`).
+2. `GpuNarrowPhase::match()` (public, gfx.physics.gpu_xpbd) gained a defaulted `GpuMatchOptions` parameter.
+3. The chains are faster than Box3D at size 8 only; at sizes 1 and 4 (0.74×, 0.86×) the pass count still decides.
+4. The scratch worktree build/head now holds d46b54b.
+
+**Results**: 1 599 tests (+ 4 `PushedContactsKeepTheirAnchorsAsWithEveryManifoldCached`, + 4
+`TheContactCacheSortsOnlyThePushedContacts`): Debug 1 599 of 1 599 (836 s), Release 1 599 of 1 599 (755 s). The first Debug build
+stopped once on "failed to write compiled module: File exists" (physics_benchmark.scenes) and passed when run again.
+
 ---
 
 ## C. The API as proposed (for validation, not final code)

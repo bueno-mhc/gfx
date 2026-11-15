@@ -159,6 +159,9 @@ struct KeysPush
     std::uint32_t count_buffer = INVALID_BINDLESS_INDEX;
     std::uint32_t count_word = 0;
     std::uint32_t gather = 0;
+    std::uint32_t listed_buffer = INVALID_BINDLESS_INDEX;
+    std::uint32_t listed_first = 0;
+    std::uint32_t empty_key = 0xFFFFFFFFU;
 };
 
 struct MatchPush
@@ -867,9 +870,12 @@ GpuNarrowPhase::match(ComputeRecorder& recorder,
                       const GpuCount& previous_count,
                       GpuSpan current,
                       const GpuCount& count,
-                      GpuSpan predecessors)
+                      GpuSpan predecessors,
+                      const GpuMatchOptions& options)
 {
-    // The previous manifolds sorted by pair: by second instance, then (stable) by first instance gathered in that order.
+    // The previous manifolds (or the listed ones) sorted by pair: by second instance, then (stable) by first instance
+    // gathered in that order; keys of the instance count's bits when it is known (empty manifolds sort at it, after every
+    // pair, as at 0xFFFFFFFF: the same order).
     const State& state = *m_state;
     if (previous_count.maximum > state.maximum_manifolds)
     {
@@ -889,19 +895,24 @@ GpuNarrowPhase::match(ComputeRecorder& recorder,
                       .maximum = previous_count.maximum,
                       .count_buffer = previous_count.word.buffer,
                       .count_word = previous_count.word.first,
-                      .gather = 0};
+                      .gather = 0,
+                      .listed_buffer = options.listed.buffer,
+                      .listed_first = options.listed.first,
+                      .empty_key = options.instance_count > 0 ? options.instance_count : 0xFFFFFFFFU};
+    const std::uint32_t key_bits =
+        options.instance_count > 0 ? std::max(static_cast<std::uint32_t>(std::bit_width(options.instance_count)), 1U) : 32U;
     PROFILE_GPU_SCOPE("contact cache", recorder, state.passes);
     {
         PROFILE_GPU_SCOPE("contact_keys", recorder, state.passes);
         record_pass(recorder, *state.keys, key_push, previous_workgroups);
     }
-    state.primitives.sort(recorder, {.buffer = keys}, {.buffer = values}, {.buffer = sorted_keys}, {.buffer = order}, previous_count);
+    state.primitives.sort(recorder, {.buffer = keys}, {.buffer = values}, {.buffer = sorted_keys}, {.buffer = order}, previous_count, key_bits);
     key_push.gather = 1;
     {
         PROFILE_GPU_SCOPE("contact_keys", recorder, state.passes);
         record_pass(recorder, *state.keys, key_push, previous_workgroups);
     }
-    state.primitives.sort(recorder, {.buffer = keys}, {.buffer = order}, {.buffer = sorted_keys}, {.buffer = values}, previous_count);
+    state.primitives.sort(recorder, {.buffer = keys}, {.buffer = order}, {.buffer = sorted_keys}, {.buffer = values}, previous_count, key_bits);
 
     // Each current point's predecessor.
     PROFILE_GPU_SCOPE("contact_match", recorder, state.passes);

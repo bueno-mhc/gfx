@@ -1676,7 +1676,8 @@ flowchart LR
     subgraph detect_stage["detection"]
         direction TB
         reach["REACH_BOXES<br/>boxes grown by each<br/>collider's own reach"] --> refit["BVH_REFIT<br/>the moving tree refit<br/>for 30 steps"]
-        refit --> reachable["REACHABLE_CONTACTS<br/>contacts that cannot meet<br/>in the step: no constraints"]
+        refit --> pushed_cache["PUSHED_CONTACT_CACHE<br/>the cache sorts only<br/>contacts that pushed"]
+        pushed_cache --> reachable["REACHABLE_CONTACTS<br/>contacts that cannot meet<br/>in the step: no constraints"]
         reachable --> relative["RELATIVE_SPEED_COLORING<br/>contacts that cannot meet at<br/>their relative speed: Jacobi"]
         relative --> coloring_maxima["NODE_MAXIMA_COLORING<br/>rounds against the bodies'<br/>atomic maxima"]
     end
@@ -1699,7 +1700,8 @@ Each is a bit of `GpuOptimization` (`GpuXpbdDescription::optimizations`, all on 
 them). Most give the same bits as the baseline (tests compare them); `REACH_BOXES` and `BVH_REFIT` find the same pairs in
 another order, `RESTING_STEPS` gives the same bits for the same steps, `REACHABLE_CONTACTS` makes fewer constraints (the same
 motion), `RELATIVE_SPEED_COLORING` and `OVERFLOW_NEW_COLORS` solve some constraints in the overflow set instead of a color of
-their own (fewer colors and passes; the same motion within the solver's tolerance). Beside the flags, the framework (lazy query tree with
+their own (fewer colors and passes; the same motion within the solver's tolerance), `PUSHED_CONTACT_CACHE` keeps friction
+anchors only from contacts that pushed. Beside the flags, the framework (lazy query tree with
 fat leaves, parallel bounds and copies, swapped events, unmoved colliders' boxes kept, `gfx::SharedMutex` for the published
 snapshot) and the GPU backend's CPU side (contacts sorted by 64-bit keys and converted in place, parallel readback of bodies
 and joints, no denormal floats, each body's motion kept for the step's speculative margin, the first part submitted once the

@@ -84,6 +84,7 @@ enum CountWord : std::uint32_t
     CONTACT_COLORS,
     COLORING_ROUNDS,
     UNCOLORED,
+    HELD,
 };
 
 /// Bytes of the indirect dispatch arguments of a color key.
@@ -340,6 +341,7 @@ struct GpuConstraintSolver::State
     std::uint32_t pair_capacity = 0;
     std::uint32_t manifold_capacity = 0;
     std::uint32_t previous_capacity = 0;
+    std::uint32_t previous_held = 0;     ///< PUSHED_CONTACT_CACHE: the slots whose contact pushed in the last completed step.
     std::uint32_t recorded_colors = GPU_XPBD_INITIAL_COLORS;
     std::uint32_t recorded_joint_colors = GPU_XPBD_INITIAL_COLORS;   ///< RECORDED_PASSES_BY_USE: the joints' colors recorded.
     std::uint32_t recorded_contact_colors = GPU_XPBD_INITIAL_COLORS; ///< RECORDED_PASSES_BY_USE: the contacts' colors recorded.
@@ -419,6 +421,9 @@ struct GpuConstraintSolver::State
     GpuArray partials{"GPU physics: gather chunk sums", 2 * sizeof(GpuVector)};
     GpuArray chunk_arguments{"GPU physics: gather chunk dispatch", DISPATCH_ARGUMENTS_BYTES, BufferUsage::INDIRECT};
     GpuArray report_flags{"GPU physics: reported contacts' flags", sizeof(std::uint32_t)};
+    GpuArray held_flags{"GPU physics: pushed contacts' flags", sizeof(std::uint32_t)};
+    std::array<GpuArray, 2> held_slots{GpuArray{"GPU physics: pushed contacts", sizeof(std::uint32_t)},
+                                       GpuArray{"GPU physics: pushed contacts", sizeof(std::uint32_t)}};
     GpuArray report_indices{"GPU physics: reported contacts", sizeof(std::uint32_t)};
     GpuArray reports{"GPU physics: contact reports", sizeof(GpuContactReport)};
     GpuArray trigger_raw_pairs{"GPU physics: trigger tree pairs", sizeof(GpuPair)};
@@ -585,6 +590,13 @@ GpuConstraintSolver::record_uploads(ComputeRecorder& recorder,
     grow(state.multipliers, slots);
     grow(state.report_flags, slots);
     grow(state.report_indices, slots);
+    if (has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE))
+    {
+        // The slots whose contact pushed, by parity: the last completed step's kept (a replay matches against them).
+        grow(state.held_flags, slots);
+        grow(state.held_slots[current], slots);
+        grow(state.held_slots[previous], slots, state.previous_held);
+    }
     grow(state.reports, state.report_capacity);
     for (GpuArray* array : {&state.trigger_raw_pairs, &state.trigger_pair_flags, &state.trigger_pair_indices})
     {
@@ -720,6 +732,7 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
     const auto listed = [lists](const GpuArray& array) noexcept { return lists ? array.index() : 0U; };
     const bool maxima = has_all(state.settings.optimizations, GpuOptimization::NODE_MAXIMA_COLORING);
     const bool reach = has_all(state.settings.optimizations, GpuOptimization::REACH_BOXES);
+    const bool held = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE);
     const GpuSolverParameters parameters{
         .speculative_distance = step.speculative_distance,
         .contact_hertz = step.solver.contact_hertz,
@@ -813,6 +826,8 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
         .node_maxima = maxima ? state.node_maxima.index() : 0U,
         .maxima_coloring = maxima ? 1U : 0U,
         .reach_boxes = reach ? state.reach_boxes.index() : 0U,
+        .held_flags = held ? state.held_flags.index() : 0U,
+        .held_slots = held ? state.held_slots[current].index() : 0U,
     };
     state.parameters = parameters;
     state.collision = step.collision;
@@ -895,13 +910,18 @@ GpuConstraintSolver::record_detection(ComputeRecorder& recorder,
                                 .total = state.count(MANIFOLD_SLOTS),
                                 .capacity = slots},
                                collision);
-    const bool keeps_anchors = step.solver.warm_starting && !step.lists_changed && state.previous_capacity > 0;
+    // The contact cache: every previous manifold, or (PUSHED_CONTACT_CACHE) the slots whose contact pushed, their count
+    // read back exactly (none: no anchors kept); keys of the instances' bits (the lists did not change: the same instances).
+    const bool pushed_cache = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE);
+    const bool keeps_anchors =
+        step.solver.warm_starting && !step.lists_changed && state.previous_capacity > 0 && (!pushed_cache || state.previous_held > 0);
     if (keeps_anchors)
     {
-        state.narrow_phase.match(recorder, span_of(state.manifolds[previous].buffer()),
-                                 {.maximum = state.previous_capacity, .word = span_of(state.counts[previous].buffer(), MANIFOLD_SLOTS)},
-                                 span_of(state.manifolds[current].buffer()), {.maximum = slots, .word = state.count(MANIFOLD_SLOTS)},
-                                 span_of(state.predecessors.buffer()));
+        const GpuCount previous_count = pushed_cache ? GpuCount{.maximum = state.previous_held, .word = span_of(state.counts[previous].buffer(), HELD)}
+                                                     : GpuCount{.maximum = state.previous_capacity, .word = span_of(state.counts[previous].buffer(), MANIFOLD_SLOTS)};
+        state.narrow_phase.match(recorder, span_of(state.manifolds[previous].buffer()), previous_count, span_of(state.manifolds[current].buffer()),
+                                 {.maximum = slots, .word = state.count(MANIFOLD_SLOTS)}, span_of(state.predecessors.buffer()),
+                                 {.instance_count = instances, .listed = pushed_cache ? span_of(state.held_slots[previous].buffer()) : GpuSpan{}});
     }
 
     narrow_scope.end();
@@ -1099,12 +1119,19 @@ GpuConstraintSolver::record_sleep(ComputeRecorder& recorder)
 void
 GpuConstraintSolver::record_reports(ComputeRecorder& recorder)
 {
-    // The touching contacts' slots flagged, compacted in slot order, their reports written.
+    // The touching contacts' slots flagged, compacted in slot order, their reports written; with PUSHED_CONTACT_CACHE the
+    // slots whose contact pushed flagged in the same pass and compacted for the next step's cache.
     State& state = *m_state;
+    const bool held = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE);
     PROFILE_GPU_SCOPE("contacts_report", recorder, state.passes);
-    state.pass(recorder, *state.contacts_report, 0, 0, state.manifold_capacity);
+    state.pass(recorder, *state.contacts_report, held ? 1U : 0U, 0, state.manifold_capacity);
     state.primitives.compact(recorder, span_of(state.report_flags.buffer()), {}, span_of(state.report_indices.buffer()), state.count(REPORTED),
                              {.maximum = state.manifold_capacity});
+    if (held)
+    {
+        state.primitives.compact(recorder, span_of(state.held_flags.buffer()), {}, span_of(state.held_slots[state.parity].buffer()), state.count(HELD),
+                                 {.maximum = state.manifold_capacity});
+    }
     state.pass(recorder, *state.contacts_report, 0, 1, state.report_capacity);
 }
 
@@ -1338,6 +1365,7 @@ GpuConstraintSolver::complete_step(const GpuSolverCounts& counts)
     state.recorded_joint_colors = std::min(counts.joint_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
     state.recorded_contact_colors = std::min(counts.contact_colors + headroom, MAXIMUM_GPU_XPBD_COLORS);
     state.recorded_rounds = std::min(counts.coloring_rounds + 2, GPU_XPBD_COLORING_ROUNDS);
+    state.previous_held = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE) ? counts.held : 0;
     if (state.refitting)
     {
         ++state.tree_age;

@@ -5,7 +5,8 @@
 // are no colliders of the interface). Mode 0, one invocation per manifold slot: a flag per slot (compacted after) and the
 // touching points counted (particles' too: the statistics). Mode 1, one per compacted slot within the reports'
 // capacity: a GpuContactReport — the colliders' slots, the fastest approach of its points at the step's start, then the
-// manifold as the narrow phase wrote it.
+// manifold as the narrow phase wrote it. With argument bit 0 (GpuOptimization::PUSHED_CONTACT_CACHE), mode 0 also flags
+// each slot whose contact pushed (particles' too: their anchors are kept as well), compacted for the next step's cache.
 #extension GL_GOOGLE_include_directive : require
 #include "solver.glsl"
 
@@ -24,12 +25,14 @@ void main()
             return;
         }
         uint flag = 0U;
+        uint pushed = 0U;
         if (index < min(count_word(COUNT_SLOTS), SOLVER.manifold_capacity))
         {
             const uint base = contact_base(index);
             const uvec4 header = gpu_word_vectors[SOLVER.contacts].values[base];
             if ((header.w & CONTACT_ACTIVE) != 0U)
             {
+                pushed = (header.w & CONTACT_PUSHED) != 0U ? 1U : 0U;
                 bool touching = (header.w & CONTACT_PUSHED) != 0U;
                 for (uint point = 0U; point < header.z; ++point)
                 {
@@ -46,6 +49,10 @@ void main()
             }
         }
         gpu_words[SOLVER.report_flags].words[index] = flag;
+        if ((push.argument & 1U) != 0U)
+        {
+            gpu_words[SOLVER.held_flags].words[index] = pushed;
+        }
         return;
     }
 
