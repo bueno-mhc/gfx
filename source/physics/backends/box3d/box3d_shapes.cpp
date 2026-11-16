@@ -140,7 +140,8 @@ Box3dBackend::check_shape(const Shape& shape,
 auto
 Box3dBackend::shape_definition(const ColliderDescription& description) const -> b3ShapeDef
 {
-    // Every shape can be seen by triggers and reports its contacts (the backend keeps the touching pairs); hits only when asked.
+    // Every shape can be seen by triggers and reports its contacts (the backend keeps the touching pairs) unless the world
+    // reports none; hits only when asked.
     b3ShapeDef definition = b3DefaultShapeDef();
     definition.baseMaterial.friction = description.material.friction.dynamic_coefficient;
     definition.baseMaterial.restitution = description.material.restitution;
@@ -148,8 +149,8 @@ Box3dBackend::shape_definition(const ColliderDescription& description) const -> 
     definition.density = description.density;
     definition.filter = to_box3d(description.filter);
     definition.enableSensorEvents = true;
-    definition.enableContactEvents = true;
-    definition.enableHitEvents = description.contact_events;
+    definition.enableContactEvents = m_report_contacts;
+    definition.enableHitEvents = m_report_contacts && description.contact_events;
     return definition;
 }
 

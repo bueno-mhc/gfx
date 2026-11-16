@@ -39,6 +39,15 @@
             "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${workspaceFolder}"] }
         },
         {
+            // The physics comparison in the Release build (build/release; no profiler), for runs measured without a
+            // debugger: "gfx: Large scale at 60 FPS (Release, no debugger)" in launch.json.
+            "label": "gfx: Build Release (physics comparison)",
+            "type": "process",
+            "command": "python",
+            "args": ["${workspaceFolder}/build.py", "--build-type", "Release", "--target", "gfx_physics_comparison"],
+            "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${workspaceFolder}"] }
+        },
+        {
             "label": "gfx: Rebuild Debug (clean first)",
             "type": "process",
             "command": "cmake",

@@ -395,6 +395,13 @@ second":
    its steps. Frames now wait for nothing: while a step runs they draw the last finished one (its interpolation held at
    the end), and the next step begins on the first frame after it finishes (`PhysicsWorld::is_step_finished()`, new: whether
    `wait_step()` would wait). The sandbox, whose picking needs the world between steps, still waits each frame.
+4. *Frames drove the steps.* A step began only when a frame called `advance()`: frames held back by their presentation held
+   the world back (6 % of real time with the screen locked, presentations blocked for half a second at a time), and a shot
+   waited for the step in flight. In real time the comparison's worlds now step on threads of their own
+   (`Scene::start_stepping()`: each step begun when due once the last has finished, the time it cannot step dropped; frames
+   take the scene's lock only to draw and to shoot, interpolating by the time since the last step), and a shot is recorded for
+   the next step without waiting. With the screen locked (frames at 1.9 a second), the GPU world kept 100 % of real time
+   (9 196 steps in 153 s, 10.2 ms each) with a shot every 20 frames.
 
 Medians of 900 frames each with the display unthrottled (240 Hz), the RTX 5060 (GPU solver 4/3/1), Box3D on 16 scheduler
 threads, after the three fixes:
@@ -414,7 +421,32 @@ the frame's time, it had kept 47 %.
 
 A size-8 GPU step: about 9.2 ms of GPU work (the solver 5.2, the narrow phase 1.4, the contact reports 1.2, copying them back
 1.0, the broad phase 0.4) and 2.7 ms of CPU after it sorting and converting its 69 000 touching contacts into the interface's
-records, which nothing reads here (§7, follow-up 2).
+records, which nothing reads here.
+
+**Contacts not reported (2026-11-15).** `PhysicsWorldDescription::report_contacts` (true by default): false, a step gathers no
+contact and makes no contact event, `contacts_of()` answers UNSUPPORTED, and the simulation is the same (the conformance suite
+compares both on every backend). The GPU backend keeps the flag pass its contact cache needs and skips the reports, their copy
+and their conversion; Box3D's shapes make no contact events and the wrapper captures nothing; the reference backend keeps its
+touching pairs (they wake what rested on a destroyed collider) and builds no list. Without touching pairs the GPU backend wakes
+the dynamic bodies within reach of a destroyed collider's last box, which the framework now hands to the backends with the
+destroy edit. The comparison's `--contacts off`; medians, RTX 5060 and 16 Box3D threads, the world on its own thread:
+
+| Pyramid size | GPU, contacts on | GPU, off | Box3D, on | Box3D, off |
+|---|---|---|---|---|
+| 6 (12 529 boxes) | 9.80 ms (100 %) | 6.74 ms (99 %) | 28.2 ms (56 %) | 9.25 ms (99 %) |
+| 8 (16 206 boxes) | 12.42 ms (99 %) | 8.53 ms (99 %) | about 44 ms (38 %) | — |
+| 10 (20 540 boxes) | — | 10.7 ms (100 %) | — | 14.8 ms (97 %) |
+| 12 (25 585 boxes) | — | 13.0 ms (99 %) | — | 20.5 ms (73 %) |
+| 14 (29 370 boxes) | — | 15.8 ms (93 %) | — | 25.4 ms (57 %) |
+
+Two thirds of Box3D's step at size 6 were the wrapper converting Box3D's 285 000 contact points (§7, follow-up 3): without
+reports, the GPU world steps 1.4–1.6× faster than Box3D's from size 6, and Box3D falls behind real time from size 12. The
+launch configuration asks for contacts on (what an application reading them pays) or off.
+
+**A limit found on the way**: kept awake (`--no-sleep`), the GPU world's size-8 pyramid holds for about 45 s, then its top
+sags (17.7 m high at 45 s, 15.7 m at 59 s, 12.7 m at two minutes) whatever the solver settings tried (4/3/1, 4/3/2, 4/3/8,
+8/2/1: 12.7–14.5 m), where Box3D's stands; asleep, it never moves. Tall stacks are XPBD's known weakness at these iteration
+counts (§7, follow-up 6).
 
 ## 7. Follow-ups
 
@@ -423,16 +455,17 @@ records, which nothing reads here (§7, follow-up 2).
    was measured and lost 1.6–6.5× (§5): the passes are bound by their work, spread over every multiprocessor, more than by
    their dispatches. What keeps the chains slower than Box3D at sizes 1 and 4 (§6.2) is the detection's passes and the CPU
    around the GPU's work.
-2. **Contacts reported only when read**: at the large-scale configuration's size 8 (§6.3) reporting the 69 000 touching
-   contacts costs about 4.7 of a step's 12.4 ms (the GPU's report pass 1.2 ms, copying the reports back 1.0 ms, sorting and
-   converting them on the CPU 2.7 ms) though nothing reads them; reporting only the colliders that ask for contact events, and
-   the rest when `contacts_of()` is first called after a step, would remove most of it.
+2. **Contacts reported on demand**: `report_contacts` (§6.3) turns reporting off for a whole world; reporting only the
+   colliders that ask for contact events, and the rest when `contacts_of()` is first called after a step, would serve worlds
+   that read some contacts.
 3. **The Box3D wrapper's contact capture** (`box3d_world.cpp`): the GPU backend's sorted, parallel conversion applied to
    Box3D's touching pairs.
 4. **Debug builds with the validation layers**: reusing recorded substeps (the timestamps written by a replay need slots of
    their own).
 5. **Queries on the GPU**: one submission and its wait per query (0.14 ms on the RTX 5060, 0.33–0.50 ms on the Intel GPU):
    a batch query API.
+6. **Tall stacks kept awake on the GPU** sag after tens of seconds (§6.3): stacking stability (shock propagation, a rest
+   stabilization of resting contacts, or more position iterations where stacks are deep).
 
 ## 8. Reproducing
 
@@ -442,6 +475,7 @@ build/profile/benchmarks/physics/gfx_physics_benchmark.exe --output build/profil
 build/profile/benchmarks/physics/gfx_physics_benchmark.exe --sleep --output build/profile/benchmark_sleep
 build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --scene pile --size 4 --no-sleep
 build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --single gpu_xpbd --scene pyramid --size 6 --no-sleep --real-time
+build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --single box3d --scene pyramid --size 12 --no-sleep --real-time --contacts off
 ```
 
 The benchmark takes about 9 minutes per pass (7 scenes × 2 backends × 1 100 steps). `--record-baseline <directory>` and

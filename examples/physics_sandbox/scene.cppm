@@ -244,6 +244,34 @@ public:
     /// @brief Paused: completes the step in flight, then begins exactly one step (drawn once completed).
     void step_once();
 
+    /// @brief Real time on a thread of its own: from now on the scene's thread steps the world 60 times a simulated second
+    ///        whatever the frames do — each step begun when it is due and the last has finished, the time it cannot step
+    ///        dropped (slower than real time) — and frames only draw. Until stop_stepping(), what a frame reads or changes of
+    ///        the scene (its bodies, drawn poses, shots) is done holding lock(), and advance(), finish(), hold() and
+    ///        step_once() are not used. A frame stalled by its presentation (a locked screen, a slow display) no longer
+    ///        stalls the simulation, nor a slow step the frames.
+    void start_stepping();
+
+    /// @brief Ends the scene's thread after the step it has in flight (none is left running).
+    void stop_stepping();
+
+    /// @brief Whether the scene's thread steps it (start_stepping()).
+    [[nodiscard]] auto steps_itself() const noexcept -> bool
+    {
+        return m_stepper.joinable();
+    }
+
+    /// @brief The lock under which the scene's thread begins a step and takes its poses: held by a frame while it reads
+    ///        or changes the scene the thread steps.
+    [[nodiscard]] auto lock() -> std::unique_lock<std::mutex>
+    {
+        return std::unique_lock{m_mutex};
+    }
+
+    /// @brief While the scene steps itself: the drawn poses' interpolation for this moment (the time since its last
+    ///        completed step), called holding lock().
+    void update_drawn_time();
+
     /// @brief Where @p body is drawn: between its last two completed poses.
     [[nodiscard]] auto drawn_pose(const SceneBody& body) const noexcept -> gfx::Transform;
 
@@ -293,6 +321,9 @@ private:
     double m_accumulator = 0.0;
     std::uint64_t m_dropped_steps = 0;
     float m_alpha = 0.0F;
+    std::mutex m_mutex{};                                  ///< start_stepping(): the scene's data between its thread and frames.
+    std::chrono::steady_clock::time_point m_captured_at{}; ///< start_stepping(): when the last completed step's poses were taken.
+    std::jthread m_stepper{};                              ///< start_stepping()'s thread; last: it stops before anything goes.
 };
 
 /// The showcase's bodies a script points at.

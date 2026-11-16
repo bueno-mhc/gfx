@@ -181,6 +181,9 @@ struct CreateCollider
 struct DestroyCollider
 {
     ColliderHandle collider{};
+    Aabb bounds = Aabb::empty(); ///< Its box after the last completed step (empty if made since): set by the framework when it
+                                 ///< applies the edit to the records, for backends that wake what rested on it without
+                                 ///< tracking touching contacts (PhysicsWorldDescription::report_contacts false).
 };
 
 /// @brief Collider::set_pose().

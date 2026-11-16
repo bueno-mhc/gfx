@@ -373,6 +373,11 @@ SteppedWorld::contacts_of(RigidBodyHandle body,
         return std::unexpected(failure(QueryFailureKind::STEP_IN_PROGRESS, OPERATION, "a step is running", backend(), handle()));
     }
     const WorldSnapshot& published = m_shared->published;
+    if (!published.configuration.report_contacts)
+    {
+        return std::unexpected(failure(QueryFailureKind::UNSUPPORTED, OPERATION, "the world reports no contacts (PhysicsWorldDescription::report_contacts is false)",
+                                       backend(), handle()));
+    }
     if (find(published, body) == nullptr)
     {
         QueryFailure invalid = failure(QueryFailureKind::INVALID_HANDLE, OPERATION, "the body is not in the last completed step", backend(), handle());

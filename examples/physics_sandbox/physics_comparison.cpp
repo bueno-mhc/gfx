@@ -2,9 +2,9 @@
 // the GPU backend (XPBD in compute shaders) on the right by default — stepped and drawn side by side with one camera, each
 // step's wall time measured and plotted. By default the worlds step in lockstep, one after the other: each frame, the
 // left world takes one step, then the right one, so both show the same simulated time and neither step shares the
-// processor with the other (their times compare). With --real-time, each world advances by the real time a frame takes,
-// both at once, as an application would run it: the slower one falls behind (it drops the steps it cannot catch up), and
-// a frame never waits for a step still running (it draws the last finished one: frames follow the display).
+// processor with the other (their times compare). With --real-time, each world steps on its own thread, 60 times a
+// simulated second, as an application would run it: the slower one falls behind (it drops the steps it cannot catch up),
+// and frames only draw the last finished steps (frames follow the display, worlds their own clock).
 // With --single, one world alone fills the window: a backend's frame rate on a large scene, as an application would see it.
 //
 // Mouse: right drag turns the camera, middle drag pans it, the wheel zooms. Keys: Space shoots a ball into both worlds
@@ -13,9 +13,9 @@
 //
 // Usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>]
 //                               [--left box3d|reference|gpu_xpbd] [--right box3d|reference|gpu_xpbd]
-//                               [--single box3d|reference|gpu_xpbd] [--real-time]
+//                               [--single box3d|reference|gpu_xpbd] [--real-time] [--contacts on|off]
 //                               [--no-sleep] [--gpu-solver S/P/V] [--gpu-optimizations "A | B" | NONE] [--device <index>]
-//                               [--threads <count>] [--frames <count>] [--validation]
+//                               [--threads <count>] [--frames <count>] [--shoot-every <frames>] [--validation]
 //                               [--trace <file.json>] [--capture <file.ppm>] [--capture-frame <index>]
 //   --scene S      the scene (pyramid by default): a square pyramid of boxes, a pile poured into a bin, a brick wall hit
 //                  by a wrecking ball, rows of swinging chains, a large cloth
@@ -23,8 +23,11 @@
 //   --left B       the left world's backend (Box3D by default); --right B the right one's (the GPU backend by default,
 //                  on the program's own device)
 //   --single B     one world of the backend B alone, the whole window (no comparison): its frame rate
-//   --real-time    each world advances by the real time of a frame, both at once, frames not waiting for steps still
-//                  running (default: one step each per frame)
+//   --contacts off the worlds report no contacts (PhysicsWorldDescription::report_contacts false: nothing here reads
+//                  them; --no-contacts too): every backend skips gathering them — Box3D's step is then mostly Box3D's
+//                  own (converting its contacts for the interface was two thirds of it). On by default
+//   --real-time    each world steps on its own thread in real time, frames only drawing (default: one step each per
+//                  frame)
 //   --gpu-solver S/P/V  the GPU world's solver: substeps, position iterations, velocity iterations per substep (4/3/1 by
 //                  default: one velocity pass a substep, as XPBD prescribes; the library's defaults, 4/3/8, are the
 //                  sequential-impulse solver's and cost the GPU backend most; the panel switches it). Box3D has no
@@ -35,6 +38,8 @@
 //                  still measures each backend's work (with sleep, a world at rest costs almost nothing)
 //   --frames N     closes after N frames and prints how the steps compared and the frames' times (frames per second);
 //                  the window then does not take the focus
+//   --shoot-every N  shoots a ball through the middle of the window every N frames (what Space does): the worlds and
+//                  the frames measured while they are hit
 //   --validation   enables the Vulkan validation layers; the exit code is 1 if they report an error
 //   --capture F    writes the last frame (or the one --capture-frame counts from 0) to F (binary PPM): what the window
 //                  showed, both worlds and the panel
@@ -145,6 +150,7 @@ struct Options
     physics::PhysicsBackendKind left = physics::PhysicsBackendKind::BOX3D;
     physics::PhysicsBackendKind right = physics::PhysicsBackendKind::GPU_XPBD;
     std::optional<physics::PhysicsBackendKind> single{}; ///< One world of this backend alone (--single).
+    bool report_contacts = true;                         ///< --no-contacts: false.
     Stepping stepping = Stepping::LOCKSTEP;
     bool sleep = true;
     SolverChoice gpu_solver = GPU_SOLVER_CHOICES[0];
@@ -152,6 +158,7 @@ struct Options
     std::optional<std::size_t> physical_device{};
     std::uint32_t threads = std::max(1U, std::thread::hardware_concurrency() / 2U);
     std::optional<std::uint64_t> frames{};
+    std::optional<std::uint64_t> shoot_every{};
     bool validation = false;
     std::optional<std::string> trace{};
     std::optional<std::string> capture{};
@@ -255,6 +262,20 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.sleep = false;
         }
+        else if (argument == "--no-contacts")
+        {
+            options.report_contacts = false;
+        }
+        else if (argument == "--contacts" && has_value)
+        {
+            const std::string_view value = arguments[++index];
+            if (value != "on" && value != "off")
+            {
+                std::println(std::cerr, "--contacts needs on or off: '{}'", value);
+                return std::nullopt;
+            }
+            options.report_contacts = value == "on";
+        }
         else if (argument == "--gpu-solver" && has_value)
         {
             // S/P/V: three positive counts (velocity and substeps at least 1).
@@ -320,6 +341,10 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         {
             options.frames = std::stoull(arguments[++index]);
         }
+        else if (argument == "--shoot-every" && has_value)
+        {
+            options.shoot_every = std::max<std::uint64_t>(1, std::stoull(arguments[++index]));
+        }
         else if (argument == "--validation")
         {
             options.validation = true;
@@ -327,9 +352,9 @@ parse_options(std::span<char* const> arguments) -> std::optional<Options>
         else
         {
             std::println(std::cerr, "usage: gfx_physics_comparison [--backend sdl3|glfw] [--scene pyramid|pile|wrecking|chains|cloth] [--size <factor>] "
-                                    "[--left <physics backend>] [--right <physics backend>] [--single <physics backend>] [--real-time] [--no-sleep] "
+                                    "[--left <physics backend>] [--right <physics backend>] [--single <physics backend>] [--real-time] [--no-sleep] [--contacts on|off] "
                                     "[--gpu-solver S/P/V] [--device <index>] "
-                                    "[--threads <count>] [--frames <count>] [--validation] [--trace <file.json>] [--capture <file.ppm>] "
+                                    "[--threads <count>] [--frames <count>] [--shoot-every <frames>] [--validation] [--trace <file.json>] [--capture <file.ppm>] "
                                     "[--capture-frame <index>]");
             return std::nullopt;
         }
@@ -512,12 +537,18 @@ struct Side
     }
 };
 
-/// Turns sleeping on or off in @p scene's world (after its step in flight); turned off, every dynamic body is woken.
+/// Turns sleeping on or off in @p scene's world (after its step in flight; recorded for the next step when the scene steps
+/// itself); turned off, every dynamic body is woken.
 void
 set_sleeping(Scene& scene,
              bool enabled)
 {
-    scene.finish();
+    const bool own_thread = scene.steps_itself();
+    if (!own_thread)
+    {
+        scene.finish();
+    }
+    const std::unique_lock<std::mutex> lock = own_thread ? scene.lock() : std::unique_lock<std::mutex>{};
     physics::SleepDescription sleep = scene.world().description().sleep;
     sleep.enabled = enabled;
     scene.world().set_sleep_description(sleep);
@@ -533,12 +564,16 @@ set_sleeping(Scene& scene,
     }
 }
 
-/// Gives @p scene's world the solver settings of @p choice (after its step in flight), the rest of its solver unchanged.
+/// Gives @p scene's world the solver settings of @p choice (after its step in flight; for the next step when the scene steps
+/// itself), the rest of its solver unchanged.
 void
 set_solver(Scene& scene,
            const SolverChoice& choice)
 {
-    scene.finish();
+    if (!scene.steps_itself())
+    {
+        scene.finish();
+    }
     physics::SolverDescription solver = scene.world().description().solver;
     solver.sub_steps = choice.sub_steps;
     solver.position_iterations = choice.position_iterations;
@@ -701,7 +736,7 @@ comparison_panel(gfx::ui::UiFrame& frame,
         {
             stepping = Stepping::REAL_TIME;
         }
-        frame.item_tooltip("each world advances by the frame's real time, both at once: the slower one falls behind");
+        frame.item_tooltip("each world steps on its own thread, 60 times a simulated second, both at once: the slower one falls behind");
         frame.same_line();
         static_cast<void>(frame.checkbox("sleeping", sleeping));
         frame.item_tooltip("off: resting bodies keep being simulated (a world at rest then still measures each backend's work)");
@@ -735,13 +770,21 @@ comparison_panel(gfx::ui::UiFrame& frame,
         for (Side& side : sides)
         {
             const physics::StepStatistics step = side.scene->statistics();
-            frame.text("{}: {:.2f} ms a step (mean {:.2f}), {} awake, {} contacts", backend_label(side.backend), step.wall_seconds * 1000.0,
-                       side.recent_mean(), step.awake_bodies, step.contacts);
+            if (side.scene->world().description().report_contacts)
+            {
+                frame.text("{}: {:.2f} ms a step (mean {:.2f}), {} awake, {} contacts", backend_label(side.backend), step.wall_seconds * 1000.0,
+                           side.recent_mean(), step.awake_bodies, step.contacts);
+            }
+            else
+            {
+                frame.text("{}: {:.2f} ms a step (mean {:.2f}), {} awake, contacts not reported", backend_label(side.backend),
+                           step.wall_seconds * 1000.0, side.recent_mean(), step.awake_bodies);
+            }
             if (stepping == Stepping::REAL_TIME)
             {
                 frame.text("{}: {:.0f} steps a second, {:.0f} % of real time", backend_label(side.backend), side.speed / STEP, side.speed * 100.0);
-                frame.item_tooltip("the world steps 60 times a simulated second, each step begun once the last has finished; frames do not wait for "
-                                   "a step (they draw the last finished one): a world whose steps take longer than the time they simulate "
+                frame.item_tooltip("the world steps on its own thread, 60 times a simulated second, each step begun once the last has finished; "
+                                   "frames only draw the last finished steps: a world whose steps take longer than the time they simulate "
                                    "steps fewer times a second and moves in slow motion");
             }
             std::array<float, PLOTTED_STEPS> values{};
@@ -872,7 +915,10 @@ run(const Options& options) -> int
          .clip = {.reversed_depth = true, .y_axis = camera::NormalizedDeviceYAxis::DOWN}});
     CameraRig rig{camera::OrbitControllerDescription{.distance = 30.0F, .maximum_distance = 500.0F}};
     physics::ThreadTaskScheduler scheduler{options.threads};
-    const WorldFactory make_world = [&device, &options](const physics::PhysicsWorldDescription& description, physics::PhysicsBackendKind backend) {
+    const WorldFactory make_world = [&device, &options](const physics::PhysicsWorldDescription& asked, physics::PhysicsBackendKind backend) {
+        // The scene's description, reporting contacts or not (--no-contacts).
+        physics::PhysicsWorldDescription description = asked;
+        description.report_contacts = options.report_contacts;
 #if GFX_SANDBOX_GPU_XPBD
         if (backend == physics::PhysicsBackendKind::GPU_XPBD)
         {
@@ -881,7 +927,6 @@ run(const Options& options) -> int
         }
 #else
         static_cast<void>(device);
-        static_cast<void>(options);
 #endif
         return physics::create_physics_world(description, backend);
     };
@@ -899,8 +944,9 @@ run(const Options& options) -> int
     }
     const std::string placement = options.single ? std::format("{} alone", backend_label(*options.single))
                                                  : std::format("{} on the left, {} on the right", backend_label(options.left), backend_label(options.right));
-    std::println("{} window on '{}': {}, {} scheduler threads, sleeping {}, {}, GPU solver {}", host->backend(), physical_device.properties().name, placement,
-                 options.threads, options.sleep ? "on" : "off", options.stepping == Stepping::LOCKSTEP ? "lockstep" : "real time",
+    std::println("{} window on '{}': {}, {} scheduler threads, sleeping {}, {}, contacts {}, GPU solver {}", host->backend(),
+                 physical_device.properties().name, placement, options.threads, options.sleep ? "on" : "off",
+                 options.stepping == Stepping::LOCKSTEP ? "lockstep" : "real time", options.report_contacts ? "reported" : "not reported",
                  solver_label(options.gpu_solver));
 
     // A scene: built again into both worlds (the old ones finished and their meshes forgotten first).
@@ -915,6 +961,7 @@ run(const Options& options) -> int
         {
             if (side.scene != nullptr)
             {
+                side.scene->stop_stepping();
                 side.scene->finish();
             }
         }
@@ -1073,40 +1120,61 @@ run(const Options& options) -> int
         rig.update(*view_camera, commands, static_cast<float>(frame_seconds));
         view_camera->set_aspect_ratio(static_cast<float>(areas[0].width) / static_cast<float>(std::max(areas[0].height, 1U)));
 
-        // A shot into both worlds, along the ray through the pointer in whichever half it is.
-        if (!ui_wants_keyboard && frame.was_action_just_pressed("shoot"_action))
+        // A shot into both worlds, along the ray through the pointer in whichever half it is (--shoot-every: through the
+        // middle of the first area).
+        const bool scripted_shot = options.shoot_every && presented > 0 && presented % *options.shoot_every == 0;
+        if (scripted_shot || (!ui_wants_keyboard && frame.was_action_just_pressed("shoot"_action)))
         {
-            const gfx::Rectangle& area = commands.pointer.x >= static_cast<float>(areas[1].x) ? areas[1] : areas[0];
-            const physics::Ray ray = view_camera->screen_to_world_ray(commands.pointer, {.x = static_cast<float>(area.x),
+            const gfx::Rectangle& area = scripted_shot || commands.pointer.x < static_cast<float>(areas[1].x) ? areas[0] : areas[1];
+            const gfx::Vector2 pointer = scripted_shot ? gfx::Vector2{.x = static_cast<float>(area.x) + 0.5F * static_cast<float>(area.width),
+                                                                      .y = static_cast<float>(area.y) + 0.45F * static_cast<float>(area.height)}
+                                                       : commands.pointer;
+            PROFILE_SCOPE("Comparison: shoot");
+            const physics::Ray ray = view_camera->screen_to_world_ray(pointer, {.x = static_cast<float>(area.x),
                                                                                           .y = static_cast<float>(area.y),
                                                                                           .width = static_cast<float>(area.width),
                                                                                           .height = static_cast<float>(area.height)});
             for (Side& side : sides)
             {
-                side.scene->finish();
+                // Recorded now, applied when the next step begins: the frame does not wait for a step still running.
+                const std::unique_lock<std::mutex> lock = side.scene->steps_itself() ? side.scene->lock() : std::unique_lock<std::mutex>{};
                 static_cast<void>(side.scene->shoot(ray.origin + ray.direction * 0.6F, ray.direction * SHOT_SPEED));
             }
         }
 
-        // The worlds: one step each, one after the other (lockstep), or each by the frame's time (real time); none while
+        // The worlds: one step each, one after the other (lockstep); in real time each on its own thread (frames only
+        // draw: a frame stalled by its presentation does not stall a world, nor a slow world the frames); none while
         // paused but a single step.
+        const bool own_threads = stepping == Stepping::REAL_TIME && !paused;
         const auto step = [&](Side& side) {
-            if (paused && !single_step)
+            if (own_threads)
+            {
+                side.scene->start_stepping();
+            }
+            else
+            {
+                side.scene->stop_stepping();
+            }
+            if (own_threads)
+            {
+                const std::unique_lock<std::mutex> lock = side.scene->lock();
+                side.scene->clear_events(); // the scene keeps the contact events until cleared (nothing here reads them)
+            }
+            else if (paused && !single_step)
             {
                 side.scene->hold();
             }
-            else if (stepping == Stepping::LOCKSTEP || single_step)
+            else
             {
                 side.scene->step_once();
                 side.scene->finish();
             }
-            else
-            {
-                side.scene->advance(frame_seconds);
-            }
             side.measure();
             side.track_speed(frame_seconds);
-            side.scene->clear_events(); // the scene keeps the contact events until cleared (nothing here reads them)
+            if (!own_threads)
+            {
+                side.scene->clear_events();
+            }
         };
         {
             PROFILE_SCOPE("Comparison: the left world");
@@ -1133,6 +1201,12 @@ run(const Options& options) -> int
         for (Side& side : sides)
         {
             side.renderer->begin_frame(frame_number);
+            // A scene stepping itself: drawn holding its lock, interpolated for now.
+            const std::unique_lock<std::mutex> lock = side.scene->steps_itself() ? side.scene->lock() : std::unique_lock<std::mutex>{};
+            if (lock.owns_lock())
+            {
+                side.scene->update_drawn_time();
+            }
             add_scene(*side.renderer, *side.scene, positions);
         }
 
@@ -1231,6 +1305,7 @@ run(const Options& options) -> int
     // The steps' summary: each side's wall times (after the first ten steps), and how they compare.
     for (Side& side : sides)
     {
+        side.scene->stop_stepping();
         side.scene->finish();
     }
     device->wait_idle();

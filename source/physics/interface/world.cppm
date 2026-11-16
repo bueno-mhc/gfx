@@ -158,7 +158,8 @@ public:
                                              const QueryOptions& options = {}) const noexcept -> QueryResult<ClosestPointHit> = 0;
 
     /// @brief The contacts of @p body's colliders after the last completed step, into @p output.
-    /// @return The contacts written; CAPACITY_EXCEEDED when there were more; INVALID_HANDLE if @p body names no body.
+    /// @return The contacts written; CAPACITY_EXCEEDED when there were more; INVALID_HANDLE if @p body names no body;
+    ///         UNSUPPORTED when the world reports no contacts (PhysicsWorldDescription::report_contacts false).
     [[nodiscard]] virtual auto contacts_of(RigidBodyHandle body,
                                            std::span<ContactInfo> output) const noexcept -> QueryResult<std::span<ContactInfo>> = 0;
 

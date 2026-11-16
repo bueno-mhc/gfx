@@ -321,6 +321,7 @@ private:
     b3BodyId m_ground{};
     std::unique_ptr<TaskBridge> m_tasks{};
     int m_sub_steps = 4;
+    bool m_report_contacts = true; ///< PhysicsWorldDescription::report_contacts: false, its shapes make no contact events.
     float m_sleep_threshold = 0.05F;
     std::uint64_t m_step = 0;
 

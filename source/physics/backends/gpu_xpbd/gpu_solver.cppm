@@ -397,8 +397,10 @@ public:
     void record_sleep(ComputeRecorder& recorder);
 
     /// Records the step's contact reports: the touching contacts between colliders, compacted, the first
-    /// report_capacity() of them written (the counts say how many there were).
-    void record_reports(ComputeRecorder& recorder);
+    /// report_capacity() of them written (the counts say how many there were); without @p reports (a world that
+    /// reports no contacts) only the touching points counted and, with PUSHED_CONTACT_CACHE, the pushed slots listed.
+    void record_reports(ComputeRecorder& recorder,
+                        bool reports = true);
 
     /// Reports the step's contacts again with room for @p reported of them (after a step that reported more than
     /// report_capacity(); its contacts are still on the GPU): the reports grown, the parameters rewritten.

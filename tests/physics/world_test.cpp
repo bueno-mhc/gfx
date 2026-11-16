@@ -274,6 +274,35 @@ TEST(SteppedWorldTest, EditsFromManyThreadsAreAllAppliedEachThreadInItsOrder)
 
 // ===================================================================================================== destruction
 
+TEST(SteppedWorldTest, WorldsReportingNoContactsPublishNone)
+{
+    // Two boxes overlapping: the recording backend reports their contact; a world made with report_contacts false publishes
+    // none of what it reports (no contact, no contact point) and answers contacts_of() UNSUPPORTED, naming the setting.
+    for (const bool report : {true, false})
+    {
+        auto [world, backend] = make_recording_world({.report_contacts = report});
+        std::unique_ptr<RigidBody> first = world->create_rigid_body({.kind = BodyKind::STATIC});
+        std::unique_ptr<RigidBody> second = world->create_rigid_body({.kind = BodyKind::STATIC, .pose = {.position = {.x = 0.5F}}});
+        const std::unique_ptr<Collider> first_collider = first->add_collider({.shape = sphere(0.5F)});
+        const std::unique_ptr<Collider> second_collider = second->add_collider({.shape = sphere(0.5F)});
+        world->step(STEP);
+        world->step(STEP);
+        std::array<ContactInfo, 4> storage{};
+        const QueryResult<std::span<ContactInfo>> found = world->contacts_of(first->handle(), storage);
+        if (report)
+        {
+            ASSERT_TRUE(found.has_value());
+            EXPECT_EQ(found->size(), 1U);
+            continue;
+        }
+        ASSERT_FALSE(found.has_value());
+        EXPECT_EQ(found.error().kind, QueryFailureKind::UNSUPPORTED);
+        EXPECT_TRUE(found.error().message().contains("report_contacts")) << found.error().message();
+        EXPECT_EQ(world->statistics().contacts, 0U);
+        EXPECT_TRUE(world->events().contacts.empty());
+    }
+}
+
 TEST(SteppedWorldTest, DestructionIsDeferredAndABodyTakesItsAttachmentsWithIt)
 {
     auto [world, backend] = make_recording_world();
@@ -297,6 +326,7 @@ TEST(SteppedWorldTest, DestructionIsDeferredAndABodyTakesItsAttachmentsWithIt)
     const std::vector<AppliedEdit> applied = backend->applied();
     ASSERT_EQ(applied.size(), before + 4);
     EXPECT_EQ(applied[before].kind, edit_kind<edits::DestroyCollider>());
+    EXPECT_NEAR(applied[before].value, 3.5F, 0.05F) << "the collider's box after the last step goes with the edit (the sphere's top)";
     EXPECT_EQ(applied[before + 1].kind, edit_kind<edits::DestroyTrigger>());
     EXPECT_EQ(applied[before + 2].kind, edit_kind<edits::DestroyJoint>());
     EXPECT_EQ(applied[before + 3].kind, edit_kind<edits::DestroyRigidBody>());

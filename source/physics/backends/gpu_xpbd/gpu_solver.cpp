@@ -1125,22 +1125,30 @@ GpuConstraintSolver::record_sleep(ComputeRecorder& recorder)
 }
 
 void
-GpuConstraintSolver::record_reports(ComputeRecorder& recorder)
+GpuConstraintSolver::record_reports(ComputeRecorder& recorder,
+                                    bool reports)
 {
     // The touching contacts' slots flagged, compacted in slot order, their reports written; with PUSHED_CONTACT_CACHE the
-    // slots whose contact pushed flagged in the same pass and compacted for the next step's cache.
+    // slots whose contact pushed flagged in the same pass and compacted for the next step's cache. Without reports, the
+    // flags only (the count of reported contacts stays 0).
     State& state = *m_state;
     const bool held = has_all(state.settings.optimizations, GpuOptimization::PUSHED_CONTACT_CACHE);
     PROFILE_GPU_SCOPE("contacts_report", recorder, state.passes);
     state.pass(recorder, *state.contacts_report, held ? 1U : 0U, 0, state.manifold_capacity);
-    state.primitives.compact(recorder, span_of(state.report_flags.buffer()), {}, span_of(state.report_indices.buffer()), state.count(REPORTED),
-                             {.maximum = state.manifold_capacity});
+    if (reports)
+    {
+        state.primitives.compact(recorder, span_of(state.report_flags.buffer()), {}, span_of(state.report_indices.buffer()), state.count(REPORTED),
+                                 {.maximum = state.manifold_capacity});
+    }
     if (held)
     {
         state.primitives.compact(recorder, span_of(state.held_flags.buffer()), {}, span_of(state.held_slots[state.parity].buffer()), state.count(HELD),
                                  {.maximum = state.manifold_capacity});
     }
-    state.pass(recorder, *state.contacts_report, 0, 1, state.report_capacity);
+    if (reports)
+    {
+        state.pass(recorder, *state.contacts_report, 0, 1, state.report_capacity);
+    }
 }
 
 void

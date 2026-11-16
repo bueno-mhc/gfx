@@ -1317,7 +1317,24 @@ Original hard requirements (from the user's initial specification):
   time. Measured unthrottled (240 Hz): size 6 GPU 11.6 ms, 98 % real time, 221 fps; Box3D 56 ms, 27 %; size 8 88 % vs 19 %; GPU
   sizes 10/12 75/61 %. Rendering at 240 fps slows both worlds' steps (GPU 10.2 → 11.6, Box3D 29 → 56 ms). **Gotcha**: when the
   workstation is locked (LogonUI.exe running) presentations stall 0.25–1 s or are paced at ~30 Hz (it changed during the session) —
-  window frame rates cannot be measured then; the panel's steps a second / % of real time still can.
+  window frame rates cannot be measured then; the panel's steps a second / % of real time still can. **Then (user: frames < 10 fps
+  when shooting; "add a launch.json item … Release")**: committed 903a5a8 at the user's request first; not reproduced on a quiet
+  machine (`--shoot-every N`, new: scripted Space); the world advanced only when a frame did (locked screen: 6 % real time) and
+  shots waited for the running step → **`Scene::start_stepping()`** etc. (a thread per scene in the comparison's real time:
+  begin_step under `m_mutex`, wait_step outside, capture under it; frames lock to draw/shoot; `update_drawn_time()` interpolates by
+  time since the last capture) — locked screen: 100 % real time at 1.9 fps; shots no longer finish(); launch "gfx: Large scale at
+  60 FPS (Release, no debugger)" (`node-terminal` + task "gfx: Build Release (physics comparison)").
+- **Follow-up after PF6: contacts reported only when wanted (2026-11-15; implemented, awaiting validation)** — design doc §B of
+  that name, PERFORMANCE.md §6.3/§7. **`PhysicsWorldDescription::report_contacts`** (default true): false → framework clears
+  contacts/events/statistics.contacts after simulate, contacts_of UNSUPPORTED; **`edits::DestroyCollider::bounds`** (last box, set
+  by RecordApplier before clearing; new records start `Aabb::empty()`); GPU: record_reports(recorder, reports) flags only, no
+  copies/conversion, `wake_beside_destroyed()` (box + speculative + LINEAR_SLOP); Box3D: shapes without contact/hit events,
+  capture skipped; reference: touching pairs kept, no list/events. Comparison `--contacts on|off`, launch input largeScaleContacts.
+  Tests: WorldsReportingNoContactsPublishNone, destroy-box check, conformance WorldsReportingNoContacts… ×6 (mutation-checked).
+  Measured: GPU −31 % (size 6 9.80 → 6.74 ms), Box3D −67 % (28.2 → 9.25 ms: the wrapper's contact conversion); without reports
+  Box3D falls behind from size 12 (73 % vs GPU 99 %). **Found**: GPU pyramid kept awake sags after ~45 s with every solver setting
+  (Box3D stands) — follow-up 6. Gotcha: a running comparison window locks its .exe — rename it aside (Move-Item) to relink without closing
+  the user's window.
 - **Bridge `gfx.platform.graphics`** (P5; `source/platform_graphics/`, target `gfx::platform_graphics`,
   re-exports gfx + gfx.platform, built with the platform library): `swapchain_description_for(window, base)`,
   constexpr `requires_swapchain_recreation(event, window)` / `(status)`, **`WindowSwapchain`** (owns swapchain
@@ -1879,7 +1896,8 @@ the profiler plan is built and accepted. |
 | 5 | Samples (headless + windowed) — scope to confirm | **windowed done in P6** (`examples/windowed`), **UI editor in U10** (`examples/ui_editor`), **headless physics in PH8** (`examples/physics`); a headless graphics sample (compute + readback) not yet |
 | 6 | Final README, architecture overview **with diagrams** of the code as built | **README + docs/architecture.md written in P6** (whole project), UI library added in U10 (+ THIRD_PARTY_LICENSES.md); left: CI (MSVC/Clang/Linux), packaging, Doxygen HTML |
 
-Test count at last report: **1604**, 2026-11-15 (follow-up after PF6, small worlds' passes and a large scene alone: + 4
+Test count at last report: **1611**, 2026-11-15 (contacts reported only when wanted: + 1 WorldsReportingNoContactsPublishNone, + 6
+conformance runs; Debug 1611/1611 (596 s), Release 1611/1611 (596 s)). Before: **1604**, 2026-11-15 (follow-up after PF6, small worlds' passes and a large scene alone: + 4
 IslandRoundsFollowWhatTheLastStepUsed, + 1 PhysicsComparison.SingleWorld; Debug 1604/1604 (785 s); Release 1604/1604 (524 s; a first
 Release run, stopped at 982/1604, had slowed the user's run of the launch configuration to 15 fps)). **Never run the full suites while the user
 measures frame rates**: hundreds of GPU tests share the GPU. Before: **1599**, 2026-11-15 (follow-up after PF6, the contact cache: + 4

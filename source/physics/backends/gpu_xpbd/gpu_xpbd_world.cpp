@@ -467,7 +467,7 @@ struct ChangeMarker
 
     void operator()(const edits::DestroyCollider& change) const
     {
-        backend.forget_collider(change.collider, pending);
+        backend.forget_collider(change, pending);
         ColliderEntry& entry = backend.collider_entry(change.collider);
         if (entry.body)
         {
@@ -900,6 +900,7 @@ GpuXpbdBackend::apply(std::span<const WorldEdit> edits,
         std::visit(marker, edit);
         m_layouts_dirty = m_layouts_dirty || !incremental || !std::visit(KeepsLayouts{}, edit);
     }
+    wake_beside_destroyed(pending);
     m_layouts_dirty = m_layouts_dirty || !incremental;
     const PushCollector collector{.backend = *this, .pending = pending};
     for (const WorldEdit& edit : edits)
@@ -1534,7 +1535,11 @@ GpuXpbdBackend::simulate(float seconds,
     {
         PROFILE_SCOPE("GPU XPBD: a resting step");
         pending.statistics.pairs = 0;
-        pending.statistics.contacts = read_contacts(pending, 0);
+        pending.statistics.contacts = pending.configuration.report_contacts ? read_contacts(pending, 0) : 0;
+        if (!pending.configuration.report_contacts)
+        {
+            pending.contacts.clear();
+        }
         pending.statistics.phase_seconds[phase(StepPhase::SOLVER)] = seconds_between(start, Clock::now());
         return;
     }
@@ -1697,9 +1702,15 @@ GpuXpbdBackend::simulate(float seconds,
             PROFILE_COUNTER("GPU XPBD: bodies copied", m_compact_capacity);
         }
         std::uint32_t kept_points = 0;
+        if (pending.configuration.report_contacts)
         {
             PROFILE_SCOPE("GPU XPBD: contacts and their events");
             kept_points = read_contacts(pending, counts.reported);
+        }
+        else
+        {
+            // No contacts reported: none read back, none kept (the list is the backend's to replace).
+            pending.contacts.clear();
         }
         {
             PROFILE_SCOPE("GPU XPBD: trigger events");
@@ -1969,7 +1980,7 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     m_solver.record_joint_forces(recorder);
     m_solver.record_sleep(recorder);
     m_phases.mark(recorder, StepPhase::EVENTS);
-    m_solver.record_reports(recorder);
+    m_solver.record_reports(recorder, pending.configuration.report_contacts);
     m_solver.record_triggers(recorder);
 
     // COMPACT_READBACK: the bodies whose state may have changed (awake or kinematic now, woken, fallen asleep, patched),
@@ -2011,6 +2022,10 @@ GpuXpbdBackend::record_step(std::uint32_t body_count,
     {
         m_compact_capacity = body_count;
         m_report_copied = m_solver.report_capacity();
+    }
+    if (!pending.configuration.report_contacts)
+    {
+        m_report_copied = 0; // no reports written, none copied
     }
 
     // The results into the readback buffer: the bodies (their arrays and flags, or the listed ones), the solver's counts,

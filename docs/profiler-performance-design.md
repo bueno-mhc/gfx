@@ -1443,9 +1443,71 @@ step is held, true once released though not yet published (step count unchanged 
    share of real time are the measure of a world), and `Scene::advance`'s catch-up depends on the last step's cost and the
    frame's time (the sandbox's real-time frames catch up as before while steps are cheap).
 
+Asked then (user, 2026-11-15, after the commit 903a5a8): "Whenever I interact with the simulation (pyramid, pressing space
+bar), the frame rate tanks to less than 10 frames per second", and "The launch.json might be triggering the debug build of the
+tests … add a launch.json item to test and run as a Release build". Found: the configuration builds and runs only the comparison
+in the optimized `profile` build, and gdb costs nothing measurable; scripted shots (`--shoot-every <frames>`, new: what Space
+does, through the middle of the window) did not slow the frames on a quiet machine (799 shots: 200 frames a second, the worst
+27.7 ms); but the world advanced only when a frame did, so whatever held frames back held the world back (the screen locked
+during the session: 6 % of real time), and each shot waited for the step in flight. Changed:
+1. **The worlds step on threads of their own** in the comparison's real time: `Scene::start_stepping()` / `stop_stepping()` /
+   `steps_itself()` / `lock()` / `update_drawn_time()` (scene.cppm): the thread begins each step when due once the last has
+   finished (begin_step under the scene's lock, wait_step outside it, the poses taken under it), drops the time it cannot
+   step; frames take the lock to draw (interpolated by the time since the last step) and to shoot; set_sleeping/set_solver
+   record their changes without waiting; rebuilds and pauses stop the thread first. With the screen locked (frames 1.9 a
+   second) the GPU world kept 100 % of real time, a shot every 20 frames.
+2. **A shot no longer waits** for the step in flight (edits are recorded from any thread for the next step).
+3. **"gfx: Large scale at 60 FPS (Release, no debugger)"** (launch.json, a `node-terminal` launch running the Release build's
+   program in a terminal) and the task "gfx: Build Release (physics comparison)".
+
 **Results**: 1 604 tests (+ 4 `IslandRoundsFollowWhatTheLastStepUsed`, + 1 `PhysicsComparison.SingleWorld`): Debug 1 604 of 1 604
 (785 s); Release 1 604 of 1 604 (524 s; a first Release run, stopped at 982 without a failure, had shared the GPU with the user's
 run of the configuration: 15 frames a second there, 222–226 on the quiet machine, under gdb or not).
+
+### Follow-up after PF6: contacts reported only when wanted (2026-11-15)
+
+Asked (user, 2026-11-15): "Continue with the work" — the step offered after the frame fixes: a size-8 GPU step spent about
+4.7 of its 12.4 ms reporting contacts the comparison never reads.
+
+**`PhysicsWorldDescription::report_contacts`** (true by default; set at creation): false, a step gathers no contact, makes no
+contact event and publishes no contact point; `contacts_of()` answers UNSUPPORTED naming the setting; triggers report as before;
+the simulation is the same.
+- **Framework**: after the backend's simulate(), a world without contacts clears `pending.contacts`, `contact_events` and
+  `statistics.contacts` (whatever a backend gathered); `edits::DestroyCollider` gained `bounds` — the collider's box after the
+  last completed step, set by the record applier before it clears the record (`apply_to_records()` takes the edits mutable; a
+  collider created in the same step has `Aabb::empty()`, new records start empty), for backends that wake what rested on a
+  destroyed collider without touching pairs.
+- **GPU backend**: `record_reports(recorder, reports)` keeps the flag pass (the touching points and PUSHED_CONTACT_CACHE's list)
+  and skips the reports' compaction and writing; nothing copied (`m_report_copied` 0), nothing read or converted; a destroyed
+  collider's box is kept (`m_destroyed_bounds`) and `wake_beside_destroyed()` wakes the dynamic bodies whose boxes come within
+  the speculative distance plus LINEAR_SLOP of it, after the edits' markers.
+- **Box3D**: its shapes make no contact (or hit) events (`m_report_contacts`), `capture_contacts()` returns at once (Box3D wakes
+  what touched a destroyed shape itself).
+- **Reference**: its touching pairs kept (they wake), no contact list, no event.
+- **Comparison**: `--contacts on|off` (and `--no-contacts`), the panel's "contacts not reported"; the large-scale launch
+  configurations ask for it (input `largeScaleContacts`, on by default).
+
+**Tests**: `SteppedWorldTest.WorldsReportingNoContactsPublishNone` (the recording backend's contacts dropped, contacts_of()
+UNSUPPORTED naming report_contacts); `SteppedWorldTest.DestructionIsDeferredAndABodyTakesItsAttachmentsWithIt` checks the
+destroy edit's box (the recording backend logs its top); conformance
+`EventConformanceTest.WorldsReportingNoContactsSimulateAlikeAndWakeWhatRestedOnADestroyedCollider` (× 6: Box3D, reference, GPU
+on both GPUs, full and portable: a ball asleep on a shelf, the shelf destroyed, the ball falls through a zone to the floor in
+both worlds within 0.1 mm; no contact event or point without reports; the same trigger events; fails on the GPU without the
+wake pass — checked).
+
+**Measured** (PERFORMANCE.md §6.3): GPU size 6 9.80 → 6.74 ms, size 8 12.42 → 8.53 ms; Box3D size 6 28.2 → 9.25 ms (the
+wrapper's conversion of its contacts was two thirds of its step). Without reports on either side the GPU world steps 1.4–1.6×
+faster than Box3D's and Box3D falls behind real time from size 12 (73 %; the GPU 99 %). Found: the GPU's size-8 pyramid kept
+awake sags after about 45 s whatever the solver settings (Box3D's stands) — PERFORMANCE.md §7, follow-up 6.
+
+**Deviations (for validation).**
+1. **Interface addition**: `PhysicsWorldDescription::report_contacts`; `edits::DestroyCollider::bounds` (framework-facing).
+2. `StepStatistics::contacts` is 0 in a world without contacts on every backend (the GPU could still count its touching points).
+3. The large-scale configurations ask whether contacts are reported (on by default: the starkest gap comes from Box3D's
+   wrapper converting its contacts, which off removes).
+
+**Results**: 1 611 tests (+ 1 `WorldsReportingNoContactsPublishNone`, + 6 conformance runs), with the frame fixes and the
+scenes' own threads before them: Debug 1 611 of 1 611 (596 s), Release 1 611 of 1 611 (596 s).
 
 ---
 

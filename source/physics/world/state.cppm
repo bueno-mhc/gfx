@@ -207,7 +207,7 @@ struct SteppedWorld::Implementation
                   float seconds);
 
     /// Applies @p edits to the pending records (and collects the destroyed objects).
-    void apply_to_records(std::span<const WorldEdit> edits);
+    void apply_to_records(std::span<WorldEdit> edits);
 
     /// The mass properties of the bodies whose colliders or settings changed.
     void update_masses();

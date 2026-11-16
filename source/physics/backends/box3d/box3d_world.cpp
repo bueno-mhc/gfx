@@ -487,6 +487,7 @@ struct EditApplier
 Box3dBackend::Box3dBackend(const PhysicsWorldDescription& description)
     : m_tasks{std::make_unique<TaskBridge>()}
 {
+    m_report_contacts = description.report_contacts;
     // Box3D holds a fixed number of worlds.
     if (b3GetWorldCount() >= B3_MAX_WORLDS)
     {
@@ -809,6 +810,13 @@ Box3dBackend::capture_bodies(WorldSnapshot& pending)
 void
 Box3dBackend::capture_contacts(WorldSnapshot& pending)
 {
+    // A world that reports no contacts: its shapes make no contact events, nothing to capture (Box3D wakes what touched a
+    // destroyed shape itself).
+    if (!m_report_contacts)
+    {
+        pending.contacts.clear();
+        return;
+    }
     const b3ContactEvents events = b3World_GetContactEvents(m_world);
     const auto colliders_of = [this](b3ShapeId a, b3ShapeId b) -> std::optional<std::pair<ShapeOwner, ShapeOwner>> {
         const ShapeOwner* first = shape_owner(a);

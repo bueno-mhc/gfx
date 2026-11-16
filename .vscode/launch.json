@@ -201,19 +201,20 @@
             // A large scene at 60 frames a second or more on the GPU backend: the comparison program with one world alone in
             // the window (--single). A pyramid of boxes kept awake (--no-sleep: every body simulated every step; with
             // sleep the GPU world's pyramid falls asleep and costs nothing) stepped in real time, 60 steps a simulated
-            // second, as an application runs it: frames never wait for a step still running. The panel shows the frames
+            // second on the world's own thread, as an application runs it: frames only draw. The panel shows the frames
             // per second, the world's steps per second and the share of real time it keeps. Size 6 by default: 12 529
             // boxes, about 215 000 contact points; on the RTX 5060 laptop GPU the GPU world keeps 98 % of real time (about
             // 59 steps a second, 11.6 ms each) while the window draws at the display's rate (240 frames a second); picked
             // from the list, Box3D keeps 27 % (16 steps a second): its pyramid moves in slow motion. Size 8 (16 206 boxes):
-            // 88 % against 19 %. While the workstation is locked the display paces or stalls presentations: measure with
-            // the window in front. Space shoots balls into the pyramid, right drag turns, the wheel zooms.
+            // 88 % against 19 %. --no-contacts: the worlds report no contacts (nothing here reads them), so neither backend
+            // gathers them. While the workstation is locked the display paces or stalls presentations: measure with the
+            // window in front. Space shoots balls into the pyramid, right drag turns, the wheel zooms.
             "name": "gfx: Large scale at 60 FPS (GPU XPBD; Box3D for contrast)",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/profile/examples/physics_sandbox/gfx_physics_comparison.exe",
             "args": ["--backend", "${input:platformBackend}", "--single", "${input:largeScaleBackend}", "--scene", "pyramid", "--size",
-                     "${input:largeScaleSize}", "--no-sleep", "--real-time"],
+                     "${input:largeScaleSize}", "--no-sleep", "--real-time", "--contacts", "${input:largeScaleContacts}"],
             "cwd": "${workspaceFolder}/build/profile",
             "environment": [
                 { "name": "_NO_DEBUG_HEAP", "value": "1" }
@@ -230,6 +231,19 @@
                 }
             ],
             "preLaunchTask": "gfx: Build Profile (physics comparison)"
+        },
+        {
+            // The same large scene from the Release build (build/release: no profiler) with no debugger attached: the
+            // program runs in a terminal (a "node-terminal" launch only runs the command; nothing attaches to a native
+            // program), as an application ships. Close the window (or Escape) to end it; it prints how its steps and
+            // frames went. Measure on a quiet machine: a Debug build or a test run at the same time takes the GPU and the
+            // processor from it (the GPU world fell from 99 % to 6 % of real time beside one).
+            "name": "gfx: Large scale at 60 FPS (Release, no debugger)",
+            "type": "node-terminal",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/build/release",
+            "command": "& '${workspaceFolder}/build/release/examples/physics_sandbox/gfx_physics_comparison.exe' --backend ${input:platformBackend} --single ${input:largeScaleBackend} --scene pyramid --size ${input:largeScaleSize} --no-sleep --real-time --contacts ${input:largeScaleContacts}",
+            "preLaunchTask": "gfx: Build Release (physics comparison)"
         },
         {
             // The physics example (examples/physics): a headless scene stepped for four seconds, then checked
@@ -292,6 +306,13 @@
             "description": "Physics backend of the large scene: the GPU backend (about 60 steps a second, drawn at the display's rate), or Box3D to see the same scene fall behind (slow motion)",
             "options": ["gpu_xpbd", "box3d"],
             "default": "gpu_xpbd"
+        },
+        {
+            "id": "largeScaleContacts",
+            "type": "pickString",
+            "description": "Whether the worlds report their contacts (on: what an application reading contacts pays; Box3D's step is then two thirds converting its contacts for the interface. off: neither backend gathers them — pick size 12 or more to see Box3D fall behind)",
+            "options": ["on", "off"],
+            "default": "on"
         },
         {
             "id": "largeScaleSize",

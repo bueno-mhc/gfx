@@ -79,6 +79,11 @@ struct PhysicsWorldDescription
     SleepDescription sleep{};                ///< Sleeping.
     CollisionSettings collision{};           ///< Speculative distance, manifold merging.
     float hit_event_speed = 1.0F;            ///< Approach speed from which contacts report HIT events.
+    bool report_contacts = true;             ///< Whether steps report their touching contacts (contacts_of(), the statistics'
+                                             ///< contact points) and contact events. False: neither (contacts_of() answers
+                                             ///< UNSUPPORTED), and the backends skip gathering them — for a world nothing reads
+                                             ///< contacts from (the GPU backend's step a third shorter at 16 000 resting boxes).
+                                             ///< The simulation is the same; triggers still report.
     std::string debug_name{};                ///< For errors and tools.
 };
 

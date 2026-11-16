@@ -1154,12 +1154,15 @@ int main()
 - **Stepping**: creations and changes are recorded and applied, in order, at the start of the next step,
   whenever they are made; getters show the last completed step. `step()`, or `begin_step()` and
   `wait_step()` (on the world's own thread with `asynchronous_stepping`); a query made during a step returns
-  `QueryFailureKind::STEP_IN_PROGRESS` at once (query between steps, from any number of threads).
+  `QueryFailureKind::STEP_IN_PROGRESS` at once (query between steps, from any number of threads);
+  `is_step_finished()` says whether `wait_step()` would wait (a frame can draw the last step while the next runs).
 - **Queries**: `ray_cast()`, `ray_cast_all()`, `shape_cast()`, `overlap()`, `closest_point()`, `contacts_of()`,
   through the backend's own queries (`QueryEngine::BACKEND`) or the abstraction's (`ABSTRACTION`); results are
   `std::expected<T, QueryFailure>`, without allocations.
 - **Events** (`events()`, valid until the next step completes): contacts begun, ended and hit, triggers
-  entered, stayed in and left, joints broken, bodies asleep and awake.
+  entered, stayed in and left, joints broken, bodies asleep and awake. A world that reads no contacts is made with
+  `report_contacts = false`: no contact is gathered, no contact event made, `contacts_of()` answers UNSUPPORTED, the
+  simulation unchanged (a GPU step a third shorter at 16 000 boxes, a Box3D step two thirds shorter).
 - **Joints**: distance (rod, rope, spring, stub), hinge, ball and socket, slider, fixed, cone-twist and six
   degrees of freedom, with limits, motors, springs and breaking; **user constraints** (`UserConstraint`: rows
   with their Jacobians) on the reference backend.
@@ -1740,18 +1743,25 @@ as for the sandbox. With `--frames`, it prints each world's mean, median and slo
 times. Measure in the `profile` build (the VS Code configuration "gfx: Physics comparison (Box3D vs GPU XPBD)" builds and runs
 it there): a Debug build's timings compare nothing. CTest runs a small pile for 120 frames with the validation layers.
 
+`--contacts off` makes the worlds report no contacts (nothing in the comparison reads them): every backend skips gathering
+them — Box3D's step is then mostly Box3D's own, two thirds of it having been the conversion of its contacts for the interface.
 `--single <backend>` shows one world alone in the whole window, as an application would run it; the panel then shows the frames
-per second and, with `--real-time`, the world's steps per second and the share of real time it keeps (frames never wait for a
-step still running: they draw the last finished one). The VS Code configuration **"gfx: Large scale at 60 FPS (GPU XPBD;
+per second and, with `--real-time`, the world's steps per second and the share of real time it keeps (each world steps on its
+own thread; frames only draw the last finished steps, so neither waits for the other). The VS Code configuration **"gfx: Large scale at 60 FPS (GPU XPBD;
 Box3D for contrast)"** runs a pyramid of 12 529 boxes (size 6; 8 555 at size 4, 16 206 at size 8), every body kept awake
-(`--no-sleep`), in real time: on the RTX 5060 laptop GPU the GPU world steps about 59 times a second (98 % of real time,
-11.6 ms a step) while the window draws at the display's 240 frames a second; Box3D, picked from the configuration's list,
-keeps 27 % of real time (16 steps a second, 56 ms a step beside the drawing): its pyramid moves in slow motion
+(`--no-sleep`), in real time, contacts reported or not (asked): on the RTX 5060 laptop GPU the GPU world keeps 99–100 % of
+real time at sizes 6 and 8 either way while the window draws at the display's rate; Box3D keeps 56 % at size 6 and about 38 %
+at size 8 with contacts reported, and needs size 12 (25 585 boxes: 73 %, the GPU 99 %) to fall behind without them
 (docs/PERFORMANCE.md §6.3).
 
 ```bash
 build/profile/examples/physics_sandbox/gfx_physics_comparison.exe --single gpu_xpbd --scene pyramid --size 6 --no-sleep --real-time
 ```
+
+"gfx: Large scale at 60 FPS (Release, no debugger)" runs the same from the Release build in a terminal, no debugger attached.
+`--shoot-every <frames>` shoots a ball through the middle of the window every so many frames (what Space does). Measure with
+the window in front on a quiet machine: a locked screen blocks the window's presentations, and a build or a test run beside it
+takes the GPU and the processor.
 
 ## Requirements (Windows)
 

@@ -225,6 +225,78 @@ TEST_P(EventConformanceTest, ADestroyedBodyTakesItsCollidersOutOfTheSimulation)
     EXPECT_EQ(touching.front().other, floor.collider->handle());
 }
 
+TEST_P(EventConformanceTest, WorldsReportingNoContactsSimulateAlikeAndWakeWhatRestedOnADestroyedCollider)
+{
+    // The same scene in a world that reports contacts and in one that does not (PhysicsWorldDescription::report_contacts
+    // false): a ball asleep on a static shelf above a zone. The shelf destroyed, the ball wakes and falls through the zone
+    // to the floor in both, through the same poses; the world without contacts reports no contact event and no contact
+    // point and answers contacts_of() UNSUPPORTED, its trigger events as the other's (a backend that tracks no touching
+    // pairs then still wakes what rested on a destroyed collider).
+    struct Scene
+    {
+        std::unique_ptr<PhysicsWorld> made{};
+        Body floor{};
+        Body shelf{};
+        Body ball{};
+        std::unique_ptr<Trigger> zone{};
+    };
+    std::array<Scene, 2> scenes{};
+    for (std::size_t index = 0; index < scenes.size(); ++index)
+    {
+        Scene& scene = scenes[index];
+        scene.made = world({.report_contacts = index == 0});
+        scene.floor = make_floor(*scene.made);
+        scene.shelf = make_body(*scene.made, {.kind = BodyKind::STATIC, .pose = {.position = {.y = 2.0F}}}, {.shape = box({.x = 1.0F, .y = 0.1F, .z = 1.0F})});
+        scene.ball = make_body(*scene.made, {.pose = {.position = {.y = 2.4F}}}, {.shape = sphere(0.3F)});
+        scene.zone = scene.made->create_trigger({.shape = box({.x = 1.0F, .y = 0.4F, .z = 1.0F}), .pose = {.position = {.y = 1.2F}}});
+    }
+    std::array<std::size_t, 2> contact_events{};
+    std::array<std::vector<TriggerEventKind>, 2> trigger_events{};
+    std::uint64_t points_without = 0;
+    const auto advance_both = [&](int steps) {
+        for (int step = 0; step < steps; ++step)
+        {
+            for (std::size_t index = 0; index < scenes.size(); ++index)
+            {
+                scenes[index].made->step(STEP);
+                const PhysicsEvents events = scenes[index].made->events();
+                contact_events[index] += events.contacts.size();
+                for (const TriggerEvent& event : events.triggers)
+                {
+                    trigger_events[index].push_back(event.kind);
+                }
+            }
+            points_without += scenes[1].made->statistics().contacts;
+        }
+    };
+    advance_both(90);
+    for (const Scene& scene : scenes)
+    {
+        EXPECT_FALSE(scene.ball.body->state().awake) << "asleep on the shelf";
+    }
+    for (Scene& scene : scenes)
+    {
+        scene.shelf.collider.reset();
+        scene.shelf.body.reset();
+    }
+    advance_both(90);
+    for (const Scene& scene : scenes)
+    {
+        EXPECT_NEAR(scene.ball.body->state().pose.position.y, 0.3F, 0.02F) << "woken, fallen to the floor";
+    }
+    EXPECT_NEAR(scenes[0].ball.body->state().pose.position.y, scenes[1].ball.body->state().pose.position.y, 1.0e-4F) << "the same simulation";
+    EXPECT_GT(contact_events[0], 0U);
+    EXPECT_EQ(contact_events[1], 0U);
+    EXPECT_EQ(points_without, 0U);
+    EXPECT_FALSE(trigger_events[0].empty());
+    EXPECT_EQ(trigger_events[0], trigger_events[1]) << "triggers report either way";
+    EXPECT_EQ(contacts_of(*scenes[0].made, *scenes[0].ball.body).size(), 1U);
+    std::array<ContactInfo, 4> storage{};
+    const QueryResult<std::span<ContactInfo>> none = scenes[1].made->contacts_of(scenes[1].ball.body->handle(), storage);
+    ASSERT_FALSE(none.has_value());
+    EXPECT_EQ(none.error().kind, QueryFailureKind::UNSUPPORTED);
+}
+
 TEST_P(EventConformanceTest, TheBroadPhaseShowsItsStructure)
 {
     // Where the backend shows it (a debug view draws it): 20 balls resting on a floor, between steps; every collider is

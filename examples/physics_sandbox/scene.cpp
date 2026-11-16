@@ -108,7 +108,8 @@ Scene::Scene(PhysicsBackendKind backend,
 
 Scene::~Scene()
 {
-    // The step in flight ends before the bodies go.
+    // The scene's thread (if any) ends, then the step in flight, before the bodies go.
+    stop_stepping();
     if (m_world != nullptr && m_world->is_stepping())
     {
         m_world->wait_step();
@@ -374,6 +375,71 @@ Scene::step_once()
     m_world->begin_step(STEP);
     m_accumulator = 0.0;
     m_alpha = 1.0F;
+}
+
+void
+Scene::start_stepping()
+{
+    if (m_stepper.joinable())
+    {
+        return;
+    }
+    finish();
+    m_accumulator = 0.0;
+    m_captured_at = std::chrono::steady_clock::now();
+    m_stepper = std::jthread{[this](const std::stop_token& stop) {
+        // Each step due begun once the last has finished; behind by more than a step, the time owed is dropped (the
+        // simulation then runs as fast as its steps allow: slower than real time, never owing more and more).
+        using Clock = std::chrono::steady_clock;
+        const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(STEP));
+        Clock::time_point due = Clock::now();
+        while (!stop.stop_requested())
+        {
+            const Clock::time_point now = Clock::now();
+            if (now < due)
+            {
+                std::this_thread::sleep_until(due);
+                continue;
+            }
+            {
+                const std::scoped_lock lock{m_mutex};
+                m_world->begin_step(STEP);
+            }
+            m_world->wait_step();
+            {
+                const std::scoped_lock lock{m_mutex};
+                capture();
+                m_captured_at = Clock::now();
+            }
+            due += period;
+            const Clock::time_point after = Clock::now();
+            if (after - due > period)
+            {
+                m_dropped_steps += static_cast<std::uint64_t>((after - due) / period);
+                due = after;
+            }
+        }
+    }};
+}
+
+void
+Scene::stop_stepping()
+{
+    if (!m_stepper.joinable())
+    {
+        return;
+    }
+    m_stepper.request_stop();
+    m_stepper.join();
+    m_stepper = {};
+    m_alpha = 1.0F;
+}
+
+void
+Scene::update_drawn_time()
+{
+    const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_captured_at).count();
+    m_alpha = static_cast<float>(std::clamp(since / STEP, 0.0, 1.0));
 }
 
 auto

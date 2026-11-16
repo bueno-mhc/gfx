@@ -160,9 +160,10 @@ void
 ReferenceBackend::report_contacts(WorldSnapshot& pending)
 {
     // The touching pairs (pushed apart by the solver, or a point within the slop), their contacts, BEGIN (and HIT) for those
-    // that start.
+    // that start. A world that reports no contacts keeps the pairs only (a destroyed collider wakes what touched it).
     m_touching.clear();
     const float hit_speed = pending.configuration.hit_event_speed;
+    const bool report = pending.configuration.report_contacts;
     for (std::size_t index = 0; index < m_manifolds.size();)
     {
         const BroadPhasePair pair = m_manifolds[index].pair;
@@ -174,11 +175,14 @@ ReferenceBackend::report_contacts(WorldSnapshot& pending)
         }
         const ColliderRecord* first = find(pending, pair.first);
         const ColliderRecord* second = find(pending, pair.second);
-        const bool reported = first->configuration.contact_events && second->configuration.contact_events;
+        const bool reported = report && first->configuration.contact_events && second->configuration.contact_events;
         m_touching.push_back({.pair = pair, .reported = reported});
         for (const PairManifold& manifold : manifolds)
         {
-            pending.contacts.push_back({.collider = pair.first, .other = pair.second, .other_body = second->body, .manifold = manifold.manifold});
+            if (report)
+            {
+                pending.contacts.push_back({.collider = pair.first, .other = pair.second, .other_body = second->body, .manifold = manifold.manifold});
+            }
         }
         if (!reported || std::ranges::binary_search(m_was_touching, pair, {}, &TouchingPair::pair))
         {

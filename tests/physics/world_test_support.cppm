@@ -18,7 +18,7 @@ struct AppliedEdit
     std::size_t kind = 0;    ///< The alternative of WorldEdit.
     std::uint64_t step = 0;  ///< The step that applied it (1 for the first).
     std::string target{};    ///< The handle it names, formatted ("RigidBody(index 0, generation 1)"), or empty.
-    float value = 0.0F;      ///< SetBodyLinearVelocity: the velocity's x.
+    float value = 0.0F;      ///< SetBodyLinearVelocity: the velocity's x; DestroyCollider: its last box's top (-1: empty).
 };
 
 /// The index of @p Edit among WorldEdit's alternatives.
@@ -101,6 +101,10 @@ public:
             if (const auto* velocity = std::get_if<edits::SetBodyLinearVelocity>(&edit))
             {
                 m_applied.back().value = velocity->velocity.x;
+            }
+            if (const auto* destroyed = std::get_if<edits::DestroyCollider>(&edit))
+            {
+                m_applied.back().value = destroyed->bounds.is_empty() ? -1.0F : destroyed->bounds.maximum.y;
             }
             if (const auto* force = std::get_if<edits::ApplyForce>(&edit))
             {

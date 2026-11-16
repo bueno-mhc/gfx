@@ -619,15 +619,17 @@ struct RecordApplier
                                                                .body = change.body,
                                                                .configuration = change.description,
                                                                .unit_mass = change.unit_mass,
-                                                               .world_bounds = {},
+                                                               .world_bounds = Aabb::empty(),
                                                                .configuration_changed = true};
         body_mass_changed(change.body);
     }
 
-    void operator()(const edits::DestroyCollider& change) const
+    void operator()(edits::DestroyCollider& change) const
     {
+        // Its last box goes with the edit to the backend (what rested on it wakes).
         if (ColliderRecord* record = find(pending, change.collider))
         {
+            change.bounds = record->world_bounds;
             body_mass_changed(record->body);
             *record = {};
         }
@@ -1965,6 +1967,13 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
         PROFILE_SCOPE("World: backend simulate");
         backend->simulate(seconds, pending);
     }
+    if (!pending.configuration.report_contacts)
+    {
+        // A world that reports no contacts publishes none, whatever a backend gathered.
+        pending.contacts.clear();
+        pending.contact_events.clear();
+        pending.statistics.contacts = 0;
+    }
     const Clock::time_point simulated = Clock::now();
     if (soft_bodies)
     {
@@ -2010,10 +2019,10 @@ SteppedWorld::Implementation::run_step(WorldShared& shared,
 }
 
 void
-SteppedWorld::Implementation::apply_to_records(std::span<const WorldEdit> edits)
+SteppedWorld::Implementation::apply_to_records(std::span<WorldEdit> edits)
 {
     const RecordApplier applier{.implementation = *this, .pending = pending};
-    for (const WorldEdit& edit : edits)
+    for (WorldEdit& edit : edits)
     {
         std::visit(applier, edit);
     }

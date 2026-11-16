@@ -420,10 +420,16 @@ GpuXpbdBackend::read_contacts(WorldSnapshot& pending,
 }
 
 void
-GpuXpbdBackend::forget_collider(ColliderHandle collider,
+GpuXpbdBackend::forget_collider(const edits::DestroyCollider& change,
                                 WorldSnapshot& pending)
 {
-    // Its touches end now; the dynamic bodies it touched wake (what rested on it may fall).
+    // Its touches end now; the dynamic bodies it touched wake (what rested on it may fall). A world that reports no
+    // contacts keeps no touching pairs: its last box instead (wake_beside_destroyed()).
+    const ColliderHandle collider = change.collider;
+    if (!pending.configuration.report_contacts && !change.bounds.is_empty())
+    {
+        m_destroyed_bounds.push_back(change.bounds);
+    }
     for (const TouchingPair& pair : m_was_touching)
     {
         if (pair.first != collider && pair.second != collider)
@@ -452,6 +458,36 @@ GpuXpbdBackend::forget_collider(ColliderHandle collider,
             pending.trigger_events.push_back({.kind = TriggerEventKind::EXIT, .trigger = trigger.handle, .collider = collider});
         }
     }
+}
+
+void
+GpuXpbdBackend::wake_beside_destroyed(WorldSnapshot& pending)
+{
+    // The bodies whose boxes came within the step's reach of a destroyed collider's: those that rested on it, and perhaps a
+    // few more (woken, they fall asleep again).
+    if (m_destroyed_bounds.empty())
+    {
+        return;
+    }
+    const float margin = pending.configuration.collision.speculative_distance + LINEAR_SLOP;
+    for (Aabb& box : m_destroyed_bounds)
+    {
+        box = box.expanded(margin);
+    }
+    for (const ColliderRecord& record : pending.colliders)
+    {
+        if (!record.handle || !record.body || record.world_bounds.is_empty())
+        {
+            continue;
+        }
+        const RigidBodyRecord* body = find(pending, record.body);
+        if (body != nullptr && body->configuration.kind == BodyKind::DYNAMIC &&
+            std::ranges::any_of(m_destroyed_bounds, [&record](const Aabb& box) { return intersects(box, record.world_bounds); }))
+        {
+            body_entry(record.body).woken = true;
+        }
+    }
+    m_destroyed_bounds.clear();
 }
 
 void

@@ -142,10 +142,10 @@ if(GFX_BUILD_TESTS)
                 TIMEOUT 900)
             gfx_use_gpu_in_tests(PhysicsComparison.Pile)
             # One world alone (--single, the large-scale launch configuration's mode): the right one's backend, a small
-            # pyramid kept awake, stepped in real time.
+            # pyramid kept awake, stepped in real time on the scene's own thread while frames shoot into it.
             add_test(NAME PhysicsComparison.SingleWorld
                      COMMAND gfx_physics_comparison --backend ${_gfx_backend_name} --single ${_gfx_comparison_right} --scene pyramid --size 0.25
-                             --no-sleep --real-time --frames 120 ${_gfx_sandbox_validation})
+                             --no-sleep --real-time --shoot-every 10 --frames 120 ${_gfx_sandbox_validation})
             set_tests_properties(PhysicsComparison.SingleWorld PROPERTIES
                 ENVIRONMENT "${_gfx_sandbox_environment}"
                 LABELS example

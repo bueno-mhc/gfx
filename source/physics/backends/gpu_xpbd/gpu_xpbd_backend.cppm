@@ -364,10 +364,15 @@ public:
     /// particle moved by an edit (their state uploaded again).
     void soft_bodies_changed(bool layout) noexcept;
 
-    /// @p collider is destroyed: the pairs it touched end now (END events for those reported; the dynamic bodies it
-    /// touched wake), as the reference backend does.
-    void forget_collider(ColliderHandle collider,
+    /// @p change's collider is destroyed: the pairs it touched end now (END events for those reported; the dynamic bodies
+    /// it touched wake), as the reference backend does; in a world that reports no contacts (no touching pairs kept), its
+    /// last box is kept for wake_beside_destroyed().
+    void forget_collider(const edits::DestroyCollider& change,
                          WorldSnapshot& pending);
+
+    /// The dynamic bodies whose colliders' boxes come within reach of the boxes forget_collider() kept wake (what rested
+    /// on a destroyed collider may fall), the boxes forgotten.
+    void wake_beside_destroyed(WorldSnapshot& pending);
 
 private:
     /// The colliders' GPU data and lists from the records, when they changed; the bodies' radii.
@@ -562,6 +567,7 @@ private:
     // (scratch, swapped with them when read).
     std::vector<TouchingPair> m_was_touching{};
     std::vector<ContactInfo> m_was_touching_contacts{}; ///< The contacts of last step's resting pairs only.
+    std::vector<Aabb> m_destroyed_bounds{};             ///< No contacts reported: the boxes of the colliders destroyed by the edits.
     std::vector<TouchingPair> m_touching{};
     std::vector<ContactInfo> m_touching_contacts{};
     std::vector<ReportKey> m_report_keys{};
